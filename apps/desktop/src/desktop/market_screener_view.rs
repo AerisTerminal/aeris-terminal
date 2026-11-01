@@ -6,6 +6,7 @@ use super::market_screener::{
     ScreenerSort, ScreenerStatus, capture_time_label,
 };
 use super::*;
+use aeris_localization::{Text, panels, tr, tr_count};
 use gpui::uniform_list;
 use std::cmp::Ordering as CmpOrdering;
 
@@ -26,7 +27,7 @@ const FOOTER_HEIGHT: f32 = 36.0;
 #[derive(Clone, Copy)]
 struct ColumnSpec {
     column: ScreenerColumn,
-    label: &'static str,
+    label: Text,
     /// Fixed width of a numeric column; the market column takes the remaining space.
     width: Option<f32>,
 }
@@ -34,32 +35,32 @@ struct ColumnSpec {
 const COLUMNS: [ColumnSpec; 6] = [
     ColumnSpec {
         column: ScreenerColumn::Market,
-        label: "Market",
+        label: panels::SCREENER_COLUMN_MARKET,
         width: None,
     },
     ColumnSpec {
         column: ScreenerColumn::Price,
-        label: "Mark price",
+        label: panels::SCREENER_COLUMN_MARK_PRICE,
         width: Some(140.0),
     },
     ColumnSpec {
         column: ScreenerColumn::Change,
-        label: "24h change",
+        label: panels::SCREENER_COLUMN_CHANGE_24H,
         width: Some(112.0),
     },
     ColumnSpec {
         column: ScreenerColumn::Volume,
-        label: "24h volume",
+        label: panels::SCREENER_COLUMN_VOLUME_24H,
         width: Some(128.0),
     },
     ColumnSpec {
         column: ScreenerColumn::OpenInterest,
-        label: "Open interest",
+        label: panels::SCREENER_COLUMN_OPEN_INTEREST,
         width: Some(128.0),
     },
     ColumnSpec {
         column: ScreenerColumn::Funding,
-        label: "Funding / 1h",
+        label: panels::SCREENER_COLUMN_FUNDING,
         width: Some(120.0),
     },
 ];
@@ -163,25 +164,29 @@ fn page_header(
     let mut summary = vec![
         screener
             .provider_name()
-            .unwrap_or("No provider")
+            .unwrap_or(tr!(panels::SCREENER_NO_PROVIDER_NAME))
             .to_string(),
     ];
     if screener.status() == ScreenerStatus::Ready {
-        let count = screener.counts().all;
-        summary.push(format!(
-            "{count} {}",
-            if count == 1 { "market" } else { "markets" }
+        summary.push(tr_count!(
+            panels::SCREENER_MARKETS_COUNT,
+            screener.counts().all
         ));
     }
     if let Some(captured) = screener.captured_at_unix_millis() {
-        summary.push(format!("Updated {}", capture_time_label(captured)));
+        summary.push(tr!(
+            panels::SCREENER_UPDATED,
+            time = capture_time_label(captured)
+        ));
     }
     let refresh_terminal = terminal.clone();
     let refresh = Button::new("screener_refresh", theme)
         .variant(ButtonVariant::Outline)
         .icon(header_icon(HugeIcon::Refresh))
-        .aria_label("Refresh market statistics")
-        .tooltip(TooltipSpec::new("Refresh", theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .aria_label(tr!(panels::SCREENER_REFRESH_ARIA))
+        .tooltip(
+            TooltipSpec::new(tr!(panels::SCREENER_REFRESH), theme).show_delay(TOOLTIP_OPEN_DELAY),
+        )
         .on_click(move |_, _, cx| {
             refresh_terminal.update(cx, TerminalApp::refresh_market_screener);
         });
@@ -247,7 +252,10 @@ fn category_bar(
             Tab::new(("screener_category", index), theme)
                 .selected(active)
                 .gap_1()
-                .aria_label(format!("Show {}", category.label()))
+                .aria_label(tr!(
+                    panels::SCREENER_SHOW_CATEGORY,
+                    category = category.label()
+                ))
                 .on_click(move |_, _, cx| {
                     select_terminal.update(cx, |terminal, terminal_cx| {
                         terminal.set_market_screener_category(category, terminal_cx);
@@ -264,12 +272,14 @@ fn category_bar(
                         .child(counts.get(category).to_string()),
                 )
         });
-    div()
-        .w_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .child(TabList::new("screener_categories", "Market category", theme).children(tabs))
+    div().w_full().flex_none().flex().items_center().child(
+        TabList::new(
+            "screener_categories",
+            tr!(panels::SCREENER_CATEGORY_LABEL),
+            theme,
+        )
+        .children(tabs),
+    )
 }
 
 fn table_header(terminal: &Entity<TerminalApp>, sort: ScreenerSort, theme: &AerisTheme) -> Div {
@@ -307,11 +317,11 @@ fn header_cell(
     });
     let sort_terminal = terminal.clone();
     let direction = if active && sort.descending {
-        "descending"
+        tr!(panels::SCREENER_DIRECTION_DESCENDING)
     } else {
-        "ascending"
+        tr!(panels::SCREENER_DIRECTION_ASCENDING)
     };
-    let label = div().child(spec.label);
+    let label = div().child(spec.label.get());
     let numeric = spec.width.is_some();
     column_cell(spec, theme).child(
         div()
@@ -323,9 +333,13 @@ fn header_cell(
             .cursor_pointer()
             .role(Role::Button)
             .aria_label(if active {
-                format!("{}, sorted {direction}", spec.label)
+                tr!(
+                    panels::SCREENER_SORTED_ARIA,
+                    label = spec.label,
+                    direction = direction
+                )
             } else {
-                format!("Sort by {}", spec.label)
+                tr!(panels::SCREENER_SORT_BY, label = spec.label)
             })
             .when(active, |cell| {
                 cell.text_color(gpui_color(colors.text_default))
@@ -431,7 +445,7 @@ fn table_row(
         .text_color(gpui_color(colors.text_default))
         .cursor_pointer()
         .role(Role::Button)
-        .aria_label(format!("Open {} in the terminal", row.display_symbol))
+        .aria_label(tr!(panels::SCREENER_OPEN_ROW, symbol = row.display_symbol))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg.over(colors.surface))))
         .on_click(move |_, _, cx| {
             open_terminal.update(cx, |terminal, terminal_cx| {
@@ -487,16 +501,18 @@ fn table_placeholder(screener: &MarketScreener, theme: &AerisTheme) -> AnyElemen
                 Loader::new("market_screener_loader", header_icon(HugeIcon::Loader))
                     .color(gpui_color(colors.icon)),
             )
-            .child("Loading markets…"),
+            .child(tr!(panels::SCREENER_LOADING)),
         (ScreenerStatus::Loading, Some(message)) => div().child(message.to_string()),
         (ScreenerStatus::Ready, _) => {
             div().child(if screener.counts().get(screener.category()) == 0 {
-                format!(
-                    "No {} are listed",
-                    screener.category().label().to_lowercase()
-                )
+                match screener.category() {
+                    ScreenerCategory::All => tr!(panels::SCREENER_NONE_LISTED_ALL),
+                    ScreenerCategory::Perpetuals => tr!(panels::SCREENER_NONE_LISTED_PERPETUALS),
+                    ScreenerCategory::Spot => tr!(panels::SCREENER_NONE_LISTED_SPOT),
+                }
+                .to_string()
             } else {
-                "No markets match the search".to_string()
+                tr!(panels::SCREENER_NO_MATCH).to_string()
             })
         }
     };
@@ -518,7 +534,10 @@ fn page_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
     let shown = screener.rows().len();
     let total = screener.counts().all;
     let status = if let Some(symbol) = screener.opening_symbol() {
-        Some((format!("Opening {symbol}…"), colors.text_secondary))
+        Some((
+            tr!(panels::SCREENER_OPENING, symbol = symbol),
+            colors.text_secondary,
+        ))
     } else {
         screener
             .message()
@@ -540,7 +559,7 @@ fn page_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
             div()
                 .flex_none()
                 .child(if screener.status() == ScreenerStatus::Ready {
-                    format!("Showing {shown} of {total}")
+                    tr!(panels::SCREENER_SHOWING, shown = shown, total = total)
                 } else {
                     String::new()
                 }),
@@ -552,11 +571,7 @@ fn page_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
                 .text_color(gpui_color(color))
                 .child(text)
         }))
-        .child(
-            div()
-                .flex_none()
-                .child("Mark prices · funding per hour · refreshes every 5 seconds"),
-        )
+        .child(div().flex_none().child(tr!(panels::SCREENER_CAPTION)))
 }
 
 impl TerminalApp {
@@ -565,8 +580,9 @@ impl TerminalApp {
         if self.pages.screener.search_input().is_some() {
             return;
         }
-        let input =
-            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Search markets"));
+        let input = cx.new(|input_cx| {
+            InputState::new(window, input_cx).placeholder(tr!(panels::SCREENER_SEARCH_PLACEHOLDER))
+        });
         cx.subscribe(&input, |terminal, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let query = input.read(cx).value();

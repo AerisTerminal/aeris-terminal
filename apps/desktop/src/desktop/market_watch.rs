@@ -305,7 +305,9 @@ impl MarketWatch {
             return PickerColor::Closed;
         };
         let Some(color) = normalize_hex_color(color) else {
-            picker.error = Some("Enter a hex color such as #2962FF or #2962FF80.".to_string());
+            picker.error = Some(
+                aeris_localization::tr!(aeris_localization::shell::HEX_COLOR_HINT).to_string(),
+            );
             return PickerColor::Rejected;
         };
         picker.error = None;

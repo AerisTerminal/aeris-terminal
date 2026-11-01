@@ -35,16 +35,15 @@ fn registered_login_schema_is_provider_owned() {
         schema
             .fields
             .iter()
-            .map(|field| (field.id, field.secret))
+            .map(|field| (field.id, field.kind, field.secret))
             .collect::<Vec<_>>(),
         [
-            ("server", false),
-            ("system", false),
-            ("user", false),
-            ("password", true)
+            ("server", descriptors::LoginFieldKind::Server, false),
+            ("system", descriptors::LoginFieldKind::System, false),
+            ("user", descriptors::LoginFieldKind::UserId, false),
+            ("password", descriptors::LoginFieldKind::Password, true)
         ]
     );
-    assert!(schema.fields.iter().all(|field| !field.label.is_empty()));
     assert_eq!(
         providers
             .iter()

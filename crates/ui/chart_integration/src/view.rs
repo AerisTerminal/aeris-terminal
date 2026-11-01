@@ -5,7 +5,7 @@ use crate::engine_bridge::{
     ProductPriceBars, apply_merged_chart_data, apply_product_series_markers,
     chart_data_queue_capacity, install_product_price_series, install_replay, install_volume_series,
     price_display_precision, replay_display_precision, replay_legend_title, replay_price_divisor,
-    replay_quantity_divisor,
+    replay_quantity_divisor, sync_chart_language,
 };
 use crate::provenance::DisplayedProvenance;
 use aeris_application::ReplayRecoveryCommand;
@@ -48,6 +48,7 @@ use aeris_design_system::{
     AerisTheme, ThemeColor, TypographyRole, platform_date_label, platform_font_family,
     platform_font_stack, platform_typography,
 };
+use aeris_localization::{chart_ui, tr};
 use aeris_observability::diagnostic;
 use gpui::{
     AnyView, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, ModifiersChangedEvent,
@@ -307,35 +308,35 @@ impl ChartIndicator {
 
     /// Returns the user-facing legacy catalog label.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Volume => "Volume",
-            Self::Vwap => "Volume Weighted Average Price",
-            Self::Sma => "Simple Moving Average",
-            Self::Ema => "Exponential Moving Average",
-            Self::Wma => "Weighted Moving Average",
-            Self::Bollinger => "Bollinger Bands",
-            Self::Rsi => "Relative Strength Index",
-            Self::Macd => "MACD",
-            Self::Stochastic => "Stochastic",
-            Self::Atr => "Average True Range",
-            Self::VolumeProfile => "Volume Profile (Visible Range)",
+            Self::Volume => tr!(chart_ui::INDICATOR_VOLUME),
+            Self::Vwap => tr!(chart_ui::INDICATOR_VWAP),
+            Self::Sma => tr!(chart_ui::INDICATOR_SMA),
+            Self::Ema => tr!(chart_ui::INDICATOR_EMA),
+            Self::Wma => tr!(chart_ui::INDICATOR_WMA),
+            Self::Bollinger => tr!(chart_ui::INDICATOR_BOLLINGER),
+            Self::Rsi => tr!(chart_ui::INDICATOR_RSI),
+            Self::Macd => tr!(chart_ui::INDICATOR_MACD),
+            Self::Stochastic => tr!(chart_ui::INDICATOR_STOCHASTIC),
+            Self::Atr => tr!(chart_ui::INDICATOR_ATR),
+            Self::VolumeProfile => tr!(chart_ui::INDICATOR_VOLUME_PROFILE),
             Self::Builtin(indicator) => indicator.label(),
         }
     }
 
     /// Returns the fixed parameters shown by the legacy indicator catalog.
     #[must_use]
-    pub const fn parameters(self) -> &'static str {
+    pub fn parameters(self) -> &'static str {
         match self {
-            Self::Volume => "Up/down volume · optional moving average",
-            Self::Vwap => "Session anchored",
-            Self::Sma | Self::Ema | Self::Wma => "Period 20",
-            Self::Bollinger => "Period 20 · Deviation 2",
-            Self::Rsi | Self::Atr => "Period 14",
-            Self::Macd => "Fast 12 · Slow 26 · Signal 9",
-            Self::Stochastic => "%K 14 · %D 3",
-            Self::VolumeProfile => "Rows 48 · Value area 70%",
+            Self::Volume => tr!(chart_ui::PARAMS_VOLUME),
+            Self::Vwap => tr!(chart_ui::PARAMS_SESSION_ANCHORED),
+            Self::Sma | Self::Ema | Self::Wma => tr!(chart_ui::PARAMS_PERIOD_20),
+            Self::Bollinger => tr!(chart_ui::PARAMS_PERIOD_20_DEVIATION_2),
+            Self::Rsi | Self::Atr => tr!(chart_ui::PARAMS_PERIOD_14),
+            Self::Macd => tr!(chart_ui::PARAMS_MACD),
+            Self::Stochastic => tr!(chart_ui::PARAMS_STOCHASTIC),
+            Self::VolumeProfile => tr!(chart_ui::PARAMS_VOLUME_PROFILE),
             Self::Builtin(indicator) => indicator.parameters(),
         }
     }
@@ -881,19 +882,19 @@ impl ChartType {
 
     /// Returns the header and menu label.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Candles => "Candles",
-            Self::HollowCandles => "Hollow candles",
-            Self::HollowCandlesBullish => "Hollow candles: bullish only",
-            Self::HollowCandlesBearish => "Hollow candles: bearish only",
-            Self::Footprint => "Footprint",
-            Self::Bars => "Bars",
-            Self::Line => "Line",
-            Self::LineWithMarkers => "Line with markers",
-            Self::Area => "Area",
-            Self::Baseline => "Baseline",
-            Self::BrushableArea => "Brushable area",
+            Self::Candles => tr!(chart_ui::CHART_TYPE_CANDLES),
+            Self::HollowCandles => tr!(chart_ui::CHART_TYPE_HOLLOW_CANDLES),
+            Self::HollowCandlesBullish => tr!(chart_ui::CHART_TYPE_HOLLOW_CANDLES_BULLISH),
+            Self::HollowCandlesBearish => tr!(chart_ui::CHART_TYPE_HOLLOW_CANDLES_BEARISH),
+            Self::Footprint => tr!(chart_ui::CHART_TYPE_FOOTPRINT),
+            Self::Bars => tr!(chart_ui::CHART_TYPE_BARS),
+            Self::Line => tr!(chart_ui::CHART_TYPE_LINE),
+            Self::LineWithMarkers => tr!(chart_ui::CHART_TYPE_LINE_WITH_MARKERS),
+            Self::Area => tr!(chart_ui::CHART_TYPE_AREA),
+            Self::Baseline => tr!(chart_ui::CHART_TYPE_BASELINE),
+            Self::BrushableArea => tr!(chart_ui::CHART_TYPE_BRUSHABLE_AREA),
         }
     }
 
@@ -1121,6 +1122,7 @@ impl AerisChartView {
         apply_platform_chrome_contract(&mut engine, TimeAxisLabels::INTRADAY);
         apply_platform_interaction(&mut engine);
         let volume_series = install_volume_series(&mut engine);
+        sync_chart_language(&mut engine, volume_series);
         let mut chart = Self {
             engine,
             platform: theme,
@@ -1223,6 +1225,7 @@ impl AerisChartView {
         apply_platform_interaction(&mut engine);
         apply_replay_time_scale_defaults(&mut engine, replay);
         let volume_series = install_volume_series(&mut engine);
+        sync_chart_language(&mut engine, volume_series);
         let mut product_bars = ProductPriceBars::default();
         install_replay(
             &mut engine,
@@ -2404,7 +2407,7 @@ impl AerisChartView {
         };
         let color = export::chart_color(self.platform.colors.session_plan_level);
         for (price, label) in &self.session_plan_levels {
-            let title = format!("PLAN · {label}");
+            let title = tr!(chart_ui::SESSION_PLAN_LINE, label = label);
             let id = self.engine.create_price_line(
                 series_id,
                 *price,
@@ -2649,6 +2652,8 @@ impl Default for AerisChartView {
 
 impl Render for AerisChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A display-language switch refreshes the window, so the next render follows it.
+        sync_chart_language(&mut self.engine, self.volume_series);
         self.schedule_clock_tick(cx);
         // Kinetic coasts, held keyboard pans, and animated scrolls advance once per frame.
         if self.engine.input_animating() {

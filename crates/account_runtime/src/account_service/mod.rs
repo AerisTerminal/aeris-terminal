@@ -27,7 +27,8 @@ use std::{
 };
 
 use crate::{
-    AccountSessionState, AccountView, LoginAuthorization, ProfilePhoto, ProfilePhotoStatus,
+    AccountDetail, AccountSessionState, AccountView, LoginAuthorization, ProfilePhoto,
+    ProfilePhotoStatus,
 };
 use aeris_account::{
     AccountId, MAXIMUM_PROFILE_EMAIL_BYTES, MAXIMUM_PROFILE_NAME_BYTES,
@@ -352,7 +353,7 @@ impl AccountService {
             callback_ports: &CALLBACK_PORTS,
             rejected_restore_marker,
             state: Arc::new(Mutex::new(ServiceState {
-                view: cleared_view(AccountSessionState::SignedOut, 0, "signed out"),
+                view: cleared_view(AccountSessionState::SignedOut, 0, AccountDetail::SignedOut),
                 pending: None,
                 last_generation: 0,
                 restore_allowed: true,
@@ -447,7 +448,7 @@ impl AccountService {
             state.view = cleared_view(
                 AccountSessionState::Authorizing,
                 0,
-                "restoring saved sign-in",
+                AccountDetail::RestoringSavedSignIn,
             );
         }
         let restoring = self.clone();
@@ -459,7 +460,7 @@ impl AccountService {
             self.set_restore_readiness(AccountRestoreReadiness::Failed);
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
-                "saved sign-in restore could not start; sign in again",
+                AccountDetail::RestoreCouldNotStart,
             );
         }
     }
@@ -556,7 +557,7 @@ impl AccountService {
             self.set_restore_readiness(AccountRestoreReadiness::Failed);
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
-                "credential storage is unavailable; sign in again",
+                AccountDetail::CredentialStorageUnavailableSignInAgain,
             );
             return;
         };
@@ -593,7 +594,7 @@ impl AccountService {
                 Err(()) => {
                     self.complete_restore_without_session(
                         AccountSessionState::TerminalError,
-                        "credential storage is unavailable; sign in again",
+                        AccountDetail::CredentialStorageUnavailableSignInAgain,
                     );
                     break None;
                 }
@@ -630,7 +631,7 @@ impl AccountService {
             self.set_restore_readiness(AccountRestoreReadiness::Failed);
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
-                "saved sign-in could not be retired; credential storage is unavailable; sign in again",
+                AccountDetail::SavedSignInRetireFailed,
             );
             return LocalRestore::Settled;
         }
@@ -640,9 +641,10 @@ impl AccountService {
                 .filter(|token| !token.is_empty())
                 .map(Zeroizing::new),
             Ok(None) => {
-                if self
-                    .complete_restore_without_session(AccountSessionState::SignedOut, "signed out")
-                {
+                if self.complete_restore_without_session(
+                    AccountSessionState::SignedOut,
+                    AccountDetail::SignedOut,
+                ) {
                     self.set_restore_readiness(AccountRestoreReadiness::Ready);
                 } else {
                     self.set_restore_readiness(AccountRestoreReadiness::Failed);
@@ -653,7 +655,7 @@ impl AccountService {
                 self.set_restore_readiness(AccountRestoreReadiness::Failed);
                 self.complete_restore_without_session(
                     AccountSessionState::TerminalError,
-                    "credential storage is unavailable; sign in again",
+                    AccountDetail::CredentialStorageUnavailableSignInAgain,
                 );
                 return LocalRestore::Settled;
             }
@@ -661,7 +663,7 @@ impl AccountService {
         if refresh_token.is_none() {
             if self.complete_restore_without_session(
                 AccountSessionState::ReauthenticationRequired,
-                "saved sign-in expired; sign in again",
+                AccountDetail::SavedSignInExpired,
             ) {
                 self.set_restore_readiness(AccountRestoreReadiness::Ready);
             } else {
@@ -697,7 +699,7 @@ impl AccountService {
             account_id,
             profile,
             0,
-            "signed in; verifying saved session",
+            AccountDetail::SignedInVerifyingSavedSession,
         );
     }
 
@@ -731,7 +733,7 @@ impl AccountService {
             Err(oidc::RefreshGrantError::Unavailable) => {
                 self.complete_restore_without_session(
                     AccountSessionState::TerminalError,
-                    "saved sign-in could not be verified; check your connection and sign in again",
+                    AccountDetail::SavedSignInUnverifiedConnection,
                 );
                 return None;
             }
@@ -754,7 +756,7 @@ impl AccountService {
                     state.view = cleared_view(
                         AccountSessionState::TerminalError,
                         0,
-                        "credential storage is unavailable; sign in again",
+                        AccountDetail::CredentialStorageUnavailableSignInAgain,
                     );
                 }
                 return None;
@@ -773,7 +775,7 @@ impl AccountService {
         let Ok(account_id) = AccountId::try_new(tokens.subject.as_str()) else {
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
-                "saved sign-in could not be verified; sign in again",
+                AccountDetail::SavedSignInUnverified,
             );
             return false;
         };
@@ -796,7 +798,7 @@ impl AccountService {
             &account_id,
             tokens.profile.clone(),
             0,
-            "signed in",
+            AccountDetail::SignedIn,
         );
         true
     }
@@ -815,7 +817,7 @@ impl AccountService {
             return false;
         }
         state.restore_allowed = false;
-        state.view.detail = "signed in offline; reconnecting".to_string();
+        state.view.detail = AccountDetail::SignedInOfflineReconnecting;
         true
     }
 
@@ -845,13 +847,13 @@ impl AccountService {
             cleared_view(
                 AccountSessionState::ReauthenticationRequired,
                 0,
-                "saved sign-in expired; sign in again",
+                AccountDetail::SavedSignInExpired,
             )
         } else {
             cleared_view(
                 AccountSessionState::TerminalError,
                 0,
-                "saved sign-in could not be retired; credential storage is unavailable; sign in again",
+                AccountDetail::SavedSignInRetireFailed,
             )
         };
     }
@@ -880,13 +882,13 @@ impl AccountService {
             cleared_view(
                 AccountSessionState::ReauthenticationRequired,
                 generation,
-                "sign-in expired; sign in again",
+                AccountDetail::SignInExpired,
             )
         } else {
             cleared_view(
                 AccountSessionState::TerminalError,
                 generation,
-                "sign-in expired but saved credentials could not be retired; sign in again",
+                AccountDetail::SignInExpiredRetireFailed,
             )
         };
     }
@@ -912,7 +914,11 @@ impl AccountService {
         cleaned && marker_settled
     }
 
-    fn complete_restore_without_session(&self, target: AccountSessionState, detail: &str) -> bool {
+    fn complete_restore_without_session(
+        &self,
+        target: AccountSessionState,
+        detail: AccountDetail,
+    ) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
@@ -924,7 +930,7 @@ impl AccountService {
         if state.view.state == AccountSessionState::Offline
             && target == AccountSessionState::TerminalError
         {
-            state.view.detail = "signed in offline; reconnecting".to_string();
+            state.view.detail = AccountDetail::SignedInOfflineReconnecting;
             return true;
         }
         state.restore_allowed = false;
@@ -1032,7 +1038,7 @@ impl AccountService {
         state.view = cleared_view(
             AccountSessionState::Authorizing,
             request_generation,
-            "waiting for browser authorization",
+            AccountDetail::WaitingForBrowserAuthorization,
         );
         let service = self.clone();
         if std::thread::Builder::new()
@@ -1044,7 +1050,7 @@ impl AccountService {
             state.view = cleared_view(
                 AccountSessionState::SignedOut,
                 request_generation,
-                "sign-in worker could not start; retry sign-in",
+                AccountDetail::SignInWorkerCouldNotStart,
             );
             return Err("sign-in worker could not start; retry sign-in".to_string());
         }
@@ -1070,7 +1076,7 @@ impl AccountService {
                 state.view = cleared_view(
                     AccountSessionState::SignedOut,
                     generation,
-                    "sign-in cancelled",
+                    AccountDetail::SignInCancelled,
                 );
                 Ok(())
             }
@@ -1088,7 +1094,7 @@ impl AccountService {
             return cleared_view(
                 AccountSessionState::TerminalError,
                 0,
-                "account state is unavailable",
+                AccountDetail::AccountStateUnavailable,
             );
         };
         let state = &mut *guard;
@@ -1102,7 +1108,7 @@ impl AccountService {
             state.view = cleared_view(
                 AccountSessionState::SignedOut,
                 generation,
-                "sign-in timed out; retry sign-in",
+                AccountDetail::SignInTimedOut,
             );
         }
         let fetch = reconcile_profile_photo(state, Instant::now());
@@ -1211,7 +1217,11 @@ impl AccountService {
             let generation = state.last_generation;
             state.restore_allowed = false;
             state.pending = None;
-            state.view = cleared_view(AccountSessionState::SignedOut, generation, "signed out");
+            state.view = cleared_view(
+                AccountSessionState::SignedOut,
+                generation,
+                AccountDetail::SignedOut,
+            );
         }
         let commit = self.lock_vault_commit();
         let token = load_refresh_token(vault).unwrap_or_default();
@@ -1237,9 +1247,9 @@ impl AccountService {
                 AccountSessionState::SignedOut,
                 state.last_generation,
                 if deleted {
-                    "signed out"
+                    AccountDetail::SignedOut
                 } else {
-                    "signed out; credential cleanup needs attention"
+                    AccountDetail::SignOutCleanupAttention
                 },
             );
             state.view.clone()
@@ -1270,7 +1280,7 @@ impl AccountService {
     fn run_login_transaction(&self, generation: u64, listener: &LoopbackListener) {
         let remaining = self.pending_remaining(generation);
         if remaining.is_zero() {
-            self.fail_generation(generation, "sign-in timed out; retry sign-in");
+            self.fail_generation(generation, AccountDetail::SignInTimedOut);
             return;
         }
         let callback = match listener
@@ -1278,15 +1288,16 @@ impl AccountService {
         {
             Ok(callback) => callback,
             Err(detail) => {
-                self.fail_generation(generation, &detail);
+                self.fail_generation(generation, AccountDetail::Failure(detail));
                 return;
             }
         };
         let code = match self.apply_callback_query(callback.query(), generation) {
             Ok(code) => code,
             Err(detail) => {
-                callback.respond_invalid(&detail);
-                self.fail_generation(generation, &detail);
+                let detail = AccountDetail::Failure(detail);
+                callback.respond_invalid(detail.english());
+                self.fail_generation(generation, detail);
                 return;
             }
         };
@@ -1296,11 +1307,12 @@ impl AccountService {
                 // Vault failure or a retired generation: the view already
                 // carries the truth, so the page repeats it verbatim.
                 let detail = self.account_status().detail;
-                callback.respond_outcome(Err(detail.as_str()));
+                callback.respond_outcome(Err(detail.english()));
             }
             Err(detail) => {
-                callback.respond_outcome(Err(detail.as_str()));
-                self.fail_generation(generation, &detail);
+                let detail = AccountDetail::Failure(detail);
+                callback.respond_outcome(Err(detail.english()));
+                self.fail_generation(generation, detail);
             }
         }
     }
@@ -1340,7 +1352,7 @@ impl AccountService {
         }
         let validated = validate_callback_query(query, &pending.oauth_state)?;
         pending.code_received = true;
-        state.view.detail = "completing sign-in".to_string();
+        state.view.detail = AccountDetail::CompletingSignIn;
         Ok(validated.code)
     }
 
@@ -1388,7 +1400,7 @@ impl AccountService {
         let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
             self.fail_generation(
                 generation,
-                "credential storage is unavailable; retry sign-in",
+                AccountDetail::CredentialStorageUnavailableRetrySignIn,
             );
             return Ok(false);
         };
@@ -1452,9 +1464,9 @@ impl AccountService {
                 AccountSessionState::TerminalError,
                 generation,
                 if stored {
-                    "saved sign-in cleanup is unavailable; retry sign-in"
+                    AccountDetail::SavedSignInCleanupUnavailable
                 } else {
-                    "credential storage is unavailable; retry sign-in"
+                    AccountDetail::CredentialStorageUnavailableRetrySignIn
                 },
             );
             return false;
@@ -1464,7 +1476,7 @@ impl AccountService {
             account_id,
             profile.clone(),
             generation,
-            "signed in",
+            AccountDetail::SignedIn,
         );
         drop(state);
         self.spawn_session_worker(generation, SESSION_REFRESH_INTERVAL);
@@ -1603,7 +1615,7 @@ impl AccountService {
         true
     }
 
-    fn fail_generation(&self, generation: u64, detail: &str) {
+    fn fail_generation(&self, generation: u64, detail: AccountDetail) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
@@ -1616,7 +1628,7 @@ impl AccountService {
         }
         state.pending = None;
         let generation = state.last_generation;
-        state.view = if detail.contains("timed out") || detail.contains("cancelled") {
+        state.view = if detail.clears_to_signed_out() {
             cleared_view(AccountSessionState::SignedOut, generation, detail)
         } else {
             cleared_view(AccountSessionState::TerminalError, generation, detail)
@@ -1649,12 +1661,12 @@ fn claim_profile_refresh(view: &AccountView, in_flight: &AtomicBool) -> Option<u
 /// One sanitized view with identity, plan, and profile cleared. Every
 /// signed-out assignment flows through here so sign-out, cancel, expiry,
 /// and failure can never leak a previous user's profile.
-fn cleared_view(state: AccountSessionState, generation: u64, detail: &str) -> AccountView {
+fn cleared_view(state: AccountSessionState, generation: u64, detail: AccountDetail) -> AccountView {
     AccountView {
         state,
         account_id: String::new(),
         plan_id: String::new(),
-        detail: detail.to_string(),
+        detail,
         request_generation: generation,
         display_name: String::new(),
         email: String::new(),
@@ -1668,13 +1680,13 @@ fn signed_in_view(
     account_id: &AccountId,
     profile: AccountProfile,
     generation: u64,
-    detail: &str,
+    detail: AccountDetail,
 ) -> AccountView {
     AccountView {
         state,
         account_id: account_id.as_str().to_string(),
         plan_id: PlanId::Unlimited.as_str().to_string(),
-        detail: detail.to_string(),
+        detail,
         request_generation: generation,
         display_name: profile.display_name,
         email: profile.email,
@@ -1849,7 +1861,7 @@ fn fail_current_storage(service: &AccountService, generation: u64) {
     state.view = cleared_view(
         AccountSessionState::TerminalError,
         generation,
-        "credential storage is unavailable; sign in again",
+        AccountDetail::CredentialStorageUnavailableSignInAgain,
     );
 }
 
@@ -1899,12 +1911,12 @@ fn apply_session_outcome(service: &AccountService, generation: u64, outcome: Ses
     match outcome {
         SessionRefresh::Verified => {
             state.view.state = AccountSessionState::Active;
-            state.view.detail = "signed in".to_string();
+            state.view.detail = AccountDetail::SignedIn;
             note_session("verified");
         }
         SessionRefresh::Unavailable => {
             state.view.state = AccountSessionState::Offline;
-            state.view.detail = "signed in offline; reconnecting".to_string();
+            state.view.detail = AccountDetail::SignedInOfflineReconnecting;
             note_session("offline");
         }
         SessionRefresh::Deferred => note_session("deferred"),

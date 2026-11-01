@@ -666,6 +666,23 @@ impl OrderEventReason {
     }
 }
 
+/// Typed facts behind a detail the trading owner wrote itself, so a client can present the
+/// event in its own language. `detail` keeps the English audit text. Venue-authored details
+/// and events recorded before notes existed carry no note and show their stored detail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OrderEventNote {
+    /// The order was accepted with these risk warnings.
+    RiskWarnings(Vec<RiskWarning>),
+    /// A practice DAY order's session ended.
+    DaySessionEnded,
+    /// The broker reported this state without an explanation.
+    VenueGaveNoReason,
+    /// A reconcile found the order no longer open at the broker.
+    NoLongerOpenAtVenue,
+    /// A reconcile found that the broker never received the order.
+    NotReceivedByVenue,
+}
+
 /// One immutable lifecycle event for an order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderEvent {
@@ -676,6 +693,7 @@ pub struct OrderEvent {
     pub reason: Option<OrderEventReason>,
     pub event_unix_nanos: i64,
     pub detail: Option<String>,
+    pub note: Option<OrderEventNote>,
     pub provenance: TradingProvenance,
 }
 

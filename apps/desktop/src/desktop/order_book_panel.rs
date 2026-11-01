@@ -6,6 +6,7 @@ use super::{
     MenuRow, OrderBookColumn, OrderBookColumnVisibility, ParentElement, PopupAnimationOrigin,
     ReadOnlyOrderBookView, SidePanel, Styled, WorkspaceSurface, div, gpui_color, px,
 };
+use aeris_localization::{panels, tr};
 use gpui::StatefulInteractiveElement;
 
 #[derive(Clone, Copy)]
@@ -41,7 +42,7 @@ pub(super) fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
             [
                 side_panel_header_button(
                     "order_book_recenter",
-                    "Center order book on the current spread",
+                    tr!(panels::ORDER_BOOK_RECENTER),
                     HugeIcon::Refresh,
                     false,
                     move |cx| {
@@ -51,7 +52,7 @@ pub(super) fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
                 ),
                 side_panel_header_button(
                     "order_book_column_settings",
-                    "Choose order-book columns",
+                    tr!(panels::ORDER_BOOK_CHOOSE_COLUMNS),
                     HugeIcon::Settings,
                     column_menu_open,
                     move |cx| {
@@ -115,7 +116,10 @@ fn order_book_column_menu_item(
     let label = if offered {
         column.label().to_string()
     } else {
-        format!("{} · not offered by this provider", column.label())
+        tr!(
+            panels::ORDER_BOOK_COLUMN_NOT_OFFERED,
+            column = column.label()
+        )
     };
     let id = match column {
         OrderBookColumn::ProfitLoss => "order_book_column_profit_loss",

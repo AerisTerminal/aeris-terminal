@@ -3,6 +3,7 @@
 //! slides down from the top centre, holds, then slides back up. Leaving fullscreen removes it.
 
 use super::*;
+use aeris_localization::{panels, tr};
 use gpui::{Animation, AnimationExt, ease_in_out};
 
 const ENTER_DURATION: Duration = Duration::from_millis(220);
@@ -116,14 +117,14 @@ fn hint_chip(theme: &AerisTheme) -> Div {
         .text_sm()
         .text_color(gpui_color(colors.text_secondary))
         .debug_selector(|| "fullscreen_hint_chip".into())
-        .child("Press")
+        .child(tr!(panels::FULLSCREEN_HINT_PRESS))
         .child(
             div()
                 .font_weight(platform_font_weight(TypographyRole::Strong))
                 .text_color(gpui_color(colors.text_default))
-                .child("Esc"),
+                .child(tr!(panels::FULLSCREEN_HINT_KEY)),
         )
-        .child("to exit full screen")
+        .child(tr!(panels::FULLSCREEN_HINT_EXIT))
 }
 
 /// The chip, centred at the top of the window while the hint is on screen. It registers no

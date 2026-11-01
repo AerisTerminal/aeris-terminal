@@ -9,15 +9,19 @@ use super::big_trades_dialog::{
 };
 use super::*;
 use crate::desktop::workspace_surface::preview_on_change;
+use aeris_localization::{Text, chart_menu, common, tr};
 
-const STYLE_CHOICES: [(&str, CumulativeDeltaStyle); 2] = [
-    ("Line", CumulativeDeltaStyle::Line),
-    ("Candles", CumulativeDeltaStyle::Candles),
+const STYLE_CHOICES: [(Text, CumulativeDeltaStyle); 2] = [
+    (chart_menu::LINE, CumulativeDeltaStyle::Line),
+    (chart_menu::CANDLES, CumulativeDeltaStyle::Candles),
 ];
 
-const RESET_CHOICES: [(&str, CumulativeDeltaReset); 2] = [
-    ("Each session", CumulativeDeltaReset::Session),
-    ("Never", CumulativeDeltaReset::Continuous),
+const RESET_CHOICES: [(Text, CumulativeDeltaReset); 2] = [
+    (
+        chart_menu::RESET_EACH_SESSION,
+        CumulativeDeltaReset::Session,
+    ),
+    (chart_menu::RESET_NEVER, CumulativeDeltaReset::Continuous),
 ];
 
 /// The order-flow indicator a settings dialog edits.
@@ -29,19 +33,19 @@ pub(super) enum OrderFlowIndicator {
 }
 
 impl OrderFlowIndicator {
-    const fn title(self) -> &'static str {
+    fn title(self) -> &'static str {
         match self {
-            Self::CumulativeDelta => "Cumulative delta (CVD)",
-            Self::DeltaHistogram => "Delta histogram",
-            Self::OrderBook => "Order book on chart (DOM)",
+            Self::CumulativeDelta => tr!(chart_menu::CVD_TITLE),
+            Self::DeltaHistogram => tr!(chart_menu::DELTA_HISTOGRAM_TITLE),
+            Self::OrderBook => tr!(chart_menu::ORDER_BOOK_TITLE),
         }
     }
 
-    const fn removed_message(self) -> &'static str {
+    fn removed_message(self) -> &'static str {
         match self {
-            Self::CumulativeDelta => "Cumulative delta is no longer on this chart.",
-            Self::DeltaHistogram => "The delta histogram is no longer on this chart.",
-            Self::OrderBook => "The order book is no longer on this chart.",
+            Self::CumulativeDelta => tr!(chart_menu::CVD_REMOVED),
+            Self::DeltaHistogram => tr!(chart_menu::DELTA_HISTOGRAM_REMOVED),
+            Self::OrderBook => tr!(chart_menu::ORDER_BOOK_REMOVED),
         }
     }
 }
@@ -132,14 +136,19 @@ impl OrderBookDraft {
             settings,
             levels_per_side: number_input(
                 settings.levels_per_side.to_string(),
-                "Levels",
+                tr!(chart_menu::LEVELS),
                 window,
                 cx,
             ),
-            max_width: number_input(settings.max_width.to_string(), "Pixels", window, cx),
+            max_width: number_input(
+                settings.max_width.to_string(),
+                tr!(chart_menu::PIXELS),
+                window,
+                cx,
+            ),
             opacity_percent: number_input(
                 settings.opacity_percent.to_string(),
-                "Percent",
+                tr!(chart_menu::PERCENT),
                 window,
                 cx,
             ),
@@ -175,17 +184,17 @@ impl OrderBookDraft {
             levels_per_side: parse_bounded_setting(
                 self.levels_per_side.read(cx).value().as_ref(),
                 OrderBookDepthSettings::LEVELS_PER_SIDE,
-                "Levels per side",
+                tr!(chart_menu::LEVELS_PER_SIDE),
             )?,
             max_width: parse_bounded_setting(
                 self.max_width.read(cx).value().as_ref(),
                 OrderBookDepthSettings::MAX_WIDTHS,
-                "Largest bar",
+                tr!(chart_menu::LARGEST_BAR),
             )?,
             opacity_percent: parse_bounded_setting(
                 self.opacity_percent.read(cx).value().as_ref(),
                 OrderBookDepthSettings::OPACITY_PERCENTS,
-                "Opacity",
+                tr!(chart_menu::OPACITY),
             )?,
             ..self.settings
         })
@@ -218,10 +227,11 @@ where
         .ok()
         .filter(|value| range.contains(value))
         .ok_or_else(|| {
-            format!(
-                "{label} must be a whole number from {} to {}",
-                range.start(),
-                range.end()
+            tr!(
+                chart_menu::WHOLE_NUMBER_ERROR,
+                label = label,
+                min = range.start(),
+                max = range.end()
             )
         })
 }
@@ -277,15 +287,15 @@ pub(super) enum OrderFlowColorTarget {
 }
 
 impl OrderFlowColorTarget {
-    const fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::CumulativeDeltaLine => "Line",
-            Self::CumulativeDeltaUp => "Rising candles",
-            Self::CumulativeDeltaDown => "Falling candles",
-            Self::DeltaPositive => "Positive delta",
-            Self::DeltaNegative => "Negative delta",
-            Self::Bid => "Bids",
-            Self::Ask => "Asks",
+            Self::CumulativeDeltaLine => tr!(chart_menu::LINE),
+            Self::CumulativeDeltaUp => tr!(chart_menu::RISING_CANDLES),
+            Self::CumulativeDeltaDown => tr!(chart_menu::FALLING_CANDLES),
+            Self::DeltaPositive => tr!(chart_menu::POSITIVE_DELTA),
+            Self::DeltaNegative => tr!(chart_menu::NEGATIVE_DELTA),
+            Self::Bid => tr!(chart_menu::BIDS),
+            Self::Ask => tr!(chart_menu::ASKS),
         }
     }
 }
@@ -400,7 +410,7 @@ impl WorkspaceSurface {
         let Some(draft) = draft else {
             Self::post_indicator_failure(
                 "order_flow_settings",
-                "Study unavailable",
+                tr!(chart_menu::STUDY_UNAVAILABLE),
                 indicator.removed_message(),
                 cx,
             );
@@ -466,13 +476,13 @@ impl WorkspaceSurface {
             return Ok(());
         };
         let Some(current) = self.chart_order_flow_settings(cx) else {
-            return Err("The chart is unavailable".to_string());
+            return Err(tr!(chart_menu::CHART_UNAVAILABLE).to_string());
         };
         let settings = applied_order_flow_settings(&dialog.draft, current, cx)?;
         if settings == current || self.set_chart_order_flow_settings(settings, cx) {
             Ok(())
         } else {
-            Err("The chart could not apply these settings".to_string())
+            Err(tr!(chart_menu::CHART_APPLY_FAILED).to_string())
         }
     }
 
@@ -574,7 +584,7 @@ impl WorkspaceSurface {
         {
             picker.error = parsed
                 .is_none()
-                .then(|| "Enter a hex color such as #2962FF or #2962FF80.".to_string());
+                .then(|| tr!(chart_menu::INVALID_HEX_COLOR).to_string());
         }
         if let Some(color) = parsed
             && let Some(slot) = dialog.draft.color_slot(target)
@@ -714,7 +724,7 @@ fn cumulative_delta_groups(
 ) -> [AnyElement; 2] {
     let style = SettingDropdown {
         menu: "cumulative_delta_style",
-        label: "Style",
+        label: tr!(chart_menu::STYLE),
         open_menu: dialog.menu.as_deref(),
         enabled: true,
         choices: dropdown_choices(&STYLE_CHOICES, |style| draft.style == style),
@@ -722,30 +732,30 @@ fn cumulative_delta_groups(
     .render(app, WorkspaceSurface::set_order_flow_dialog_style, theme);
     let reset = SettingDropdown {
         menu: "cumulative_delta_reset",
-        label: "Reset",
+        label: tr!(chart_menu::RESET),
         open_menu: dialog.menu.as_deref(),
         enabled: true,
         choices: dropdown_choices(&RESET_CHOICES, |reset| draft.reset == reset),
     }
     .render(app, WorkspaceSurface::set_order_flow_dialog_reset, theme);
     let reset_description = match draft.reset {
-        CumulativeDeltaReset::Session => "The delta starts again from zero at each session open.",
-        CumulativeDeltaReset::Continuous => "The delta keeps adding up across every bar.",
+        CumulativeDeltaReset::Session => tr!(chart_menu::RESET_SESSION_DESCRIPTION),
+        CumulativeDeltaReset::Continuous => tr!(chart_menu::RESET_CONTINUOUS_DESCRIPTION),
     };
     let colors = match draft.style {
         CumulativeDeltaStyle::Line => colors_row(
             app,
             dialog,
-            "Line color",
-            "Color of the running-delta line.",
+            tr!(chart_menu::LINE_COLOR),
+            tr!(chart_menu::LINE_COLOR_DESCRIPTION),
             &[OrderFlowColorTarget::CumulativeDeltaLine],
             theme,
         ),
         CumulativeDeltaStyle::Candles => colors_row(
             app,
             dialog,
-            "Candle colors",
-            "Each candle takes the color of the way the delta moved in its bar.",
+            tr!(chart_menu::CANDLE_COLORS),
+            tr!(chart_menu::CANDLE_COLORS_DESCRIPTION),
             &[
                 OrderFlowColorTarget::CumulativeDeltaUp,
                 OrderFlowColorTarget::CumulativeDeltaDown,
@@ -755,19 +765,19 @@ fn cumulative_delta_groups(
     };
     [
         settings_group(
-            "Calculation",
+            tr!(chart_menu::CALCULATION),
             [
                 setting_row(
-                    "Style",
-                    "A line through each bar's close, or candles of the delta within each bar.",
+                    tr!(chart_menu::STYLE),
+                    tr!(chart_menu::STYLE_DESCRIPTION),
                     style,
                     theme,
                 ),
-                setting_row("Reset", reset_description, reset, theme),
+                setting_row(tr!(chart_menu::RESET), reset_description, reset, theme),
             ],
             theme,
         ),
-        settings_group("Colors", [colors], theme),
+        settings_group(tr!(chart_menu::COLORS), [colors], theme),
     ]
 }
 
@@ -783,11 +793,11 @@ fn order_book_groups(
         .child(
             SwitchRow::new(
                 "order_book_show_sizes",
-                "Show sizes",
+                tr!(chart_menu::SHOW_SIZES),
                 draft.settings.show_sizes,
                 theme,
             )
-            .description("Write each level's resting size on its bar.")
+            .description(tr!(chart_menu::SHOW_SIZES_DESCRIPTION))
             .on_change(move |show_sizes, _, _, cx| {
                 update.update(cx, |surface, surface_cx| {
                     surface.set_order_flow_dialog_show_sizes(show_sizes, surface_cx);
@@ -797,23 +807,23 @@ fn order_book_groups(
         .into_any_element();
     [
         settings_group(
-            "Bars",
+            tr!(chart_menu::BARS),
             [
                 number_row(
-                    "Levels per side",
-                    "Book levels drawn above and below the price, from 1 to 200.",
+                    tr!(chart_menu::LEVELS_PER_SIDE),
+                    tr!(chart_menu::LEVELS_PER_SIDE_DESCRIPTION),
                     &draft.levels_per_side,
                     theme,
                 ),
                 number_row(
-                    "Largest bar",
-                    "Length in pixels of the largest level's bar, from 20 to 400.",
+                    tr!(chart_menu::LARGEST_BAR),
+                    tr!(chart_menu::LARGEST_BAR_DESCRIPTION),
                     &draft.max_width,
                     theme,
                 ),
                 number_row(
-                    "Opacity",
-                    "Bar opacity in percent, from 10 to 100.",
+                    tr!(chart_menu::OPACITY),
+                    tr!(chart_menu::OPACITY_DESCRIPTION),
                     &draft.opacity_percent,
                     theme,
                 ),
@@ -821,14 +831,14 @@ fn order_book_groups(
             theme,
         ),
         settings_group(
-            "Display",
+            tr!(chart_menu::DISPLAY),
             [
                 show_sizes,
                 colors_row(
                     app,
                     dialog,
-                    "Colors",
-                    "Bid bars sit below the price and ask bars above it.",
+                    tr!(chart_menu::COLORS),
+                    tr!(chart_menu::BID_ASK_COLORS_DESCRIPTION),
                     &[OrderFlowColorTarget::Bid, OrderFlowColorTarget::Ask],
                     theme,
                 ),
@@ -848,12 +858,12 @@ fn order_flow_dialog_groups(
             cumulative_delta_groups(app, dialog, draft, theme).into()
         }
         OrderFlowDialogDraft::DeltaHistogram(_) => vec![settings_group(
-            "Columns",
+            tr!(chart_menu::COLUMNS),
             [colors_row(
                 app,
                 dialog,
-                "Colors",
-                "Columns above zero take the positive color and columns below it the negative.",
+                tr!(chart_menu::COLORS),
+                tr!(chart_menu::COLUMNS_COLORS_DESCRIPTION),
                 &[
                     OrderFlowColorTarget::DeltaPositive,
                     OrderFlowColorTarget::DeltaNegative,
@@ -881,7 +891,7 @@ pub(super) fn order_flow_dialog_layer(
     Dialog::new("order_flow_dialog", DialogSize::Md, theme, move |_, cx| {
         dismiss.update(cx, WorkspaceSurface::close_order_flow_dialog);
     })
-    .title("Indicator settings")
+    .title(tr!(chart_menu::INDICATOR_SETTINGS))
     .subtitle(dialog.draft.indicator().title())
     .max_height(px(680.0))
     .child(settings_groups(
@@ -897,7 +907,7 @@ pub(super) fn order_flow_dialog_layer(
     .footer_leading(
         Button::new("order_flow_reset", theme)
             .variant(ButtonVariant::Destructive)
-            .label("Reset to defaults")
+            .label(tr!(chart_menu::RESET_TO_DEFAULTS))
             .on_click(move |_, window, cx| {
                 reset.update(cx, |surface, surface_cx| {
                     surface.reset_order_flow_dialog(window, surface_cx);
@@ -907,7 +917,7 @@ pub(super) fn order_flow_dialog_layer(
     .action(
         Button::new("order_flow_cancel", theme)
             .variant(ButtonVariant::Secondary)
-            .label("Cancel")
+            .label(tr!(common::CANCEL))
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_order_flow_dialog);
             }),
@@ -915,7 +925,7 @@ pub(super) fn order_flow_dialog_layer(
     .action(
         Button::new("order_flow_apply", theme)
             .variant(ButtonVariant::Primary)
-            .label("Apply")
+            .label(tr!(chart_menu::APPLY))
             .on_click(move |_, _, cx| {
                 apply.update(cx, WorkspaceSurface::apply_order_flow_dialog);
             }),

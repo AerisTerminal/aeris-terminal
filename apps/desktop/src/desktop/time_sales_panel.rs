@@ -2,6 +2,7 @@
 
 use super::side_panel_dock::side_panel_header;
 use super::*;
+use aeris_localization::{panels, tr, tr_count};
 use gpui::Stateful;
 use std::cell::RefCell;
 
@@ -102,8 +103,8 @@ fn trades_unavailable_panel(
             theme,
         ))
         .child(super::chrome_menu::chrome_menu_empty(
-            "No trade prints",
-            format!("{provider} publishes quotes and depth, not individual trades."),
+            tr!(panels::TIME_SALES_NO_PRINTS),
+            tr!(panels::TIME_SALES_PROVIDER_NO_TRADES, provider = provider),
             &theme.colors,
         ))
 }
@@ -176,13 +177,16 @@ fn time_sales_filters(
     let range_app = app.clone();
     let reset_app = app.clone();
     let size_label = if filter.minimum_quantity == 0.0 {
-        "Any size".to_string()
+        tr!(panels::TIME_SALES_ANY_SIZE).to_string()
     } else {
-        format!(">= {}", filter.minimum_quantity)
+        tr!(
+            panels::TIME_SALES_MINIMUM_SIZE,
+            size = filter.minimum_quantity
+        )
     };
     let range_label = filter.price_range_ticks.map_or_else(
-        || "All prices".to_string(),
-        |ticks| format!("±{ticks} ticks"),
+        || tr!(panels::TIME_SALES_ALL_PRICES).to_string(),
+        |ticks| tr_count!(panels::TIME_SALES_RANGE_TICKS, ticks),
     );
     div()
         .p_1()
@@ -217,8 +221,11 @@ fn time_sales_filters(
                 .variant(ButtonVariant::Outline)
                 .button_size(ButtonSize::Sm)
                 .icon(header_icon(HugeIcon::Refresh))
-                .aria_label("Reset Time & Sales filters")
-                .tooltip(TooltipSpec::new("Reset filters", theme).show_delay(TOOLTIP_OPEN_DELAY))
+                .aria_label(tr!(panels::TIME_SALES_RESET_ARIA))
+                .tooltip(
+                    TooltipSpec::new(tr!(panels::TIME_SALES_RESET_FILTERS), theme)
+                        .show_delay(TOOLTIP_OPEN_DELAY),
+                )
                 .on_click(move |_, _, cx| {
                     reset_app.update(cx, WorkspaceSurface::reset_time_sales_filter);
                 }),

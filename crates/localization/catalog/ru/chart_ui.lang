@@ -1,0 +1,190 @@
+# Графики: названия индикаторов, типы графика, строки и кнопки легенды, метки
+# рисования, экспорт снимка и стакан только для чтения.
+
+# Названия индикаторов старого каталога.
+indicator_volume = Объём
+indicator_vwap = Средневзвешенная объёмом цена
+indicator_sma = Простая скользящая средняя
+indicator_ema = Экспоненциальная скользящая средняя
+indicator_wma = Взвешенная скользящая средняя
+indicator_bollinger = Полосы Боллинджера
+indicator_rsi = Индекс относительной силы
+indicator_macd = MACD
+indicator_stochastic = Стохастик
+indicator_atr = Средний истинный диапазон
+indicator_volume_profile = Профиль объёма (видимый диапазон)
+
+# Названия встроенных индикаторов Aeris Charts.
+indicator_dema = Двойная экспоненциальная скользящая средняя
+indicator_tema = Тройная экспоненциальная скользящая средняя
+indicator_smma = Сглаженная скользящая средняя (RMA)
+indicator_hma = Скользящая средняя Халла
+indicator_alma = Скользящая средняя Арно Легу
+indicator_kama = Адаптивная скользящая средняя Кауфмана
+indicator_mcginley = Динамика МакГинли
+indicator_vwma = Объёмно-взвешенная скользящая средняя
+indicator_linear_regression = Канал линейной регрессии
+indicator_envelopes = Конверты скользящих средних
+indicator_donchian = Каналы Дончиана
+indicator_keltner = Каналы Кельтнера
+indicator_atr_bands = Полосы ATR
+indicator_vwap_bands = Полосы VWAP
+indicator_parabolic_sar = Параболик SAR
+indicator_supertrend = SuperTrend
+indicator_ichimoku = Облако Ишимоку
+indicator_zigzag = Зигзаг
+indicator_pivot_standard = Пивоты: стандартные
+indicator_pivot_fibonacci = Пивоты: Фибоначчи
+indicator_pivot_camarilla = Пивоты: Камарилья
+indicator_pivot_woodie = Пивоты: Вуди
+indicator_pivot_demark = Пивоты: ДеМарк
+indicator_swing_points = Свинговые максимумы и минимумы
+indicator_session_levels = Максимум и минимум сессии
+indicator_previous_period_levels = Максимум и минимум предыдущего дня
+indicator_opening_range = Диапазон открытия
+indicator_aroon = Арун
+indicator_awesome_oscillator = Чудесный осциллятор
+indicator_dpo = Детрендированный ценовой осциллятор
+indicator_chande_momentum = Осциллятор моментума Чанде
+indicator_bollinger_metrics = Боллинджер %B и ширина полос
+indicator_standard_deviation = Стандартное отклонение
+indicator_cci = Индекс товарного канала
+indicator_williams_r = Williams %R
+indicator_stochastic_rsi = Стохастик RSI
+indicator_momentum = Моментум
+indicator_roc = Скорость изменения
+indicator_adx_dmi = ADX и DMI
+indicator_choppiness = Индекс нестабильности
+indicator_historical_volatility = Историческая волатильность
+indicator_trix = TRIX
+indicator_kst = Know Sure Thing
+indicator_tsi = Индекс истинной силы
+indicator_mass_index = Индекс массы
+indicator_vortex = Индикатор Vortex
+indicator_coppock = Кривая Коппока
+indicator_fisher = Преобразование Фишера
+indicator_ultimate_oscillator = Окончательный осциллятор
+indicator_obv = Балансовый объём
+indicator_accumulation_distribution = Накопление/распределение
+indicator_price_volume_trend = Тренд цены и объёма
+indicator_chaikin_oscillator = Осциллятор Чайкина
+indicator_klinger = Осциллятор Клингера
+indicator_relative_volume = Относительный объём
+indicator_volume_oscillator = Осциллятор объёма
+indicator_elder_force = Индекс силы Элдера
+indicator_ease_of_movement = Лёгкость движения
+indicator_cmf = Денежный поток Чайкина
+indicator_mfi = Индекс денежных потоков
+
+# Сводки параметров рядом с названиями индикаторов.
+params_volume = Объём вверх/вниз · необязательная скользящая средняя
+params_session_anchored = Привязка к сессии
+params_period_20 = Период 20
+params_period_20_deviation_2 = Период 20 · Отклонение 2
+params_bollinger = Период 14 · Отклонение 2
+params_period_14 = Период 14
+params_macd = Быстрый 12 · Медленный 26 · Сигнал 9
+params_stochastic = %K 14 · %D 3
+params_volume_profile = Строки 48 · Зона стоимости 70%
+params_alma = Период 14 · Смещение 0.85 · Сигма 6
+params_kama = Период 10 · Быстрый 2 · Медленный 30
+params_envelopes = Период 14 · 2%
+params_multiplier_2 = Период 14 · Множитель 2
+params_vwap_bands = Привязка к сессии · 1 стандартное отклонение
+params_multiplier_3 = Период 14 · Множитель 3
+params_deviation_2_percent = Отклонение 2%
+params_standard = Стандартные настройки
+params_prior_period_levels = Уровни предыдущего периода
+params_swing_points = Слева 5 · Справа 5
+params_utc_sessions = Сессии UTC
+params_utc_days = Дни UTC
+params_opening_range = 30 минут · сессии UTC
+params_stochastic_rsi = RSI 14 · Стохастик 14
+params_historical_volatility = Период 14 · 252 дня
+params_trix = Период 14 · Сигнал 9
+params_kst = ROC 10 · 15 · 20 · 30 · Сигнал 9
+params_tsi = Длинный 25 · Короткий 13 · Сигнал 13
+params_mass_index = EMA 9 · Сумма 25
+params_coppock = Длинный 14 · Короткий 11 · Сглаживание 10
+params_ultimate_oscillator = Периоды 7 · 14 · 28
+params_cumulative = Накопительно
+params_chaikin_oscillator = Быстрый 3 · Медленный 10
+params_klinger = Быстрый 34 · Медленный 55 · Сигнал 13
+
+# Типы графика.
+chart_type_candles = Свечи
+chart_type_hollow_candles = Пустотелые свечи
+chart_type_hollow_candles_bullish = Пустотелые свечи: только бычьи
+chart_type_hollow_candles_bearish = Пустотелые свечи: только медвежьи
+chart_type_footprint = Футпринт
+chart_type_bars = Бары
+chart_type_line = Линия
+chart_type_line_with_markers = Линия с маркерами
+chart_type_area = Область
+chart_type_baseline = Базовая линия
+chart_type_brushable_area = Область с выделением
+
+# Значки инструмента рисования «Метка».
+stamp_check = Галочка
+stamp_cross = Крестик
+stamp_star = Звезда
+stamp_alert = Предупреждение
+stamp_info = Информация
+stamp_question = Вопрос
+stamp_bolt = Молния
+stamp_target = Цель
+
+# Строки легенды графика и их кнопки.
+legend_waiting_for_order_flow = Ожидание потока ордеров
+legend_volume_profile = Профиль объёма
+legend_big_trades = Крупные сделки
+legend_order_book = Стакан
+legend_depth_heatmap = Тепловая карта глубины
+legend_loading = Загрузка
+legend_hide = Скрыть
+legend_show = Показать
+legend_settings = Настройки
+legend_remove = Удалить
+order_flow_cvd = CVD
+order_flow_delta = Дельта
+
+# Ошибки ввода координат привязки рисунка.
+drawing_anchor_price = Введите цену числом
+drawing_anchor_time = Введите время в формате ГГГГ-ММ-ДД ЧЧ:ММ
+drawing_anchor_rejected = График не может разместить точку здесь
+
+# Подпись экспортированного снимка графика.
+export_created_with = Создано в Aeris
+
+# Заголовок ценовой линии плана сессии.
+session_plan_line = ПЛАН · {label}
+
+# Колонки, баннеры и метки ячеек стакана только для чтения.
+book_column_pnl = П/У
+book_column_bid = Бид
+book_column_sell = Продажа
+book_column_price = Цена
+book_column_buy = Покупка
+book_column_ask = Аск
+book_column_orders = Ордера
+book_column_queue = Очередь
+book_offline = Стакан офлайн · нет подключения к интернету
+book_reconnecting = Стакан переподключается · ожидание нового снимка
+book_level_one_note = Уровень 1 · лучшие бид/аск
+book_unavailable = Стакан недоступен
+book_waiting_snapshot = Ожидание снимка стакана
+book_loading = Загрузка стакана…
+book_drag_buy = ПОКУПКА
+book_drag_sell = ПРОДАЖА
+book_position = ПОЗ {quantity}
+book_own_order = ВЫ {quantity}
+queues_loading = Загрузка очередей ордеров
+queues_recovering = Восстановление очередей ордеров · ожидание полного образа ордеров
+queues_unavailable = Очереди ордеров недоступны для этого рынка
+queues_limit_reached = Достигнут лимит очередей ордеров · закройте колонку очереди в другом стакане
+book_stale = Стакан устарел · последняя последовательность {watermark}
+book_recovering = Восстановление стакана · {reason}
+recovery_awaiting_snapshot = ожидание снимка
+recovery_sequence_gap = разрыв последовательности
+recovery_crossed_book = пересечённый стакан
+recovery_invalid_update = некорректное обновление

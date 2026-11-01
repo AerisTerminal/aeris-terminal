@@ -1,0 +1,5 @@
+# Текст, общий для всех экранов.
+cancel = Отмена
+items[one] = {count} элемент
+items[few] = {count} элемента
+items[many] = {count} элементов

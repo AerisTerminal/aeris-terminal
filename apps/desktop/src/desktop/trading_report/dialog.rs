@@ -3,13 +3,14 @@
 
 use super::period::{CustomDates, ReportPeriod, ReportZone, date_text, resolve_span};
 use super::*;
+use aeris_localization::{Text, common, panels, tr, tr_count};
 use bottom_panel::TradeHistoryAccountFilter;
 
 const ACCOUNT_MENU_WIDTH: f32 = 260.0;
 const ACCOUNT_MENU_MAX_HEIGHT: f32 = 220.0;
 const REPORT_NOTICE_DURATION: Duration = Duration::from_secs(10);
-const RUNNING_PROBLEM: &str = "A report is already being generated.";
-const NO_ACCOUNT_PROBLEM: &str = "Choose an account to report on.";
+const RUNNING_PROBLEM: Text = panels::REPORT_RUNNING;
+const NO_ACCOUNT_PROBLEM: Text = panels::REPORT_NO_ACCOUNT;
 
 /// Choices of the open report dialog. The period fields keep their text while another
 /// period is selected.
@@ -96,7 +97,9 @@ impl TerminalApp {
         let from = dialog.from.read(cx).value().to_string();
         let to = dialog.to.read(cx).value().to_string();
         if self.pages.bottom_panel.report_running {
-            self.update_trading_report_dialog(cx, |dialog| dialog.problem = Some(RUNNING_PROBLEM));
+            self.update_trading_report_dialog(cx, |dialog| {
+                dialog.problem = Some(RUNNING_PROBLEM.get());
+            });
             return;
         }
         let zone = self.trading_report_zone(cx);
@@ -128,12 +131,12 @@ impl TerminalApp {
             .collect::<Vec<_>>();
         if accounts.is_empty() {
             self.update_trading_report_dialog(cx, |dialog| {
-                dialog.problem = Some(NO_ACCOUNT_PROBLEM);
+                dialog.problem = Some(NO_ACCOUNT_PROBLEM.get());
             });
             return;
         }
         let scope = match account {
-            TradeHistoryAccountFilter::All => "All accounts".to_string(),
+            TradeHistoryAccountFilter::All => tr!(panels::REPORT_ALL_ACCOUNTS).to_string(),
             TradeHistoryAccountFilter::Account(_) => accounts
                 .first()
                 .map(|account| account.display_name.clone())
@@ -175,26 +178,20 @@ impl TerminalApp {
         result: Result<GeneratedReport, ReportError>,
         cx: &mut Context<Self>,
     ) {
-        let trades = |count: usize| {
-            if count == 1 {
-                "1 closed trade".to_string()
-            } else {
-                format!("{count} closed trades")
-            }
-        };
+        let trades = |count: usize| tr_count!(panels::REPORT_CLOSED_TRADES, count);
         let (severity, tone, title, detail, action) = match result {
             Ok(report) if report.opened => (
                 notification_center::NoticeSeverity::Info,
                 notification_center::NoticeTone::Info,
-                "Trading report ready",
-                format!("{}, opened in your browser.", trades(report.trades)),
+                tr!(panels::REPORT_READY),
+                tr!(panels::REPORT_DETAIL_OPENED, trades = trades(report.trades)),
                 Some(notification_center::NoticeAction::OpenFolder(report.path)),
             ),
             Ok(report) => (
                 notification_center::NoticeSeverity::Warning,
                 notification_center::NoticeTone::Warning,
-                "Trading report saved",
-                format!("{}. Your browser could not open it.", trades(report.trades)),
+                tr!(panels::REPORT_SAVED),
+                tr!(panels::REPORT_DETAIL_SAVED, trades = trades(report.trades)),
                 Some(notification_center::NoticeAction::OpenFolder(report.path)),
             ),
             Err(error) => {
@@ -215,7 +212,7 @@ impl TerminalApp {
                 (
                     notification_center::NoticeSeverity::Warning,
                     notification_center::NoticeTone::Warning,
-                    "Trading report failed",
+                    tr!(panels::REPORT_FAILED),
                     error.notice_detail().to_string(),
                     None,
                 )
@@ -266,10 +263,10 @@ impl TerminalApp {
                     dismiss.update(cx, TerminalApp::close_trading_report_dialog);
                 },
             )
-            .title("Trading report")
-            .subtitle("Closed trades as an offline HTML file")
+            .title(tr!(panels::REPORT_TITLE))
+            .subtitle(tr!(panels::REPORT_SUBTITLE))
             .child(report_field(
-                "Period",
+                tr!(panels::REPORT_PERIOD),
                 report_period_choices(terminal, dialog.period, &theme),
                 &theme,
             ))
@@ -280,7 +277,7 @@ impl TerminalApp {
                         .gap_2()
                         .child(
                             report_field(
-                                "First day",
+                                tr!(panels::REPORT_FIRST_DAY),
                                 Input::new(&dialog.from).platform(&theme),
                                 &theme,
                             )
@@ -288,7 +285,7 @@ impl TerminalApp {
                         )
                         .child(
                             report_field(
-                                "Last day",
+                                tr!(panels::REPORT_LAST_DAY),
                                 Input::new(&dialog.to).platform(&theme),
                                 &theme,
                             )
@@ -297,7 +294,7 @@ impl TerminalApp {
                 )
             })
             .child(report_field(
-                "Accounts",
+                tr!(panels::REPORT_ACCOUNTS),
                 report_account_picker(terminal, dialog, accounts, &theme),
                 &theme,
             ))
@@ -305,9 +302,7 @@ impl TerminalApp {
                 div()
                     .text_xs()
                     .text_color(gpui_color(colors.text_secondary))
-                    .child(format!(
-                        "Days and hours use the chart's time zone ({zone}). Simulated and broker results are reported separately. The report is saved in Downloads, in the Aeris Reports folder, and opens in your browser."
-                    )),
+                    .child(tr!(panels::REPORT_ZONE_EXPLANATION, zone = zone)),
             )
             .children(dialog.problem.map(|problem| {
                 div()
@@ -318,7 +313,7 @@ impl TerminalApp {
             .action(
                 Button::new("trading_report_cancel", &theme)
                     .variant(ButtonVariant::Secondary)
-                    .label("Cancel")
+                    .label(tr!(common::CANCEL))
                     .on_press(move |_, _, cx| {
                         cancel.update(cx, TerminalApp::close_trading_report_dialog);
                     }),
@@ -326,7 +321,7 @@ impl TerminalApp {
             .action(
                 Button::new("trading_report_generate", &theme)
                     .variant(ButtonVariant::Primary)
-                    .label("Generate report")
+                    .label(tr!(panels::REPORT_GENERATE))
                     .disabled(self.pages.bottom_panel.report_running)
                     .on_press(move |_, _, cx| {
                         generate.update(cx, TerminalApp::generate_trading_report);
@@ -392,7 +387,7 @@ fn report_account_picker(
     let toggle = terminal.clone();
     let dismiss = terminal.clone();
     let label = match &dialog.account {
-        TradeHistoryAccountFilter::All => "All accounts".to_string(),
+        TradeHistoryAccountFilter::All => tr!(panels::REPORT_ALL_ACCOUNTS).to_string(),
         TradeHistoryAccountFilter::Account(key) => accounts
             .iter()
             .find(|account| account.id.as_str() == key)
@@ -402,7 +397,7 @@ fn report_account_picker(
         .variant(ButtonVariant::Outline)
         .button_size(ButtonSize::Sm)
         .open(dialog.account_menu_open)
-        .aria_label("Accounts in the report")
+        .aria_label(tr!(panels::REPORT_ACCOUNTS_ARIA))
         .label(label)
         .caret(header_icon(HugeIcon::ChevronDown))
         .on_press(move |_, _, cx| {
@@ -413,13 +408,16 @@ fn report_account_picker(
             });
         });
     let menu = dialog.account_menu_open.then(|| {
-        let choices = std::iter::once((TradeHistoryAccountFilter::All, "All accounts".to_string()))
-            .chain(accounts.iter().map(|account| {
-                (
-                    TradeHistoryAccountFilter::Account(account.id.as_str().to_string()),
-                    account.display_name.clone(),
-                )
-            }));
+        let choices = std::iter::once((
+            TradeHistoryAccountFilter::All,
+            tr!(panels::REPORT_ALL_ACCOUNTS).to_string(),
+        ))
+        .chain(accounts.iter().map(|account| {
+            (
+                TradeHistoryAccountFilter::Account(account.id.as_str().to_string()),
+                account.display_name.clone(),
+            )
+        }));
         let mut menu = MenuPanel::new(
             "trading_report_account_menu",
             MenuPlacement::Anchored {

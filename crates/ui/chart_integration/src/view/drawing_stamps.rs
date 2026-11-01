@@ -3,6 +3,7 @@
 
 use aeris_charts_engine::{ChartEngine, MAX_DRAWING_ICON_SIZE};
 use aeris_design_system::{AerisTheme, ThemeColor, ThemeMode, ThemePreset};
+use aeris_localization::{chart_ui, tr};
 use aeris_observability::diagnostic;
 use num_traits::ToPrimitive;
 use resvg::{tiny_skia, usvg};
@@ -37,16 +38,16 @@ impl ChartDrawingStamp {
     ];
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Check => "Check mark",
-            Self::Cross => "Cross mark",
-            Self::Star => "Star",
-            Self::Alert => "Alert",
-            Self::Info => "Info",
-            Self::Question => "Question",
-            Self::Bolt => "Lightning",
-            Self::Target => "Target",
+            Self::Check => tr!(chart_ui::STAMP_CHECK),
+            Self::Cross => tr!(chart_ui::STAMP_CROSS),
+            Self::Star => tr!(chart_ui::STAMP_STAR),
+            Self::Alert => tr!(chart_ui::STAMP_ALERT),
+            Self::Info => tr!(chart_ui::STAMP_INFO),
+            Self::Question => tr!(chart_ui::STAMP_QUESTION),
+            Self::Bolt => tr!(chart_ui::STAMP_BOLT),
+            Self::Target => tr!(chart_ui::STAMP_TARGET),
         }
     }
 

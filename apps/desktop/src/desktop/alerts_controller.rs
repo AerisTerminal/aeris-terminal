@@ -5,6 +5,7 @@ use super::{
     MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlertTrigger, PriceAlertCondition,
     PriceAlertFrequency, PriceAlertStatus, WorkspacePriceAlertState,
 };
+use aeris_localization::{panels, tr};
 use num_traits::ToPrimitive;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -110,18 +111,17 @@ impl AlertsController {
         created_at_unix_nanos: i64,
     ) -> Result<Vec<WorkspacePriceAlertState>, &'static str> {
         let Some(dialog) = &self.dialog else {
-            return Err("Select a live market before creating an alert.");
+            return Err(tr!(panels::ALERT_NO_LIVE_MARKET));
         };
         if self.alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER {
-            return Err("This chart has reached its alert limit.");
+            return Err(tr!(panels::ALERT_LIMIT_REACHED));
         }
         let instrument = &dialog.instrument;
         let price = scaled_price(dialog.request.price, instrument.price_scale)
-            .ok_or("The selected alert price is invalid.")?;
-        let id = new_alert_id(&self.alerts)
-            .map_err(|_| "An alert identity could not be allocated. Try again.")?;
+            .ok_or(tr!(panels::ALERT_PRICE_INVALID))?;
+        let id = new_alert_id(&self.alerts).map_err(|_| tr!(panels::ALERT_IDENTITY_ALLOCATION))?;
         let pane_index = u32::try_from(dialog.request.pane_index)
-            .map_err(|_| "The selected chart pane is invalid.")?;
+            .map_err(|_| tr!(panels::ALERT_PANE_INVALID))?;
         let mut next = self.alerts.clone();
         next.push(WorkspacePriceAlertState {
             id,

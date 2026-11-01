@@ -5,6 +5,7 @@
 use super::html::{amount, escape, grouped};
 use super::period::date_text;
 use super::statistics::{CurrencyGroup, to_f64};
+use aeris_localization::{panels, tr, tr_count};
 use chrono::{Datelike, NaiveDate};
 use std::fmt::{self, Write as _};
 
@@ -53,7 +54,7 @@ pub(super) fn cumulative(group: &CurrencyGroup) -> Result<String, fmt::Error> {
         &values,
         WIDE,
         "primary",
-        "Cumulative P&amp;L by closed trade",
+        tr!(panels::REPORT_CHART_CUMULATIVE_ARIA),
     )
 }
 
@@ -67,7 +68,12 @@ pub(super) fn drawdown(group: &CurrencyGroup) -> Result<String, fmt::Error> {
                 .map(|point| -whole(point.drawdown, group.scale)),
         )
         .collect::<Vec<_>>();
-    line_chart(&values, HALF, "negative", "Drawdown by closed trade")
+    line_chart(
+        &values,
+        HALF,
+        "negative",
+        tr!(panels::REPORT_CHART_DRAWDOWN_ARIA),
+    )
 }
 
 /// Net P&L per exit day with trades, or per month when there are too many days to read.
@@ -386,14 +392,13 @@ fn column_chart(bars: &[Bar], monthly: bool, group: &CurrencyGroup) -> Result<St
         };
         write!(
             out,
-            "<rect class=\"{class}\" x=\"{:.1}\" y=\"{:.1}\" width=\"{width:.1}\" height=\"{:.1}\"><title>{when}: {} {}, {} {}</title></rect>",
+            "<rect class=\"{class}\" x=\"{:.1}\" y=\"{:.1}\" width=\"{width:.1}\" height=\"{:.1}\"><title>{when}: {} {}, {}</title></rect>",
             plot.left + band * float(index) + (band - width) / 2.0,
             top.min(zero),
             (top - zero).abs().max(1.0),
             amount(bar.net, group.scale),
             escape(&group.currency),
-            grouped(&bar.trades.to_string()),
-            if bar.trades == 1 { "trade" } else { "trades" },
+            tr_count!(panels::REPORT_BAR_TRADES, bar.trades),
         )?;
     }
     out.push_str("</g><g class=\"labels\">");

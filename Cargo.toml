@@ -15,6 +15,7 @@ members = [
     "crates/domain/market_data",
     "crates/domain/trading",
     "crates/contracts",
+    "crates/localization",
     "crates/observability",
     "crates/platform_sys",
     "crates/platform_runtime",
@@ -62,6 +63,7 @@ serde_json = "=1.0.151"
 same-file = "=1.0.6"
 webpki-roots = "=1.0.9"
 sha2 = "=0.11.0"
+sys-locale = "=0.3.2"
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 windows-sys = { version = "=0.61.2", default-features = false }
 # Pinned to the version GPUI resolves; its safe API keeps registry access free of `unsafe`.
@@ -93,11 +95,11 @@ unicode-segmentation = "=1.13.3"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56934ec0560bce8929025497411de7f5322fb6ca", default-features = false, features = ["font-kit", "wayland", "x11"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "8c610c7dc61a5afb5fbb6928be50640d7dfbb1dd", version = "=0.3.0" }
-aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "8c610c7dc61a5afb5fbb6928be50640d7dfbb1dd", version = "=0.3.0" }
-aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "8c610c7dc61a5afb5fbb6928be50640d7dfbb1dd", version = "=0.3.0" }
-aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "8c610c7dc61a5afb5fbb6928be50640d7dfbb1dd", version = "=0.3.0", features = ["gpui-backend"] }
-aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "8c610c7dc61a5afb5fbb6928be50640d7dfbb1dd", version = "=0.3.0" }
+aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b33854ce93e3230e86bace88f336486672e24018", version = "=0.3.0" }
+aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b33854ce93e3230e86bace88f336486672e24018", version = "=0.3.0" }
+aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b33854ce93e3230e86bace88f336486672e24018", version = "=0.3.0" }
+aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b33854ce93e3230e86bace88f336486672e24018", version = "=0.3.0", features = ["gpui-backend"] }
+aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b33854ce93e3230e86bace88f336486672e24018", version = "=0.3.0" }
 
 [patch.crates-io]
 # Aeris Charts pins the published `gpui = 0.2.2`; replace it with the exact same reviewed Git

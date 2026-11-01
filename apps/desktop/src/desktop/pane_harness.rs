@@ -818,7 +818,10 @@ fn assert_stale_protection_notice(harness: &PaneHarness, cx: &VisualTestContext)
         let notices = harness.window.read(cx).toaster.notices();
         assert_eq!(notices.len(), 1, "one keyed stale revision notice");
         assert_eq!(notices[0].key.kind, "stale_order_edit");
-        assert_eq!(notices[0].title, aeris_desktop::trading::STALE_ORDER_NOTICE);
+        assert_eq!(
+            notices[0].title,
+            aeris_desktop::trading::stale_order_notice()
+        );
         assert!(!notices[0].detail.contains("StaleRevision"));
     });
 }

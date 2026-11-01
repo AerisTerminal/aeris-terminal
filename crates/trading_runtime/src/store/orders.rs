@@ -7,8 +7,8 @@ use super::{
     json_i64, json_string, json_u64, optional_fixed, params, split_optional, sqlite_i64,
     sqlite_u64,
 };
-use aeris_trading::OrderEventReason;
 use aeris_trading::venue::{BracketLevel, BracketSide, ServerBracket};
+use aeris_trading::{OrderEventNote, OrderEventReason, RiskWarning};
 
 const LOAD_ORDERS_SQL: &str = "SELECT id, client_order_id, account_id, instrument_id, side,
     order_type, time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
@@ -577,7 +577,7 @@ impl TradingStore {
             .connection
             .prepare(
                 "SELECT id, order_id, sequence, kind, event_unix_nanos, detail, provenance_json,
-                        reason_code
+                        reason_code, reason_json
              FROM order_events ORDER BY sequence",
             )
             .map_err(database_error)?;
@@ -592,11 +592,12 @@ impl TradingStore {
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })
             .map_err(database_error)?;
         for row in rows {
-            let (id, order, sequence, kind, time, detail, provenance, reason) =
+            let (id, order, sequence, kind, time, detail, provenance, reason, note) =
                 row.map_err(database_error)?;
             let event = OrderEvent {
                 id: OrderEventId::try_new(id).map_err(|error| error.to_string())?,
@@ -606,6 +607,7 @@ impl TradingStore {
                 reason: reason.as_deref().map(parse_event_reason).transpose()?,
                 event_unix_nanos: time,
                 detail,
+                note: note.as_deref().and_then(decode_event_note),
                 provenance: decode_provenance(&provenance)?,
             };
             event.validate().map_err(|error| error.to_string())?;
@@ -740,13 +742,75 @@ pub(super) fn insert_event_row(
     let sequence = sqlite_i64(event.sequence)?;
     transaction.execute(
         "INSERT INTO order_events(id, order_id, sequence, kind, event_unix_nanos, detail, provenance_json,
-             reason_code)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             reason_code, reason_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![event.id.as_str(), event.order_id.as_str(), sequence, event.kind.as_str(),
             event.event_unix_nanos, event.detail, encode_provenance(&event.provenance),
-            event.reason.map(OrderEventReason::as_str)],
+            event.reason.map(OrderEventReason::as_str),
+            event.note.as_ref().map(encode_event_note)],
     ).map_err(database_error)?;
     Ok(())
+}
+
+fn encode_event_note(note: &OrderEventNote) -> String {
+    match note {
+        OrderEventNote::RiskWarnings(warnings) => json!({
+            "note": "risk_warnings",
+            "warnings": warnings.iter().map(|warning| match warning {
+                RiskWarning::ConsistencyLimitExceeded { current_percent, limit_percent } => json!({
+                    "code": warning.as_str(),
+                    "current_percent": current_percent,
+                    "limit_percent": limit_percent,
+                }),
+                _ => json!({"code": warning.as_str()}),
+            }).collect::<Vec<_>>(),
+        }),
+        OrderEventNote::DaySessionEnded => json!({"note": "day_session_ended"}),
+        OrderEventNote::VenueGaveNoReason => json!({"note": "venue_gave_no_reason"}),
+        OrderEventNote::NoLongerOpenAtVenue => json!({"note": "no_longer_open_at_venue"}),
+        OrderEventNote::NotReceivedByVenue => json!({"note": "not_received_by_venue"}),
+    }
+    .to_string()
+}
+
+/// A note is presentation only; the stored detail stays authoritative, so a note this build
+/// cannot read (a newer kind or a damaged value) is dropped and the event shows its detail.
+fn decode_event_note(raw: &str) -> Option<OrderEventNote> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    match value.get("note")?.as_str()? {
+        "risk_warnings" => value
+            .get("warnings")?
+            .as_array()?
+            .iter()
+            .map(decode_risk_warning)
+            .collect::<Option<Vec<_>>>()
+            .map(OrderEventNote::RiskWarnings),
+        "day_session_ended" => Some(OrderEventNote::DaySessionEnded),
+        "venue_gave_no_reason" => Some(OrderEventNote::VenueGaveNoReason),
+        "no_longer_open_at_venue" => Some(OrderEventNote::NoLongerOpenAtVenue),
+        "not_received_by_venue" => Some(OrderEventNote::NotReceivedByVenue),
+        _ => None,
+    }
+}
+
+fn decode_risk_warning(value: &Value) -> Option<RiskWarning> {
+    let percent = |field: &str| {
+        value
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|percent| u8::try_from(percent).ok())
+    };
+    match value.get("code")?.as_str()? {
+        "approaching_daily_loss_limit" => Some(RiskWarning::ApproachingDailyLossLimit),
+        "no_attached_stop" => Some(RiskWarning::NoAttachedStop),
+        "consistency_limit_exceeded" => Some(RiskWarning::ConsistencyLimitExceeded {
+            current_percent: percent("current_percent")?,
+            limit_percent: percent("limit_percent")?,
+        }),
+        "fast_stop_reentry" => Some(RiskWarning::FastStopReentry),
+        "unverified_price_grid" => Some(RiskWarning::UnverifiedPriceGrid),
+        _ => None,
+    }
 }
 
 pub(super) fn update_next_sequence(transaction: &Transaction<'_>, next: u64) -> Result<(), String> {
@@ -1089,5 +1153,35 @@ mod lifecycle_wire_tests {
             assert_eq!(parse_event_reason(reason.as_str()), Ok(reason));
         }
         assert!(parse_event_reason("display text is not a reason").is_err());
+    }
+
+    #[test]
+    fn event_notes_round_trip_and_unreadable_notes_fall_back_to_the_detail() {
+        for note in [
+            OrderEventNote::RiskWarnings(vec![
+                RiskWarning::ApproachingDailyLossLimit,
+                RiskWarning::NoAttachedStop,
+                RiskWarning::ConsistencyLimitExceeded {
+                    current_percent: 42,
+                    limit_percent: 30,
+                },
+                RiskWarning::FastStopReentry,
+                RiskWarning::UnverifiedPriceGrid,
+            ]),
+            OrderEventNote::DaySessionEnded,
+            OrderEventNote::VenueGaveNoReason,
+            OrderEventNote::NoLongerOpenAtVenue,
+            OrderEventNote::NotReceivedByVenue,
+        ] {
+            assert_eq!(decode_event_note(&encode_event_note(&note)), Some(note));
+        }
+        for unreadable in [
+            "not json",
+            r#"{"note":"a_newer_note"}"#,
+            r#"{"note":"risk_warnings","warnings":[{"code":"a_newer_warning"}]}"#,
+            r#"{"note":"risk_warnings","warnings":[{"code":"consistency_limit_exceeded","current_percent":300,"limit_percent":30}]}"#,
+        ] {
+            assert_eq!(decode_event_note(unreadable), None, "{unreadable}");
+        }
     }
 }

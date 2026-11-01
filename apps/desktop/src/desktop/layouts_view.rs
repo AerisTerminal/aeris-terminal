@@ -4,7 +4,8 @@
 
 use super::*;
 use aeris_desktop::command_registry::CommandId;
-use layout_library::{MAXIMUM_SAVED_LAYOUTS, UNTITLED_LAYOUT_NAME};
+use aeris_localization::{common, shell, tr, tr_count};
+use layout_library::MAXIMUM_SAVED_LAYOUTS;
 
 const START_PAGE_WIDTH: f32 = 720.0;
 const START_PAGE_PADDING_Y: f32 = 48.0;
@@ -46,19 +47,19 @@ pub(super) enum LayoutNamePurpose {
 }
 
 impl LayoutNamePurpose {
-    const fn title(self) -> &'static str {
+    const fn title(self) -> aeris_localization::Text {
         match self {
-            Self::Rename(_) => "Rename layout",
-            Self::Copy => "Make a copy of layout",
-            Self::Create => "Create new layout",
+            Self::Rename(_) => shell::LAYOUT_RENAME_TITLE,
+            Self::Copy => shell::CMD_COPY_LAYOUT,
+            Self::Create => shell::LAYOUT_CREATE_TITLE,
         }
     }
 
-    const fn confirm_label(self) -> &'static str {
+    const fn confirm_label(self) -> aeris_localization::Text {
         match self {
-            Self::Rename(_) => "Rename",
-            Self::Copy => "Make a copy",
-            Self::Create => "Create",
+            Self::Rename(_) => shell::LAYOUT_RENAME_CONFIRM,
+            Self::Copy => shell::LAYOUT_COPY_CONFIRM,
+            Self::Create => shell::LAYOUT_CREATE_CONFIRM,
         }
     }
 }
@@ -130,7 +131,7 @@ fn saved_date_label(saved_at_unix_ms: i64) -> Option<String> {
         return None;
     }
     chrono::DateTime::from_timestamp_millis(saved_at_unix_ms)
-        .map(|saved| saved.format("Saved %b %-d, %Y").to_string())
+        .map(|saved| tr!(shell::LAYOUT_SAVED_DATE, date = saved.format("%b %-d, %Y")))
 }
 
 /// The first chart's symbol and interval, the pane count and the saved date of a layout.
@@ -144,7 +145,9 @@ fn layout_card_detail(layout: &WorkspaceSavedLayoutState) -> String {
         let symbol = pane
             .instrument
             .as_ref()
-            .map_or("No market", |instrument| instrument.display_symbol.as_str());
+            .map_or(tr!(shell::NO_MARKET), |instrument| {
+                instrument.display_symbol.as_str()
+            });
         parts.push(if pane.interval.is_empty() {
             symbol.to_string()
         } else {
@@ -152,7 +155,7 @@ fn layout_card_detail(layout: &WorkspaceSavedLayoutState) -> String {
         });
     }
     if panes.len() > 1 {
-        parts.push(format!("{} charts", panes.len()));
+        parts.push(tr_count!(shell::CHARTS_COUNT, panes.len()));
     }
     parts.extend(saved_date_label(layout.saved_at_unix_ms));
     parts.join(" \u{b7} ")
@@ -187,8 +190,9 @@ impl TerminalApp {
         self.pages.layouts.card_menu = None;
         self.show_terminal_view(cx);
         if self.pages.layouts.start_page.is_none() {
-            let search =
-                cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Search layouts"));
+            let search = cx.new(|input_cx| {
+                InputState::new(window, input_cx).placeholder(tr!(shell::SEARCH_LAYOUTS))
+            });
             let changes = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -262,7 +266,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name = self.saved.layouts().unique_name(UNTITLED_LAYOUT_NAME);
+        let name = self.saved.layouts().unique_name(tr!(shell::UNTITLED));
         match self.add_workspace(&name, window, cx) {
             Ok(()) => self.close_start_page(window, cx),
             Err(error) => {
@@ -345,12 +349,12 @@ impl TerminalApp {
                 .map(|layout| layout.name.clone()),
             LayoutNamePurpose::Copy => Some(self.copy_layout_name(&self.tabs.active().label)),
             LayoutNamePurpose::Create => {
-                Some(self.saved.layouts().unique_name(UNTITLED_LAYOUT_NAME))
+                Some(self.saved.layouts().unique_name(tr!(shell::UNTITLED)))
             }
         };
         let Some(name) = name else {
             self.notices
-                .show_workspace_error("The layout no longer exists".to_string());
+                .show_workspace_error(tr!(shell::LAYOUT_NO_LONGER_EXISTS).to_string());
             cx.notify();
             return;
         };
@@ -358,7 +362,7 @@ impl TerminalApp {
         self.pages.layouts.card_menu = None;
         let input = cx.new(|input_cx| {
             InputState::new(window, input_cx)
-                .placeholder("Layout name")
+                .placeholder(tr!(shell::LAYOUT_NAME_PLACEHOLDER))
                 .default_value(name)
         });
         input.update(cx, |input, input_cx| {
@@ -579,7 +583,7 @@ impl TerminalApp {
             div()
                 .text_sm()
                 .text_color(gpui_color(colors.text_muted))
-                .child(format!("No layouts match \u{201c}{}\u{201d}", query.trim()))
+                .child(tr!(shell::NO_LAYOUTS_MATCH, query = query.trim()))
         });
         let cards = layouts
             .into_iter()
@@ -596,7 +600,7 @@ impl TerminalApp {
                     .text_xl()
                     .font_weight(platform_font_weight(TypographyRole::Strong))
                     .text_color(gpui_color(colors.text_default))
-                    .child("Layouts"),
+                    .child(tr!(shell::LAYOUTS_HEADING)),
             )
             .child(
                 div()
@@ -646,8 +650,8 @@ impl TerminalApp {
                 layout_card_body(
                     ("create_layout_card_body", 0),
                     HugeIcon::Add,
-                    "Create new layout",
-                    "A new tab with one chart".to_string(),
+                    tr!(shell::LAYOUT_CREATE_TITLE),
+                    tr!(shell::CREATE_LAYOUT_DETAIL).to_string(),
                     theme,
                 )
                 .on_click(move |_, window, cx| {
@@ -673,7 +677,7 @@ impl TerminalApp {
         let trigger = Button::new(("layout_card_more", layout_id), theme)
             .variant(ButtonVariant::Ghost)
             .icon(header_icon(HugeIcon::More))
-            .aria_label(format!("More actions for {}", layout.name))
+            .aria_label(tr!(shell::LAYOUT_ACTIONS_ARIA, name = layout.name))
             .open(menu_open)
             .on_click(move |_, _, cx| {
                 toggle.update(cx, |terminal, cx| {
@@ -712,9 +716,9 @@ impl TerminalApp {
         let toggle = terminal.clone();
         let dismiss = terminal.clone();
         let label = if unsaved {
-            format!("Layout {}, unsaved changes", workspace.label)
+            tr!(shell::LAYOUT_BUTTON_ARIA_UNSAVED, name = workspace.label)
         } else {
-            format!("Layout {}", workspace.label)
+            tr!(shell::LAYOUT_BUTTON_ARIA, name = workspace.label)
         };
         let button = Button::new("layout_menu", &theme)
             .variant(ButtonVariant::Ghost)
@@ -732,7 +736,7 @@ impl TerminalApp {
             .on_dismiss(move |_, cx| {
                 dismiss.update(cx, TerminalApp::close_layout_menus);
             });
-        chrome_tooltip("layout_menu", "Layouts", menu, &theme).into_any_element()
+        chrome_tooltip("layout_menu", tr!(shell::LAYOUTS_HEADING), menu, &theme).into_any_element()
     }
 
     /// The header menu's rows for the most recently opened layouts other than the active one.
@@ -788,17 +792,21 @@ impl TerminalApp {
         .width(px(LAYOUT_MENU_WIDTH))
         .animate_from(PopupAnimationOrigin::new(1.0, 0.0))
         .child(
-            action("layout_menu_save", "Save layout", |terminal, window, cx| {
-                terminal.pages.layouts.layout_menu_open = false;
-                terminal.run_layout_command(CommandId::SaveLayout, window, cx);
-            })
+            action(
+                "layout_menu_save",
+                tr!(shell::CMD_SAVE_LAYOUT),
+                |terminal, window, cx| {
+                    terminal.pages.layouts.layout_menu_open = false;
+                    terminal.run_layout_command(CommandId::SaveLayout, window, cx);
+                },
+            )
             .detail("Ctrl+S")
             .disabled(!unsaved),
         )
         .child(
             action(
                 "layout_menu_autosave",
-                "Autosave",
+                tr!(shell::AUTOSAVE),
                 |terminal, window, cx| {
                     terminal.run_layout_command(CommandId::ToggleLayoutAutosave, window, cx);
                 },
@@ -808,7 +816,7 @@ impl TerminalApp {
         .separator()
         .child(action(
             "layout_menu_rename",
-            "Rename\u{2026}",
+            tr!(shell::RENAME_ELLIPSIS),
             |terminal, window, cx| {
                 let layout_id = terminal.tabs.active().saved_layout_id;
                 terminal.open_layout_name_dialog(LayoutNamePurpose::Rename(layout_id), window, cx);
@@ -816,14 +824,14 @@ impl TerminalApp {
         ))
         .child(action(
             "layout_menu_copy",
-            "Make a copy\u{2026}",
+            tr!(shell::MAKE_COPY_ELLIPSIS),
             |terminal, window, cx| {
                 terminal.open_layout_name_dialog(LayoutNamePurpose::Copy, window, cx);
             },
         ))
         .child(action(
             "layout_menu_create",
-            "Create new layout\u{2026}",
+            tr!(shell::CREATE_NEW_LAYOUT_ELLIPSIS),
             |terminal, window, cx| {
                 terminal.open_layout_name_dialog(LayoutNamePurpose::Create, window, cx);
             },
@@ -837,14 +845,14 @@ impl TerminalApp {
                         .py_1()
                         .text_xs()
                         .text_color(gpui_color(theme.colors.text_muted))
-                        .child("Recently used"),
+                        .child(tr!(shell::RECENTLY_USED)),
                 )
                 .children(recent)
                 .separator();
         }
         menu.child(action(
             "layout_menu_open",
-            "Open layout\u{2026}",
+            tr!(shell::OPEN_LAYOUT_ELLIPSIS),
             |terminal, window, cx| {
                 terminal.open_start_page(window, cx);
             },
@@ -872,20 +880,20 @@ impl TerminalApp {
             return Some(
                 ConfirmationDialog::new(
                     "layout_delete_dialog",
-                    "Delete layout?",
+                    tr!(shell::DELETE_LAYOUT_TITLE),
                     ConfirmationTone::Destructive,
                     &theme,
                     move |window, cx| {
                         cancel.update(cx, |terminal, cx| terminal.cancel_layout_modal(window, cx));
                     },
                     move |window, cx| {
-                        confirm.update(cx, |terminal, cx| terminal.confirm_layout_delete(window, cx));
+                        confirm.update(cx, |terminal, cx| {
+                            terminal.confirm_layout_delete(window, cx);
+                        });
                     },
                 )
-                .confirm_label("Delete")
-                .message(format!(
-                    "Delete \u{201c}{name}\u{201d}? Its arrangement and drawings cannot be recovered."
-                ))
+                .confirm_label(tr!(shell::DELETE))
+                .message(tr!(shell::DELETE_LAYOUT_MESSAGE, name = name))
                 .into_any_element(),
             );
         }
@@ -895,7 +903,7 @@ impl TerminalApp {
         Some(
             ConfirmationDialog::new(
                 "layout_name_dialog",
-                dialog.purpose.title(),
+                tr!(dialog.purpose.title()),
                 ConfirmationTone::Positive,
                 &theme,
                 move |window, cx| {
@@ -905,7 +913,7 @@ impl TerminalApp {
                     confirm.update(cx, |terminal, cx| terminal.confirm_layout_name(window, cx));
                 },
             )
-            .confirm_label(dialog.purpose.confirm_label())
+            .confirm_label(tr!(dialog.purpose.confirm_label()))
             .child(
                 Input::new(&dialog.input)
                     .platform(&theme)
@@ -939,16 +947,16 @@ impl TerminalApp {
         };
         let (title, message) = match names.as_slice() {
             [name] => (
-                format!("Save changes to \u{201c}{name}\u{201d}?"),
-                "Your layout has unsaved changes.".to_string(),
+                tr!(shell::SAVE_CHANGES_TITLE_ONE, name = name),
+                tr!(shell::UNSAVED_CHANGES_ONE).to_string(),
             ),
             names => (
-                format!("Save changes to {} layouts?", names.len()),
-                format!(
-                    "Your layouts have unsaved changes: {}.",
-                    names
+                tr_count!(shell::SAVE_CHANGES_TITLE_MANY, names.len()),
+                tr!(
+                    shell::UNSAVED_CHANGES_MANY,
+                    names = names
                         .iter()
-                        .map(|name| format!("\u{201c}{name}\u{201d}"))
+                        .map(|name| tr!(shell::QUOTED_NAME, name = name))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
@@ -976,7 +984,7 @@ impl TerminalApp {
         .action(
             Button::new("layout_close_cancel", &theme)
                 .variant(ButtonVariant::Secondary)
-                .label("Cancel")
+                .label(tr!(common::CANCEL))
                 .on_press(move |_, window, cx| {
                     cancel.update(cx, |terminal, cx| terminal.cancel_layout_modal(window, cx));
                 }),
@@ -984,7 +992,7 @@ impl TerminalApp {
         .action(
             Button::new("layout_close_discard", &theme)
                 .variant(ButtonVariant::Destructive)
-                .label("Discard and close")
+                .label(tr!(shell::DISCARD_AND_CLOSE))
                 .on_press(move |_, window, cx| {
                     discard.update(cx, |terminal, cx| {
                         terminal.finish_layout_close(false, window, cx);
@@ -994,7 +1002,7 @@ impl TerminalApp {
         .action(
             Button::new("layout_close_save", &theme)
                 .variant(ButtonVariant::Primary)
-                .label("Save and close")
+                .label(tr!(shell::SAVE_AND_CLOSE))
                 .on_press(move |_, window, cx| {
                     save.update(cx, |terminal, cx| {
                         terminal.finish_layout_close(true, window, cx);
@@ -1090,7 +1098,7 @@ fn layout_card_menu(
     .width(px(LAYOUT_CARD_MENU_WIDTH))
     .animate_from(PopupAnimationOrigin::new(1.0, 0.0))
     .child(
-        MenuRow::compact(("layout_card_open", layout_id), "Open", theme).on_click(
+        MenuRow::compact(("layout_card_open", layout_id), tr!(shell::OPEN), theme).on_click(
             move |_, window, cx| {
                 open.update(cx, |terminal, cx| {
                     terminal.open_layout_from_start_page(layout_id, window, cx);
@@ -1099,36 +1107,42 @@ fn layout_card_menu(
         ),
     )
     .child(
-        MenuRow::compact(("layout_card_rename", layout_id), "Rename\u{2026}", theme).on_click(
-            move |_, window, cx| {
-                rename.update(cx, |terminal, cx| {
-                    terminal.open_layout_name_dialog(
-                        LayoutNamePurpose::Rename(layout_id),
-                        window,
-                        cx,
-                    );
-                });
-            },
-        ),
+        MenuRow::compact(
+            ("layout_card_rename", layout_id),
+            tr!(shell::RENAME_ELLIPSIS),
+            theme,
+        )
+        .on_click(move |_, window, cx| {
+            rename.update(cx, |terminal, cx| {
+                terminal.open_layout_name_dialog(LayoutNamePurpose::Rename(layout_id), window, cx);
+            });
+        }),
     )
     .child(
-        MenuRow::compact(("layout_card_copy", layout_id), "Make a copy", theme).on_click(
-            move |_, _, cx| {
-                copy.update(cx, |terminal, cx| {
-                    terminal.copy_layout_from_start_page(layout_id, cx);
-                });
-            },
-        ),
+        MenuRow::compact(
+            ("layout_card_copy", layout_id),
+            tr!(shell::LAYOUT_COPY_CONFIRM),
+            theme,
+        )
+        .on_click(move |_, _, cx| {
+            copy.update(cx, |terminal, cx| {
+                terminal.copy_layout_from_start_page(layout_id, cx);
+            });
+        }),
     )
     .separator()
     .child(
-        MenuRow::compact(("layout_card_delete", layout_id), "Delete\u{2026}", theme)
-            .destructive(true)
-            .on_click(move |_, _, cx| {
-                delete.update(cx, |terminal, cx| {
-                    terminal.request_layout_delete(layout_id, cx);
-                });
-            }),
+        MenuRow::compact(
+            ("layout_card_delete", layout_id),
+            tr!(shell::DELETE_ELLIPSIS),
+            theme,
+        )
+        .destructive(true)
+        .on_click(move |_, _, cx| {
+            delete.update(cx, |terminal, cx| {
+                terminal.request_layout_delete(layout_id, cx);
+            });
+        }),
     )
 }
 

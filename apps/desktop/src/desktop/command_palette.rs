@@ -1,5 +1,6 @@
 use super::*;
 use aeris_desktop::command_registry::{self, CommandId};
+use aeris_localization::{panels, tr};
 
 const COMMAND_PALETTE_LIMIT: usize = 8;
 
@@ -20,7 +21,7 @@ pub(super) fn command_palette_layer(
         command_row(
             terminal,
             spec.id,
-            spec.title,
+            spec.title.get(),
             spec.shortcut_label(),
             index,
             index == selected,
@@ -54,7 +55,7 @@ pub(super) fn command_palette_layer(
             .text_color(gpui_color(colors.text_warning))
             .child(message)
     }))
-    .footer_leading("↑↓ select · Enter run · Esc close")
+    .footer_leading(tr!(panels::PALETTE_FOOTER))
     .into_any_element()
 }
 
@@ -63,28 +64,19 @@ fn mnemonic_command_row(
     mnemonic: &command_registry::Mnemonic,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let label = format!(
-        "Run {}{}{}",
+    let detail = format!(
+        "{}{}{}",
         mnemonic.symbol.as_deref().unwrap_or_default(),
         mnemonic
             .chart
-            .map(|id| format!(
-                " · {}",
-                command_registry::command(id)
-                    .title
-                    .trim_start_matches("Chart: ")
-            ))
+            .map(|id| format!(" · {}", command_registry::command(id).short_title.get()))
             .unwrap_or_default(),
         mnemonic
             .interval
-            .map(|id| format!(
-                " · {}",
-                command_registry::command(id)
-                    .title
-                    .trim_start_matches("Interval: ")
-            ))
+            .map(|id| format!(" · {}", command_registry::command(id).short_title.get()))
             .unwrap_or_default()
     );
+    let label = tr!(panels::PALETTE_RUN, command = detail);
     let execute = terminal.clone();
     // The typed mnemonic is the palette's primary action, so it stays highlighted.
     MenuRow::search_result("command_palette_mnemonic", label, theme)

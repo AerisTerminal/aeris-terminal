@@ -1,5 +1,7 @@
 //! Desktop composition and shared presentation types. Behavior lives in owned child modules.
 
+use aeris_localization::{tr, tr_count, workspace};
+
 mod accounts_panel;
 mod alerts_controller;
 use alerts_controller::{PriceAlertAnnouncement, PriceAlertDialogState, PriceAlertDropdown};
@@ -1138,11 +1140,11 @@ enum VolumeColorTarget {
 }
 
 impl VolumeColorTarget {
-    const fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Up => "Up volume",
-            Self::Down => "Down volume",
-            Self::Average => "Average line",
+            Self::Up => tr!(workspace::VOLUME_COLOR_UP),
+            Self::Down => tr!(workspace::VOLUME_COLOR_DOWN),
+            Self::Average => tr!(workspace::VOLUME_COLOR_AVERAGE),
         }
     }
 
@@ -1319,15 +1321,15 @@ enum TimeframeMenuGroup {
 }
 
 impl TimeframeMenuGroup {
-    const fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Ticks => "Ticks",
-            Self::Seconds => "Seconds",
-            Self::Minutes => "Minutes",
-            Self::Hours => "Hours",
-            Self::Days => "Days",
-            Self::Weeks => "Weeks",
-            Self::Months => "Months",
+            Self::Ticks => tr!(workspace::TIMEFRAME_TICKS),
+            Self::Seconds => tr!(workspace::TIMEFRAME_SECONDS),
+            Self::Minutes => tr!(workspace::TIMEFRAME_MINUTES),
+            Self::Hours => tr!(workspace::TIMEFRAME_HOURS),
+            Self::Days => tr!(workspace::TIMEFRAME_DAYS),
+            Self::Weeks => tr!(workspace::TIMEFRAME_WEEKS),
+            Self::Months => tr!(workspace::TIMEFRAME_MONTHS),
         }
     }
 }
@@ -1635,13 +1637,13 @@ fn chart_order_semantics(
         (event.order_id == order.id
             && event.kind == aeris_trading::OrderEventKind::Accepted
             && event.reason == Some(aeris_trading::OrderEventReason::RiskWarning))
-        .then_some(event.detail.as_deref())
+        .then(|| aeris_desktop::trading::order_event_detail_text(event))
         .flatten()
     }) {
         annotations.push(ChartTradingAnnotation {
             id: "risk-warning".to_string(),
-            text: "RISK".to_string(),
-            tooltip: Some(warning.to_string()),
+            text: tr!(workspace::RISK_BADGE).to_string(),
+            tooltip: Some(warning),
             tone: ChartTradingAnnotationTone::Warning,
             // Above the line, so the warning never covers the marker's drag and close controls.
             placement: ChartTradingAnnotationPlacement::Above,
@@ -1861,15 +1863,23 @@ fn chart_session_plan_overlay(
         return ChartHostOverlaySnapshot::default();
     };
     let bias = match plan.bias {
-        aeris_trading_runtime::SessionBias::Long => "LONG",
-        aeris_trading_runtime::SessionBias::Short => "SHORT",
-        aeris_trading_runtime::SessionBias::Neutral => "NEUTRAL",
+        aeris_trading_runtime::SessionBias::Long => tr!(workspace::BIAS_LONG),
+        aeris_trading_runtime::SessionBias::Short => tr!(workspace::BIAS_SHORT),
+        aeris_trading_runtime::SessionBias::Neutral => tr!(workspace::BIAS_NEUTRAL),
     };
-    let setup = plan.active_setup.as_deref().unwrap_or("setup pending");
-    let label = format!("PLAN {bias} · {setup} · {} levels", plan.levels.len())
-        .chars()
-        .take(96)
-        .collect::<String>();
+    let setup = plan
+        .active_setup
+        .as_deref()
+        .unwrap_or(tr!(workspace::SETUP_PENDING));
+    let label = tr_count!(
+        workspace::PLAN_MARKER,
+        plan.levels.len(),
+        bias = bias,
+        setup = setup
+    )
+    .chars()
+    .take(96)
+    .collect::<String>();
     ChartHostOverlaySnapshot {
         events: vec![
             ChartHostEventMarker {
@@ -1883,7 +1893,7 @@ fn chart_session_plan_overlay(
                 id: "session-plan-end".to_string(),
                 time: chart_time_seconds_from_unix_nanos(plan.session_end_unix_nanos),
                 importance: 1,
-                label: "PLAN END".to_string(),
+                label: tr!(workspace::PLAN_END).to_string(),
                 icon: None,
             },
         ],
@@ -1961,22 +1971,18 @@ enum ChartIntentRejection {
 }
 
 impl ChartIntentRejection {
-    const fn message(self) -> &'static str {
+    fn message(self) -> &'static str {
         match self {
-            Self::Incomplete => "The chart sent an incomplete trading action. Try again.",
-            Self::NoAccount => "Select a practice account to trade from the chart.",
-            Self::AccountLocked => "The selected account is locked by a risk rule.",
-            Self::NoInstrument => "The chart has no instrument loaded yet.",
-            Self::NotOnChart => "That order or position belongs to another account or instrument.",
-            Self::InvalidPrice => "That price isn't valid for this instrument.",
-            Self::InvalidQuantity => "That size isn't valid for this instrument.",
-            Self::PlannedLegKept => {
-                "A pending bracket keeps its stop and target. Drag them, or cancel the entry."
-            }
-            Self::ReplayActive => {
-                "New orders are paused on this chart during bar replay. Exit replay to trade here."
-            }
-            Self::Unsupported => "That chart action isn't available for this order.",
+            Self::Incomplete => tr!(workspace::INTENT_INCOMPLETE),
+            Self::NoAccount => tr!(workspace::INTENT_NO_ACCOUNT),
+            Self::AccountLocked => tr!(workspace::INTENT_ACCOUNT_LOCKED),
+            Self::NoInstrument => tr!(workspace::INTENT_NO_INSTRUMENT),
+            Self::NotOnChart => tr!(workspace::INTENT_NOT_ON_CHART),
+            Self::InvalidPrice => tr!(workspace::INTENT_INVALID_PRICE),
+            Self::InvalidQuantity => tr!(workspace::INTENT_INVALID_QUANTITY),
+            Self::PlannedLegKept => tr!(workspace::INTENT_PLANNED_LEG_KEPT),
+            Self::ReplayActive => tr!(workspace::INTENT_REPLAY_ACTIVE),
+            Self::Unsupported => tr!(workspace::INTENT_UNSUPPORTED),
         }
     }
 }
@@ -2102,7 +2108,8 @@ fn dispatch_chart_cancel(
                 })
                 .is_err()
         {
-            lost_pane_feedback.record(Err(aeris_desktop::trading::STALE_ORDER_NOTICE.to_string()));
+            lost_pane_feedback
+                .record(Err(aeris_desktop::trading::stale_order_notice().to_string()));
         }
     })
     .detach();
@@ -2178,8 +2185,8 @@ fn post_stale_order_notice(cx: &mut Context<WorkspaceSurface>) {
         severity: notification_center::NoticeSeverity::Warning,
         tone: notification_center::NoticeTone::Warning,
         source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-        title: aeris_desktop::trading::STALE_ORDER_NOTICE,
-        detail: "The current order is shown on the chart.".into(),
+        title: aeris_desktop::trading::stale_order_notice(),
+        detail: tr!(workspace::STALE_ORDER_DETAIL).into(),
         action: None,
         lifetime: notification_center::NoticeLifetime::UntilDismissed,
     }));
@@ -2202,8 +2209,10 @@ fn dispatch_chart_place_bracket(
             };
             let task = cx.background_executor().spawn(async move {
                 let result = service.place_chart_bracket(command);
-                feedback
-                    .finish_pane_result(request_id, result.map(|_| "Bracket placed".to_string()))
+                feedback.finish_pane_result(
+                    request_id,
+                    result.map(|_| tr!(workspace::BRACKET_PLACED).to_string()),
+                )
             });
             cx.spawn(async move |_, cx| {
                 let accepted = task.await;
@@ -2379,7 +2388,8 @@ fn dispatch_chart_modify(
                 })
                 .is_err()
         {
-            lost_pane_feedback.record(Err(aeris_desktop::trading::STALE_ORDER_NOTICE.to_string()));
+            lost_pane_feedback
+                .record(Err(aeris_desktop::trading::stale_order_notice().to_string()));
         }
     })
     .detach();
@@ -2500,7 +2510,7 @@ fn dispatch_chart_close_position(
         feedback.finish_pane_result(
             request_id,
             aeris_desktop::trading::flatten_feedback(
-                "Position closed",
+                tr!(workspace::POSITION_CLOSED),
                 service.flatten(aeris_trading_runtime::FlattenScope {
                     account: Some(account_id),
                     instrument: Some(instrument),
@@ -2672,7 +2682,7 @@ fn dispatch_chart_move_planned_leg(
                     client_order_id,
                     price,
                 })
-                .map(|_| "Bracket leg moved".to_string()),
+                .map(|_| tr!(workspace::BRACKET_LEG_MOVED).to_string()),
         )
     });
     cx.spawn(async move |_, cx| {
@@ -2917,6 +2927,7 @@ fn first_selectable_instrument_index(entries: &[InstrumentMenuEntry]) -> Option<
         .position(|entry| matches!(entry.action, InstrumentMenuAction::Select(_)))
 }
 
+#[cfg(test)]
 fn counted(count: usize, singular: &str, plural: &str) -> String {
     format!("{count} {}", if count == 1 { singular } else { plural })
 }
@@ -3044,12 +3055,12 @@ impl SidePanel {
         Self::Watchlist,
     ];
 
-    const fn title(self) -> &'static str {
+    fn title(self) -> &'static str {
         match self {
-            Self::OrderBook => "Order Book",
-            Self::OrderEntry => "Order Entry",
-            Self::TimeSales => "Time & Sales",
-            Self::Watchlist => "Watchlist",
+            Self::OrderBook => tr!(workspace::SIDE_PANEL_ORDER_BOOK),
+            Self::OrderEntry => tr!(workspace::SIDE_PANEL_ORDER_ENTRY),
+            Self::TimeSales => tr!(workspace::SIDE_PANEL_TIME_SALES),
+            Self::Watchlist => tr!(workspace::SIDE_PANEL_WATCHLIST),
         }
     }
 
@@ -3373,7 +3384,7 @@ impl MarketSummaryEntry {
         };
         match update {
             Ok(update) => self.apply_update(update),
-            Err(_) => self.message = Some("Market data unavailable".to_string()),
+            Err(_) => self.message = Some(tr!(workspace::MARKET_DATA_UNAVAILABLE).to_string()),
         }
     }
 
@@ -3433,7 +3444,7 @@ impl MarketSummaryEntry {
             }
         }
         if disconnected {
-            self.message = Some("Market data unavailable".to_string());
+            self.message = Some(tr!(workspace::MARKET_DATA_UNAVAILABLE).to_string());
             self.worker = None;
         }
         changed
@@ -3496,9 +3507,9 @@ fn chart_surface_notice(
             label: state.label(),
             detail: Some(
                 if has_market_data {
-                    "Showing live bars; history will backfill when the provider answers."
+                    tr!(workspace::SHOWING_LIVE_BARS)
                 } else {
-                    "Waiting for live trades; history will backfill when the provider answers."
+                    tr!(workspace::WAITING_LIVE_TRADES)
                 }
                 .to_string(),
             ),
@@ -3535,14 +3546,12 @@ enum ChartFailure {
 }
 
 impl ChartFailure {
-    const fn detail(self) -> &'static str {
+    fn detail(self) -> &'static str {
         match self {
-            Self::NoDefault => "Choose an instrument",
-            Self::UnsupportedProvider => {
-                "This restored market provider is unavailable. Choose another market."
-            }
-            Self::Market => "Market chart could not be loaded. Try again.",
-            Self::WorkerStopped => "Market worker stopped.",
+            Self::NoDefault => tr!(workspace::CHOOSE_INSTRUMENT),
+            Self::UnsupportedProvider => tr!(workspace::RESTORED_PROVIDER_UNAVAILABLE),
+            Self::Market => tr!(workspace::MARKET_CHART_LOAD_FAILED),
+            Self::WorkerStopped => tr!(workspace::MARKET_WORKER_STOPPED),
         }
     }
 }
@@ -3559,25 +3568,29 @@ fn chart_status_detail(
         return failure.detail().to_string();
     }
     match connection_state {
-        FeedConnectionState::Stopped => "Market worker stopped.".to_string(),
-        FeedConnectionState::Disconnected => "Market data offline.".to_string(),
-        FeedConnectionState::Discovering => "Connecting to market data.".to_string(),
-        FeedConnectionState::Authenticating => "Authenticating market data.".to_string(),
-        FeedConnectionState::Recovering => "Reconnecting market data.".to_string(),
+        FeedConnectionState::Stopped => tr!(workspace::MARKET_WORKER_STOPPED).to_string(),
+        FeedConnectionState::Disconnected => tr!(workspace::MARKET_DATA_OFFLINE).to_string(),
+        FeedConnectionState::Discovering => tr!(workspace::MARKET_DATA_CONNECTING).to_string(),
+        FeedConnectionState::Authenticating => {
+            tr!(workspace::MARKET_DATA_AUTHENTICATING).to_string()
+        }
+        FeedConnectionState::Recovering => tr!(workspace::MARKET_DATA_RECONNECTING).to_string(),
         FeedConnectionState::Streaming => match chart_state {
             ChartState::Loading => pending_interval.map_or_else(
-                || "Waiting for a covering market snapshot.".to_string(),
-                |interval| format!("Loading {} history.", interval.label()),
+                || tr!(workspace::WAITING_COVERING_SNAPSHOT).to_string(),
+                |interval| {
+                    tr!(
+                        workspace::LOADING_INTERVAL_HISTORY,
+                        interval = interval.label()
+                    )
+                },
             ),
             ChartState::Stale | ChartState::Recovering => {
-                "Waiting for a covering market snapshot.".to_string()
+                tr!(workspace::WAITING_COVERING_SNAPSHOT).to_string()
             }
-            ChartState::AwaitingData => "Waiting for market data.".to_string(),
-            ChartState::HistoryUnavailable => {
-                "Waiting for live trades; history will backfill when the provider answers."
-                    .to_string()
-            }
-            ChartState::Error => "Market chart could not be loaded. Try again.".to_string(),
+            ChartState::AwaitingData => tr!(workspace::WAITING_MARKET_DATA).to_string(),
+            ChartState::HistoryUnavailable => tr!(workspace::WAITING_LIVE_TRADES).to_string(),
+            ChartState::Error => tr!(workspace::MARKET_CHART_LOAD_FAILED).to_string(),
             ChartState::Ready => String::new(),
         },
     }
@@ -3598,7 +3611,7 @@ const fn connectivity_chart_state(
 
 fn instrument_selector_label(selected: Option<(&str, &str)>) -> String {
     selected.map_or_else(
-        || "Contract".to_string(),
+        || tr!(workspace::CONTRACT_FALLBACK).to_string(),
         |(symbol, exchange)| format!("{symbol} / {exchange}"),
     )
 }
@@ -3615,7 +3628,7 @@ fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
     }
     if provider_presentation(app.provider).is_some() {
         return app.product.as_ref().map_or_else(
-            || "Select market".to_string(),
+            || tr!(workspace::SELECT_MARKET).to_string(),
             |product| product.display_symbol.clone(),
         );
     }
@@ -3746,35 +3759,42 @@ fn catalog_rejection_message(
     command: ProviderCatalogCommand,
     provider: ProviderId,
 ) -> String {
-    let provider_name = provider.display();
+    let provider = provider.display();
     match reason {
         ProviderCatalogRejectionReason::SearchRejected => {
-            format!("{provider_name} rejected the market search")
+            tr!(workspace::CATALOG_SEARCH_REJECTED, provider = provider)
         }
         ProviderCatalogRejectionReason::SupersededSearch => {
-            "A newer symbol search replaced this one".to_string()
+            tr!(workspace::CATALOG_SEARCH_SUPERSEDED).to_string()
         }
         ProviderCatalogRejectionReason::InstrumentUnavailable => {
-            format!("The selected {provider_name} asset is no longer available")
+            tr!(workspace::CATALOG_ASSET_UNAVAILABLE, provider = provider)
         }
         ProviderCatalogRejectionReason::SubscriptionRejected => {
-            format!("{provider_name} rejected the market subscription")
+            tr!(
+                workspace::CATALOG_SUBSCRIPTION_REJECTED,
+                provider = provider
+            )
         }
-        ProviderCatalogRejectionReason::DispatchUnavailable => {
-            let operation = match command {
-                ProviderCatalogCommand::Search => "search",
-                ProviderCatalogCommand::Selection => "selection",
-            };
-            format!("The {provider_name} {operation} could not be scheduled")
-        }
+        ProviderCatalogRejectionReason::DispatchUnavailable => match command {
+            ProviderCatalogCommand::Search => {
+                tr!(workspace::CATALOG_SEARCH_UNSCHEDULED, provider = provider)
+            }
+            ProviderCatalogCommand::Selection => {
+                tr!(
+                    workspace::CATALOG_SELECTION_UNSCHEDULED,
+                    provider = provider
+                )
+            }
+        },
         ProviderCatalogRejectionReason::SearchTimedOut => {
-            format!("The {provider_name} market search timed out; try again")
+            tr!(workspace::CATALOG_SEARCH_TIMED_OUT, provider = provider)
         }
         ProviderCatalogRejectionReason::SelectionTimedOut => {
-            format!("The {provider_name} market selection timed out; try again")
+            tr!(workspace::CATALOG_SELECTION_TIMED_OUT, provider = provider)
         }
         ProviderCatalogRejectionReason::Unspecified => {
-            format!("The {provider_name} catalog request failed")
+            tr!(workspace::CATALOG_REQUEST_FAILED, provider = provider)
         }
     }
 }
@@ -4288,15 +4308,13 @@ fn trading_corruption_message(
     newest_backup: Option<&std::path::Path>,
 ) -> String {
     let backup = newest_backup.map_or_else(
-        || "No migration backup is available.".to_string(),
-        |path| format!("Newest migration backup:\n{}", path.display()),
+        || tr!(workspace::CORRUPTION_NO_BACKUP).to_string(),
+        |path| tr!(workspace::CORRUPTION_NEWEST_BACKUP, path = path.display()),
     );
-    format!(
-        "Aeris cannot open the trading database because it is corrupt:\n{}\n\n{backup}\n\n\
-         Select Yes to quarantine the database and its WAL sidecars. Aeris will exit; \
-         a new database is created only after you restart.\n\n\
-         Select No to exit without changing any files.",
-        database.display()
+    tr!(
+        workspace::CORRUPTION_MESSAGE,
+        database = database.display(),
+        backup = backup
     )
 }
 
@@ -4348,31 +4366,22 @@ fn handle_trading_corruption(
                     "Aeris corrupt trading database quarantined at {}",
                     quarantine.display()
                 );
-                fatal_startup(
-                    account_service,
-                    "The corrupt trading database was quarantined. Restart Aeris to create a new database.",
-                );
+                fatal_startup(account_service, tr!(workspace::CORRUPTION_QUARANTINED));
             }
             Err(error) => {
                 diagnostic!("Aeris trading database quarantine failed: {error}");
                 fatal_startup(
                     account_service,
-                    "The corrupt trading database could not be quarantined and was not recreated.",
+                    tr!(workspace::CORRUPTION_QUARANTINE_FAILED),
                 );
             }
         },
         Ok(false) => {
-            fatal_startup(
-                account_service,
-                "The corrupt trading database was left untouched. Aeris cannot start.",
-            );
+            fatal_startup(account_service, tr!(workspace::CORRUPTION_UNTOUCHED));
         }
         Err(error) => {
             diagnostic!("Aeris corruption confirmation dialog failed: {error}");
-            fatal_startup(
-                account_service,
-                "Aeris could not obtain confirmation. The corrupt trading database was left untouched.",
-            );
+            fatal_startup(account_service, tr!(workspace::CORRUPTION_NO_CONFIRMATION));
         }
     }
 }
@@ -4474,7 +4483,7 @@ fn symbol_input_for_startup(
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<InputState> {
-    cx.new(|cx| InputState::new(window, cx).placeholder("Search markets"))
+    cx.new(|cx| InputState::new(window, cx).placeholder(tr!(workspace::SEARCH_MARKETS)))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4919,14 +4928,16 @@ fn workspace_surface_entity(
     let symbol_input = Some(symbol_input_for_startup(&bootstrap, window, cx));
     let search_input = symbol_input.clone();
     let indicator_input =
-        cx.new(|cx| InputState::new(window, cx).placeholder("Search native indicators"));
+        cx.new(|cx| InputState::new(window, cx).placeholder(tr!(workspace::SEARCH_INDICATORS)));
     let indicator_search_input = indicator_input.clone();
-    let timeframe_input = cx.new(|cx| InputState::new(window, cx).placeholder("1m, 5, 1H, 1D"));
+    let timeframe_input =
+        cx.new(|cx| InputState::new(window, cx).placeholder(tr!(workspace::TIMEFRAME_EXAMPLES)));
     timeframe_input.update(cx, |input, cx| {
         input.set_text_align(gpui::TextAlign::Center, cx);
     });
     let timeframe_search_input = timeframe_input.clone();
-    let time_zone_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search time zones"));
+    let time_zone_input =
+        cx.new(|cx| InputState::new(window, cx).placeholder(tr!(workspace::SEARCH_TIME_ZONES)));
     let time_zone_search_input = time_zone_input.clone();
     let order_quantity = order_quantity::OrderQuantityControls::new(
         TradingOrderEntryState::default().quantity,
@@ -5178,21 +5189,21 @@ enum ChartSettingsSection {
 impl ChartSettingsSection {
     const ALL: [Self; 4] = [Self::Symbol, Self::Canvas, Self::Legend, Self::Trading];
 
-    const fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Symbol => "Symbol",
-            Self::Canvas => "Canvas",
-            Self::Legend => "Legend",
-            Self::Trading => "Trading",
+            Self::Symbol => tr!(workspace::SETTINGS_SECTION_SYMBOL),
+            Self::Canvas => tr!(workspace::SETTINGS_SECTION_CANVAS),
+            Self::Legend => tr!(workspace::SETTINGS_SECTION_LEGEND),
+            Self::Trading => tr!(workspace::SETTINGS_SECTION_TRADING),
         }
     }
 
-    const fn description(self) -> &'static str {
+    fn description(self) -> &'static str {
         match self {
-            Self::Symbol => "Colors and style of the price series",
-            Self::Canvas => "Background, grid and crosshair",
-            Self::Legend => "What the legends show over the chart",
-            Self::Trading => "Orders, positions and fills on the chart",
+            Self::Symbol => tr!(workspace::SETTINGS_SECTION_SYMBOL_DESCRIPTION),
+            Self::Canvas => tr!(workspace::SETTINGS_SECTION_CANVAS_DESCRIPTION),
+            Self::Legend => tr!(workspace::SETTINGS_SECTION_LEGEND_DESCRIPTION),
+            Self::Trading => tr!(workspace::SETTINGS_SECTION_TRADING_DESCRIPTION),
         }
     }
 
@@ -5234,25 +5245,25 @@ struct ChartColorPickerState {
 }
 
 impl ChartColorSetting {
-    const fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Up => "Up candles",
-            Self::Down => "Down candles",
-            Self::WickUp => "Up wicks",
-            Self::WickDown => "Down wicks",
-            Self::BorderUp => "Up borders",
-            Self::BorderDown => "Down borders",
-            Self::Line => "Line",
-            Self::AreaTop => "Area top",
-            Self::AreaBottom => "Area bottom",
-            Self::BaselineTop => "Above baseline",
-            Self::BaselineBottom => "Below baseline",
-            Self::Background => "Background",
-            Self::Text => "Text",
-            Self::Grid => "Grid",
-            Self::Crosshair => "Crosshair",
-            Self::AxisBorder => "Axis border",
-            Self::AxisText => "Axis text",
+            Self::Up => tr!(workspace::COLOR_UP_CANDLES),
+            Self::Down => tr!(workspace::COLOR_DOWN_CANDLES),
+            Self::WickUp => tr!(workspace::COLOR_UP_WICKS),
+            Self::WickDown => tr!(workspace::COLOR_DOWN_WICKS),
+            Self::BorderUp => tr!(workspace::COLOR_UP_BORDERS),
+            Self::BorderDown => tr!(workspace::COLOR_DOWN_BORDERS),
+            Self::Line => tr!(workspace::COLOR_LINE),
+            Self::AreaTop => tr!(workspace::COLOR_AREA_TOP),
+            Self::AreaBottom => tr!(workspace::COLOR_AREA_BOTTOM),
+            Self::BaselineTop => tr!(workspace::COLOR_ABOVE_BASELINE),
+            Self::BaselineBottom => tr!(workspace::COLOR_BELOW_BASELINE),
+            Self::Background => tr!(workspace::COLOR_BACKGROUND),
+            Self::Text => tr!(workspace::COLOR_TEXT),
+            Self::Grid => tr!(workspace::COLOR_GRID),
+            Self::Crosshair => tr!(workspace::COLOR_CROSSHAIR),
+            Self::AxisBorder => tr!(workspace::COLOR_AXIS_BORDER),
+            Self::AxisText => tr!(workspace::COLOR_AXIS_TEXT),
         }
     }
 }
@@ -5678,15 +5689,24 @@ fn dispatch_desktop_readiness(arguments: &mut Vec<std::ffi::OsString>) -> bool {
     true
 }
 
+/// Applies the saved display-language choice before the first window opens. The read is
+/// the workspace document's ordinary restore path; the sign-in gate opens before the
+/// signed-in restore, so it cannot share that result.
+fn restore_display_language(persistence: &chart_chrome::DesktopPersistence) {
+    let restored = local_state::restore_workspace(&persistence.workspace_path());
+    chart_chrome::ChartChromePreferences::from_workspace_chrome(
+        restored.workspace.chart_chrome.as_ref(),
+    )
+    .language
+    .apply();
+}
+
 fn start_desktop_persistence(
     account_service: &aeris_account_runtime::AccountService,
 ) -> chart_chrome::DesktopPersistence {
     let root = aeris_platform_runtime::native_data_root().unwrap_or_else(|error| {
         diagnostic!("Aeris desktop persistence root could not resolve: {error}");
-        fatal_startup(
-            account_service,
-            "The desktop data folder could not be opened.",
-        );
+        fatal_startup(account_service, tr!(workspace::DATA_FOLDER_FAILED));
     });
     let persistence = chart_chrome::DesktopPersistence::new(root);
     // A validation run keeps every file it writes inside its own root.
@@ -5759,16 +5779,19 @@ pub(super) fn run(
         }) => handle_trading_corruption(&account_service, &path, newest_backup.as_deref(), &detail),
         Err(error) => {
             diagnostic!("Aeris trading owner could not start: {error}");
-            fatal_startup(&account_service, "The trading service could not start.");
+            fatal_startup(&account_service, tr!(workspace::TRADING_SERVICE_FAILED));
         }
     };
     let persistence = start_desktop_persistence(&account_service);
+    // The display language resolves before any window opens so the sign-in gate and the
+    // workspace both render translated from their first frame.
+    restore_display_language(&persistence);
     let account = match aeris_desktop::services::install_account(&account_service) {
         Ok(account) => account,
         Err(error) => {
             diagnostic!("Aeris account session could not start: {error}");
             stop_partial_startup(&trading, None);
-            fatal_startup(&account_service, "The account session could not start.");
+            fatal_startup(&account_service, tr!(workspace::ACCOUNT_SESSION_FAILED));
         }
     };
     #[cfg(debug_assertions)]
@@ -5841,14 +5864,14 @@ fn start_signed_in_runtime(startup: SignedInStartup) -> Result<SignedInRuntime, 
     } = startup;
     let context = start_context_service().map_err(|error| {
         diagnostic!("Aeris context owner could not start: {error}");
-        "The context service could not start."
+        tr!(workspace::CONTEXT_SERVICE_FAILED)
     })?;
     let market = match aeris_market_runtime::MarketService::start() {
         Ok(market) => market,
         Err(error) => {
             diagnostic!("Aeris market owner could not start: {error}");
             stop_signed_in_owners(None, &context);
-            return Err("The market service could not start.");
+            return Err(tr!(workspace::MARKET_SERVICE_FAILED));
         }
     };
     let services = compose_desktop_services(market, trading.clone(), account_service, persistence)
@@ -5863,13 +5886,13 @@ fn start_signed_in_runtime(startup: SignedInStartup) -> Result<SignedInRuntime, 
         Err(error) => {
             diagnostic!("Aeris market worker could not start: {error}");
             stop_signed_in_owners(Some(&services.market), &context);
-            return Err("The market service could not start.");
+            return Err(tr!(workspace::MARKET_SERVICE_FAILED));
         }
     };
     if let Err(error) = attach_trading_market_feed(&trading, &services.market) {
         diagnostic!("Aeris trading market feed could not attach: {error}");
         stop_signed_in_owners(Some(&services.market), &context);
-        return Err("The trading market feed could not start.");
+        return Err(tr!(workspace::TRADING_MARKET_FEED_FAILED));
     }
     if let Err(error) = attach_broker_venue(&trading, &services.market) {
         diagnostic!("Aeris broker venue could not attach: {error}");
@@ -5942,9 +5965,10 @@ fn with_diagnostics_location(message: &str) -> String {
         |_| std::path::PathBuf::from("aeris.log"),
         |root| root.join("logs").join("aeris.log"),
     );
-    format!(
-        "{message}\n\nDiagnostics were written to:\n{}",
-        diagnostics_log_path.display()
+    tr!(
+        workspace::DIAGNOSTICS_WRITTEN,
+        message = message,
+        path = diagnostics_log_path.display()
     )
 }
 
@@ -5970,9 +5994,7 @@ fn quit_without_window(reason: &str, lifecycle: &DesktopLifecycle, cx: &mut App)
 /// running unseen and hold the instance lock, so every caller quits once the
 /// dialog task completes.
 pub(super) fn report_window_unavailable(error: &impl std::fmt::Display, cx: &App) -> Task<()> {
-    let detail = with_diagnostics_location(&format!(
-        "Aeris could not open its window: {error}.\n\nUpdating the graphics driver usually fixes this. Start Aeris again afterwards."
-    ));
+    let detail = with_diagnostics_location(&tr!(workspace::WINDOW_OPEN_FAILED, error = error));
     cx.background_executor().spawn(async move {
         if let Err(error) = aeris_platform_runtime::message_box("Aeris Terminal", &detail) {
             diagnostic!("Aeris window failure dialog could not open: {error}");
@@ -6081,7 +6103,7 @@ fn mount_desktop(
         DesktopLayout::WorkspaceTabs => {
             let Some(workspace_factory) = workspace_factory else {
                 diagnostic!("Aeris workspace factory is unavailable");
-                quit_without_window("the workspace could not be prepared", &lifecycle, cx);
+                quit_without_window(tr!(workspace::WORKSPACE_UNPREPARED), &lifecycle, cx);
                 return None;
             };
             let build = move |window: &mut Window, cx: &mut App| {
@@ -6143,7 +6165,7 @@ fn register_quit_hooks(lifecycle: &DesktopLifecycle, cx: &mut App) {
 
 fn finish_mount(window_failure: Option<&str>, lifecycle: &DesktopLifecycle, cx: &mut App) {
     if cx.windows().is_empty() {
-        let reason = window_failure.unwrap_or("no window was created");
+        let reason = window_failure.unwrap_or(tr!(workspace::NO_WINDOW_CREATED));
         quit_without_window(reason, lifecycle, cx);
         return;
     }

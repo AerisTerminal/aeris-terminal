@@ -13,6 +13,8 @@ use super::download_offer::DownloadOfferState;
 use super::terminal_chrome::title_bar_fill;
 use super::*;
 use aeris_design_system::{ThemeMode, ThemePreset};
+use aeris_desktop::language::LanguagePreference;
+use aeris_localization::{Text, menu, shell, tr};
 use gpui_base::Button as BaseButton;
 
 const PLATFORM_MENU_WIDTH: f32 = 320.0;
@@ -47,6 +49,9 @@ const THEME_SECTION_HEIGHT: f32 = SECTION_TITLE_HEIGHT
 const WINDOW_SETTING_HEIGHT: f32 = 40.0;
 const WINDOW_SECTION_HEIGHT: f32 =
     SECTION_TITLE_HEIGHT + 2.0 * WINDOW_SETTING_HEIGHT + SECTION_BOTTOM_PADDING;
+const LANGUAGE_ROW_HEIGHT: f32 = 28.0;
+const LANGUAGE_SECTION_HEIGHT: f32 =
+    SECTION_TITLE_HEIGHT + 3.0 * LANGUAGE_ROW_HEIGHT + SECTION_BOTTOM_PADDING;
 const ABOUT_BRAND_HEIGHT: f32 = 40.0;
 const ABOUT_DETAIL_HEIGHT: f32 = 26.0;
 const ABOUT_UPDATE_HEIGHT: f32 = 44.0;
@@ -56,6 +61,7 @@ const ABOUT_NOTICES_HEIGHT: f32 = 200.0;
 const THEME_MODES: [ThemeMode; 2] = [ThemeMode::Light, ThemeMode::Dark];
 
 type ThemeSelect = Rc<dyn Fn(AerisTheme, &mut Window, &mut App)>;
+type LanguageSelect = Rc<dyn Fn(LanguagePreference, &mut Window, &mut App)>;
 type UpdateActivate = Rc<dyn Fn(UpdateAction, &mut Window, &mut App)>;
 type WindowToggle = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
@@ -76,15 +82,18 @@ pub(super) fn account_avatar_button(
 ) -> impl IntoElement {
     let presentation = &account.presentation;
     let mut tooltip = if account.signed_in() && !presentation.display_name.is_empty() {
-        format!("Account — {}", presentation.display_name)
+        tr!(
+            shell::ACCOUNT_TOOLTIP_NAMED,
+            name = presentation.display_name
+        )
     } else if account.signed_in() {
-        "Account".to_string()
+        tr!(shell::ACCOUNT_TOOLTIP).to_string()
     } else {
-        "Account — Sign in".to_string()
+        tr!(shell::ACCOUNT_TOOLTIP_SIGN_IN).to_string()
     };
     if let Some(prompt) = update_prompt {
         tooltip.push_str(" · ");
-        tooltip.push_str(prompt.summary());
+        tooltip.push_str(tr!(prompt.summary()));
     }
     let colors = theme.colors;
     let toggle_terminal = terminal.clone();
@@ -94,7 +103,7 @@ pub(super) fn account_avatar_button(
         Button::new("account_avatar", theme)
             .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Lg)
-            .aria_label("Profile menu")
+            .aria_label(tr!(shell::PROFILE_MENU))
             .on_click(move |event, _, cx| {
                 let anchor = event.position();
                 toggle_terminal.update(cx, |terminal, terminal_cx| {
@@ -197,10 +206,10 @@ pub(super) enum UpdatePrompt {
 }
 
 impl UpdatePrompt {
-    const fn summary(self) -> &'static str {
+    const fn summary(self) -> Text {
         match self {
-            Self::Restart => "Update ready",
-            Self::Download => "Update available",
+            Self::Restart => shell::UPDATE_READY,
+            Self::Download => shell::UPDATE_AVAILABLE,
         }
     }
 }
@@ -213,6 +222,7 @@ pub(super) struct PlatformMenuContent<'a> {
     pub(super) update_prompt: Option<UpdatePrompt>,
     pub(super) window_frame: chart_chrome::WindowFrame,
     pub(super) drawing_toolbar_visible: bool,
+    pub(super) language: LanguagePreference,
     /// Notices appear under About only while their provider's session is held.
     pub(super) attribution: Option<aeris_market_runtime::ProviderAttribution>,
     pub(super) now_unix_seconds: i64,
@@ -235,6 +245,7 @@ pub(super) fn platform_menu_layer(
         update_prompt,
         window_frame,
         drawing_toolbar_visible,
+        language,
         attribution,
         now_unix_seconds,
     } = content;
@@ -271,6 +282,12 @@ pub(super) fn platform_menu_layer(
         });
     });
     let (toggle_frameless, toggle_drawing_toolbar) = window_toggles(terminal);
+    let language_terminal = terminal.clone();
+    let select_language: LanguageSelect = Rc::new(move |preference, window, cx| {
+        language_terminal.update(cx, |terminal, terminal_cx| {
+            terminal.set_language_preference(preference, window, terminal_cx);
+        });
+    });
     let update_terminal = terminal.clone();
     let run_update: UpdateActivate = Rc::new(move |action, _, cx| {
         update_terminal.update(cx, |terminal, terminal_cx| match action {
@@ -307,6 +324,8 @@ pub(super) fn platform_menu_layer(
             &toggle_drawing_toolbar,
             theme,
         ))
+        .separator()
+        .child(language_section(language, &select_language, theme))
         .separator()
         .child(keyboard_shortcuts_row(terminal, theme))
         .separator()
@@ -404,6 +423,8 @@ impl PlatformMenuLayout {
             + THEME_SECTION_HEIGHT
             + separator
             + WINDOW_SECTION_HEIGHT
+            + separator
+            + LANGUAGE_SECTION_HEIGHT
             + separator
             + CHART_CONTEXT_MENU_ROW_HEIGHT
             + separator
@@ -547,16 +568,16 @@ impl AccountAction {
         }
     }
 
-    const fn label(self) -> &'static str {
+    const fn label(self) -> Text {
         match self {
-            Self::RestartToUpdate => "Restart to update",
-            Self::DownloadUpdate => "Download update",
-            Self::SignIn => "Sign in",
-            Self::Cancel => "Cancel sign-in",
-            Self::SignOut => "Sign out",
-            Self::RetrySignOut => "Retry sign-out",
-            Self::Reopen => "Open browser page again",
-            Self::ManageProfile => "Manage Profile",
+            Self::RestartToUpdate => shell::ACTION_RESTART_TO_UPDATE,
+            Self::DownloadUpdate => shell::ACTION_DOWNLOAD_UPDATE,
+            Self::SignIn => shell::ACTION_SIGN_IN,
+            Self::Cancel => shell::ACTION_CANCEL_SIGN_IN,
+            Self::SignOut => shell::ACTION_SIGN_OUT,
+            Self::RetrySignOut => shell::ACTION_RETRY_SIGN_OUT,
+            Self::Reopen => shell::ACTION_REOPEN_BROWSER,
+            Self::ManageProfile => shell::ACTION_MANAGE_PROFILE,
         }
     }
 
@@ -622,7 +643,7 @@ fn account_action_rows(
         .map(|&action| {
             let enabled = !(pending && action.waits_for_pending_request());
             let terminal = terminal.clone();
-            MenuRow::compact(action.id(), action.label(), theme)
+            MenuRow::compact(action.id(), tr!(action.label()), theme)
                 .leading_icon(header_icon(action.icon()).with_size(px(16.0)))
                 .disabled(!enabled)
                 .destructive(action.destructive())
@@ -676,10 +697,10 @@ fn section_title(title: &'static str, theme: &AerisTheme) -> Div {
         .child(title)
 }
 
-const fn theme_mode_name(mode: ThemeMode) -> &'static str {
+const fn theme_mode_name(mode: ThemeMode) -> Text {
     match mode {
-        ThemeMode::Light => "Light",
-        ThemeMode::Dark => "Dark",
+        ThemeMode::Light => shell::THEME_MODE_LIGHT,
+        ThemeMode::Dark => shell::THEME_MODE_DARK,
     }
 }
 
@@ -697,7 +718,7 @@ fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
     section()
         .h(px(THEME_SECTION_HEIGHT))
         .pb(px(SECTION_BOTTOM_PADDING))
-        .child(section_title("Theme", theme))
+        .child(section_title(tr!(shell::SECTION_THEME), theme))
         .child(
             div()
                 .flex()
@@ -747,7 +768,7 @@ fn preset_chip(preset: ThemePreset, theme: &AerisTheme, on_select: ThemeSelect) 
     let preview = AerisTheme::resolve(preset, theme.mode);
     let id = preset_chip_id(preset);
     BaseButton::new(id)
-        .accessibility_label(format!("{} palette", preset.label()))
+        .accessibility_label(tr!(shell::PRESET_ARIA, preset = preset.label()))
         .group(id)
         .flex_1()
         .min_w_0()
@@ -808,7 +829,7 @@ fn theme_card(mode: ThemeMode, theme: &AerisTheme, on_select: ThemeSelect) -> An
     let selected = theme.mode == mode;
     let preview = AerisTheme::resolve(theme.preset, mode);
     BaseButton::new(theme_card_id(mode))
-        .accessibility_label(format!("{} theme", theme_mode_name(mode)))
+        .accessibility_label(tr!(shell::THEME_CARD_ARIA, mode = theme_mode_name(mode)))
         .group(theme_card_id(mode))
         .flex_1()
         .min_w_0()
@@ -837,7 +858,7 @@ fn theme_card(mode: ThemeMode, theme: &AerisTheme, on_select: ThemeSelect) -> An
                 } else {
                     colors.text_secondary
                 }))
-                .child(theme_mode_name(mode)),
+                .child(tr!(theme_mode_name(mode))),
         )
         .into_any_element()
 }
@@ -947,25 +968,25 @@ fn window_section(
     section()
         .h(px(WINDOW_SECTION_HEIGHT))
         .pb(px(SECTION_BOTTOM_PADDING))
-        .child(section_title("Window", theme))
+        .child(section_title(tr!(shell::SECTION_WINDOW), theme))
         .child(window_switch(
             SwitchRow::new(
                 "platform_menu_frameless_window",
-                "Frameless mode",
+                tr!(shell::WINDOW_FRAMELESS),
                 settings.frameless,
                 theme,
             )
-            .description("Show the tab bar when pointing at the top edge"),
+            .description(tr!(shell::WINDOW_FRAMELESS_DESCRIPTION)),
             on_frameless,
         ))
         .child(window_switch(
             SwitchRow::new(
                 "platform_menu_drawing_toolbar",
-                "Drawing toolbar",
+                tr!(shell::WINDOW_DRAWING_TOOLBAR),
                 settings.drawing_toolbar_visible,
                 theme,
             )
-            .description("Show the drawing tools beside the charts"),
+            .description(tr!(shell::WINDOW_DRAWING_TOOLBAR_DESCRIPTION)),
             on_drawing_toolbar,
         ))
 }
@@ -980,11 +1001,90 @@ fn window_switch(row: SwitchRow, on_toggle: &WindowToggle) -> Div {
         }))
 }
 
+const fn language_row_id(preference: LanguagePreference) -> &'static str {
+    match preference {
+        LanguagePreference::System => "platform_menu_language_system",
+        LanguagePreference::Pinned(aeris_localization::Language::English) => {
+            "platform_menu_language_english"
+        }
+        LanguagePreference::Pinned(aeris_localization::Language::Russian) => {
+            "platform_menu_language_russian"
+        }
+    }
+}
+
+/// Language section: one row per choice, marked while selected. Pinned languages show their
+/// own name, so a user who cannot read the current language still recognizes theirs.
+fn language_section(
+    language: LanguagePreference,
+    on_select: &LanguageSelect,
+    theme: &AerisTheme,
+) -> Div {
+    section()
+        .h(px(LANGUAGE_SECTION_HEIGHT))
+        .pb(px(SECTION_BOTTOM_PADDING))
+        .child(section_title(tr!(menu::LANGUAGE), theme))
+        .children(
+            LanguagePreference::ALL
+                .map(|preference| language_row(preference, language, on_select.clone(), theme)),
+        )
+}
+
+fn language_row(
+    preference: LanguagePreference,
+    selected: LanguagePreference,
+    on_select: LanguageSelect,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let is_selected = preference == selected;
+    let id = language_row_id(preference);
+    let label: &'static str = match preference {
+        LanguagePreference::System => tr!(menu::LANGUAGE_SYSTEM),
+        LanguagePreference::Pinned(language) => language.native_name(),
+    };
+    BaseButton::new(id)
+        .accessibility_label(label)
+        .group(id)
+        .w_full()
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            on_select(preference, window, cx);
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .h(px(LANGUAGE_ROW_HEIGHT))
+                .w_full()
+                .flex()
+                .items_center()
+                .px_2()
+                .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
+                .when(is_selected, |row| row.bg(gpui_color(colors.active_bg)))
+                .when(!is_selected, |row| {
+                    row.group_hover(id, |style| style.bg(gpui_color(colors.hover_bg)))
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(gpui_color(if is_selected {
+                            colors.text_default
+                        } else {
+                            colors.text_secondary
+                        }))
+                        .child(label),
+                ),
+        )
+        .into_any_element()
+}
+
 fn keyboard_shortcuts_row(terminal: &Entity<TerminalApp>, theme: &AerisTheme) -> AnyElement {
     let open = terminal.clone();
     MenuRow::compact(
         "platform_menu_keyboard_shortcuts",
-        "Keyboard shortcuts",
+        tr!(shell::KEYBOARD_SHORTCUTS),
         theme,
     )
     .leading_icon(header_icon(HugeIcon::Keyboard).with_size(px(16.0)))
@@ -1006,9 +1106,12 @@ fn about_details(
         || std::env::consts::OS.to_string(),
         |value| value.system_version.clone(),
     );
-    let mut details = vec![("System", system)];
+    let mut details = vec![(tr!(shell::ABOUT_SYSTEM), system)];
     if !account.sign_in_enabled {
-        details.push(("Mode", account.presentation.state.to_string()));
+        details.push((
+            tr!(shell::ABOUT_MODE),
+            account.presentation.state.to_string(),
+        ));
     }
     details
 }
@@ -1026,7 +1129,7 @@ fn about_section(
     section()
         .h(px(height))
         .pb(px(SECTION_BOTTOM_PADDING))
-        .child(section_title("About", theme))
+        .child(section_title(tr!(shell::SECTION_ABOUT), theme))
         .child(
             div()
                 .h(px(ABOUT_BRAND_HEIGHT))
@@ -1050,7 +1153,10 @@ fn about_section(
                             div()
                                 .text_xs()
                                 .text_color(gpui_color(colors.text_muted))
-                                .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                                .child(tr!(
+                                    shell::ABOUT_VERSION,
+                                    version = env!("CARGO_PKG_VERSION")
+                                )),
                         ),
                 ),
         )
@@ -1173,25 +1279,27 @@ fn about_update_view(
     }
     let (status, status_color, action) = match update.map(|value| &value.state) {
         Some(UpdateState::Idle) => (
-            "Updates are checked automatically.".to_string(),
+            tr!(shell::UPDATES_CHECKED_AUTOMATICALLY).to_string(),
             colors.text_muted,
             None,
         ),
-        Some(UpdateState::Checking) => {
-            ("Checking for updates…".to_string(), colors.text_muted, None)
-        }
+        Some(UpdateState::Checking) => (
+            tr!(shell::UPDATES_CHECKING).to_string(),
+            colors.text_muted,
+            None,
+        ),
         Some(UpdateState::Current) => (
-            "Aeris Terminal is up to date.".to_string(),
+            tr!(shell::UPDATES_CURRENT).to_string(),
             colors.primary,
             None,
         ),
         Some(UpdateState::Downloading { latest_version }) => (
-            format!("Downloading Aeris Terminal {latest_version}…"),
+            tr!(shell::UPDATES_DOWNLOADING, version = latest_version),
             colors.text_muted,
             None,
         ),
         Some(UpdateState::ReadyToRestart { latest_version }) => (
-            format!("Aeris Terminal {latest_version} is ready. Restart to update."),
+            tr!(shell::UPDATES_READY, version = latest_version),
             colors.primary,
             Some(UpdateAction::Restart),
         ),
@@ -1199,12 +1307,12 @@ fn about_update_view(
             (error.clone(), colors.danger, Some(UpdateAction::Retry))
         }
         Some(UpdateState::PreparingRestart) => (
-            "Preparing restart to install update…".to_string(),
+            tr!(shell::UPDATES_PREPARING_RESTART).to_string(),
             colors.text_muted,
             None,
         ),
         None => (
-            "Update checking is unavailable in this session.".to_string(),
+            tr!(shell::UPDATES_UNAVAILABLE_SESSION).to_string(),
             colors.text_muted,
             None,
         ),
@@ -1219,21 +1327,23 @@ fn about_update_view(
 fn download_offer_view(offer: &DownloadOfferState, theme: &AerisTheme) -> UpdateView {
     let colors = theme.colors;
     let (status, status_color, action) = match offer {
-        DownloadOfferState::Checking => {
-            ("Checking for updates…".to_string(), colors.text_muted, None)
-        }
+        DownloadOfferState::Checking => (
+            tr!(shell::UPDATES_CHECKING).to_string(),
+            colors.text_muted,
+            None,
+        ),
         DownloadOfferState::Current => (
-            "Aeris Terminal is up to date.".to_string(),
+            tr!(shell::UPDATES_CURRENT).to_string(),
             colors.primary,
             None,
         ),
         DownloadOfferState::Available { latest_version } => (
-            format!("Aeris Terminal {latest_version} is available."),
+            tr!(shell::UPDATES_OFFER_AVAILABLE, version = latest_version),
             colors.primary,
             Some(UpdateAction::Download),
         ),
         DownloadOfferState::Unavailable => (
-            "Update check unavailable.".to_string(),
+            tr!(shell::UPDATES_CHECK_UNAVAILABLE).to_string(),
             colors.text_muted,
             None,
         ),
@@ -1253,9 +1363,9 @@ fn update_row(view: &UpdateView, on_update: &UpdateActivate, theme: &AerisTheme)
             .variant(ButtonVariant::Default)
             .button_size(ButtonSize::Sm)
             .label(match action {
-                UpdateAction::Restart => "Restart",
-                UpdateAction::Retry => "Retry",
-                UpdateAction::Download => "Download",
+                UpdateAction::Restart => tr!(shell::UPDATE_RESTART),
+                UpdateAction::Retry => tr!(shell::UPDATE_RETRY),
+                UpdateAction::Download => tr!(shell::UPDATE_DOWNLOAD),
             })
             .on_click(move |_, window, cx| on_update(action, window, cx))
     });
@@ -1276,7 +1386,7 @@ fn update_row(view: &UpdateView, on_update: &UpdateActivate, theme: &AerisTheme)
                     div()
                         .text_xs()
                         .text_color(gpui_color(colors.text_muted))
-                        .child("Updates"),
+                        .child(tr!(shell::UPDATES_SECTION)),
                 )
                 .child(
                     div()
@@ -1415,8 +1525,9 @@ mod tests {
         let expected = panel_chrome
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
+            + LANGUAGE_SECTION_HEIGHT
             + CHART_CONTEXT_MENU_ROW_HEIGHT
-            + 3.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
+            + 4.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
             + about_section_height(2, None);
         assert!((development.height(panel_chrome) - expected).abs() < f32::EPSILON);
         let signed_in = PlatformMenuLayout {
@@ -1432,8 +1543,9 @@ mod tests {
             + ACCOUNT_ERROR_HEIGHT
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
+            + LANGUAGE_SECTION_HEIGHT
             + about_section_height(1, attributed)
-            + 5.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
+            + 6.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
         assert!((signed_in.height(panel_chrome) - expected).abs() < f32::EPSILON);
     }
 

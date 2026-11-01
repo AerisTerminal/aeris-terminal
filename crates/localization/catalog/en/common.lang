@@ -1,0 +1,4 @@
+# Text shared by every surface.
+cancel = Cancel
+items[one] = {count} item
+items[other] = {count} items

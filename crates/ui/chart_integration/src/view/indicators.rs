@@ -1,6 +1,7 @@
 //! Indicators.
 
 use super::*;
+use aeris_localization::{chart_ui, tr};
 
 const CVD_LEGEND_IDENTITY: u64 = 2;
 const DELTA_LEGEND_IDENTITY: u64 = 3;
@@ -228,27 +229,45 @@ impl AerisChartView {
             && let Some(asset) = rows.iter_mut().find(|row| row.item == LegendItem::Asset)
         {
             asset.values = vec![LegendValue {
-                text: "Waiting for order flow".to_string(),
+                text: tr!(chart_ui::LEGEND_WAITING_FOR_ORDER_FLOW).to_string(),
                 color: None,
             }];
         }
         if let Some(visible) = self.volume_profile_visible() {
             let item = LegendItem::VolumeProfile;
-            insert_price_pane_legend_row(&mut rows, item, "Volume Profile", visible, false);
+            insert_price_pane_legend_row(
+                &mut rows,
+                item,
+                tr!(chart_ui::LEGEND_VOLUME_PROFILE),
+                visible,
+                false,
+            );
         }
         // The row follows the durable settings rather than the drawn indicator, so a chart whose
         // tape is unavailable can still edit or remove it.
         if let Some(big_trades) = self.order_flow_settings.big_trades {
             let item = LegendItem::BigTrades;
-            insert_price_pane_legend_row(&mut rows, item, "Big Trades", big_trades.visible, true);
+            insert_price_pane_legend_row(
+                &mut rows,
+                item,
+                tr!(chart_ui::LEGEND_BIG_TRADES),
+                big_trades.visible,
+                true,
+            );
         }
         if let Some(book) = self.order_flow_settings.order_book_depth {
             let item = LegendItem::OrderBookDepth;
-            insert_price_pane_legend_row(&mut rows, item, "Order Book", book.visible, true);
+            insert_price_pane_legend_row(
+                &mut rows,
+                item,
+                tr!(chart_ui::LEGEND_ORDER_BOOK),
+                book.visible,
+                true,
+            );
         }
         if let Some(heatmap) = self.order_flow_settings.depth_heatmap {
             let item = LegendItem::DepthHeatmap;
-            let title = "Depth Heatmap";
+            let title = tr!(chart_ui::LEGEND_DEPTH_HEATMAP);
             insert_price_pane_legend_row(&mut rows, item, title, heatmap.visible, false);
         }
         apply_legend_options(&mut rows, self.legend_options);

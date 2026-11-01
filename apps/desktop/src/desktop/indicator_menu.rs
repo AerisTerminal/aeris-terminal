@@ -1,5 +1,6 @@
 use super::*;
 use crate::desktop::workspace_surface::IndicatorMenuEntry;
+use aeris_localization::{chart_menu, tr, tr_count};
 
 use super::chrome_menu::{
     ChromeMenuExtent, chrome_menu_empty, chrome_menu_group_heading, chrome_menu_scroll_body,
@@ -14,12 +15,12 @@ pub(super) fn indicator_selector(
 ) -> impl IntoElement {
     chrome_tooltip(
         "indicator_selector",
-        "Indicators",
+        tr!(chart_menu::INDICATORS),
         Button::new("indicator_selector", theme)
             .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Lg)
             .icon(header_icon(HugeIcon::Chart))
-            .aria_label("Indicators")
+            .aria_label(tr!(chart_menu::INDICATORS))
             .disabled(!enabled)
             .on_click(move |event, window, cx| {
                 app.update(cx, |app, app_cx| {
@@ -85,21 +86,21 @@ pub(super) fn indicator_dialog_content(
     let colors = theme.colors;
     let entries = app.read(cx).indicator_menu_entries(cx);
     let native_count = entries.iter().filter(|entry| entry.is_indicator()).count();
-    let hint = format!("{native_count} native");
+    let hint = tr_count!(chart_menu::NATIVE_INDICATORS, native_count);
     let highlighted = state.keyboard_active.then_some(state.keyboard_selection);
     let mut list = chrome_menu_scroll_body();
     if entries.is_empty() {
         list = list.child(chrome_menu_empty(
-            "No matching indicators",
-            "Try “average”, “bands”, or a kind like SMA.",
+            tr!(chart_menu::NO_MATCHING_INDICATORS),
+            tr!(chart_menu::NO_MATCHING_INDICATORS_HINT),
             &colors,
         ));
     }
     for (index, &entry) in entries.iter().enumerate() {
         let starts_group = match entry {
-            IndicatorMenuEntry::OrderFlow(_) => (index == 0).then_some("Order flow"),
+            IndicatorMenuEntry::OrderFlow(_) => (index == 0).then_some(tr!(chart_menu::ORDER_FLOW)),
             IndicatorMenuEntry::Indicator(_) | IndicatorMenuEntry::Builtin(_) => {
-                (index + native_count == entries.len()).then_some("Indicators")
+                (index + native_count == entries.len()).then_some(tr!(chart_menu::INDICATORS))
             }
         };
         if let Some(heading) = starts_group {

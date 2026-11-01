@@ -47,7 +47,7 @@ fn main() {
     }
 }
 
-/// The first, quoted family of a CSS font stack such as `"DM Sans", sans-serif`.
+/// The first, quoted family of a CSS font stack such as `"Inter", sans-serif`.
 fn primary_family<'a>(stack: &'a str, property: &str) -> Result<&'a str, String> {
     stack
         .strip_prefix('"')

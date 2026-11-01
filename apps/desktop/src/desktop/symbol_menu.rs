@@ -5,6 +5,7 @@ use super::chrome_menu::{
     ChromeMenuExtent, chrome_menu_close_button, chrome_menu_empty, chrome_menu_scroll_body,
     chrome_menu_surface, compact_menu_add_button, scrollable_menu_body,
 };
+use aeris_localization::{panels, tr};
 
 pub(super) fn provider_exchange_mark(
     provider: ProviderId,
@@ -56,7 +57,10 @@ pub(super) fn instrument_selector(
 ) -> impl IntoElement {
     chrome_tooltip(
         "instrument_selector",
-        format!("Search or select a {} market", state.provider.display()),
+        tr!(
+            panels::SYMBOL_MENU_TOOLTIP,
+            provider = state.provider.display()
+        ),
         Button::new("instrument_selector", theme)
             .variant(ButtonVariant::Secondary)
             .button_size(ButtonSize::Lg)
@@ -129,7 +133,7 @@ pub(super) fn instrument_dialog_content(
     let mut list = chrome_menu_scroll_body();
     if state.instruments.is_empty() {
         list = list.child(chrome_menu_empty(
-            "No markets to display",
+            tr!(panels::SYMBOL_MENU_EMPTY),
             state.message.clone(),
             &colors,
         ));
@@ -160,7 +164,7 @@ pub(super) fn instrument_dialog_content(
                     div().px_3().py_1().child(
                         Button::new("symbol_menu_connect_provider", theme)
                             .variant(ButtonVariant::Secondary)
-                            .label(format!("Connect {provider_name} in Accounts"))
+                            .label(tr!(panels::SYMBOL_MENU_CONNECT, provider = provider_name))
                             .on_click(move |_, window, cx| {
                                 accounts.update(cx, |surface, surface_cx| {
                                     surface.open_accounts_panel(
@@ -224,22 +228,26 @@ fn symbol_provider_menu(
     });
     let all_app = app.clone();
     let all_hover_app = app.clone();
-    let all_row = MenuRow::compact(("symbol_provider_row", 0_usize), "All providers", theme)
-        .leading(generic_mark(px(18.0), false, &colors))
-        .checked(state.scope == SymbolSearchScope::All)
-        .disabled(state.availability.selection_pending)
-        .on_hover(move |hovered, _, cx| {
-            if *hovered {
-                all_hover_app.update(cx, |surface, surface_cx| {
-                    surface.set_symbol_scope_flyout(None, surface_cx);
-                });
-            }
-        })
-        .on_click(move |_, window, cx| {
-            all_app.update(cx, |surface, surface_cx| {
-                surface.choose_symbol_scope(SymbolSearchScope::All, window, surface_cx);
+    let all_row = MenuRow::compact(
+        ("symbol_provider_row", 0_usize),
+        tr!(panels::SYMBOL_MENU_ALL_PROVIDERS),
+        theme,
+    )
+    .leading(generic_mark(px(18.0), false, &colors))
+    .checked(state.scope == SymbolSearchScope::All)
+    .disabled(state.availability.selection_pending)
+    .on_hover(move |hovered, _, cx| {
+        if *hovered {
+            all_hover_app.update(cx, |surface, surface_cx| {
+                surface.set_symbol_scope_flyout(None, surface_cx);
             });
+        }
+    })
+    .on_click(move |_, window, cx| {
+        all_app.update(cx, |surface, surface_cx| {
+            surface.choose_symbol_scope(SymbolSearchScope::All, window, surface_cx);
         });
+    });
     let provider_rows = providers.into_iter().enumerate().map(|(index, provider)| {
         let row_app = app.clone();
         let hover_app = app.clone();
@@ -347,18 +355,22 @@ fn symbol_scope_flyout(
     if !exchanges.is_empty() {
         let all_app = app.clone();
         panel = panel.child(
-            MenuRow::compact(("symbol_exchange_row", 0_usize), "All exchanges", theme)
-                .checked(state.scope == SymbolSearchScope::Provider(id))
-                .disabled(state.availability.selection_pending)
-                .on_click(move |_, window, cx| {
-                    all_app.update(cx, |surface, surface_cx| {
-                        surface.choose_symbol_scope(
-                            SymbolSearchScope::Provider(id),
-                            window,
-                            surface_cx,
-                        );
-                    });
-                }),
+            MenuRow::compact(
+                ("symbol_exchange_row", 0_usize),
+                tr!(panels::SYMBOL_MENU_ALL_EXCHANGES),
+                theme,
+            )
+            .checked(state.scope == SymbolSearchScope::Provider(id))
+            .disabled(state.availability.selection_pending)
+            .on_click(move |_, window, cx| {
+                all_app.update(cx, |surface, surface_cx| {
+                    surface.choose_symbol_scope(
+                        SymbolSearchScope::Provider(id),
+                        window,
+                        surface_cx,
+                    );
+                });
+            }),
         );
         panel = panel.children(exchanges.iter().enumerate().map(|(index, exchange)| {
             let row_app = app.clone();
@@ -506,7 +518,7 @@ pub(super) fn instrument_search_header(
                 .variant(ButtonVariant::Secondary)
                 .round()
                 .open(state.provider_menu_open)
-                .aria_label("Choose which markets to search")
+                .aria_label(tr!(panels::SYMBOL_MENU_CHOOSE_MARKETS))
                 .leading(scope_mark(
                     state.scope,
                     px(CHROME_MENU_SEARCH_ICON_SIZE),

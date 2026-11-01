@@ -4,6 +4,7 @@
 pub mod account;
 pub mod chart_chrome;
 pub mod command_registry;
+pub mod language;
 pub mod market_worker;
 pub mod services;
 pub mod trading;

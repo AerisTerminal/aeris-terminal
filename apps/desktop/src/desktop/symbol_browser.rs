@@ -7,6 +7,7 @@
 
 use super::ProviderId;
 use aeris_desktop::chart_chrome::{ExchangeCode, SymbolSearchScope};
+use aeris_localization::{panels, tr};
 use aeris_market_runtime::{ProviderInstrumentKind, ProviderInstrumentSummary};
 use std::num::NonZeroUsize;
 
@@ -316,7 +317,7 @@ impl ProviderLane {
             label: listed.display_symbol.clone(),
             description: listed.name.clone(),
             detail: if opening {
-                Some("Opening".to_string())
+                Some(tr!(panels::SYMBOL_OPENING).to_string())
             } else {
                 product_detail(listed.asset_class.as_deref(), &listed.exchange)
             },
@@ -938,8 +939,19 @@ fn contract_description(
 
 /// The month of a `YYYYMM`, `YYYYMMDD` or `YYYY-MM-DD` expiration, such as "Dec 2026".
 fn contract_month(expiration: &str) -> Option<String> {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    const MONTHS: [aeris_localization::Text; 12] = [
+        panels::MONTH_JAN,
+        panels::MONTH_FEB,
+        panels::MONTH_MAR,
+        panels::MONTH_APR,
+        panels::MONTH_MAY,
+        panels::MONTH_JUN,
+        panels::MONTH_JUL,
+        panels::MONTH_AUG,
+        panels::MONTH_SEP,
+        panels::MONTH_OCT,
+        panels::MONTH_NOV,
+        panels::MONTH_DEC,
     ];
     if !expiration
         .bytes()

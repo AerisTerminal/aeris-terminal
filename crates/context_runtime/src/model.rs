@@ -119,20 +119,59 @@ pub enum EventImportance {
     High,
 }
 
+/// Releases whose title an Aeris adapter writes rather than the publisher.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EconomicEventKind {
+    /// The title is the publisher's own release name.
+    #[default]
+    Published,
+    FomcRateDecision,
+    EiaWeeklyPetroleumStatusReport,
+}
+
 /// One scheduled official economic or policy release.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EconomicEvent {
     pub id: String,
+    /// The English title; surfaces localize it from `kind` unless the publisher wrote it.
     pub title: String,
+    #[serde(default)]
+    pub kind: EconomicEventKind,
     pub scheduled_unix_seconds: i64,
     pub importance: EventImportance,
     pub provenance: ContextProvenance,
+}
+
+/// What a statistic measures, for statistics whose label and unit an Aeris adapter writes.
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMetricKind {
+    /// The label and unit are the publisher's own text.
+    #[default]
+    Published,
+    CommercialCrudeStocks,
+    Lower48NaturalGasStorage,
+    TenYearTreasuryYield,
+    TradeWeightedDollarIndex,
+    ConsumerPriceIndex,
+    NonfarmPayrolls,
+    WasdeCornProduction,
+    WasdeCornExports,
+    WasdeCornEndingStocks,
+    /// Weekly export sales of a commodity the publisher names.
+    WeeklyExportSales {
+        commodity: String,
+    },
 }
 
 /// Fixed-point public statistic. `units` carries the exact decimal provenance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ContextMetric {
     pub id: String,
+    #[serde(default)]
+    pub kind: ContextMetricKind,
+    /// The English or publisher label; surfaces localize Aeris-written labels from `kind`.
     pub label: String,
     pub period: String,
     pub value_units: i128,
@@ -144,15 +183,33 @@ pub struct ContextMetric {
     pub provenance: ContextProvenance,
 }
 
+/// Regions a degree-day projection can cover.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DegreeDayRegion {
+    /// The contiguous United States, weighted by population.
+    ConusPopulationWeighted,
+}
+
 /// Heating/cooling degree-day projection derived only from released NOAA observations/forecasts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DegreeDayMetric {
-    pub region: String,
+    pub region: DegreeDayRegion,
     pub period: String,
     pub heating_degree_days_units: i64,
     pub cooling_degree_days_units: i64,
     pub scale: u8,
     pub provenance: ContextProvenance,
+}
+
+/// CFTC disaggregated Commitments of Traders categories.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CotTraderCategory {
+    ProducerMerchant,
+    SwapDealer,
+    ManagedMoney,
+    OtherReportable,
 }
 
 /// One CFTC positioning row with explicit trader-category provenance.
@@ -161,7 +218,7 @@ pub struct CotPosition {
     pub market_code: String,
     pub market_name: String,
     pub report_date_unix_seconds: i64,
-    pub category: String,
+    pub category: CotTraderCategory,
     pub long_contracts: i64,
     pub short_contracts: i64,
     pub spreading_contracts: Option<i64>,

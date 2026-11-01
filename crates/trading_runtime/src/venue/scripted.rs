@@ -1946,8 +1946,8 @@ fn latest_notice(service: &TradingService) -> String {
         .venue_notices
         .last()
         .expect("venue notice")
-        .detail
-        .clone()
+        .kind
+        .to_string()
 }
 
 #[test]
@@ -2109,7 +2109,12 @@ fn a_refused_exit_is_reported_to_the_user() {
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.venue_notices.len(), 1);
     assert_eq!(snapshot.venue_notices[0].account_id, broker().id);
-    assert!(snapshot.venue_notices[0].detail.contains("refused"));
+    assert!(
+        snapshot.venue_notices[0]
+            .kind
+            .to_string()
+            .contains("refused")
+    );
     assert_eq!(service.status().expect("status").venue_error, None);
 }
 
@@ -2290,7 +2295,7 @@ fn a_reverse_whose_exit_fails_never_opens_the_opposite_position() {
     assert!(
         notices
             .iter()
-            .any(|notice| notice.detail.contains("reverse was cancelled"))
+            .any(|notice| notice.kind.to_string().contains("reverse was cancelled"))
     );
 }
 

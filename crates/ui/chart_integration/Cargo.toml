@@ -14,6 +14,7 @@ test-support = ["aeris_application/test-support"]
 [dependencies]
 aeris_application = { path = "../../application" }
 aeris_design_system = { path = "../design_system" }
+aeris_localization = { path = "../../localization" }
 aeris_observability = { path = "../../observability" }
 aeris_terminal_ui = { path = "../terminal_ui", default-features = false }
 aeris_trading = { path = "../../domain/trading" }

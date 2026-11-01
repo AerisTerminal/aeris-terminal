@@ -5,6 +5,7 @@ use super::{
 };
 use aeris_charts_render::color::Color;
 use aeris_design_system::{AerisTheme, platform_typography};
+use aeris_localization::{chart_ui, tr};
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, CursorStyle, Entity, MouseButton, Rgba, Role,
     SharedString, Transformation, div, percentage, prelude::*, px, rgba, svg,
@@ -324,7 +325,7 @@ fn legend_loading_glyph(palette: LegendPalette) -> AnyElement {
         .flex()
         .items_center()
         .role(Role::Status)
-        .aria_label("Loading")
+        .aria_label(tr!(chart_ui::LEGEND_LOADING))
         .child(
             svg()
                 .path(LEGEND_LOADING_ICON)
@@ -358,10 +359,24 @@ fn legend_control(
     let action_chart = chart.clone();
     let remove = matches!(control, LegendControl::Remove);
     let (label, path, color) = match control {
-        LegendControl::Visibility(true) => ("Hide", LEGEND_VIEW_ICON, palette.text),
-        LegendControl::Visibility(false) => ("Show", LEGEND_VIEW_OFF_ICON, palette.muted),
-        LegendControl::Settings => ("Settings", LEGEND_SETTINGS_ICON, palette.text),
-        LegendControl::Remove => ("Remove", LEGEND_REMOVE_ICON, palette.danger),
+        LegendControl::Visibility(true) => {
+            (tr!(chart_ui::LEGEND_HIDE), LEGEND_VIEW_ICON, palette.text)
+        }
+        LegendControl::Visibility(false) => (
+            tr!(chart_ui::LEGEND_SHOW),
+            LEGEND_VIEW_OFF_ICON,
+            palette.muted,
+        ),
+        LegendControl::Settings => (
+            tr!(chart_ui::LEGEND_SETTINGS),
+            LEGEND_SETTINGS_ICON,
+            palette.text,
+        ),
+        LegendControl::Remove => (
+            tr!(chart_ui::LEGEND_REMOVE),
+            LEGEND_REMOVE_ICON,
+            palette.danger,
+        ),
     };
     div()
         .id(legend_control_element_id(item, control))

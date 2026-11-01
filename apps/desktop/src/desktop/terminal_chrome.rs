@@ -2,6 +2,7 @@ use super::app_navigation::app_navigation_button;
 use super::platform_menu::account_avatar_button;
 use super::*;
 use crate::desktop::native_ui::tooltip::TooltipPlacement;
+use aeris_localization::{Text, shell, tr};
 use aeris_market_runtime::{MarketSessionPhase, MarketSessionStatus};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -444,7 +445,7 @@ pub(super) fn workspace_window_controls(
         CaptionControlSpec {
             id: "workspace_window_minimize",
             icon: HugeIcon::WindowMinimize,
-            label: "Minimize window",
+            label: tr!(shell::CMD_MINIMIZE_WINDOW),
             command: CaptionCommand::Minimize,
             close: false,
         },
@@ -461,9 +462,9 @@ pub(super) fn workspace_window_controls(
                 HugeIcon::WindowMaximize
             },
             label: if window.is_maximized() {
-                "Restore window"
+                tr!(shell::CAPTION_RESTORE)
             } else {
-                "Maximize window"
+                tr!(shell::CAPTION_MAXIMIZE)
             },
             command: CaptionCommand::MaximizeOrRestore,
             close: false,
@@ -476,7 +477,7 @@ pub(super) fn workspace_window_controls(
         CaptionControlSpec {
             id: "workspace_window_close",
             icon: HugeIcon::WindowClose,
-            label: "Close window",
+            label: tr!(shell::CMD_CLOSE_WINDOW),
             command: CaptionCommand::Close,
             close: true,
         },
@@ -677,11 +678,11 @@ pub(super) fn provider_attribution(
 
 fn chart_link_toggle(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> AnyElement {
     let link_label = match state.chart_link_group {
-        1 => "Link A",
-        2 => "Link B",
-        3 => "Link C",
-        4 => "Link D",
-        _ => "Link",
+        1 => tr!(shell::CHART_LINK_GROUP, group = "A"),
+        2 => tr!(shell::CHART_LINK_GROUP, group = "B"),
+        3 => tr!(shell::CHART_LINK_GROUP, group = "C"),
+        4 => tr!(shell::CHART_LINK_GROUP, group = "D"),
+        _ => tr!(shell::CHART_LINK).to_string(),
     };
     panel_toggle(
         PanelToggleState {
@@ -690,7 +691,7 @@ fn chart_link_toggle(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> Any
             icon: HugeIcon::SplitSideBySide,
             enabled: true,
             selected: state.chart_link_group != 0,
-            tooltip: "Cycle linked chart group",
+            tooltip: tr!(shell::CHART_LINK_TOOLTIP),
             toggle: WorkspaceSurface::cycle_chart_link_group,
         },
         &state.theme,
@@ -732,13 +733,13 @@ pub(super) fn panel_sidebar(
         aeris_desktop::command_registry::CommandId::ToggleContext,
     );
     let context = sidebar_toggle(
-        PanelToggleState {
+        &PanelToggleState {
             id: "context_panel_toggle",
-            label: context_command.title,
+            label: tr!(context_command.title).to_string(),
             icon: HugeIcon::Info,
             enabled: true,
             selected: state.context_visible,
-            tooltip: context_command.title,
+            tooltip: tr!(context_command.title),
             toggle: WorkspaceSurface::toggle_context_panel,
         },
         theme,
@@ -802,13 +803,13 @@ fn side_panel_toggle(
     };
     let command = aeris_desktop::command_registry::command(command_id);
     sidebar_toggle(
-        PanelToggleState {
+        &PanelToggleState {
             id,
-            label: command.title,
+            label: tr!(command.title).to_string(),
             icon,
             enabled,
             selected,
-            tooltip: command.title,
+            tooltip: tr!(command.title),
             toggle,
         },
         theme,
@@ -818,10 +819,11 @@ fn side_panel_toggle(
 
 /// An icon-only panel toggle; the command title is its tooltip and accessible name.
 fn sidebar_toggle(
-    state: PanelToggleState,
+    state: &PanelToggleState,
     theme: &AerisTheme,
     app: Entity<WorkspaceSurface>,
 ) -> AnyElement {
+    let toggle = state.toggle;
     Button::new(state.id, theme)
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Default)
@@ -836,7 +838,7 @@ fn sidebar_toggle(
         .selected(state.selected)
         .disabled(!state.enabled)
         .on_click(move |_, _, cx| {
-            app.update(cx, state.toggle);
+            app.update(cx, toggle);
         })
         .into_any_element()
 }
@@ -862,19 +864,19 @@ pub(super) fn connection_status_indicator(
                 .flex_col()
                 .gap_1()
                 .child(connection_tooltip_row(
-                    "Provider",
+                    tr!(shell::CONNECTION_PROVIDER),
                     provider.clone(),
                     false,
                     theme,
                 ))
                 .child(connection_tooltip_row(
-                    "Status",
+                    tr!(shell::CONNECTION_STATUS),
                     status.clone(),
                     false,
                     theme,
                 ))
                 .child(connection_tooltip_row(
-                    "Latency",
+                    tr!(shell::CONNECTION_LATENCY),
                     latency.clone(),
                     true,
                     theme,
@@ -931,10 +933,10 @@ fn connection_tooltip_row(
         })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PanelToggleState {
     id: &'static str,
-    label: &'static str,
+    label: String,
     icon: HugeIcon,
     enabled: bool,
     selected: bool,
@@ -976,10 +978,10 @@ impl ChartHistoryControl {
         }
     }
 
-    const fn tooltip(self) -> &'static str {
+    const fn tooltip(self) -> Text {
         match self {
-            Self::Undo => "Undo",
-            Self::Redo => "Redo",
+            Self::Undo => shell::UNDO,
+            Self::Redo => shell::REDO,
         }
     }
 
@@ -1019,8 +1021,8 @@ fn chart_history_control(
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .icon(header_icon(control.icon()))
-        .aria_label(control.tooltip())
-        .tooltip(TooltipSpec::new(control.tooltip(), theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .aria_label(tr!(control.tooltip()))
+        .tooltip(TooltipSpec::new(tr!(control.tooltip()), theme).show_delay(TOOLTIP_OPEN_DELAY))
         .disabled(!control.enabled(history))
         .on_click(move |_, _, cx| {
             app.update(cx, step);
@@ -1313,7 +1315,12 @@ pub(super) fn series_selector(
             .inset_0(),
         )
         .child(button);
-    chrome_tooltip("series_selector", "Select chart timeframe", trigger, theme)
+    chrome_tooltip(
+        "series_selector",
+        tr!(shell::SELECT_CHART_TIMEFRAME),
+        trigger,
+        theme,
+    )
 }
 
 pub(super) fn chart_type_selector(
@@ -1362,7 +1369,12 @@ pub(super) fn chart_type_selector(
             .inset_0(),
         )
         .child(button);
-    chrome_tooltip("chart_type_selector", "Select chart type", trigger, theme)
+    chrome_tooltip(
+        "chart_type_selector",
+        tr!(shell::SELECT_CHART_TYPE),
+        trigger,
+        theme,
+    )
 }
 
 pub(super) fn time_zone_selector(
@@ -1414,7 +1426,7 @@ pub(super) fn time_zone_selector(
         .child(button);
     chrome_tooltip(
         "time_zone_selector",
-        format!("Chart time zone · {time_zone_id}"),
+        tr!(shell::CHART_TIME_ZONE, time_zone = time_zone_id),
         trigger,
         theme,
     )
@@ -1433,7 +1445,7 @@ fn accounts_selector(
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .icon(header_icon(HugeIcon::User))
-        .label(account_label.unwrap_or_else(|| "Accounts".to_string()))
+        .label(account_label.unwrap_or_else(|| tr!(shell::ACCOUNTS).to_string()))
         .caret(header_icon(HugeIcon::ChevronDown))
         .on_click(move |event, window, cx| {
             open_app.update(cx, |app, app_cx| {
@@ -1469,7 +1481,7 @@ fn accounts_selector(
         .child(button);
     chrome_tooltip(
         "accounts_selector",
-        "Accounts and connections",
+        tr!(shell::ACCOUNTS_AND_CONNECTIONS),
         trigger,
         theme,
     )
@@ -1520,15 +1532,15 @@ fn market_dot_color(phase: MarketSessionPhase) -> Option<ConnectionColor> {
     }
 }
 
-const fn market_phase_label(phase: MarketSessionPhase) -> &'static str {
+const fn market_phase_label(phase: MarketSessionPhase) -> Text {
     match phase {
-        MarketSessionPhase::Regular => "Open",
-        MarketSessionPhase::PreMarket => "Pre-market",
-        MarketSessionPhase::PostMarket => "Post-market",
-        MarketSessionPhase::Overnight => "Overnight session",
-        MarketSessionPhase::Closed => "Closed",
-        MarketSessionPhase::AlwaysOpen => "Open 24/7",
-        MarketSessionPhase::Unknown => "Hours unavailable",
+        MarketSessionPhase::Regular => shell::MARKET_OPEN,
+        MarketSessionPhase::PreMarket => shell::MARKET_PRE_MARKET,
+        MarketSessionPhase::PostMarket => shell::MARKET_POST_MARKET,
+        MarketSessionPhase::Overnight => shell::MARKET_OVERNIGHT,
+        MarketSessionPhase::Closed => shell::MARKET_CLOSED,
+        MarketSessionPhase::AlwaysOpen => shell::MARKET_ALWAYS_OPEN,
+        MarketSessionPhase::Unknown => shell::MARKET_HOURS_UNAVAILABLE,
     }
 }
 
@@ -1537,7 +1549,10 @@ fn market_tooltip_rows(
     time_zone: &str,
     now_unix_nanos: i64,
 ) -> Vec<(&'static str, String)> {
-    let mut rows = vec![("Market", market_phase_label(status.phase).to_string())];
+    let mut rows = vec![(
+        tr!(shell::MARKET_ROW),
+        tr!(market_phase_label(status.phase)).to_string(),
+    )];
     let wall = |nanos: i64| {
         AerisChartView::time_zone_wall_time_label(time_zone, nanos.div_euclid(1_000_000_000))
             .unwrap_or_else(|| "--:--".to_string())
@@ -1547,20 +1562,20 @@ fn market_tooltip_rows(
         .zip(status.session_end_unix_nanos)
     {
         rows.push((
-            "Session",
+            tr!(shell::SESSION_ROW),
             format!("{}–{} {time_zone}", wall(start), wall(end)),
         ));
     }
     let countdown = match status.phase {
         MarketSessionPhase::Closed => status
             .next_open_unix_nanos
-            .map(|open| ("Opens in", countdown_text(open, now_unix_nanos))),
+            .map(|open| (tr!(shell::OPENS_IN), countdown_text(open, now_unix_nanos))),
         MarketSessionPhase::Regular
         | MarketSessionPhase::PreMarket
         | MarketSessionPhase::PostMarket
         | MarketSessionPhase::Overnight => status
             .session_end_unix_nanos
-            .map(|close| ("Closes in", countdown_text(close, now_unix_nanos))),
+            .map(|close| (tr!(shell::CLOSES_IN), countdown_text(close, now_unix_nanos))),
         MarketSessionPhase::AlwaysOpen | MarketSessionPhase::Unknown => None,
     };
     rows.extend(countdown);
@@ -1574,9 +1589,13 @@ pub(super) fn countdown_text(target_unix_nanos: i64, now_unix_nanos: i64) -> Str
     let minutes = remaining.saturating_add(MINUTE - 1) / MINUTE;
     let (hours, minutes) = (minutes / 60, minutes % 60);
     if hours == 0 {
-        format!("{minutes}m")
+        tr!(shell::DURATION_MINUTES, minutes = minutes)
     } else {
-        format!("{hours}h {minutes}m")
+        tr!(
+            shell::DURATION_HOURS_MINUTES,
+            hours = hours,
+            minutes = minutes
+        )
     }
 }
 
@@ -1586,12 +1605,24 @@ pub(super) fn connection_presentation(
     transport_rtt_nanos: Option<u64>,
 ) -> ConnectionPresentation {
     let (status, color): (&'static str, ConnectionColor) = match state {
-        FeedConnectionState::Disconnected => ("Offline", |theme| theme.colors.danger),
-        FeedConnectionState::Discovering => ("Connecting", |theme| theme.colors.warning),
-        FeedConnectionState::Authenticating => ("Authenticating", |theme| theme.colors.warning),
-        FeedConnectionState::Streaming => ("Live", |theme| theme.colors.positive),
-        FeedConnectionState::Recovering => ("Reconnecting", |theme| theme.colors.warning),
-        FeedConnectionState::Stopped => ("Stopped", |theme| theme.colors.danger),
+        FeedConnectionState::Disconnected => {
+            (tr!(shell::CONNECTION_OFFLINE), |theme| theme.colors.danger)
+        }
+        FeedConnectionState::Discovering => (tr!(shell::CONNECTION_CONNECTING), |theme| {
+            theme.colors.warning
+        }),
+        FeedConnectionState::Authenticating => (tr!(shell::CONNECTION_AUTHENTICATING), |theme| {
+            theme.colors.warning
+        }),
+        FeedConnectionState::Streaming => {
+            (tr!(shell::CONNECTION_LIVE), |theme| theme.colors.positive)
+        }
+        FeedConnectionState::Recovering => (tr!(shell::CONNECTION_RECONNECTING), |theme| {
+            theme.colors.warning
+        }),
+        FeedConnectionState::Stopped => {
+            (tr!(shell::CONNECTION_STOPPED), |theme| theme.colors.danger)
+        }
     };
     ConnectionPresentation {
         provider: provider.display(),
@@ -1599,7 +1630,7 @@ pub(super) fn connection_presentation(
         latency: if state == FeedConnectionState::Streaming {
             format_transport_rtt(transport_rtt_nanos)
         } else {
-            "Measuring…".to_string()
+            tr!(shell::LATENCY_MEASURING).to_string()
         },
         color,
         market_rows: Vec::new(),
@@ -1608,14 +1639,15 @@ pub(super) fn connection_presentation(
 
 fn format_transport_rtt(transport_rtt_nanos: Option<u64>) -> String {
     transport_rtt_nanos.map_or_else(
-        || "Measuring…".to_string(),
+        || tr!(shell::LATENCY_MEASURING).to_string(),
         |nanos| {
             let tenths_of_a_millisecond = nanos / 100_000;
-            format!(
-                "{}.{:01} ms RTT",
+            let latency = format!(
+                "{}.{:01}",
                 tenths_of_a_millisecond / 10,
                 tenths_of_a_millisecond % 10
-            )
+            );
+            tr!(shell::LATENCY_RTT, latency = latency)
         },
     )
 }

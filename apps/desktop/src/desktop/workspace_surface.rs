@@ -8,6 +8,7 @@ use super::pane_persistence::PanePersistence;
 use super::studies_controller::{StudiesController, StudySettingsRequest};
 use super::symbol_entry::SymbolEntry;
 use super::*;
+use aeris_localization::{tr, tr_count, workspace};
 use aeris_observability::diagnostic;
 
 #[cfg(feature = "diagnostics")]
@@ -165,7 +166,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         chart_trading_visibility: init.chart_trading_visibility,
         symbol_entry: init.symbol_entry,
         market_state: WorkspaceMarketState::default(),
-        series_message: "Select a symbol before choosing a series".to_string(),
+        series_message: tr!(workspace::SELECT_SYMBOL_BEFORE_SERIES).to_string(),
         indicator_input: init.indicator_input,
         timeframe_input: init.timeframe_input,
         time_zone_input: init.time_zone_input,
@@ -444,13 +445,13 @@ impl OrderFlowMenuStudy {
         Self::DepthHeatmap,
     ];
 
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
-            Self::CumulativeDelta => "Cumulative delta (CVD)",
-            Self::Delta => "Delta histogram",
-            Self::BigTrades => "Big trades",
-            Self::OrderBookDepth => "Order book on chart (DOM)",
-            Self::DepthHeatmap => "Depth heatmap (book history)",
+            Self::CumulativeDelta => tr!(workspace::ORDER_FLOW_CUMULATIVE_DELTA),
+            Self::Delta => tr!(workspace::ORDER_FLOW_DELTA_HISTOGRAM),
+            Self::BigTrades => tr!(workspace::ORDER_FLOW_BIG_TRADES),
+            Self::OrderBookDepth => tr!(workspace::ORDER_FLOW_BOOK_ON_CHART),
+            Self::DepthHeatmap => tr!(workspace::ORDER_FLOW_DEPTH_HEATMAP),
         }
     }
 
@@ -480,7 +481,7 @@ pub(super) enum IndicatorMenuEntry {
 }
 
 impl IndicatorMenuEntry {
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::OrderFlow(study) => study.label(),
             Self::Indicator(spec) => spec.label,
@@ -581,7 +582,7 @@ fn parse_big_trades_minimum_volume(text: &str) -> Result<f64, String> {
         .parse::<f64>()
         .ok()
         .filter(|volume| volume.is_finite() && *volume > 0.0)
-        .ok_or_else(|| "Minimum volume must be a number greater than zero".to_string())
+        .ok_or_else(|| tr!(workspace::MINIMUM_VOLUME_INVALID).to_string())
 }
 
 fn parse_volume_average_length(text: &str) -> Result<u16, String> {
@@ -590,10 +591,10 @@ fn parse_volume_average_length(text: &str) -> Result<u16, String> {
         .ok()
         .filter(|length| VolumeSettings::AVERAGE_LENGTHS.contains(length))
         .ok_or_else(|| {
-            format!(
-                "Length must be a whole number from {} to {}",
-                VolumeSettings::AVERAGE_LENGTHS.start(),
-                VolumeSettings::AVERAGE_LENGTHS.end()
+            tr!(
+                workspace::LENGTH_RANGE_INVALID,
+                min = *VolumeSettings::AVERAGE_LENGTHS.start(),
+                max = *VolumeSettings::AVERAGE_LENGTHS.end()
             )
         })
 }
@@ -1032,7 +1033,7 @@ fn runtime_study_registration(
     active: &[RuntimeStudyState],
 ) -> Result<NativeStudyRegistration, String> {
     let registry = super::study_packages::product_study_registry()
-        .map_err(|error| format!("trusted study package registry is invalid: {error}"))?;
+        .map_err(|error| tr!(workspace::STUDY_REGISTRY_INVALID, error = error))?;
     runtime_study_registration_with_registry(state, current_series, active, &registry)
 }
 
@@ -1051,10 +1052,12 @@ fn runtime_study_registration_with_registry(
         .settings
         .iter()
         .map(|setting| {
-            let value = setting
-                .value
-                .as_ref()
-                .ok_or_else(|| format!("study setting {} has no value", setting.identifier))?;
+            let value = setting.value.as_ref().ok_or_else(|| {
+                tr!(
+                    workspace::STUDY_SETTING_NO_VALUE,
+                    setting = setting.identifier
+                )
+            })?;
             Ok((
                 setting.identifier.clone(),
                 runtime_study_setting_value(value)?,
@@ -1082,9 +1085,9 @@ fn runtime_study_registration_with_registry(
             .map(String::as_str)
             .collect::<Vec<_>>()
     {
-        return Err(format!(
-            "study {} output interface no longer matches this workspace",
-            state.identifier
+        return Err(tr!(
+            workspace::STUDY_OUTPUT_INTERFACE_MISMATCH,
+            study = state.identifier
         ));
     }
     Ok(registration)
@@ -1100,7 +1103,7 @@ fn runtime_study_setting_value(
             StudySettingValue::Decimal(StudyDecimal {
                 mantissa: value.mantissa,
                 scale: u8::try_from(value.scale)
-                    .map_err(|_| "study decimal scale is out of range".to_string())?,
+                    .map_err(|_| tr!(workspace::STUDY_DECIMAL_SCALE_RANGE).to_string())?,
             })
         }
         workspace_study_setting_state::Value::Text(value) => StudySettingValue::Text(value.clone()),
@@ -1149,7 +1152,7 @@ pub(super) fn study_decimal_text(value: StudyDecimal) -> String {
 fn parse_study_decimal(text: &str) -> Result<StudyDecimal, String> {
     let text = text.trim();
     if text.is_empty() {
-        return Err("decimal setting cannot be empty".to_string());
+        return Err(tr!(workspace::DECIMAL_EMPTY).to_string());
     }
     let (negative, unsigned) = text
         .strip_prefix('-')
@@ -1165,14 +1168,15 @@ fn parse_study_decimal(text: &str) -> Result<StudyDecimal, String> {
         || fraction.len()
             > usize::from(aeris_market_runtime::study::MAXIMUM_STUDY_SETTING_DECIMAL_SCALE)
     {
-        return Err("decimal setting is invalid".to_string());
+        return Err(tr!(workspace::DECIMAL_INVALID).to_string());
     }
     let whole = if whole.is_empty() { "0" } else { whole };
-    let scale = u8::try_from(fraction.len()).map_err(|_| "decimal scale is invalid".to_string())?;
+    let scale = u8::try_from(fraction.len())
+        .map_err(|_| tr!(workspace::DECIMAL_SCALE_INVALID).to_string())?;
     let factor = 10_i128.pow(u32::from(scale));
     let whole = whole
         .parse::<i128>()
-        .map_err(|_| "decimal setting is out of range".to_string())?;
+        .map_err(|_| tr!(workspace::DECIMAL_OUT_OF_RANGE).to_string())?;
     let fraction = if fraction.is_empty() {
         0
     } else {
@@ -1183,10 +1187,10 @@ fn parse_study_decimal(text: &str) -> Result<StudyDecimal, String> {
     let magnitude = whole
         .checked_mul(factor)
         .and_then(|value| value.checked_add(fraction))
-        .ok_or_else(|| "decimal setting is out of range".to_string())?;
+        .ok_or_else(|| tr!(workspace::DECIMAL_OUT_OF_RANGE).to_string())?;
     let signed = if negative { -magnitude } else { magnitude };
     let mantissa =
-        i64::try_from(signed).map_err(|_| "decimal setting is out of range".to_string())?;
+        i64::try_from(signed).map_err(|_| tr!(workspace::DECIMAL_OUT_OF_RANGE).to_string())?;
     Ok(StudyDecimal { mantissa, scale })
 }
 
@@ -1209,34 +1213,51 @@ fn study_setting_value_from_dialog(
             .draft_values
             .get(&spec.identifier)
             .cloned()
-            .ok_or_else(|| format!("{} has no value", spec.presentation.label)),
+            .ok_or_else(|| tr!(workspace::SETTING_NO_VALUE, label = spec.presentation.label)),
         StudySettingControl::Integer { .. } => {
-            let input = dialog
-                .inputs
-                .get(&spec.identifier)
-                .ok_or_else(|| format!("{} editor is unavailable", spec.presentation.label))?;
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
             input
                 .read(cx)
                 .value()
                 .trim()
                 .parse::<i64>()
                 .map(StudySettingValue::Integer)
-                .map_err(|_| format!("{} must be a whole number", spec.presentation.label))
+                .map_err(|_| {
+                    tr!(
+                        workspace::SETTING_WHOLE_NUMBER,
+                        label = spec.presentation.label
+                    )
+                })
         }
         StudySettingControl::Decimal { .. } => {
-            let input = dialog
-                .inputs
-                .get(&spec.identifier)
-                .ok_or_else(|| format!("{} editor is unavailable", spec.presentation.label))?;
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
             parse_study_decimal(input.read(cx).value().as_ref())
                 .map(StudySettingValue::Decimal)
-                .map_err(|error| format!("{}: {error}", spec.presentation.label))
+                .map_err(|error| {
+                    tr!(
+                        workspace::SETTING_PARSE_ERROR,
+                        label = spec.presentation.label,
+                        error = error
+                    )
+                })
         }
         StudySettingControl::Text => {
-            let input = dialog
-                .inputs
-                .get(&spec.identifier)
-                .ok_or_else(|| format!("{} editor is unavailable", spec.presentation.label))?;
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
             Ok(StudySettingValue::Text(input.read(cx).value().to_string()))
         }
     }
@@ -1262,15 +1283,19 @@ pub(super) fn study_setting_condition_matches(
 
 pub(super) fn study_display_name(identifier: &str) -> String {
     match identifier {
-        aeris_study_sdk::BUILTIN_SMA_IDENTIFIER => "Simple Moving Average".to_string(),
-        aeris_study_sdk::BUILTIN_EMA_IDENTIFIER => "Exponential Moving Average".to_string(),
-        aeris_study_sdk::BUILTIN_WMA_IDENTIFIER => "Weighted Moving Average".to_string(),
-        aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER => "Bollinger Bands".to_string(),
-        aeris_study_sdk::BUILTIN_VWAP_IDENTIFIER => "Volume Weighted Average Price".to_string(),
-        aeris_study_sdk::BUILTIN_RSI_IDENTIFIER => "Relative Strength Index".to_string(),
-        aeris_study_sdk::BUILTIN_MACD_IDENTIFIER => "MACD".to_string(),
-        aeris_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER => "Stochastic".to_string(),
-        aeris_study_sdk::BUILTIN_ATR_IDENTIFIER => "Average True Range".to_string(),
+        aeris_study_sdk::BUILTIN_SMA_IDENTIFIER => tr!(workspace::STUDY_NAME_SMA).to_string(),
+        aeris_study_sdk::BUILTIN_EMA_IDENTIFIER => tr!(workspace::STUDY_NAME_EMA).to_string(),
+        aeris_study_sdk::BUILTIN_WMA_IDENTIFIER => tr!(workspace::STUDY_NAME_WMA).to_string(),
+        aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER => {
+            tr!(workspace::STUDY_NAME_BOLLINGER).to_string()
+        }
+        aeris_study_sdk::BUILTIN_VWAP_IDENTIFIER => tr!(workspace::STUDY_NAME_VWAP).to_string(),
+        aeris_study_sdk::BUILTIN_RSI_IDENTIFIER => tr!(workspace::STUDY_NAME_RSI).to_string(),
+        aeris_study_sdk::BUILTIN_MACD_IDENTIFIER => tr!(workspace::STUDY_NAME_MACD).to_string(),
+        aeris_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER => {
+            tr!(workspace::STUDY_NAME_STOCHASTIC).to_string()
+        }
+        aeris_study_sdk::BUILTIN_ATR_IDENTIFIER => tr!(workspace::STUDY_NAME_ATR).to_string(),
         _ => identifier.to_string(),
     }
 }
@@ -1279,27 +1304,27 @@ fn runtime_study_streams(streams: &[i32]) -> Result<StreamRequirements, String> 
     let mut requirements = StreamRequirements::NONE;
     for stream in streams {
         let stream = WorkspaceStudyMarketStream::try_from(*stream)
-            .map_err(|_| "study market dependency contains an unknown stream".to_string())?;
+            .map_err(|_| tr!(workspace::STUDY_STREAM_UNKNOWN).to_string())?;
         let stream = match stream {
             WorkspaceStudyMarketStream::Bars => MarketStream::Bars,
             WorkspaceStudyMarketStream::Trades => MarketStream::Trades,
             WorkspaceStudyMarketStream::Quotes => MarketStream::Quotes,
             WorkspaceStudyMarketStream::Depth => MarketStream::Depth,
             WorkspaceStudyMarketStream::Unspecified => {
-                return Err("study market dependency contains an unspecified stream".to_string());
+                return Err(tr!(workspace::STUDY_STREAM_UNSPECIFIED).to_string());
             }
         };
         requirements = requirements.with(stream);
     }
     if requirements.is_empty() {
-        return Err("study market dependency has no streams".to_string());
+        return Err(tr!(workspace::STUDY_STREAM_EMPTY).to_string());
     }
     Ok(requirements)
 }
 
 fn runtime_study_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
     let period = aeris_market_runtime::legacy_series_period(series)
-        .ok_or_else(|| "study series cadence is unsupported".to_string())?;
+        .ok_or_else(|| tr!(workspace::STUDY_CADENCE_UNSUPPORTED).to_string())?;
     let series = BarSeriesKey {
         provider_id: series.provider.clone(),
         instrument_id: series.instrument_id.clone(),
@@ -1317,7 +1342,7 @@ fn runtime_study_dependency(
     active: &[RuntimeStudyState],
 ) -> Result<StudyDependency, String> {
     match WorkspaceStudyDependencyKind::try_from(dependency.kind)
-        .map_err(|_| "study dependency kind is unknown".to_string())?
+        .map_err(|_| tr!(workspace::STUDY_DEPENDENCY_KIND_UNKNOWN).to_string())?
     {
         WorkspaceStudyDependencyKind::CurrentChartSeries => {
             Ok(StudyDependency::Market(StudyMarketInput {
@@ -1329,7 +1354,7 @@ fn runtime_study_dependency(
             let series = dependency
                 .series
                 .as_ref()
-                .ok_or_else(|| "study explicit-series dependency has no series".to_string())?;
+                .ok_or_else(|| tr!(workspace::STUDY_DEPENDENCY_NO_SERIES).to_string())?;
             Ok(StudyDependency::Market(StudyMarketInput {
                 series: runtime_study_series(series)?,
                 streams: runtime_study_streams(&dependency.streams)?,
@@ -1340,9 +1365,9 @@ fn runtime_study_dependency(
                 .iter()
                 .find(|state| state.persisted.local_id == dependency.study_local_id)
                 .ok_or_else(|| {
-                    format!(
-                        "study dependency {} has not been restored yet",
-                        dependency.study_local_id
+                    tr!(
+                        workspace::STUDY_DEPENDENCY_NOT_RESTORED,
+                        dependency = dependency.study_local_id
                     )
                 })?;
             let output_index = upstream
@@ -1351,9 +1376,9 @@ fn runtime_study_dependency(
                 .iter()
                 .position(|identifier| identifier == &dependency.output_identifier)
                 .ok_or_else(|| {
-                    format!(
-                        "study dependency output {} is unavailable",
-                        dependency.output_identifier
+                    tr!(
+                        workspace::STUDY_DEPENDENCY_OUTPUT_UNAVAILABLE,
+                        output = dependency.output_identifier
                     )
                 })?;
             Ok(StudyDependency::Output(
@@ -1361,7 +1386,7 @@ fn runtime_study_dependency(
             ))
         }
         WorkspaceStudyDependencyKind::Unspecified => {
-            Err("study dependency kind is unspecified".to_string())
+            Err(tr!(workspace::STUDY_DEPENDENCY_KIND_UNSPECIFIED).to_string())
         }
     }
 }
@@ -1953,9 +1978,8 @@ impl WorkspaceSurface {
             severity: notification_center::NoticeSeverity::Error,
             tone: notification_center::NoticeTone::Loss,
             source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-            title: "Chart settings could not be restored",
-            detail: "Some saved chart settings could not be applied. Review this chart's settings."
-                .into(),
+            title: tr!(workspace::CHART_RESTORE_FAILED_TITLE),
+            detail: tr!(workspace::CHART_RESTORE_FAILED_DETAIL).into(),
             action: None,
             lifetime: notification_center::NoticeLifetime::UntilCleared,
         }));
@@ -2001,9 +2025,8 @@ impl WorkspaceSurface {
                     severity: notification_center::NoticeSeverity::Warning,
                     tone: notification_center::NoticeTone::Warning,
                     source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-                    title: "Market demand unavailable",
-                    detail: "This chart's market priority could not be updated. Try switching tabs again."
-                        .into(),
+                    title: tr!(workspace::MARKET_DEMAND_UNAVAILABLE_TITLE),
+                    detail: tr!(workspace::MARKET_DEMAND_UNAVAILABLE_DETAIL).into(),
                     action: None,
                     lifetime: notification_center::NoticeLifetime::UntilCleared,
                 }));
@@ -2196,8 +2219,8 @@ impl WorkspaceSurface {
         if !aeris_chart_integration::TRADINGVIEW_TIME_ZONES.contains(&time_zone) {
             Self::post_indicator_failure(
                 "chart_time_zone",
-                "Chart settings unavailable",
-                "The selected chart time zone is unsupported.",
+                tr!(workspace::CHART_SETTINGS_UNAVAILABLE),
+                tr!(workspace::CHART_TIME_ZONE_UNSUPPORTED),
                 cx,
             );
             return false;
@@ -2215,8 +2238,8 @@ impl WorkspaceSurface {
         {
             Self::post_indicator_failure(
                 "chart_time_zone",
-                "Chart settings unavailable",
-                "The chart time zone could not be applied.",
+                tr!(workspace::CHART_SETTINGS_UNAVAILABLE),
+                tr!(workspace::CHART_TIME_ZONE_FAILED),
                 cx,
             );
             return false;
@@ -2260,7 +2283,7 @@ impl WorkspaceSurface {
     }
 
     fn post_study_failure(detail: &'static str, cx: &mut Context<Self>) {
-        Self::post_indicator_failure("study", "Study unavailable", detail, cx);
+        Self::post_indicator_failure("study", tr!(workspace::STUDY_UNAVAILABLE), detail, cx);
     }
 
     pub(super) fn apply_highlighted_time_zone(
@@ -2300,9 +2323,7 @@ impl WorkspaceSurface {
         let query = self.timeframe_input.read(cx).value().to_string();
         let intervals = self.quick_timeframe_matches(cx);
         if intervals.is_empty() {
-            let message = format!(
-                "\u{201c}{query}\u{201d} is not an available timeframe. Try 1m, 5m, 1H or 1D."
-            );
+            let message = tr!(workspace::QUICK_TIMEFRAME_UNAVAILABLE, query = query);
             self.chrome.reject_quick_timeframe(query, message);
             cx.notify();
             return;
@@ -2310,7 +2331,7 @@ impl WorkspaceSurface {
         self.apply_highlighted_interval(&intervals, window, cx);
         if self.chrome.is_overlay_open(ChromeOverlay::QuickTimeframe) {
             let message = if self.series_message.is_empty() {
-                "This timeframe could not be applied.".to_string()
+                tr!(workspace::TIMEFRAME_APPLY_FAILED).to_string()
             } else {
                 self.series_message.clone()
             };
@@ -2356,11 +2377,11 @@ impl WorkspaceSurface {
                 | ChartInterval::Day1
         );
         if !aeris_desktop::account::plan_policy().extended_timeframes && !starter_interval {
-            self.series_message = "This timeframe requires a paid plan".to_string();
+            self.series_message = tr!(workspace::TIMEFRAME_REQUIRES_PLAN).to_string();
             Self::post_indicator_failure(
                 "series_selection",
-                "Timeframe unavailable",
-                "This timeframe requires a paid plan.",
+                tr!(workspace::TIMEFRAME_UNAVAILABLE),
+                tr!(workspace::TIMEFRAME_REQUIRES_PLAN_NOTICE),
                 cx,
             );
             cx.notify();
@@ -2377,22 +2398,25 @@ impl WorkspaceSurface {
                 return true;
             }
             let Some(product) = self.product.clone() else {
-                self.series_message = "Select a market before changing the timeframe.".into();
+                self.series_message = tr!(workspace::SELECT_MARKET_BEFORE_TIMEFRAME).into();
                 Self::post_indicator_failure(
                     "series_selection",
-                    "Timeframe unavailable",
-                    "Select a market before changing the timeframe.",
+                    tr!(workspace::TIMEFRAME_UNAVAILABLE),
+                    tr!(workspace::SELECT_MARKET_BEFORE_TIMEFRAME),
                     cx,
                 );
                 cx.notify();
                 return false;
             };
             let Ok(sequence) = self.market_worker.try_select_instrument(product, interval) else {
-                self.series_message = format!("{} history could not start", interval.label());
+                self.series_message = tr!(
+                    workspace::INTERVAL_HISTORY_FAILED,
+                    interval = interval.label()
+                );
                 Self::post_indicator_failure(
                     "series_selection",
-                    "Timeframe unavailable",
-                    "Market history could not start. Try again.",
+                    tr!(workspace::TIMEFRAME_UNAVAILABLE),
+                    tr!(workspace::MARKET_HISTORY_FAILED),
                     cx,
                 );
                 cx.notify();
@@ -2443,8 +2467,8 @@ impl WorkspaceSurface {
         else {
             Self::post_indicator_failure(
                 "series_selection",
-                "Market history unavailable",
-                "Market history could not start. Try again.",
+                tr!(workspace::MARKET_HISTORY_UNAVAILABLE),
+                tr!(workspace::MARKET_HISTORY_FAILED),
                 cx,
             );
             cx.notify();
@@ -2627,7 +2651,7 @@ impl WorkspaceSurface {
                         .reject_selection(selection.generation);
                     Self::post_symbol_selection_notice(
                         selection.provider,
-                        "Market selection could not be scheduled. Try again.",
+                        tr!(workspace::MARKET_SELECTION_UNSCHEDULED),
                         cx,
                     );
                     cx.notify();
@@ -2655,7 +2679,7 @@ impl WorkspaceSurface {
                     .reject_selection(selection.generation);
                 Self::post_symbol_selection_notice(
                     selection.provider,
-                    "Market selection could not be scheduled. Try again.",
+                    tr!(workspace::MARKET_SELECTION_UNSCHEDULED),
                     cx,
                 );
                 cx.notify();
@@ -3636,7 +3660,12 @@ impl WorkspaceSurface {
     }
 
     fn post_chart_failure(failure: ChartFailure, cx: &mut Context<Self>) {
-        Self::post_indicator_failure("chart_state", "Chart unavailable", failure.detail(), cx);
+        Self::post_indicator_failure(
+            "chart_state",
+            tr!(workspace::CHART_UNAVAILABLE),
+            failure.detail(),
+            cx,
+        );
     }
 
     fn clear_chart_failure(&mut self, cx: &mut Context<Self>) {
@@ -3832,10 +3861,7 @@ impl WorkspaceSurface {
     ) {
         match scope {
             aeris_desktop::market_worker::LocalFailureScope::Catalog => {
-                Self::post_symbol_search_notice(
-                    "The market catalog is unavailable. Try again later.",
-                    cx,
-                );
+                Self::post_symbol_search_notice(tr!(workspace::CATALOG_UNAVAILABLE), cx);
             }
             aeris_desktop::market_worker::LocalFailureScope::Selection(generation) => {
                 self.apply_series_state_message(generation, ChartState::Error, message, cx);
@@ -4165,7 +4191,7 @@ impl WorkspaceSurface {
         let product = self
             .product
             .as_ref()
-            .ok_or_else(|| "market selection is unavailable for this study".to_string())?;
+            .ok_or_else(|| tr!(workspace::STUDY_MARKET_UNAVAILABLE).to_string())?;
         engine_market_worker::series_key(product, self.interval)
     }
 
@@ -4257,8 +4283,8 @@ impl WorkspaceSurface {
                     diagnostic!("Aeris study could not be queued: {reason}");
                     Self::post_indicator_failure(
                         "study",
-                        "Study unavailable",
-                        "The study could not be queued. Try again.",
+                        tr!(workspace::STUDY_UNAVAILABLE),
+                        tr!(workspace::STUDY_QUEUE_FAILED),
                         cx,
                     );
                 }
@@ -4361,8 +4387,8 @@ impl WorkspaceSurface {
                 diagnostic!("Aeris study could not be updated: {reason}");
                 Self::post_indicator_failure(
                     "study",
-                    "Study unavailable",
-                    "The study could not be updated. Try again.",
+                    tr!(workspace::STUDY_UNAVAILABLE),
+                    tr!(workspace::STUDY_UPDATE_FAILED),
                     cx,
                 );
             }
@@ -4431,8 +4457,8 @@ impl WorkspaceSurface {
         }
         Self::post_indicator_failure(
             "study",
-            "Study unavailable",
-            "The study could not be added. Try again.",
+            tr!(workspace::STUDY_UNAVAILABLE),
+            tr!(workspace::STUDY_ADD_FAILED),
             cx,
         );
     }
@@ -4460,9 +4486,9 @@ impl WorkspaceSurface {
         if let Some(dialog) = self.study_settings_dialog_mut()
             && dialog.study_id == study_id
         {
-            dialog.message = Some("Study settings could not be applied. Try again.".into());
+            dialog.message = Some(tr!(workspace::STUDY_SETTINGS_APPLY_FAILED).into());
         }
-        Self::post_study_failure("Study settings could not be applied. Try again.", cx);
+        Self::post_study_failure(tr!(workspace::STUDY_SETTINGS_APPLY_FAILED), cx);
         self.send_queued_study_settings(study_id, cx);
     }
 
@@ -4509,8 +4535,8 @@ impl WorkspaceSurface {
         if !self.studies.removal_failed(study_id) {
             Self::post_indicator_failure(
                 "study",
-                "Study unavailable",
-                "The study could not be removed. Try again.",
+                tr!(workspace::STUDY_UNAVAILABLE),
+                tr!(workspace::STUDY_REMOVE_FAILED),
                 cx,
             );
         }
@@ -4786,14 +4812,14 @@ impl WorkspaceSurface {
                 if instrument_changed {
                     Self::post_symbol_selection_notice(
                         self.provider,
-                        "Market selection failed. Try again.",
+                        tr!(workspace::MARKET_SELECTION_FAILED),
                         cx,
                     );
                 } else {
                     Self::post_indicator_failure(
                         "series_selection",
-                        "Timeframe unavailable",
-                        "Market history could not start. Try again.",
+                        tr!(workspace::TIMEFRAME_UNAVAILABLE),
+                        tr!(workspace::MARKET_HISTORY_FAILED),
                         cx,
                     );
                 }
@@ -4941,7 +4967,11 @@ impl WorkspaceSurface {
         {
             self.market_state.symbol_selection_pending = false;
             self.symbol_entry.forget_pending_selection();
-            Self::post_symbol_selection_notice(provider, "Market selection failed. Try again.", cx);
+            Self::post_symbol_selection_notice(
+                provider,
+                tr!(workspace::MARKET_SELECTION_FAILED),
+                cx,
+            );
             cx.notify();
         }
     }
@@ -4962,14 +4992,14 @@ impl WorkspaceSurface {
         if !instrument_switch && failed_interval.is_some_and(|interval| interval != self.interval) {
             Self::post_indicator_failure(
                 "series_selection",
-                "Timeframe unavailable",
-                "Market history could not start. Try again.",
+                tr!(workspace::TIMEFRAME_UNAVAILABLE),
+                tr!(workspace::MARKET_HISTORY_FAILED),
                 cx,
             );
         } else {
             Self::post_symbol_selection_notice(
                 self.provider,
-                "Market selection failed. Try again.",
+                tr!(workspace::MARKET_SELECTION_FAILED),
                 cx,
             );
         }
@@ -5604,8 +5634,8 @@ impl WorkspaceSurface {
             Err(_) => {
                 Self::post_indicator_failure(
                     "order_flow",
-                    "Order flow unavailable",
-                    "The order-flow settings could not be applied.",
+                    tr!(workspace::ORDER_FLOW_UNAVAILABLE),
+                    tr!(workspace::ORDER_FLOW_SETTINGS_FAILED),
                     cx,
                 );
                 false
@@ -5818,8 +5848,8 @@ impl WorkspaceSurface {
             if shows_order_flow {
                 Self::post_indicator_failure(
                     "order_flow",
-                    "Order flow unavailable",
-                    "Footprint needs a published price increment for this market.",
+                    tr!(workspace::ORDER_FLOW_UNAVAILABLE),
+                    tr!(workspace::FOOTPRINT_NEEDS_INCREMENT),
                     cx,
                 );
             } else {
@@ -5854,8 +5884,8 @@ impl WorkspaceSurface {
                 diagnostic!("Aeris pane order-flow tape could not be applied: {error}");
                 Self::post_indicator_failure(
                     "order_flow",
-                    "Order flow unavailable",
-                    "The current trade tape could not be applied to the chart.",
+                    tr!(workspace::ORDER_FLOW_UNAVAILABLE),
+                    tr!(workspace::TRADE_TAPE_APPLY_FAILED),
                     cx,
                 );
             }
@@ -5866,8 +5896,8 @@ impl WorkspaceSurface {
         if !super::provider_chart_types(self.provider).contains(&chart_type) {
             Self::post_indicator_failure(
                 "chart_type",
-                "Chart settings unavailable",
-                "This chart type needs trade prints that the selected market does not publish.",
+                tr!(workspace::CHART_SETTINGS_UNAVAILABLE),
+                tr!(workspace::CHART_TYPE_NEEDS_TRADES),
                 cx,
             );
             return;
@@ -5915,7 +5945,7 @@ impl WorkspaceSurface {
             severity: notification_center::NoticeSeverity::Error,
             tone: notification_center::NoticeTone::Loss,
             source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-            title: "Symbol search unavailable",
+            title: tr!(workspace::SYMBOL_SEARCH_UNAVAILABLE),
             detail: detail.into(),
             action: None,
             lifetime: notification_center::NoticeLifetime::UntilCleared,
@@ -5931,7 +5961,7 @@ impl WorkspaceSurface {
             severity: notification_center::NoticeSeverity::Warning,
             tone: notification_center::NoticeTone::Warning,
             source: notification_center::NoticeSource::Provider(provider.id()),
-            title: "Market selection unavailable",
+            title: tr!(workspace::MARKET_SELECTION_UNAVAILABLE),
             detail: detail.into(),
             action: None,
             lifetime: notification_center::NoticeLifetime::UntilCleared,
@@ -5948,23 +5978,22 @@ impl WorkspaceSurface {
     /// Derive normal menu status from accepted browser and chart state, not a second string.
     pub(super) fn symbol_selector_status(&self) -> String {
         if self.market_state.symbol_selection_pending {
-            return "Selecting market".into();
+            return tr!(workspace::SELECTING_MARKET).into();
         }
         match self.symbol_entry.browser().status() {
-            SymbolBrowserStatus::Searching => return "Searching provider markets".into(),
+            SymbolBrowserStatus::Searching => {
+                return tr!(workspace::SEARCHING_PROVIDER_MARKETS).into();
+            }
             SymbolBrowserStatus::Listed(SymbolListingSummary::Products(count)) => {
-                return format!(
-                    "{} · choose one for its front month",
-                    counted(count, "product", "products")
-                );
+                return tr_count!(workspace::PRODUCTS_FRONT_MONTH, count);
             }
             SymbolBrowserStatus::Listed(SymbolListingSummary::Contracts(count)) => {
-                return counted(count, "contract", "contracts");
+                return tr_count!(workspace::CONTRACTS_LISTED, count);
             }
             SymbolBrowserStatus::Listed(SymbolListingSummary::Markets(count)) => {
-                return format!("{count} matching markets · search to find more");
+                return tr_count!(workspace::MATCHING_MARKETS, count);
             }
-            SymbolBrowserStatus::NoMatches => return "No markets found".into(),
+            SymbolBrowserStatus::NoMatches => return tr!(workspace::NO_MARKETS_FOUND).into(),
             SymbolBrowserStatus::Idle => {}
         }
         if self.symbol_entry.browser().covers(self.provider)
@@ -5978,7 +6007,7 @@ impl WorkspaceSurface {
             .scoped_provider()
             .and_then(super::provider_presentation)
             .map_or_else(
-                || "Search provider markets".into(),
+                || tr!(workspace::SEARCH_PROVIDER_MARKETS).into(),
                 |descriptor| descriptor.search_hint.into(),
             )
     }
@@ -5987,10 +6016,7 @@ impl WorkspaceSurface {
     /// own listing. A provider still answering an older query drops that reply.
     pub(super) fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
         let Ok(requests) = self.symbol_entry.browser_mut().begin_search(query) else {
-            Self::post_symbol_search_notice(
-                "Enter a market query of at most 64 printable bytes.",
-                cx,
-            );
+            Self::post_symbol_search_notice(tr!(workspace::MARKET_QUERY_TOO_LONG), cx);
             cx.notify();
             return false;
         };
@@ -6029,10 +6055,7 @@ impl WorkspaceSurface {
             request.request_id,
             SymbolSearchFailure::Failed,
         );
-        Self::post_symbol_search_notice(
-            "The market search could not complete. Try again later.",
-            cx,
-        );
+        Self::post_symbol_search_notice(tr!(workspace::MARKET_SEARCH_FAILED), cx);
         cx.notify();
         false
     }
@@ -6062,7 +6085,7 @@ impl WorkspaceSurface {
             OpenedProduct::NoContracts(product) => {
                 Self::post_symbol_selection_notice(
                     product.provider,
-                    &format!("No {} contracts are listed.", product.code),
+                    &tr!(workspace::NO_PRODUCT_CONTRACTS, product = product.code),
                     cx,
                 );
                 false
@@ -6080,10 +6103,7 @@ impl WorkspaceSurface {
             ExactSymbolMatch::Pending => false,
             ExactSymbolMatch::Missing => {
                 self.symbol_entry.clear_mnemonic();
-                Self::post_symbol_search_notice(
-                    "No exact market matched the requested symbol.",
-                    cx,
-                );
+                Self::post_symbol_search_notice(tr!(workspace::NO_EXACT_MARKET), cx);
                 false
             }
             ExactSymbolMatch::Found(selection) => {
@@ -6115,10 +6135,7 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(input) = self.symbol_entry.input().cloned() else {
-            Self::post_symbol_search_notice(
-                "The market search is unavailable. Try again later.",
-                cx,
-            );
+            Self::post_symbol_search_notice(tr!(workspace::MARKET_SEARCH_UNAVAILABLE), cx);
             cx.notify();
             return false;
         };
@@ -6299,10 +6316,7 @@ impl WorkspaceSurface {
         );
         // With several providers in scope a provider that cannot answer lists nothing.
         if self.symbol_entry.browser().scoped_provider().is_some() {
-            Self::post_symbol_search_notice(
-                "The market search could not complete. Try again later.",
-                cx,
-            );
+            Self::post_symbol_search_notice(tr!(workspace::MARKET_SEARCH_FAILED), cx);
         }
         self.resolve_pending_mnemonic(cx);
     }
@@ -6416,8 +6430,8 @@ impl WorkspaceSurface {
                 severity: notification_center::NoticeSeverity::Error,
                 tone: notification_center::NoticeTone::Loss,
                 source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-                title: "Order book unavailable",
-                detail: "The order book request could not be sent. Try again later.".into(),
+                title: tr!(workspace::ORDER_BOOK_UNAVAILABLE),
+                detail: tr!(workspace::ORDER_BOOK_REQUEST_FAILED).into(),
                 action: None,
                 lifetime: notification_center::NoticeLifetime::UntilCleared,
             }));
@@ -6480,7 +6494,7 @@ impl WorkspaceSurface {
             .map(|source| {
                 let input = cx.new(|input_cx| {
                     InputState::new(window, input_cx)
-                        .placeholder("Enter a new key")
+                        .placeholder(tr!(workspace::ENTER_NEW_KEY))
                         .masked(true)
                 });
                 (source, input)
@@ -6504,18 +6518,18 @@ impl WorkspaceSurface {
             .collect::<Vec<_>>();
         if entries.is_empty() {
             self.context_panel
-                .set_credential_message("No keys were entered; existing keys are unchanged.");
+                .set_credential_message(tr!(workspace::CREDENTIAL_NO_KEYS));
             cx.notify();
             return;
         }
         let Some(service) = self.lifecycle.context_service() else {
             self.context_panel
-                .set_credential_message("Context runtime is unavailable.");
+                .set_credential_message(tr!(workspace::CREDENTIAL_RUNTIME_UNAVAILABLE));
             cx.notify();
             return;
         };
         self.context_panel
-            .set_credential_message("Saving keys to the native credential vault…");
+            .set_credential_message(tr!(workspace::CREDENTIAL_SAVING));
         let save = cx.background_executor().spawn(async move {
             for (source, value) in entries {
                 service.store_api_key(source, value)?;
@@ -6526,8 +6540,8 @@ impl WorkspaceSurface {
             let result = save.await;
             if let Err(error) = surface.update(cx, |surface, surface_cx| {
                 surface.context_panel.set_credential_message(match result {
-                    Ok(()) => "Keys saved; source refreshes were scheduled.".to_string(),
-                    Err(error) => format!("Keys could not be saved: {error}"),
+                    Ok(()) => tr!(workspace::CREDENTIAL_SAVED).to_string(),
+                    Err(error) => tr!(workspace::CREDENTIAL_SAVE_FAILED, error = error),
                 });
                 surface_cx.notify();
             }) && surface.upgrade().is_some()
@@ -6739,21 +6753,21 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         if self.studies.is_busy(study_id) {
-            Self::post_study_failure("Study settings are busy. Try again.", cx);
+            Self::post_study_failure(tr!(workspace::STUDY_SETTINGS_BUSY), cx);
             return;
         }
         let Some(active) = self.studies.active_study(study_id).cloned() else {
-            Self::post_study_failure("This study is no longer active.", cx);
+            Self::post_study_failure(tr!(workspace::STUDY_NO_LONGER_ACTIVE), cx);
             return;
         };
         let Ok(series) = self.current_runtime_series() else {
-            Self::post_study_failure("Chart data is not available for this study yet.", cx);
+            Self::post_study_failure(tr!(workspace::CHART_DATA_UNAVAILABLE_FOR_STUDY), cx);
             return;
         };
         let Ok(registration) =
             runtime_study_registration(&active.persisted, &series, self.studies.active())
         else {
-            Self::post_study_failure("Study settings could not be loaded.", cx);
+            Self::post_study_failure(tr!(workspace::STUDY_SETTINGS_LOAD_FAILED), cx);
             return;
         };
         let mut draft_values = BTreeMap::new();
@@ -6761,7 +6775,7 @@ impl WorkspaceSurface {
         let mut subscriptions = Vec::new();
         for spec in &registration.definition.settings {
             let Some(value) = registration.settings.get(&spec.identifier).cloned() else {
-                Self::post_study_failure("Study settings are incomplete.", cx);
+                Self::post_study_failure(tr!(workspace::STUDY_SETTINGS_INCOMPLETE), cx);
                 return;
             };
             if let Some(text) = study_setting_input_text(&value) {
@@ -7000,7 +7014,7 @@ impl WorkspaceSurface {
         {
             picker.error = normalized
                 .is_none()
-                .then(|| "Enter a hex color such as #2962FF or #2962FF80.".to_string());
+                .then(|| tr!(workspace::HEX_COLOR_HINT).to_string());
         }
         if let Some(color) = normalized
             && let Some(draft) = dialog
@@ -7061,7 +7075,7 @@ impl WorkspaceSurface {
                 .request_study_settings(study_id, original.settings, cx)
                 .is_err()
             {
-                Self::post_study_failure("Study settings could not be restored. Try again.", cx);
+                Self::post_study_failure(tr!(workspace::STUDY_SETTINGS_RESTORE_FAILED), cx);
             }
         }
         cx.notify();
@@ -7078,8 +7092,8 @@ impl WorkspaceSurface {
         if !self.studies.is_active(study_id) {
             Self::post_indicator_failure(
                 "study",
-                "Study unavailable",
-                "This study is no longer active.",
+                tr!(workspace::STUDY_UNAVAILABLE),
+                tr!(workspace::STUDY_NO_LONGER_ACTIVE),
                 cx,
             );
             return;
@@ -7097,8 +7111,8 @@ impl WorkspaceSurface {
         if self.market_worker.try_remove_study(study_id).is_err() {
             Self::post_indicator_failure(
                 "study",
-                "Study unavailable",
-                "The study could not be removed. Try again.",
+                tr!(workspace::STUDY_UNAVAILABLE),
+                tr!(workspace::STUDY_REMOVE_FAILED),
                 cx,
             );
             return false;
@@ -7206,7 +7220,7 @@ impl WorkspaceSurface {
             .active_study(study_id)
             .map(|state| state.persisted.output_identifiers.len())
         else {
-            return Err("Study is no longer active".to_string());
+            return Err(tr!(workspace::STUDY_INACTIVE).to_string());
         };
         let line_width = dialog.line_width;
         let output_colors = persisted_output_colors(output_count, &dialog.output_colors);
@@ -7237,7 +7251,7 @@ impl WorkspaceSurface {
     ) -> Result<(), String> {
         let replacement = match self.studies.request_settings(study_id, settings) {
             StudySettingsRequest::Inactive => {
-                return Err("Study is no longer active".to_string());
+                return Err(tr!(workspace::STUDY_INACTIVE).to_string());
             }
             StudySettingsRequest::Waiting | StudySettingsRequest::Unchanged => return Ok(()),
             StudySettingsRequest::Reinitialize(replacement) => replacement,
@@ -7247,7 +7261,7 @@ impl WorkspaceSurface {
                 .map(|registration| (series, registration))
         })?;
         if !self.retry_automatic_study_removals(cx) {
-            return Err("Study cancellation is waiting for runtime capacity".to_string());
+            return Err(tr!(workspace::STUDY_CANCEL_WAITING).to_string());
         }
         match self
             .market_worker
@@ -7264,9 +7278,11 @@ impl WorkspaceSurface {
                 Ok(())
             }
             Err(TrySendError::Full(_)) => {
-                Err("Study settings queue is busy; try again".to_string())
+                Err(tr!(workspace::STUDY_SETTINGS_QUEUE_BUSY).to_string())
             }
-            Err(TrySendError::Disconnected(_)) => Err("Study runtime is unavailable".to_string()),
+            Err(TrySendError::Disconnected(_)) => {
+                Err(tr!(workspace::STUDY_RUNTIME_UNAVAILABLE).to_string())
+            }
         }
     }
 
@@ -7284,7 +7300,7 @@ impl WorkspaceSurface {
             dialog.message = Some(message);
             cx.notify();
         } else {
-            Self::post_study_failure("Study settings could not be applied. Try again.", cx);
+            Self::post_study_failure(tr!(workspace::STUDY_SETTINGS_APPLY_FAILED), cx);
         }
     }
 
@@ -7311,15 +7327,16 @@ impl WorkspaceSurface {
         let Some(settings) = settings else {
             Self::post_indicator_failure(
                 "big_trades_settings",
-                "Order flow unavailable",
-                "Big trades is no longer on this chart.",
+                tr!(workspace::ORDER_FLOW_UNAVAILABLE),
+                tr!(workspace::BIG_TRADES_REMOVED),
                 cx,
             );
             return;
         };
         let (intensity, fixed_minimum) = big_trades_filter_draft(settings.filter);
-        let minimum_volume =
-            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Order volume"));
+        let minimum_volume = cx.new(|input_cx| {
+            InputState::new(window, input_cx).placeholder(tr!(workspace::ORDER_VOLUME))
+        });
         if let Some(volume) = fixed_minimum.or(threshold) {
             minimum_volume.update(cx, |input, input_cx| {
                 input.set_value(big_trades_volume_text(volume), window, input_cx);
@@ -7385,10 +7402,10 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let Some(mut settings) = self.chart_order_flow_settings(cx) else {
-            return Err("The chart is unavailable".to_string());
+            return Err(tr!(workspace::CHART_UNAVAILABLE_DIALOG).to_string());
         };
         let Some(current) = settings.big_trades else {
-            return Err("Big trades is no longer on this chart".to_string());
+            return Err(tr!(workspace::BIG_TRADES_REMOVED_DIALOG).to_string());
         };
         let replacement = BigTradesSettings {
             filter,
@@ -7403,7 +7420,7 @@ impl WorkspaceSurface {
         if self.set_chart_order_flow_settings(settings, cx) {
             Ok(())
         } else {
-            Err("The chart could not apply these settings".to_string())
+            Err(tr!(workspace::CHART_APPLY_SETTINGS_FAILED).to_string())
         }
     }
 
@@ -7498,14 +7515,14 @@ impl WorkspaceSurface {
         let Some(settings) = settings else {
             Self::post_indicator_failure(
                 "volume_settings",
-                "Study unavailable",
-                "Volume is no longer on this chart.",
+                tr!(workspace::STUDY_UNAVAILABLE),
+                tr!(workspace::VOLUME_REMOVED),
                 cx,
             );
             return;
         };
         let average_length =
-            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Bars"));
+            cx.new(|input_cx| InputState::new(window, input_cx).placeholder(tr!(workspace::BARS)));
         average_length.update(cx, |input, input_cx| {
             input.set_value(settings.average.length.to_string(), window, input_cx);
         });
@@ -7563,17 +7580,17 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let Some(chart) = &self.chart else {
-            return Err("The chart is unavailable".to_string());
+            return Err(tr!(workspace::CHART_UNAVAILABLE_DIALOG).to_string());
         };
         let changed = chart.update(cx, |chart, chart_cx| {
             if chart.volume_settings().is_none() {
-                return Err("Volume is no longer on this chart".to_string());
+                return Err(tr!(workspace::VOLUME_REMOVED_DIALOG).to_string());
             }
             if chart.volume_settings().as_ref() == Some(&settings) {
                 return Ok(false);
             }
             if !chart.set_volume_settings(settings) {
-                return Err("The chart could not apply these settings".to_string());
+                return Err(tr!(workspace::CHART_APPLY_SETTINGS_FAILED).to_string());
             }
             chart_cx.notify();
             Ok(true)
@@ -7685,7 +7702,7 @@ impl WorkspaceSurface {
         {
             picker.error = normalized
                 .is_none()
-                .then(|| "Enter a hex color such as #2962FF or #2962FF80.".to_string());
+                .then(|| tr!(workspace::HEX_COLOR_HINT).to_string());
         }
         let Some(color) = normalized else {
             return cx.notify();
@@ -7753,8 +7770,8 @@ impl WorkspaceSurface {
                 Err(_) => {
                     Self::post_indicator_failure(
                         "study",
-                        "Study unavailable",
-                        "Some studies could not be removed. Try again.",
+                        tr!(workspace::STUDY_UNAVAILABLE),
+                        tr!(workspace::STUDIES_REMOVE_FAILED),
                         cx,
                     );
                 }
@@ -7796,26 +7813,26 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(chart) = self.chart.clone() else {
-            Self::post_study_failure("Chart data is not available yet.", cx);
+            Self::post_study_failure(tr!(workspace::CHART_DATA_UNAVAILABLE_YET), cx);
             return false;
         };
         if let Some(maximum) = aeris_desktop::account::plan_policy().studies_per_chart
             && chart.read(cx).indicator_states().len() + self.studies.count() >= maximum
         {
-            Self::post_study_failure("This chart has reached its indicator limit.", cx);
+            Self::post_study_failure(tr!(workspace::INDICATOR_LIMIT_REACHED), cx);
             return false;
         }
         if runtime_managed_indicator(indicator) {
             if self.current_runtime_series().is_err() {
-                Self::post_study_failure("Chart data is not available for this study yet.", cx);
+                Self::post_study_failure(tr!(workspace::CHART_DATA_UNAVAILABLE_FOR_STUDY), cx);
                 return false;
             }
             let Some(local_id) = self.studies.allocate_local_id() else {
-                Self::post_study_failure("Study identity space is exhausted.", cx);
+                Self::post_study_failure(tr!(workspace::STUDY_IDENTITY_EXHAUSTED), cx);
                 return false;
             };
             let Some(persisted) = default_runtime_study(local_id, indicator, true) else {
-                Self::post_study_failure("Study implementation is unavailable.", cx);
+                Self::post_study_failure(tr!(workspace::STUDY_IMPLEMENTATION_UNAVAILABLE), cx);
                 return false;
             };
             let state = PendingRuntimeStudyState {
@@ -7826,7 +7843,7 @@ impl WorkspaceSurface {
                 blocked: false,
             };
             if self.dispatch_runtime_study(state, cx).is_err() {
-                Self::post_study_failure("The study could not be queued. Try again.", cx);
+                Self::post_study_failure(tr!(workspace::STUDY_QUEUE_FAILED), cx);
                 return false;
             }
             self.record_runtime_study_edit(true, vec![persisted], cx);
@@ -7843,7 +7860,7 @@ impl WorkspaceSurface {
             result
         });
         if result.is_err() {
-            Self::post_study_failure("The indicator could not be added.", cx);
+            Self::post_study_failure(tr!(workspace::INDICATOR_ADD_FAILED), cx);
             return false;
         }
         Self::clear_indicator_failure("study", cx);

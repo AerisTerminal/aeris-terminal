@@ -12,6 +12,7 @@ gpui = ["dep:aeris_design_system", "dep:gpui"]
 
 [dependencies]
 aeris_instruments = { path = "../../domain/instruments" }
+aeris_localization = { path = "../../localization" }
 aeris_design_system = { path = "../design_system", optional = true }
 aeris_market_data = { path = "../../domain/market_data" }
 aeris_trading = { path = "../../domain/trading" }

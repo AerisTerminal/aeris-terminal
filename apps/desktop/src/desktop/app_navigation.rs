@@ -3,6 +3,7 @@
 
 use super::market_screener::{AppView, MarketScreener};
 use super::*;
+use aeris_localization::{panels, tr};
 
 const APP_NAVIGATION_MENU_WIDTH: f32 = 200.0;
 const APP_NAVIGATION_MENU_GAP: f32 = 4.0;
@@ -26,11 +27,11 @@ pub(super) fn app_navigation_button(
     let toggle_terminal = terminal.clone();
     chrome_tooltip(
         "app_navigation",
-        "Switch page",
+        tr!(panels::APP_NAVIGATION_SWITCH),
         Button::new("app_navigation", theme)
             .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Lg)
-            .aria_label(format!("Page: {}", current.label()))
+            .aria_label(tr!(panels::APP_NAVIGATION_PAGE, label = current.label()))
             .icon(header_icon(current.icon()))
             .label(current.label())
             .caret(header_icon(HugeIcon::ChevronDown))

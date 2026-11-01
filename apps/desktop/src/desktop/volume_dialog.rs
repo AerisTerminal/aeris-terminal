@@ -3,15 +3,19 @@ use super::big_trades_dialog::{
     settings_groups,
 };
 use super::*;
+use aeris_localization::{Text, common, panels, tr};
 
-const PLACEMENT_CHOICES: [(&str, VolumePlacement); 2] = [
-    ("Price pane", VolumePlacement::PricePane),
-    ("Own pane", VolumePlacement::OwnPane),
+const PLACEMENT_CHOICES: [(Text, VolumePlacement); 2] = [
+    (
+        panels::VOLUME_PLACEMENT_PRICE_PANE,
+        VolumePlacement::PricePane,
+    ),
+    (panels::VOLUME_PLACEMENT_OWN_PANE, VolumePlacement::OwnPane),
 ];
 
-const AVERAGE_KIND_CHOICES: [(&str, VolumeAverageKind); 2] = [
-    ("SMA", VolumeAverageKind::Simple),
-    ("EMA", VolumeAverageKind::Exponential),
+const AVERAGE_KIND_CHOICES: [(Text, VolumeAverageKind); 2] = [
+    (panels::VOLUME_AVERAGE_SMA, VolumeAverageKind::Simple),
+    (panels::VOLUME_AVERAGE_EMA, VolumeAverageKind::Exponential),
 ];
 
 /// A swatch that opens the color picker for one volume color. Picks preview at once. A
@@ -73,8 +77,8 @@ fn columns_row(
     theme: &AerisTheme,
 ) -> AnyElement {
     setting_row(
-        "Columns",
-        "Each column takes the color of the bar that traded it.",
+        tr!(panels::VOLUME_COLUMNS),
+        tr!(panels::VOLUME_COLUMNS_DESCRIPTION),
         control_strip([
             color_control(app, dialog, VolumeColorTarget::Up, true, theme),
             color_control(app, dialog, VolumeColorTarget::Down, true, theme),
@@ -90,7 +94,7 @@ fn placement_row(
 ) -> AnyElement {
     let choices = SettingDropdown {
         menu: "volume_placement",
-        label: "Placement",
+        label: tr!(panels::VOLUME_PLACEMENT),
         open_menu: dialog.menu.as_deref(),
         enabled: true,
         choices: dropdown_choices(&PLACEMENT_CHOICES, |placement| {
@@ -99,10 +103,10 @@ fn placement_row(
     }
     .render(app, WorkspaceSurface::set_volume_dialog_placement, theme);
     let description = match dialog.draft.placement {
-        VolumePlacement::PricePane => "Columns sit along the bottom of the price chart.",
-        VolumePlacement::OwnPane => "Columns get a pane and scale of their own below the price.",
+        VolumePlacement::PricePane => tr!(panels::VOLUME_PLACEMENT_PRICE_DESCRIPTION),
+        VolumePlacement::OwnPane => tr!(panels::VOLUME_PLACEMENT_OWN_DESCRIPTION),
     };
-    setting_row("Placement", description, choices, theme)
+    setting_row(tr!(panels::VOLUME_PLACEMENT), description, choices, theme)
 }
 
 fn average_switch_row(
@@ -116,11 +120,11 @@ fn average_switch_row(
         .child(
             SwitchRow::new(
                 "volume_average_enabled",
-                "Moving average",
+                tr!(panels::VOLUME_MOVING_AVERAGE),
                 dialog.draft.average.enabled,
                 theme,
             )
-            .description("Draw the average volume over the columns.")
+            .description(tr!(panels::VOLUME_MOVING_AVERAGE_DESCRIPTION))
             .on_change(move |enabled, _, _, cx| {
                 update.update(cx, |surface, surface_cx| {
                     surface.set_volume_dialog_average_enabled(enabled, surface_cx);
@@ -137,7 +141,7 @@ fn average_kind_row(
 ) -> AnyElement {
     let choices = SettingDropdown {
         menu: "volume_average_kind",
-        label: "Average type",
+        label: tr!(panels::VOLUME_AVERAGE_TYPE),
         open_menu: dialog.menu.as_deref(),
         enabled: true,
         choices: dropdown_choices(&AVERAGE_KIND_CHOICES, |kind| {
@@ -146,16 +150,21 @@ fn average_kind_row(
     }
     .render(app, WorkspaceSurface::set_volume_dialog_average_kind, theme);
     let description = match dialog.draft.average.kind {
-        VolumeAverageKind::Simple => "Simple: every bar in the length counts equally.",
-        VolumeAverageKind::Exponential => "Exponential: recent bars count more.",
+        VolumeAverageKind::Simple => tr!(panels::VOLUME_AVERAGE_SMA_DESCRIPTION),
+        VolumeAverageKind::Exponential => tr!(panels::VOLUME_AVERAGE_EMA_DESCRIPTION),
     };
-    setting_row("Average type", description, choices, theme)
+    setting_row(
+        tr!(panels::VOLUME_AVERAGE_TYPE),
+        description,
+        choices,
+        theme,
+    )
 }
 
 fn average_length_row(dialog: &VolumeDialogState, theme: &AerisTheme) -> AnyElement {
     setting_row(
-        "Length",
-        "Number of bars averaged, from 1 to 500.",
+        tr!(panels::VOLUME_LENGTH),
+        tr!(panels::VOLUME_LENGTH_DESCRIPTION),
         setting_input(&dialog.average_length, theme),
         theme,
     )
@@ -167,8 +176,8 @@ fn average_color_row(
     theme: &AerisTheme,
 ) -> AnyElement {
     setting_row(
-        "Average color",
-        "Color of the moving-average line.",
+        tr!(panels::VOLUME_AVERAGE_COLOR),
+        tr!(panels::VOLUME_AVERAGE_COLOR_DESCRIPTION),
         color_control(app, dialog, VolumeColorTarget::Average, false, theme),
         theme,
     )
@@ -187,13 +196,13 @@ pub(super) fn volume_dialog_layer(
     Dialog::new("volume_dialog", DialogSize::Md, theme, move |_, cx| {
         dismiss.update(cx, WorkspaceSurface::close_volume_dialog);
     })
-    .title("Indicator settings")
-    .subtitle("Volume")
+    .title(tr!(panels::INDICATOR_SETTINGS))
+    .subtitle(tr!(panels::VOLUME))
     .max_height(px(680.0))
     .child(settings_groups(
         [
             settings_group(
-                "Columns",
+                tr!(panels::VOLUME_COLUMNS),
                 [
                     columns_row(app, dialog, theme),
                     placement_row(app, dialog, theme),
@@ -201,7 +210,7 @@ pub(super) fn volume_dialog_layer(
                 theme,
             ),
             settings_group(
-                "Moving average",
+                tr!(panels::VOLUME_MOVING_AVERAGE),
                 std::iter::once(average_switch_row(app, dialog, theme)).chain(
                     dialog
                         .draft
@@ -231,7 +240,7 @@ pub(super) fn volume_dialog_layer(
     .footer_leading(
         Button::new("volume_reset", theme)
             .variant(ButtonVariant::Destructive)
-            .label("Reset to defaults")
+            .label(tr!(panels::RESET_TO_DEFAULTS))
             .on_click(move |_, window, cx| {
                 reset.update(cx, |surface, surface_cx| {
                     surface.reset_volume_dialog(window, surface_cx);
@@ -241,7 +250,7 @@ pub(super) fn volume_dialog_layer(
     .action(
         Button::new("volume_cancel", theme)
             .variant(ButtonVariant::Secondary)
-            .label("Cancel")
+            .label(tr!(common::CANCEL))
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_volume_dialog);
             }),
@@ -249,7 +258,7 @@ pub(super) fn volume_dialog_layer(
     .action(
         Button::new("volume_apply", theme)
             .variant(ButtonVariant::Primary)
-            .label("Apply")
+            .label(tr!(panels::APPLY))
             .on_click(move |_, _, cx| {
                 apply.update(cx, WorkspaceSurface::apply_volume_dialog);
             }),

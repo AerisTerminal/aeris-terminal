@@ -7,10 +7,12 @@ use super::{
 };
 use crate::desktop::native_ui::input::Input;
 use aeris_context_runtime::{
-    ContextMetric, ContextProvenance, ContextSource, CotPosition, DegreeDayMetric, EconomicEvent,
+    ContextMetric, ContextMetricKind, ContextProvenance, ContextSource, CotPosition,
+    CotTraderCategory, DegreeDayMetric, DegreeDayRegion, EconomicEvent, EconomicEventKind,
     SourceAvailability,
 };
 use aeris_design_system::platform_date_label;
+use aeris_localization::{common, panels, runtime, tr};
 use chrono::{Datelike as _, NaiveDate, TimeZone, Timelike as _, Utc};
 use gpui::{AppContext as _, Div, prelude::FluentBuilder as _};
 
@@ -82,17 +84,21 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
                 .border_b_1()
                 .border_color(gpui_color(theme.colors.border))
                 .child(
-                    TabList::new("context_panel_tabs", "Market context", theme)
-                        .compact()
-                        .children(tabs),
+                    TabList::new(
+                        "context_panel_tabs",
+                        tr!(panels::CONTEXT_PANEL_LABEL),
+                        theme,
+                    )
+                    .compact()
+                    .children(tabs),
                 )
                 .child(div().flex_1())
                 .child(
                     Button::new("context_credentials", theme)
                         .variant(ButtonVariant::Ghost)
                         .button_size(ButtonSize::Sm)
-                        .label("API keys")
-                        .aria_label("Configure official context API keys")
+                        .label(tr!(panels::CONTEXT_API_KEYS))
+                        .aria_label(tr!(panels::CONTEXT_CONFIGURE_API_KEYS))
                         .on_click(move |_, window, cx| {
                             credentials_app.update(cx, |surface, surface_cx| {
                                 surface.toggle_context_credential_dialog(window, surface_cx);
@@ -101,7 +107,7 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
                 )
                 .child(chrome_tooltip(
                     "close_context_panel",
-                    "Close market context",
+                    tr!(panels::CONTEXT_CLOSE),
                     close_button("close_context_panel", theme, move |_, cx| {
                         close_app.update(cx, |surface, surface_cx| {
                             surface.set_context_panel_visible(false, surface_cx);
@@ -161,11 +167,16 @@ fn credential_editor(
         .enumerate()
         .map(|(index, (source, input))| {
             let label = match source {
-                ContextSource::Eia => "EIA key",
-                ContextSource::Usda => "USDA NASS key",
-                ContextSource::UsdaFas => "USDA FAS / api.data.gov key",
-                ContextSource::Fred => "FRED key",
-                _ => source.label(),
+                ContextSource::Eia => tr!(panels::CONTEXT_KEY_EIA),
+                ContextSource::Usda => tr!(panels::CONTEXT_KEY_USDA_NASS),
+                ContextSource::UsdaFas => tr!(panels::CONTEXT_KEY_USDA_FAS),
+                ContextSource::Fred => tr!(panels::CONTEXT_KEY_FRED),
+                other @ (ContextSource::Bls
+                | ContextSource::Bea
+                | ContextSource::FederalReserve
+                | ContextSource::Noaa
+                | ContextSource::Cftc
+                | ContextSource::UsdaWasde) => source_label(*other),
             };
             div()
                 .id(("context_credential_row", index))
@@ -192,7 +203,7 @@ fn credential_editor(
             div()
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_muted))
-                .child("Keys are write-only, masked, and stored in the operating-system credential vault. Blank fields leave existing keys unchanged."),
+                .child(tr!(panels::CONTEXT_KEYS_EXPLANATION)),
         )
         .child(div().flex().gap_2().children(fields))
         .when_some(message, |editor, message| {
@@ -212,7 +223,7 @@ fn credential_editor(
                     Button::new("cancel_context_credentials", theme)
                         .variant(ButtonVariant::Outline)
                         .button_size(ButtonSize::Sm)
-                        .label("Cancel")
+                        .label(tr!(common::CANCEL))
                         .on_click(move |_, window, cx| {
                             cancel_app.update(cx, |surface, surface_cx| {
                                 surface.toggle_context_credential_dialog(window, surface_cx);
@@ -223,7 +234,7 @@ fn credential_editor(
                     Button::new("save_context_credentials", theme)
                         .variant(ButtonVariant::Primary)
                         .button_size(ButtonSize::Sm)
-                        .label("Save")
+                        .label(tr!(panels::CONTEXT_SAVE))
                         .on_click(move |_, window, cx| {
                             save_app.update(cx, |surface, surface_cx| {
                                 surface.save_context_api_keys(window, surface_cx);
@@ -244,7 +255,7 @@ fn context_tab(
     Tab::new(("context_panel_tab", index), theme)
         .compact()
         .selected(candidate == selected)
-        .aria_label(format!("Show {} context", candidate.label()))
+        .aria_label(tr!(panels::CONTEXT_SHOW_TAB, tab = candidate.label()))
         .on_click(move |_, _, cx| {
             app.update(cx, |surface, surface_cx| {
                 surface.set_context_panel_tab(candidate, surface_cx);
@@ -282,12 +293,16 @@ fn calendar_rows(events: &[EconomicEvent], now: i64, theme: &AerisTheme) -> Vec<
         .map(|event| {
             let countdown = countdown(event.scheduled_unix_seconds, now);
             let importance = match event.importance {
-                aeris_context_runtime::EventImportance::High => "HIGH",
-                aeris_context_runtime::EventImportance::Medium => "MED",
-                aeris_context_runtime::EventImportance::Low => "LOW",
+                aeris_context_runtime::EventImportance::High => {
+                    tr!(panels::CONTEXT_IMPORTANCE_HIGH)
+                }
+                aeris_context_runtime::EventImportance::Medium => {
+                    tr!(panels::CONTEXT_IMPORTANCE_MEDIUM)
+                }
+                aeris_context_runtime::EventImportance::Low => tr!(panels::CONTEXT_IMPORTANCE_LOW),
             };
             context_row(
-                format!("{importance} · {}", event.title),
+                format!("{importance} · {}", event_title(event)),
                 format!(
                     "{} · {countdown}",
                     format_timestamp(event.scheduled_unix_seconds)
@@ -307,12 +322,15 @@ fn energy_rows(
     let mut rows = metric_rows(energy, theme);
     rows.extend(weather.iter().take(32).map(|metric| {
         context_row(
-            format!("NOAA degree days · {}", metric.region),
-            format!(
-                "HDD {} · CDD {} · {}",
-                fixed_value(i128::from(metric.heating_degree_days_units), metric.scale),
-                fixed_value(i128::from(metric.cooling_degree_days_units), metric.scale),
-                period_label(&metric.period)
+            tr!(
+                panels::CONTEXT_DEGREE_DAYS,
+                region = degree_day_region_label(metric.region)
+            ),
+            tr!(
+                panels::CONTEXT_HDD_CDD,
+                hdd = fixed_value(i128::from(metric.heating_degree_days_units), metric.scale),
+                cdd = fixed_value(i128::from(metric.cooling_degree_days_units), metric.scale),
+                period = period_label(&metric.period)
             ),
             &metric.provenance,
             theme,
@@ -331,32 +349,35 @@ fn metric_rows(metrics: &[ContextMetric], theme: &AerisTheme) -> Vec<Div> {
                 .five_year_min_units
                 .zip(metric.five_year_max_units)
                 .map_or_else(String::new, |(minimum, maximum)| {
-                    format!(
-                        " · 5y {}–{}",
-                        fixed_value(minimum, metric.value_scale),
-                        fixed_value(maximum, metric.value_scale)
+                    tr!(
+                        panels::CONTEXT_METRIC_FIVE_YEAR,
+                        minimum = fixed_value(minimum, metric.value_scale),
+                        maximum = fixed_value(maximum, metric.value_scale)
                     )
                 });
             let surprise = metric.expected_units.map_or_else(String::new, |expected| {
-                format!(
-                    " · surprise {}",
-                    fixed_value(
+                tr!(
+                    panels::CONTEXT_METRIC_SURPRISE,
+                    value = fixed_value(
                         metric.value_units.saturating_sub(expected),
                         metric.value_scale
                     )
                 )
             });
-            context_row(
-                metric.label.clone(),
-                format!(
-                    "{} {} · {}{range}{surprise}",
-                    fixed_value(metric.value_units, metric.value_scale),
-                    metric.unit,
-                    period_label(&metric.period)
-                ),
-                &metric.provenance,
-                theme,
-            )
+            let (label, unit) = metric_label_and_unit(metric);
+            let mut detail = tr!(
+                panels::CONTEXT_METRIC_VALUE,
+                value = fixed_value(metric.value_units, metric.value_scale),
+                unit = unit,
+                period = period_label(&metric.period)
+            );
+            for fragment in [&range, &surprise] {
+                if !fragment.is_empty() {
+                    detail.push(' ');
+                    detail.push_str(fragment);
+                }
+            }
+            context_row(label, detail, &metric.provenance, theme)
         })
         .collect()
 }
@@ -371,13 +392,18 @@ fn cot_rows(positions: &[CotPosition], theme: &AerisTheme) -> Vec<Div> {
                 .long_contracts
                 .saturating_sub(position.short_contracts);
             context_row(
-                format!("{} · {}", position.market_name, position.category),
                 format!(
-                    "Long {} · Short {} · Net {net:+} · OI {} · {}",
-                    position.long_contracts,
-                    position.short_contracts,
-                    position.open_interest,
-                    format_timestamp(position.report_date_unix_seconds)
+                    "{} · {}",
+                    position.market_name,
+                    cot_category_label(position.category)
+                ),
+                tr!(
+                    panels::CONTEXT_COT_LINE,
+                    long = position.long_contracts,
+                    short = position.short_contracts,
+                    net = format!("{net:+}"),
+                    open_interest = position.open_interest,
+                    date = format_timestamp(position.report_date_unix_seconds)
                 ),
                 &position.provenance,
                 theme,
@@ -425,10 +451,10 @@ fn context_row(
                 .ml_2()
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_muted))
-                .child(format!(
-                    "{} · known {}",
-                    provenance.source.label(),
-                    format_timestamp(provenance.release_unix_seconds)
+                .child(tr!(
+                    panels::CONTEXT_KNOWN_AT,
+                    source = source_label(provenance.source),
+                    date = format_timestamp(provenance.release_unix_seconds)
                 )),
         )
 }
@@ -441,21 +467,32 @@ fn empty_row(theme: &AerisTheme) -> Div {
         .items_center()
         .text_sm()
         .text_color(gpui_color(theme.colors.text_muted))
-        .child("No released values are available for this view.")
+        .child(tr!(panels::CONTEXT_EMPTY))
 }
 
 fn source_status_bar(snapshot: &ContextSnapshot, theme: &AerisTheme) -> Div {
     let statuses = snapshot.source_statuses.iter().map(|status| {
         let (label, color) = match status.availability {
-            SourceAvailability::Pending => ("pending", theme.colors.text_muted),
-            SourceAvailability::Available => ("ready", theme.colors.text_positive),
-            SourceAvailability::MissingCredential => ("key required", theme.colors.warning),
-            SourceAvailability::Unavailable => ("unavailable", theme.colors.text_negative),
+            SourceAvailability::Pending => {
+                (tr!(panels::CONTEXT_STATUS_PENDING), theme.colors.text_muted)
+            }
+            SourceAvailability::Available => (
+                tr!(panels::CONTEXT_STATUS_READY),
+                theme.colors.text_positive,
+            ),
+            SourceAvailability::MissingCredential => (
+                tr!(panels::CONTEXT_STATUS_KEY_REQUIRED),
+                theme.colors.warning,
+            ),
+            SourceAvailability::Unavailable => (
+                tr!(panels::CONTEXT_STATUS_UNAVAILABLE),
+                theme.colors.text_negative,
+            ),
         };
         div()
             .text_xs()
             .text_color(gpui_color(color))
-            .child(format!("{} {label}", status.source.label()))
+            .child(format!("{} {label}", source_label(status.source)))
     });
     div()
         .h(px(26.0))
@@ -467,6 +504,102 @@ fn source_status_bar(snapshot: &ContextSnapshot, theme: &AerisTheme) -> Div {
         .border_t_1()
         .border_color(gpui_color(theme.colors.border))
         .children(statuses)
+}
+
+fn source_label(source: ContextSource) -> &'static str {
+    match source {
+        ContextSource::FederalReserve => tr!(runtime::CONTEXT_SOURCE_FEDERAL_RESERVE),
+        // Agency acronyms read the same in every language.
+        ContextSource::Bls
+        | ContextSource::Bea
+        | ContextSource::Eia
+        | ContextSource::Noaa
+        | ContextSource::Cftc
+        | ContextSource::Usda
+        | ContextSource::UsdaWasde
+        | ContextSource::UsdaFas
+        | ContextSource::Fred => source.label(),
+    }
+}
+
+fn event_title(event: &EconomicEvent) -> &str {
+    match event.kind {
+        EconomicEventKind::Published => &event.title,
+        EconomicEventKind::FomcRateDecision => tr!(runtime::CONTEXT_EVENT_FOMC_RATE_DECISION),
+        EconomicEventKind::EiaWeeklyPetroleumStatusReport => {
+            tr!(runtime::CONTEXT_EVENT_EIA_PETROLEUM_STATUS)
+        }
+    }
+}
+
+/// A statistic's label and unit; publisher-written ones are shown as published.
+fn metric_label_and_unit(metric: &ContextMetric) -> (String, &str) {
+    let (label, unit) = match &metric.kind {
+        ContextMetricKind::Published => return (metric.label.clone(), &metric.unit),
+        ContextMetricKind::WeeklyExportSales { commodity } => {
+            return (
+                tr!(
+                    runtime::CONTEXT_METRIC_WEEKLY_EXPORT_SALES,
+                    commodity = commodity
+                ),
+                tr!(runtime::CONTEXT_UNIT_METRIC_TONS),
+            );
+        }
+        ContextMetricKind::CommercialCrudeStocks => (
+            runtime::CONTEXT_METRIC_COMMERCIAL_CRUDE_STOCKS,
+            runtime::CONTEXT_UNIT_THOUSAND_BARRELS,
+        ),
+        ContextMetricKind::Lower48NaturalGasStorage => (
+            runtime::CONTEXT_METRIC_LOWER_48_GAS_STORAGE,
+            runtime::CONTEXT_UNIT_BILLION_CUBIC_FEET,
+        ),
+        ContextMetricKind::TenYearTreasuryYield => (
+            runtime::CONTEXT_METRIC_TEN_YEAR_TREASURY_YIELD,
+            runtime::CONTEXT_UNIT_PERCENT,
+        ),
+        ContextMetricKind::TradeWeightedDollarIndex => (
+            runtime::CONTEXT_METRIC_TRADE_WEIGHTED_DOLLAR,
+            runtime::CONTEXT_UNIT_INDEX,
+        ),
+        ContextMetricKind::ConsumerPriceIndex => (
+            runtime::CONTEXT_METRIC_CONSUMER_PRICE_INDEX,
+            runtime::CONTEXT_UNIT_INDEX,
+        ),
+        ContextMetricKind::NonfarmPayrolls => (
+            runtime::CONTEXT_METRIC_NONFARM_PAYROLLS,
+            runtime::CONTEXT_UNIT_THOUSANDS_OF_PERSONS,
+        ),
+        ContextMetricKind::WasdeCornProduction => (
+            runtime::CONTEXT_METRIC_WASDE_CORN_PRODUCTION,
+            runtime::CONTEXT_UNIT_MILLION_BUSHELS,
+        ),
+        ContextMetricKind::WasdeCornExports => (
+            runtime::CONTEXT_METRIC_WASDE_CORN_EXPORTS,
+            runtime::CONTEXT_UNIT_MILLION_BUSHELS,
+        ),
+        ContextMetricKind::WasdeCornEndingStocks => (
+            runtime::CONTEXT_METRIC_WASDE_CORN_ENDING_STOCKS,
+            runtime::CONTEXT_UNIT_MILLION_BUSHELS,
+        ),
+    };
+    (tr!(label).to_string(), tr!(unit))
+}
+
+fn degree_day_region_label(region: DegreeDayRegion) -> &'static str {
+    match region {
+        DegreeDayRegion::ConusPopulationWeighted => {
+            tr!(runtime::CONTEXT_REGION_CONUS_POPULATION_WEIGHTED)
+        }
+    }
+}
+
+fn cot_category_label(category: CotTraderCategory) -> &'static str {
+    match category {
+        CotTraderCategory::ProducerMerchant => tr!(runtime::CONTEXT_COT_PRODUCER_MERCHANT),
+        CotTraderCategory::SwapDealer => tr!(runtime::CONTEXT_COT_SWAP_DEALER),
+        CotTraderCategory::ManagedMoney => tr!(runtime::CONTEXT_COT_MANAGED_MONEY),
+        CotTraderCategory::OtherReportable => tr!(runtime::CONTEXT_COT_OTHER_REPORTABLE),
+    }
 }
 
 fn fixed_value(units: i128, scale: u8) -> String {
@@ -486,7 +619,7 @@ fn fixed_value(units: i128, scale: u8) -> String {
 
 fn format_timestamp(unix_seconds: i64) -> String {
     Utc.timestamp_opt(unix_seconds, 0).single().map_or_else(
-        || "invalid time".to_string(),
+        || tr!(panels::CONTEXT_INVALID_TIME).to_string(),
         |time| {
             format!(
                 "{} {:02}:{:02} UTC",
@@ -529,17 +662,17 @@ fn provider_calendar_date(word: &str) -> Option<NaiveDate> {
 fn countdown(event_unix_seconds: i64, now_unix_seconds: i64) -> String {
     let remaining = event_unix_seconds.saturating_sub(now_unix_seconds);
     if remaining <= 0 {
-        return "released".to_string();
+        return tr!(panels::CONTEXT_RELEASED).to_string();
     }
     let days = remaining / 86_400;
     let hours = remaining % 86_400 / 3_600;
     let minutes = remaining % 3_600 / 60;
     if days > 0 {
-        format!("in {days}d {hours}h")
+        tr!(panels::CONTEXT_IN_DAYS, days = days, hours = hours)
     } else if hours > 0 {
-        format!("in {hours}h {minutes}m")
+        tr!(panels::CONTEXT_IN_HOURS, hours = hours, minutes = minutes)
     } else {
-        format!("in {minutes}m")
+        tr!(panels::CONTEXT_IN_MINUTES, minutes = minutes)
     }
 }
 
@@ -554,6 +687,7 @@ mod tests {
         let event = EconomicEvent {
             id: "release".into(),
             title: "Public release".into(),
+            kind: EconomicEventKind::Published,
             scheduled_unix_seconds: 1_000,
             importance: aeris_context_runtime::EventImportance::Low,
             provenance: ContextProvenance {
@@ -582,6 +716,146 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    fn context_provenance() -> ContextProvenance {
+        ContextProvenance {
+            source: ContextSource::Eia,
+            source_url: String::new(),
+            release_unix_seconds: 1,
+            fetched_unix_seconds: 1,
+        }
+    }
+
+    fn metric_fixture(kind: ContextMetricKind) -> ContextMetric {
+        ContextMetric {
+            id: String::new(),
+            kind,
+            label: "Publisher label".into(),
+            period: String::new(),
+            value_units: 0,
+            value_scale: 0,
+            unit: "publisher unit".into(),
+            expected_units: None,
+            five_year_min_units: None,
+            five_year_max_units: None,
+            provenance: context_provenance(),
+        }
+    }
+
+    #[test]
+    fn aeris_written_metric_text_keeps_the_runtime_english() {
+        for (kind, label, unit) in [
+            (
+                ContextMetricKind::Published,
+                "Publisher label",
+                "publisher unit",
+            ),
+            (
+                ContextMetricKind::CommercialCrudeStocks,
+                "Commercial crude oil stocks",
+                "thousand barrels",
+            ),
+            (
+                ContextMetricKind::Lower48NaturalGasStorage,
+                "Lower 48 working natural gas storage",
+                "billion cubic feet",
+            ),
+            (
+                ContextMetricKind::TenYearTreasuryYield,
+                "10-year Treasury yield",
+                "percent",
+            ),
+            (
+                ContextMetricKind::TradeWeightedDollarIndex,
+                "Trade-weighted U.S. dollar index",
+                "index",
+            ),
+            (
+                ContextMetricKind::ConsumerPriceIndex,
+                "Consumer Price Index",
+                "index",
+            ),
+            (
+                ContextMetricKind::NonfarmPayrolls,
+                "Total nonfarm payrolls",
+                "thousands of persons",
+            ),
+            (
+                ContextMetricKind::WasdeCornProduction,
+                "WASDE U.S. corn production",
+                "million bushels",
+            ),
+            (
+                ContextMetricKind::WasdeCornExports,
+                "WASDE U.S. corn exports",
+                "million bushels",
+            ),
+            (
+                ContextMetricKind::WasdeCornEndingStocks,
+                "WASDE U.S. corn ending stocks",
+                "million bushels",
+            ),
+            (
+                ContextMetricKind::WeeklyExportSales {
+                    commodity: "Wheat - Total".into(),
+                },
+                "Wheat - Total weekly export sales",
+                "metric tons",
+            ),
+        ] {
+            let metric = metric_fixture(kind);
+            let (shown_label, shown_unit) = metric_label_and_unit(&metric);
+            assert_eq!((shown_label.as_str(), shown_unit), (label, unit));
+        }
+    }
+
+    #[test]
+    fn aeris_written_context_labels_keep_the_runtime_english() {
+        assert_eq!(
+            [
+                CotTraderCategory::ProducerMerchant,
+                CotTraderCategory::SwapDealer,
+                CotTraderCategory::ManagedMoney,
+                CotTraderCategory::OtherReportable,
+            ]
+            .map(cot_category_label),
+            [
+                "Producer/Merchant",
+                "Swap Dealer",
+                "Managed Money",
+                "Other Reportable"
+            ]
+        );
+        assert_eq!(
+            degree_day_region_label(DegreeDayRegion::ConusPopulationWeighted),
+            "CONUS population weighted"
+        );
+        assert_eq!(
+            ContextSource::ALL.map(source_label),
+            ContextSource::ALL.map(ContextSource::label)
+        );
+        for (kind, title) in [
+            (EconomicEventKind::Published, "Publisher title"),
+            (
+                EconomicEventKind::FomcRateDecision,
+                "FOMC rate decision and press conference",
+            ),
+            (
+                EconomicEventKind::EiaWeeklyPetroleumStatusReport,
+                "EIA Weekly Petroleum Status Report",
+            ),
+        ] {
+            let event = EconomicEvent {
+                id: String::new(),
+                title: "Publisher title".into(),
+                kind,
+                scheduled_unix_seconds: 1,
+                importance: aeris_context_runtime::EventImportance::Low,
+                provenance: context_provenance(),
+            };
+            assert_eq!(event_title(&event), title);
+        }
     }
 
     #[test]

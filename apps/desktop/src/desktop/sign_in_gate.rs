@@ -6,6 +6,7 @@
 
 use super::*;
 use aeris_desktop::account::DesktopAccount;
+use aeris_localization::{common, shell, tr};
 use aeris_observability::diagnostic;
 
 const SIGN_IN_COLUMN_WIDTH: f32 = 360.0;
@@ -56,9 +57,11 @@ pub(super) fn sign_in_status(
     }
     let presentation = &account.presentation;
     match stage {
-        SignInStage::Verifying => Some("Checking your saved sign-in…".to_string()),
-        SignInStage::Waiting => Some("Finish signing in in your browser.".to_string()),
-        SignInStage::Ready if presentation.pending => Some("Opening your browser…".to_string()),
+        SignInStage::Verifying => Some(tr!(shell::SIGN_IN_CHECKING).to_string()),
+        SignInStage::Waiting => Some(tr!(shell::SIGN_IN_BROWSER_WAIT).to_string()),
+        SignInStage::Ready if presentation.pending => {
+            Some(tr!(shell::SIGN_IN_OPENING_BROWSER).to_string())
+        }
         SignInStage::Ready if account.hides_identity() => None,
         SignInStage::Ready => Some(presentation.state.to_string()),
     }
@@ -100,12 +103,12 @@ fn sign_in_body(account: &DesktopAccount, notice: StartupNotice, theme: &AerisTh
             sign_in_actions(account, &menu, stage, theme),
         ),
         StartupNotice::Opening => (
-            Some("Opening your workspace…".to_string()),
+            Some(tr!(shell::SIGN_IN_OPENING_WORKSPACE).to_string()),
             false,
             Vec::new(),
         ),
         StartupNotice::Failed(message) => (
-            Some(format!("{message} Close Aeris Terminal and open it again.")),
+            Some(tr!(shell::SIGN_IN_FAILED, message = message)),
             true,
             Vec::new(),
         ),
@@ -122,7 +125,7 @@ fn sign_in_body(account: &DesktopAccount, notice: StartupNotice, theme: &AerisTh
                     .mt_6()
                     .text_xl()
                     .font_weight(platform_font_weight(TypographyRole::Strong))
-                    .child("Sign in to Aeris Terminal"),
+                    .child(tr!(shell::SIGN_IN_TITLE)),
             )
             .child(
                 div()
@@ -130,7 +133,7 @@ fn sign_in_body(account: &DesktopAccount, notice: StartupNotice, theme: &AerisTh
                     .text_sm()
                     .text_center()
                     .text_color(gpui_color(colors.text_secondary))
-                    .child("Your Aeris account opens in your default browser."),
+                    .child(tr!(shell::SIGN_IN_SUBTITLE)),
             )
             .child(
                 div()
@@ -208,13 +211,13 @@ fn sign_in_actions(
         SignInStage::Waiting => vec![
             action(
                 "sign_in_reopen",
-                "Open sign-in page again",
+                tr!(shell::SIGN_IN_REOPEN),
                 ButtonVariant::Primary,
                 DesktopAccount::reopen_browser,
             ),
             action(
                 "sign_in_cancel",
-                "Cancel",
+                tr!(common::CANCEL),
                 ButtonVariant::Outline,
                 DesktopAccount::request_cancel,
             ),
@@ -223,9 +226,9 @@ fn sign_in_actions(
             let mut actions = vec![action(
                 "sign_in_start",
                 if menu.error.is_some() {
-                    "Try again"
+                    tr!(shell::SIGN_IN_TRY_AGAIN)
                 } else {
-                    "Sign in with browser"
+                    tr!(shell::SIGN_IN_WITH_BROWSER)
                 },
                 ButtonVariant::Primary,
                 DesktopAccount::request_sign_in,
@@ -233,7 +236,7 @@ fn sign_in_actions(
             if menu.retry_sign_out {
                 actions.push(action(
                     "sign_in_retry_sign_out",
-                    "Retry sign-out",
+                    tr!(shell::ACTION_RETRY_SIGN_OUT),
                     ButtonVariant::Outline,
                     DesktopAccount::request_sign_out,
                 ));
@@ -511,14 +514,20 @@ impl Render for SignInWindow {
 #[cfg(test)]
 mod tests {
     use super::{SignInStage, sign_in_stage, sign_in_status};
+    use aeris_account_runtime::AccountSessionState;
     use aeris_desktop::account::{AccountMenuState, AccountPresentation};
 
-    fn menu(action: &'static str, state: &'static str) -> AccountMenuState {
+    fn menu(
+        session: AccountSessionState,
+        action: &'static str,
+        state: &'static str,
+    ) -> AccountMenuState {
         AccountMenuState {
             presentation: AccountPresentation {
                 action,
                 state,
                 plan: "No plan",
+                session: Some(session),
                 detail: String::new(),
                 display_name: String::new(),
                 email: String::new(),
@@ -533,7 +542,7 @@ mod tests {
 
     #[test]
     fn startup_restore_shows_verification_without_actions() {
-        let signed_out = menu("Sign in", "Signed out");
+        let signed_out = menu(AccountSessionState::SignedOut, "Sign in", "Signed out");
         assert_eq!(sign_in_stage(&signed_out, true), SignInStage::Verifying);
         assert_eq!(
             sign_in_status(&signed_out, SignInStage::Verifying).as_deref(),
@@ -543,7 +552,7 @@ mod tests {
 
     #[test]
     fn failed_restore_offers_sign_in_with_its_error() {
-        let mut failed = menu("Sign in", "Signed out");
+        let mut failed = menu(AccountSessionState::SignedOut, "Sign in", "Signed out");
         failed.error = Some("account request timed out; try again".to_string());
         assert_eq!(sign_in_stage(&failed, true), SignInStage::Ready);
         assert_eq!(
@@ -554,18 +563,26 @@ mod tests {
 
     #[test]
     fn browser_wait_and_recovery_states_name_themselves() {
-        let waiting = menu("Waiting for browser", "Waiting for browser sign-in");
+        let waiting = menu(
+            AccountSessionState::Authorizing,
+            "Waiting for browser",
+            "Waiting for browser sign-in",
+        );
         assert_eq!(sign_in_stage(&waiting, false), SignInStage::Waiting);
         assert_eq!(
             sign_in_status(&waiting, SignInStage::Waiting).as_deref(),
             Some("Finish signing in in your browser.")
         );
-        let expired = menu("Sign in", "Sign-in required");
+        let expired = menu(
+            AccountSessionState::ReauthenticationRequired,
+            "Sign in",
+            "Sign-in required",
+        );
         assert_eq!(
             sign_in_status(&expired, SignInStage::Ready).as_deref(),
             Some("Sign-in required")
         );
-        let signed_out = menu("Sign in", "Signed out");
+        let signed_out = menu(AccountSessionState::SignedOut, "Sign in", "Signed out");
         assert_eq!(sign_in_status(&signed_out, SignInStage::Ready), None);
     }
 }

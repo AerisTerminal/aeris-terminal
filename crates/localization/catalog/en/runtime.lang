@@ -1,0 +1,75 @@
+# Runtime-published market, account and study text: built-in study settings, official context
+# statistics and provider login fields. Publisher-authored text (third-party study settings,
+# official release titles and statistic names) is shown as published and never enters here.
+
+## Built-in study settings
+study_setting_period = Period
+study_setting_period_description = Number of input bars used by the calculation.
+study_setting_deviation = Deviation
+study_setting_deviation_description = Standard-deviation multiplier applied to the bands.
+study_setting_fast_period = Fast period
+study_setting_fast_period_description = Fast EMA period.
+study_setting_slow_period = Slow period
+study_setting_slow_period_description = Slow EMA period.
+study_setting_signal_period = Signal period
+study_setting_signal_period_description = Signal EMA period.
+study_setting_k_period = %K period
+study_setting_k_period_description = Lookback window for the fast oscillator.
+study_setting_d_period = %D period
+study_setting_d_period_description = Smoothing window for the signal line.
+
+## Market context sources, events and statistics
+context_source_federal_reserve = Federal Reserve
+context_event_fomc_rate_decision = FOMC rate decision and press conference
+context_event_eia_petroleum_status = EIA Weekly Petroleum Status Report
+context_metric_commercial_crude_stocks = Commercial crude oil stocks
+context_metric_lower_48_gas_storage = Lower 48 working natural gas storage
+context_metric_ten_year_treasury_yield = 10-year Treasury yield
+context_metric_trade_weighted_dollar = Trade-weighted U.S. dollar index
+context_metric_consumer_price_index = Consumer Price Index
+context_metric_nonfarm_payrolls = Total nonfarm payrolls
+context_metric_wasde_corn_production = WASDE U.S. corn production
+context_metric_wasde_corn_exports = WASDE U.S. corn exports
+context_metric_wasde_corn_ending_stocks = WASDE U.S. corn ending stocks
+context_metric_weekly_export_sales = {commodity} weekly export sales
+context_unit_thousand_barrels = thousand barrels
+context_unit_billion_cubic_feet = billion cubic feet
+context_unit_percent = percent
+context_unit_index = index
+context_unit_thousands_of_persons = thousands of persons
+context_unit_million_bushels = million bushels
+context_unit_metric_tons = metric tons
+context_region_conus_population_weighted = CONUS population weighted
+context_cot_producer_merchant = Producer/Merchant
+context_cot_swap_dealer = Swap Dealer
+context_cot_managed_money = Managed Money
+context_cot_other_reportable = Other Reportable
+
+## Provider login fields
+login_field_server = Server
+login_field_system = System
+login_field_user_id = User ID
+login_field_password = Password
+## Account session details
+account_detail_signed_out = signed out
+account_detail_restoring_saved_sign_in = restoring saved sign-in
+account_detail_signed_in_verifying_saved_session = signed in; verifying saved session
+account_detail_signed_in = signed in
+account_detail_signed_in_offline_reconnecting = signed in offline; reconnecting
+account_detail_waiting_for_browser_authorization = waiting for browser authorization
+account_detail_completing_sign_in = completing sign-in
+account_detail_sign_in_cancelled = sign-in cancelled
+account_detail_sign_in_timed_out = sign-in timed out; retry sign-in
+account_detail_sign_in_worker_could_not_start = sign-in worker could not start; retry sign-in
+account_detail_account_state_unavailable = account state is unavailable
+account_detail_credential_storage_unavailable_sign_in_again = credential storage is unavailable; sign in again
+account_detail_credential_storage_unavailable_retry_sign_in = credential storage is unavailable; retry sign-in
+account_detail_saved_sign_in_expired = saved sign-in expired; sign in again
+account_detail_sign_in_expired = sign-in expired; sign in again
+account_detail_saved_sign_in_retire_failed = saved sign-in could not be retired; credential storage is unavailable; sign in again
+account_detail_sign_in_expired_retire_failed = sign-in expired but saved credentials could not be retired; sign in again
+account_detail_sign_out_cleanup_attention = signed out; credential cleanup needs attention
+account_detail_saved_sign_in_cleanup_unavailable = saved sign-in cleanup is unavailable; retry sign-in
+account_detail_restore_could_not_start = saved sign-in restore could not start; sign in again
+account_detail_saved_sign_in_unverified_connection = saved sign-in could not be verified; check your connection and sign in again
+account_detail_saved_sign_in_unverified = saved sign-in could not be verified; sign in again

@@ -3,6 +3,7 @@
 //! [`COMMANDS`] and [`WORKSPACE_SHORTCUTS`] are the only sources of desktop shortcuts. Keys the
 //! chart consumes belong to Aeris Charts; [`validate_chords`] keeps every shortcut here off them.
 
+use aeris_localization::{Text, shell, tr};
 use gpui::{Keystroke, Modifiers, MouseButton};
 
 /// Stable command identifiers. Execution stays at the owning desktop surface/runtime boundary.
@@ -161,14 +162,14 @@ impl CommandGroup {
     ];
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub const fn label(self) -> Text {
         match self {
-            Self::Trading => "Trading",
-            Self::General => "General",
-            Self::Workspaces => "Workspaces",
-            Self::Panes => "Panes",
-            Self::Panels => "Panels",
-            Self::Chart => "Chart",
+            Self::Trading => shell::GROUP_TRADING,
+            Self::General => shell::GROUP_GENERAL,
+            Self::Workspaces => shell::GROUP_WORKSPACES,
+            Self::Panes => shell::GROUP_PANES,
+            Self::Panels => shell::GROUP_PANELS,
+            Self::Chart => shell::GROUP_CHART,
         }
     }
 }
@@ -176,7 +177,7 @@ impl CommandGroup {
 /// One line of the shortcuts list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShortcutRow {
-    pub title: &'static str,
+    pub title: Text,
     /// Alternatives, the displayed shortcut first.
     pub triggers: Vec<ShortcutTrigger>,
 }
@@ -192,7 +193,7 @@ pub fn shortcut_sections() -> Vec<(CommandGroup, Vec<ShortcutRow>)> {
                 .iter()
                 .filter(|spec| spec.id.group() == group && !spec.chords.is_empty())
                 .map(|spec| ShortcutRow {
-                    title: spec.short_title(),
+                    title: spec.short_title,
                     triggers: spec
                         .chords
                         .iter()
@@ -248,7 +249,7 @@ impl ShortcutTrigger {
 pub struct WorkspaceShortcutSpec {
     pub shortcut: WorkspaceShortcut,
     pub group: CommandGroup,
-    pub title: &'static str,
+    pub title: Text,
     pub trigger: ShortcutTrigger,
 }
 
@@ -256,25 +257,25 @@ pub const WORKSPACE_SHORTCUTS: &[WorkspaceShortcutSpec] = &[
     WorkspaceShortcutSpec {
         shortcut: WorkspaceShortcut::MaximizePane,
         group: CommandGroup::Panes,
-        title: "Maximize or restore pane",
+        title: shell::WS_MAXIMIZE_PANE,
         trigger: ShortcutTrigger::AltClick,
     },
     WorkspaceShortcutSpec {
         shortcut: WorkspaceShortcut::ToggleChartFullscreen,
         group: CommandGroup::Chart,
-        title: "Chart fullscreen",
+        title: shell::WS_CHART_FULLSCREEN,
         trigger: ShortcutTrigger::Key("shift-f"),
     },
     WorkspaceShortcutSpec {
         shortcut: WorkspaceShortcut::NextWatchlistSymbol,
         group: CommandGroup::Chart,
-        title: "Next watchlist symbol",
+        title: shell::WS_NEXT_WATCHLIST_SYMBOL,
         trigger: ShortcutTrigger::Key("space"),
     },
     WorkspaceShortcutSpec {
         shortcut: WorkspaceShortcut::PreviousWatchlistSymbol,
         group: CommandGroup::Chart,
-        title: "Previous watchlist symbol",
+        title: shell::WS_PREVIOUS_WATCHLIST_SYMBOL,
         trigger: ShortcutTrigger::Key("shift-space"),
     },
 ];
@@ -310,24 +311,16 @@ pub fn workspace_click_shortcut(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandSpec {
     pub id: CommandId,
-    pub title: &'static str,
-    pub keywords: &'static str,
+    pub title: Text,
+    /// The title without its group prefix, for lists that already show the group as a heading
+    /// (`Buy market` under Trading). A command whose title carries no prefix repeats it.
+    pub short_title: Text,
+    pub keywords: Text,
     /// GPUI keystrokes bound to the command, the displayed shortcut first.
     pub chords: &'static [&'static str],
 }
 
 impl CommandSpec {
-    /// The title without its group prefix, for lists that already show the group as a heading
-    /// (`Buy market` under Trading).
-    #[must_use]
-    pub fn short_title(&self) -> &'static str {
-        let title = self.title;
-        title
-            .strip_prefix(self.id.group().label())
-            .and_then(|rest| rest.strip_prefix(": "))
-            .unwrap_or(title)
-    }
-
     /// The shortcut shown next to the command, written for people (`Ctrl+Shift+K`).
     #[must_use]
     pub fn shortcut_label(&self) -> Option<String> {
@@ -365,13 +358,32 @@ pub fn chord_keys(chord: &str) -> Vec<String> {
 
 const fn spec(
     id: CommandId,
-    title: &'static str,
-    keywords: &'static str,
+    title: Text,
+    keywords: Text,
     chords: &'static [&'static str],
 ) -> CommandSpec {
     CommandSpec {
         id,
         title,
+        short_title: title,
+        keywords,
+        chords,
+    }
+}
+
+/// A command whose title carries its group as a prefix (`Chart: Candles` under Chart); the
+/// short title is its own catalog text, never a slice of the translated title.
+const fn prefixed_spec(
+    id: CommandId,
+    title: Text,
+    short_title: Text,
+    keywords: Text,
+    chords: &'static [&'static str],
+) -> CommandSpec {
+    CommandSpec {
+        id,
+        title,
+        short_title,
         keywords,
         chords,
     }
@@ -380,207 +392,259 @@ const fn spec(
 pub const COMMANDS: &[CommandSpec] = &[
     spec(
         CommandId::OpenPalette,
-        "Open command palette",
-        "search commands",
+        shell::CMD_OPEN_PALETTE,
+        shell::CMD_OPEN_PALETTE_KEYWORDS,
         &["ctrl-k"],
     ),
     spec(
         CommandId::ToggleFullscreen,
-        "Toggle fullscreen",
-        "window full screen",
+        shell::CMD_TOGGLE_FULLSCREEN,
+        shell::CMD_TOGGLE_FULLSCREEN_KEYWORDS,
         &["f11", "alt-enter"],
     ),
     spec(
         CommandId::MinimizeWindow,
-        "Minimize window",
-        "window",
+        shell::CMD_MINIMIZE_WINDOW,
+        shell::CMD_MINIMIZE_WINDOW_KEYWORDS,
         &["alt-f9"],
     ),
     spec(
         CommandId::ZoomWindow,
-        "Maximize or restore window",
-        "window zoom",
+        shell::CMD_ZOOM_WINDOW,
+        shell::CMD_ZOOM_WINDOW_KEYWORDS,
         &["alt-f10"],
     ),
     spec(
         CommandId::CloseWindow,
-        "Close window",
-        "window quit exit",
+        shell::CMD_CLOSE_WINDOW,
+        shell::CMD_CLOSE_WINDOW_KEYWORDS,
         &["alt-f4"],
     ),
     spec(
         CommandId::ToggleContext,
-        "Market context",
-        "toggle show hide calendar macro energy cot agriculture fundamentals",
+        shell::CMD_TOGGLE_CONTEXT,
+        shell::CMD_TOGGLE_CONTEXT_KEYWORDS,
         &[],
     ),
     spec(
         CommandId::ToggleOrderBook,
-        "Order book",
-        "toggle show hide dom depth",
+        shell::CMD_TOGGLE_ORDER_BOOK,
+        shell::CMD_TOGGLE_ORDER_BOOK_KEYWORDS,
         &[],
     ),
     spec(
         CommandId::ToggleOrderEntry,
-        "Order entry",
-        "toggle show hide ticket trade buy sell",
+        shell::CMD_TOGGLE_ORDER_ENTRY,
+        shell::CMD_TOGGLE_ORDER_ENTRY_KEYWORDS,
         &[],
     ),
     spec(
         CommandId::ToggleTimeSales,
-        "Time & Sales",
-        "toggle show hide tape trades prints",
+        shell::CMD_TOGGLE_TIME_SALES,
+        shell::CMD_TOGGLE_TIME_SALES_KEYWORDS,
         &[],
     ),
     spec(
         CommandId::ToggleWatchlist,
-        "Watchlist",
-        "toggle show hide symbols",
+        shell::CMD_TOGGLE_WATCHLIST,
+        shell::CMD_TOGGLE_WATCHLIST_KEYWORDS,
         &[],
     ),
-    spec(
+    prefixed_spec(
         CommandId::ChartCandles,
-        "Chart: Candles",
-        "candlestick",
+        shell::CMD_CHART_CANDLES,
+        shell::CMD_CHART_CANDLES_SHORT,
+        shell::CMD_CHART_CANDLES_KEYWORDS,
         &[],
     ),
-    spec(CommandId::ChartBars, "Chart: Bars", "ohlc", &[]),
-    spec(CommandId::ChartLine, "Chart: Line", "close", &[]),
-    spec(CommandId::ChartArea, "Chart: Area", "filled", &[]),
-    spec(
+    prefixed_spec(
+        CommandId::ChartBars,
+        shell::CMD_CHART_BARS,
+        shell::CMD_CHART_BARS_SHORT,
+        shell::CMD_CHART_BARS_KEYWORDS,
+        &[],
+    ),
+    prefixed_spec(
+        CommandId::ChartLine,
+        shell::CMD_CHART_LINE,
+        shell::CMD_CHART_LINE_SHORT,
+        shell::CMD_CHART_LINE_KEYWORDS,
+        &[],
+    ),
+    prefixed_spec(
+        CommandId::ChartArea,
+        shell::CMD_CHART_AREA,
+        shell::CMD_CHART_AREA_SHORT,
+        shell::CMD_CHART_AREA_KEYWORDS,
+        &[],
+    ),
+    prefixed_spec(
         CommandId::ChartBaseline,
-        "Chart: Baseline",
-        "comparison",
+        shell::CMD_CHART_BASELINE,
+        shell::CMD_CHART_BASELINE_SHORT,
+        shell::CMD_CHART_BASELINE_KEYWORDS,
         &[],
     ),
-    spec(
+    prefixed_spec(
         CommandId::ChartFootprint,
-        "Chart: Footprint",
-        "order flow bid ask delta",
+        shell::CMD_CHART_FOOTPRINT,
+        shell::CMD_CHART_FOOTPRINT_SHORT,
+        shell::CMD_CHART_FOOTPRINT_KEYWORDS,
         &[],
     ),
-    spec(CommandId::Interval1Minute, "Interval: 1 minute", "1m", &[]),
-    spec(
+    prefixed_spec(
+        CommandId::Interval1Minute,
+        shell::CMD_INTERVAL_1_MINUTE,
+        shell::CMD_INTERVAL_1_MINUTE_SHORT,
+        shell::CMD_INTERVAL_1_MINUTE_KEYWORDS,
+        &[],
+    ),
+    prefixed_spec(
         CommandId::Interval5Minutes,
-        "Interval: 5 minutes",
-        "5m",
+        shell::CMD_INTERVAL_5_MINUTES,
+        shell::CMD_INTERVAL_5_MINUTES_SHORT,
+        shell::CMD_INTERVAL_5_MINUTES_KEYWORDS,
+        &[],
+    ),
+    prefixed_spec(
+        CommandId::Interval15Minutes,
+        shell::CMD_INTERVAL_15_MINUTES,
+        shell::CMD_INTERVAL_15_MINUTES_SHORT,
+        shell::CMD_INTERVAL_15_MINUTES_KEYWORDS,
+        &[],
+    ),
+    prefixed_spec(
+        CommandId::Interval1Hour,
+        shell::CMD_INTERVAL_1_HOUR,
+        shell::CMD_INTERVAL_1_HOUR_SHORT,
+        shell::CMD_INTERVAL_1_HOUR_KEYWORDS,
+        &[],
+    ),
+    prefixed_spec(
+        CommandId::Interval1Day,
+        shell::CMD_INTERVAL_1_DAY,
+        shell::CMD_INTERVAL_1_DAY_SHORT,
+        shell::CMD_INTERVAL_1_DAY_KEYWORDS,
         &[],
     ),
     spec(
-        CommandId::Interval15Minutes,
-        "Interval: 15 minutes",
-        "15m",
-        &[],
+        CommandId::NewWorkspace,
+        shell::CMD_NEW_WORKSPACE,
+        shell::CMD_NEW_WORKSPACE_KEYWORDS,
+        &["ctrl-t"],
     ),
-    spec(CommandId::Interval1Hour, "Interval: 1 hour", "1h 60m", &[]),
-    spec(CommandId::Interval1Day, "Interval: 1 day", "1d daily", &[]),
-    spec(CommandId::NewWorkspace, "New workspace", "tab", &["ctrl-t"]),
     spec(
         CommandId::SelectNextWorkspace,
-        "Next workspace",
-        "tab switch",
+        shell::CMD_NEXT_WORKSPACE,
+        shell::CMD_NEXT_WORKSPACE_KEYWORDS,
         &["ctrl-tab"],
     ),
     spec(
         CommandId::SelectPreviousWorkspace,
-        "Previous workspace",
-        "tab switch",
+        shell::CMD_PREVIOUS_WORKSPACE,
+        shell::CMD_PREVIOUS_WORKSPACE_KEYWORDS,
         &["ctrl-shift-tab"],
     ),
     spec(
         CommandId::MoveWorkspaceLeft,
-        "Move workspace left",
-        "tab reorder",
+        shell::CMD_MOVE_WORKSPACE_LEFT,
+        shell::CMD_MOVE_WORKSPACE_LEFT_KEYWORDS,
         &["ctrl-shift-pageup"],
     ),
     spec(
         CommandId::MoveWorkspaceRight,
-        "Move workspace right",
-        "tab reorder",
+        shell::CMD_MOVE_WORKSPACE_RIGHT,
+        shell::CMD_MOVE_WORKSPACE_RIGHT_KEYWORDS,
         &["ctrl-shift-pagedown"],
     ),
     spec(
         CommandId::CloseWorkspace,
-        "Close workspace",
-        "tab",
+        shell::CMD_CLOSE_WORKSPACE,
+        shell::CMD_CLOSE_WORKSPACE_KEYWORDS,
         &["ctrl-w"],
     ),
     spec(
         CommandId::SaveLayout,
-        "Save layout",
-        "workspace layout save",
+        shell::CMD_SAVE_LAYOUT,
+        shell::CMD_SAVE_LAYOUT_KEYWORDS,
         &["ctrl-s"],
     ),
     spec(
         CommandId::ToggleLayoutAutosave,
-        "Layout autosave",
-        "workspace layout autosave toggle on off",
+        shell::CMD_LAYOUT_AUTOSAVE,
+        shell::CMD_LAYOUT_AUTOSAVE_KEYWORDS,
         &[],
     ),
     spec(
         CommandId::CopyLayout,
-        "Make a copy of layout",
-        "workspace layout copy duplicate save as",
+        shell::CMD_COPY_LAYOUT,
+        shell::CMD_COPY_LAYOUT_KEYWORDS,
         &[],
     ),
     spec(
         CommandId::OpenRecentLayout,
-        "Open recent layout",
-        "workspace layout reopen recent closed tab",
+        shell::CMD_OPEN_RECENT_LAYOUT,
+        shell::CMD_OPEN_RECENT_LAYOUT_KEYWORDS,
         &[],
     ),
     spec(
         CommandId::SplitHorizontal,
-        "Split pane horizontally",
-        "layout",
+        shell::CMD_SPLIT_HORIZONTAL,
+        shell::CMD_SPLIT_HORIZONTAL_KEYWORDS,
         &["ctrl-alt-h"],
     ),
     spec(
         CommandId::SplitVertical,
-        "Split pane vertically",
-        "layout",
+        shell::CMD_SPLIT_VERTICAL,
+        shell::CMD_SPLIT_VERTICAL_KEYWORDS,
         &["ctrl-alt-v"],
     ),
     spec(
         CommandId::ClosePane,
-        "Close pane",
-        "layout",
+        shell::CMD_CLOSE_PANE,
+        shell::CMD_CLOSE_PANE_KEYWORDS,
         &["ctrl-shift-w"],
     ),
-    spec(
+    prefixed_spec(
         CommandId::ToggleOneClickTrading,
-        "Trading: Toggle one-click trading",
-        "confirm confirmation hotkeys",
+        shell::CMD_TRADING_ONE_CLICK,
+        shell::CMD_TRADING_ONE_CLICK_SHORT,
+        shell::CMD_TRADING_ONE_CLICK_KEYWORDS,
         &[],
     ),
-    spec(
+    prefixed_spec(
         CommandId::BuyMarket,
-        "Trading: Buy market",
-        "order",
+        shell::CMD_BUY_MARKET,
+        shell::CMD_BUY_MARKET_SHORT,
+        shell::CMD_BUY_MARKET_KEYWORDS,
         &["ctrl-b"],
     ),
-    spec(
+    prefixed_spec(
         CommandId::SellMarket,
-        "Trading: Sell market",
-        "order",
+        shell::CMD_SELL_MARKET,
+        shell::CMD_SELL_MARKET_SHORT,
+        shell::CMD_SELL_MARKET_KEYWORDS,
         &["ctrl-shift-s"],
     ),
-    spec(
+    prefixed_spec(
         CommandId::CancelAll,
-        "Trading: Cancel all",
-        "orders",
+        shell::CMD_CANCEL_ALL,
+        shell::CMD_CANCEL_ALL_SHORT,
+        shell::CMD_CANCEL_ALL_KEYWORDS,
         &["ctrl-shift-x"],
     ),
-    spec(
+    prefixed_spec(
         CommandId::FlattenAccount,
-        "Trading: Flatten account",
-        "close positions",
+        shell::CMD_FLATTEN_ACCOUNT,
+        shell::CMD_FLATTEN_ACCOUNT_SHORT,
+        shell::CMD_FLATTEN_ACCOUNT_KEYWORDS,
         &["ctrl-shift-f"],
     ),
-    spec(
+    prefixed_spec(
         CommandId::KillSwitch,
-        "Trading: Kill switch",
-        "cancel flatten lock",
+        shell::CMD_KILL_SWITCH,
+        shell::CMD_KILL_SWITCH_SHORT,
+        shell::CMD_KILL_SWITCH_KEYWORDS,
         &["ctrl-shift-k"],
     ),
 ];
@@ -624,7 +688,7 @@ pub fn validate_chords(
         ShortcutTrigger::Key(chord) => Some((spec.title, chord)),
         ShortcutTrigger::AltClick => None,
     });
-    let mut bound: Vec<(Keystroke, &str)> = Vec::new();
+    let mut bound: Vec<(Keystroke, Text)> = Vec::new();
     for (title, chord) in command_chords.chain(workspace_chords) {
         let keystroke =
             Keystroke::parse(chord).map_err(|error| format!("{title} chord {chord}: {error}"))?;
@@ -661,14 +725,13 @@ pub fn command(id: CommandId) -> &'static CommandSpec {
 /// Returns at most `limit` deterministic case-insensitive substring matches.
 #[must_use]
 pub fn search(query: &str, limit: usize) -> Vec<&'static CommandSpec> {
-    let query = query.trim().to_ascii_lowercase();
+    let query = query.trim().to_lowercase();
     COMMANDS
         .iter()
         .filter(|spec| {
             query.is_empty()
-                || spec.title.to_ascii_lowercase().contains(&query)
-                || spec
-                    .keywords
+                || tr!(spec.title).to_lowercase().contains(&query)
+                || tr!(spec.keywords)
                     .split_whitespace()
                     .any(|keyword| keyword.contains(&query))
         })
@@ -742,7 +805,10 @@ mod tests {
         assert!(COMMANDS.iter().all(|spec| ids.insert(spec.id)));
         assert_eq!(ids, CommandId::ALL.into_iter().collect());
         assert_eq!(search("chart", 3).len(), 3);
-        assert_eq!(command(CommandId::ToggleContext).title, "Market context");
+        assert_eq!(
+            tr!(command(CommandId::ToggleContext).title),
+            "Market context"
+        );
     }
 
     #[test]
@@ -840,7 +906,7 @@ mod tests {
                         .iter()
                         .map(|trigger| trigger.keys().join("+"))
                         .collect::<Vec<_>>();
-                    (row.title, keys.join(" or "))
+                    (tr!(row.title), keys.join(" or "))
                 })
                 .collect::<Vec<_>>()
         };
@@ -886,8 +952,13 @@ mod tests {
             .count();
         assert_eq!(listed, bound + WORKSPACE_SHORTCUTS.len());
         assert_eq!(
-            command(CommandId::NewWorkspace).short_title(),
+            tr!(command(CommandId::NewWorkspace).short_title),
             "New workspace"
+        );
+        assert_eq!(
+            tr!(command(CommandId::BuyMarket).short_title),
+            "Buy market",
+            "the short title is its own text, not a slice of the translated title"
         );
     }
 

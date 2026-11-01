@@ -5,6 +5,7 @@ use crate::{OrderBookColumnLevel, OrderBookFrame};
 use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family, platform_typography,
 };
+use aeris_localization::{chart_ui, tr};
 use aeris_market_data::{
     AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState, OrderQueueLevel,
     OrderQueueState,
@@ -159,16 +160,16 @@ impl OrderBookColumn {
     ];
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::ProfitLoss => "P/L",
-            Self::Bid => "Bid",
-            Self::SellTrades => "Sell",
-            Self::Price => "Price",
-            Self::BuyTrades => "Buy",
-            Self::Ask => "Ask",
-            Self::Orders => "Orders",
-            Self::Queue => "Queue",
+            Self::ProfitLoss => tr!(chart_ui::BOOK_COLUMN_PNL),
+            Self::Bid => tr!(chart_ui::BOOK_COLUMN_BID),
+            Self::SellTrades => tr!(chart_ui::BOOK_COLUMN_SELL),
+            Self::Price => tr!(chart_ui::BOOK_COLUMN_PRICE),
+            Self::BuyTrades => tr!(chart_ui::BOOK_COLUMN_BUY),
+            Self::Ask => tr!(chart_ui::BOOK_COLUMN_ASK),
+            Self::Orders => tr!(chart_ui::BOOK_COLUMN_ORDERS),
+            Self::Queue => tr!(chart_ui::BOOK_COLUMN_QUEUE),
         }
     }
 
@@ -569,13 +570,13 @@ fn connection_status_banner(
 ) -> Option<impl IntoElement + use<>> {
     let label = match state {
         OrderBookConnectionState::Online => return None,
-        OrderBookConnectionState::Offline => "Order Book offline · internet disconnected",
+        OrderBookConnectionState::Offline => tr!(chart_ui::BOOK_OFFLINE),
         // Discovering/authenticating and the first provider snapshot all flow
         // through Recovering at the desktop boundary. Until a concrete book
         // has actually been presented, that is ordinary loading rather than
         // a reconnect/failure and the ladder's neutral loading copy is enough.
         OrderBookConnectionState::Recovering if !has_frame && !unavailable => return None,
-        OrderBookConnectionState::Recovering => "Order Book reconnecting · awaiting fresh snapshot",
+        OrderBookConnectionState::Recovering => tr!(chart_ui::BOOK_RECONNECTING),
     };
     Some(banner_row(label.to_owned(), BannerTone::Failure, theme))
 }
@@ -620,7 +621,7 @@ fn render_header(
                 .items_center()
                 .px_2()
                 .truncate()
-                .child("Level 1 · best bid/ask")
+                .child(tr!(chart_ui::BOOK_LEVEL_ONE_NOTE))
         }))
         .child(labels)
 }
@@ -628,13 +629,13 @@ fn render_header(
 /// Empty-panel copy: loading until the first frame, and the unavailable
 /// verdict only after a concrete failure marked the book dead. An empty
 /// book with no failure behind it is still loading, never an error.
-const fn empty_book_copy(unavailable: bool, has_frame: bool) -> &'static str {
+fn empty_book_copy(unavailable: bool, has_frame: bool) -> &'static str {
     if unavailable {
-        "Order Book unavailable"
+        tr!(chart_ui::BOOK_UNAVAILABLE)
     } else if has_frame {
-        "Waiting for order-book snapshot"
+        tr!(chart_ui::BOOK_WAITING_SNAPSHOT)
     } else {
-        "Loading order book…"
+        tr!(chart_ui::BOOK_LOADING)
     }
 }
 
@@ -1726,8 +1727,8 @@ fn working_order_drag(
     theme: &AerisTheme,
 ) -> OrderBookLevelDrag {
     let side = match order.order_side {
-        OrderSide::Buy => "BUY",
-        OrderSide::Sell => "SELL",
+        OrderSide::Buy => tr!(chart_ui::BOOK_DRAG_BUY),
+        OrderSide::Sell => tr!(chart_ui::BOOK_DRAG_SELL),
     };
     OrderBookLevelDrag {
         price,
@@ -1977,17 +1978,18 @@ fn working_order_cell(
                 position_marker.map_or_else(
                     || order_count.map_or_else(String::new, |count| count.to_string()),
                     |marker| {
-                        format!(
-                            "POS {}",
-                            compact_quantity_text(marker.quantity, marker.quantity_scale)
+                        tr!(
+                            chart_ui::BOOK_POSITION,
+                            quantity =
+                                compact_quantity_text(marker.quantity, marker.quantity_scale)
                         )
                     },
                 )
             },
             |order| {
-                format!(
-                    "YOU {}",
-                    compact_quantity_text(order.quantity, order.quantity_scale)
+                tr!(
+                    chart_ui::BOOK_OWN_ORDER,
+                    quantity = compact_quantity_text(order.quantity, order.quantity_scale)
                 )
             },
         ))
@@ -2284,22 +2286,19 @@ fn order_queue_banner(
     Some(banner_row(label.to_owned(), tone, theme))
 }
 
-const fn order_queue_presentation(state: OrderQueueState) -> Option<(&'static str, BannerTone)> {
+fn order_queue_presentation(state: OrderQueueState) -> Option<(&'static str, BannerTone)> {
     match state {
         OrderQueueState::Ready => None,
-        OrderQueueState::Loading => Some(("Order queues loading", BannerTone::Neutral)),
-        OrderQueueState::Recovering => Some((
-            "Order queues recovering · awaiting a complete order image",
-            BannerTone::Failure,
-        )),
-        OrderQueueState::Unavailable => Some((
-            "Order queues unavailable for this market",
-            BannerTone::Failure,
-        )),
-        OrderQueueState::LimitReached => Some((
-            "Order queues limit reached · close the queue column on another book",
-            BannerTone::Neutral,
-        )),
+        OrderQueueState::Loading => Some((tr!(chart_ui::QUEUES_LOADING), BannerTone::Neutral)),
+        OrderQueueState::Recovering => {
+            Some((tr!(chart_ui::QUEUES_RECOVERING), BannerTone::Failure))
+        }
+        OrderQueueState::Unavailable => {
+            Some((tr!(chart_ui::QUEUES_UNAVAILABLE), BannerTone::Failure))
+        }
+        OrderQueueState::LimitReached => {
+            Some((tr!(chart_ui::QUEUES_LIMIT_REACHED), BannerTone::Neutral))
+        }
     }
 }
 
@@ -2307,31 +2306,31 @@ fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String,
     match state {
         OrderBookState::Ready => None,
         OrderBookState::Stale => Some((
-            format!("Order Book stale · last sequence {watermark}"),
+            tr!(chart_ui::BOOK_STALE, watermark = watermark),
             BannerTone::Failure,
         )),
         // Awaiting the first snapshot is still loading, not a failure, so
         // it renders neutral. Red is reserved for a book that broke.
         OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot) => Some((
-            format!(
-                "Order Book recovering · {}",
-                recovery_label(OrderBookRecoveryReason::AwaitingSnapshot)
+            tr!(
+                chart_ui::BOOK_RECOVERING,
+                reason = recovery_label(OrderBookRecoveryReason::AwaitingSnapshot)
             ),
             BannerTone::Neutral,
         )),
         OrderBookState::Recovering(reason) => Some((
-            format!("Order Book recovering · {}", recovery_label(reason)),
+            tr!(chart_ui::BOOK_RECOVERING, reason = recovery_label(reason)),
             BannerTone::Failure,
         )),
     }
 }
 
-const fn recovery_label(reason: OrderBookRecoveryReason) -> &'static str {
+fn recovery_label(reason: OrderBookRecoveryReason) -> &'static str {
     match reason {
-        OrderBookRecoveryReason::AwaitingSnapshot => "awaiting snapshot",
-        OrderBookRecoveryReason::SequenceGap => "sequence gap",
-        OrderBookRecoveryReason::CrossedBook => "crossed book",
-        OrderBookRecoveryReason::InvalidUpdate => "invalid update",
+        OrderBookRecoveryReason::AwaitingSnapshot => tr!(chart_ui::RECOVERY_AWAITING_SNAPSHOT),
+        OrderBookRecoveryReason::SequenceGap => tr!(chart_ui::RECOVERY_SEQUENCE_GAP),
+        OrderBookRecoveryReason::CrossedBook => tr!(chart_ui::RECOVERY_CROSSED_BOOK),
+        OrderBookRecoveryReason::InvalidUpdate => tr!(chart_ui::RECOVERY_INVALID_UPDATE),
     }
 }
 

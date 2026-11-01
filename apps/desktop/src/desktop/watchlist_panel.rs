@@ -3,6 +3,7 @@
 use super::chart_context_menus::chart_css_color;
 use super::side_panel_dock::side_panel_header;
 use super::*;
+use aeris_localization::{panels, tr};
 use gpui::{AppContext, Stateful};
 
 const WATCHLIST_COLUMNS_HEIGHT: f32 = 26.0;
@@ -107,9 +108,9 @@ fn watchlist_table(
                 .text_xs()
                 .text_color(gpui_color(colors.text_muted))
                 .child(if flags.filter.is_some() {
-                    "No symbols carry this flag"
+                    tr!(panels::WATCHLIST_NO_SYMBOLS_WITH_FLAG)
                 } else {
-                    "Add symbols with +"
+                    tr!(panels::WATCHLIST_ADD_HINT)
                 }),
         );
     } else {
@@ -186,17 +187,25 @@ fn watchlist_columns(theme: &AerisTheme) -> impl IntoElement + use<> {
                 .pr_2()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child("ASSET"),
+                .child(tr!(panels::WATCHLIST_COLUMN_ASSET)),
         )
-        .child(watchlist_header_cell("LAST", WATCHLIST_LAST_WIDTH, theme))
-        .child(watchlist_header_cell("CHG", WATCHLIST_CHANGE_WIDTH, theme))
         .child(watchlist_header_cell(
-            "CHG %",
+            tr!(panels::WATCHLIST_COLUMN_LAST),
+            WATCHLIST_LAST_WIDTH,
+            theme,
+        ))
+        .child(watchlist_header_cell(
+            tr!(panels::WATCHLIST_COLUMN_CHANGE),
+            WATCHLIST_CHANGE_WIDTH,
+            theme,
+        ))
+        .child(watchlist_header_cell(
+            tr!(panels::WATCHLIST_COLUMN_CHANGE_PERCENT),
             WATCHLIST_CHANGE_PERCENT_WIDTH,
             theme,
         ))
         .child(watchlist_header_cell(
-            "VOLUME",
+            tr!(panels::WATCHLIST_COLUMN_VOLUME),
             WATCHLIST_VOLUME_WIDTH,
             theme,
         ))
@@ -430,7 +439,10 @@ fn interactive_watchlist_row(
     row.cursor_pointer()
         .role(Role::Button)
         .aria_selected(active)
-        .aria_label(format!("Select {}", instrument.display_symbol))
+        .aria_label(tr!(
+            panels::WATCHLIST_SELECT_SYMBOL,
+            symbol = instrument.display_symbol
+        ))
         .on_click(move |_, _, cx| {
             select_terminal.update(cx, |terminal, terminal_cx| {
                 terminal.select_watchlist_instrument(&instrument, terminal_cx);
@@ -501,9 +513,15 @@ fn watchlist_flag_slot(
         .cursor_pointer()
         .role(Role::Button)
         .aria_label(if row.flag.is_some() {
-            format!("Remove flag from {}", row.instrument.display_symbol)
+            tr!(
+                panels::WATCHLIST_REMOVE_FLAG,
+                symbol = row.instrument.display_symbol
+            )
         } else {
-            format!("Flag {}", row.instrument.display_symbol)
+            tr!(
+                panels::WATCHLIST_FLAG_SYMBOL,
+                symbol = row.instrument.display_symbol
+            )
         })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
@@ -569,14 +587,14 @@ fn watchlist_flag_filter_control(
     let toggle = terminal.clone();
     let trigger = chrome_tooltip(
         "watchlist_flag_filter",
-        "Filter by flag",
+        tr!(panels::WATCHLIST_FILTER_BY_FLAG),
         Button::new("watchlist_flag_filter", theme)
             .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Sm)
             .round()
             .icon(icon)
             .open(flags.filter_menu_open)
-            .aria_label("Filter by flag")
+            .aria_label(tr!(panels::WATCHLIST_FILTER_BY_FLAG))
             .on_press(move |_, _, cx| {
                 toggle.update(cx, TerminalApp::toggle_watchlist_flag_filter_menu);
             }),
@@ -611,38 +629,50 @@ fn watchlist_flag_filter_menu(
     .width(px(WATCHLIST_FLAG_FILTER_MENU_WIDTH))
     .animate_from(PopupAnimationOrigin::TOP_RIGHT)
     .child(
-        MenuRow::compact("watchlist_flag_filter_all", "All symbols", theme)
-            .checked(flags.filter.is_none())
-            .on_click(move |_, _, cx| {
-                show_all.update(cx, |terminal, terminal_cx| {
-                    terminal.set_watchlist_flag_filter(None, terminal_cx);
-                });
-            }),
+        MenuRow::compact(
+            "watchlist_flag_filter_all",
+            tr!(panels::WATCHLIST_ALL_SYMBOLS),
+            theme,
+        )
+        .checked(flags.filter.is_none())
+        .on_click(move |_, _, cx| {
+            show_all.update(cx, |terminal, terminal_cx| {
+                terminal.set_watchlist_flag_filter(None, terminal_cx);
+            });
+        }),
     )
     .separator();
     if flags.colors.is_empty() {
         return menu.child(
-            MenuRow::compact("watchlist_flag_filter_none", "No flagged symbols", theme)
-                .disabled(true),
+            MenuRow::compact(
+                "watchlist_flag_filter_none",
+                tr!(panels::WATCHLIST_NO_FLAGGED),
+                theme,
+            )
+            .disabled(true),
         );
     }
     for (index, color) in flags.colors.iter().enumerate() {
         let select = terminal.clone();
         let value = color.clone();
         menu = menu.child(
-            MenuRow::compact(("watchlist_flag_filter_color", index), "Flagged", theme)
-                .leading(
-                    Icon::new(HugeIcon::FlagFilled.path())
-                        .small()
-                        .color(chart_css_color(color, theme.colors.primary)),
-                )
-                .detail(color.clone())
-                .checked(flags.filter.as_ref() == Some(color))
-                .on_click(move |_, _, cx| {
-                    select.update(cx, |terminal, terminal_cx| {
-                        terminal.set_watchlist_flag_filter(Some(value.clone()), terminal_cx);
-                    });
-                }),
+            MenuRow::compact(
+                ("watchlist_flag_filter_color", index),
+                tr!(panels::WATCHLIST_FLAGGED),
+                theme,
+            )
+            .leading(
+                Icon::new(HugeIcon::FlagFilled.path())
+                    .small()
+                    .color(chart_css_color(color, theme.colors.primary)),
+            )
+            .detail(color.clone())
+            .checked(flags.filter.as_ref() == Some(color))
+            .on_click(move |_, _, cx| {
+                select.update(cx, |terminal, terminal_cx| {
+                    terminal.set_watchlist_flag_filter(Some(value.clone()), terminal_cx);
+                });
+            }),
         );
     }
     menu
@@ -665,13 +695,13 @@ fn watchlist_add_symbol_control(
 ) -> impl IntoElement + use<> {
     chrome_tooltip(
         "watchlist_add_symbol",
-        "Add symbol to watchlist",
+        tr!(panels::WATCHLIST_ADD_SYMBOL),
         Button::new("watchlist_add_symbol", theme)
             .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Sm)
             .round()
             .icon(header_icon(HugeIcon::Add))
-            .aria_label("Add symbol to watchlist")
+            .aria_label(tr!(panels::WATCHLIST_ADD_SYMBOL))
             .on_press(move |position, window, cx| {
                 app.update(cx, |surface, surface_cx| {
                     surface.open_watchlist_symbol_menu_at(position, window, surface_cx);

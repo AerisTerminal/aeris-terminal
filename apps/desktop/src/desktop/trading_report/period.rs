@@ -1,6 +1,7 @@
 //! Report periods and the chart time zone that dates them.
 
 use aeris_chart_integration::AerisChartView;
+use aeris_localization::{panels, tr};
 use chrono::{Datelike, Days, NaiveDate, NaiveDateTime, NaiveTime};
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
@@ -28,13 +29,13 @@ impl ReportPeriod {
         Self::Custom,
     ];
 
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
-            Self::LastSevenDays => "Last 7 days",
-            Self::ThisWeek => "This week",
-            Self::ThisMonth => "This month",
-            Self::ThisYear => "This year",
-            Self::Custom => "Custom",
+            Self::LastSevenDays => tr!(panels::REPORT_PERIOD_7D),
+            Self::ThisWeek => tr!(panels::REPORT_PERIOD_WEEK),
+            Self::ThisMonth => tr!(panels::REPORT_PERIOD_MONTH),
+            Self::ThisYear => tr!(panels::REPORT_PERIOD_YEAR),
+            Self::Custom => tr!(panels::REPORT_PERIOD_CUSTOM),
         }
     }
 }
@@ -128,11 +129,11 @@ pub(super) enum PeriodProblem {
 }
 
 impl PeriodProblem {
-    pub(super) const fn message(self) -> &'static str {
+    pub(super) fn message(self) -> &'static str {
         match self {
-            Self::FromDate => "Enter the first day as YYYY-MM-DD.",
-            Self::ToDate => "Enter the last day as YYYY-MM-DD.",
-            Self::Reversed => "The first day must not be after the last day.",
+            Self::FromDate => tr!(panels::REPORT_PROBLEM_FROM),
+            Self::ToDate => tr!(panels::REPORT_PROBLEM_TO),
+            Self::Reversed => tr!(panels::REPORT_PROBLEM_REVERSED),
         }
     }
 }

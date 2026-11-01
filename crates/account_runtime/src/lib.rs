@@ -11,6 +11,6 @@ pub use account_service::{
     AccountRefreshQuiesce, AccountRestoreReadiness, AccountService, AccountServiceConfig,
 };
 pub use view::{
-    AccountSessionState, AccountView, LoginAuthorization, ProfilePhoto, ProfilePhotoFormat,
-    ProfilePhotoStatus,
+    AccountDetail, AccountSessionState, AccountView, LoginAuthorization, ProfilePhoto,
+    ProfilePhotoFormat, ProfilePhotoStatus,
 };

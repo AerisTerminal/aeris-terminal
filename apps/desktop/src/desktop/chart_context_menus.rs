@@ -1,5 +1,6 @@
 use super::big_trades_dialog::{settings_group, settings_groups};
 use super::*;
+use aeris_localization::{chart_menu, tr};
 use drawing_context_toolbar::{choice_glyph, width_glyph};
 
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
@@ -274,63 +275,63 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
         ChartContextMenuItem {
             id: "chart_context_reset_view",
             icon: HugeIcon::RefreshV2,
-            label: "Reset view",
+            label: tr!(chart_menu::RESET_VIEW),
             enabled: state.enabled(ChartContextMenuState::READY),
             action: ChartContextAction::Reset,
         },
         ChartContextMenuItem {
             id: "chart_context_copy_price",
             icon: HugeIcon::Copy,
-            label: "Copy price",
+            label: tr!(chart_menu::COPY_PRICE),
             enabled: state.enabled(ChartContextMenuState::COPY_PRICE),
             action: ChartContextAction::CopyPrice,
         },
         ChartContextMenuItem {
             id: "chart_context_capture",
             icon: HugeIcon::Camera,
-            label: "Capture chart",
+            label: tr!(chart_menu::CAPTURE_CHART),
             enabled: state.enabled(ChartContextMenuState::READY),
             action: ChartContextAction::CaptureMenu,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_drawings",
             icon: HugeIcon::Trash,
-            label: "Remove drawings",
+            label: tr!(chart_menu::REMOVE_DRAWINGS),
             enabled: state.enabled(ChartContextMenuState::DRAWINGS),
             action: ChartContextAction::ClearDrawings,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_indicators",
             icon: HugeIcon::Trash,
-            label: "Remove indicators",
+            label: tr!(chart_menu::REMOVE_INDICATORS),
             enabled: state.enabled(ChartContextMenuState::INDICATORS),
             action: ChartContextAction::ClearIndicators,
         },
         ChartContextMenuItem {
             id: "chart_context_split_horizontal",
             icon: HugeIcon::SplitSideBySide,
-            label: "Split side by side",
+            label: tr!(chart_menu::SPLIT_SIDE_BY_SIDE),
             enabled: state.enabled(ChartContextMenuState::SPLIT),
             action: ChartContextAction::Split(ChartSplitDirection::Horizontal),
         },
         ChartContextMenuItem {
             id: "chart_context_split_vertical",
             icon: HugeIcon::SplitStacked,
-            label: "Split top and bottom",
+            label: tr!(chart_menu::SPLIT_TOP_AND_BOTTOM),
             enabled: state.enabled(ChartContextMenuState::SPLIT),
             action: ChartContextAction::Split(ChartSplitDirection::Vertical),
         },
         ChartContextMenuItem {
             id: "chart_context_close_pane",
             icon: HugeIcon::CloseBold,
-            label: "Close chart",
+            label: tr!(chart_menu::CLOSE_CHART),
             enabled: state.pane_count > 1,
             action: ChartContextAction::Close,
         },
         ChartContextMenuItem {
             id: "chart_context_settings",
             icon: HugeIcon::Settings,
-            label: "Settings",
+            label: tr!(chart_menu::SETTINGS),
             enabled: true,
             action: ChartContextAction::Settings,
         },
@@ -343,14 +344,14 @@ pub(super) fn chart_capture_menu_items(state: ChartContextMenuState) -> [ChartCo
         ChartContextMenuItem {
             id: "capture_chart_copy",
             icon: HugeIcon::Copy,
-            label: "Copy image",
+            label: tr!(chart_menu::COPY_IMAGE),
             enabled,
             action: ChartContextAction::CopyCapture,
         },
         ChartContextMenuItem {
             id: "capture_chart_save",
             icon: HugeIcon::Download,
-            label: "Save image…",
+            label: tr!(chart_menu::SAVE_IMAGE),
             enabled,
             action: ChartContextAction::SaveCapture,
         },
@@ -384,7 +385,7 @@ pub(super) fn chart_context_menu_item(
         action,
     } = item;
     let row_label = if copy_feedback_generation.is_some() {
-        "Copied"
+        tr!(chart_menu::COPIED)
     } else {
         label
     };
@@ -615,21 +616,29 @@ pub(super) fn price_axis_root_rows(
     state: PriceAxisMenuState,
 ) -> [PriceAxisMenuRow; 7] {
     [
-        PriceAxisMenuRow::flyout("Labels", PriceAxisMenuFlyout::Labels, flyout),
-        PriceAxisMenuRow::flyout("Lines", PriceAxisMenuFlyout::Lines, flyout),
+        PriceAxisMenuRow::flyout(tr!(chart_menu::LABELS), PriceAxisMenuFlyout::Labels, flyout),
+        PriceAxisMenuRow::flyout(tr!(chart_menu::LINES), PriceAxisMenuFlyout::Lines, flyout),
         PriceAxisMenuRow::toggle(
-            "Auto scale",
+            tr!(chart_menu::AUTO_SCALE),
             state.enabled(PriceAxisMenuState::AUTO_SCALE),
             PriceAxisMenuAction::ToggleAutoScale,
         ),
         PriceAxisMenuRow::toggle(
-            "Invert scale",
+            tr!(chart_menu::INVERT_SCALE),
             state.enabled(PriceAxisMenuState::INVERT_SCALE),
             PriceAxisMenuAction::ToggleInvertScale,
         ),
-        PriceAxisMenuRow::flyout("Scale mode", PriceAxisMenuFlyout::ScaleMode, flyout),
-        PriceAxisMenuRow::flyout("Y-axis", PriceAxisMenuFlyout::YAxis, flyout),
-        PriceAxisMenuRow::flyout("Precision", PriceAxisMenuFlyout::Precision, flyout),
+        PriceAxisMenuRow::flyout(
+            tr!(chart_menu::SCALE_MODE),
+            PriceAxisMenuFlyout::ScaleMode,
+            flyout,
+        ),
+        PriceAxisMenuRow::flyout(tr!(chart_menu::Y_AXIS), PriceAxisMenuFlyout::YAxis, flyout),
+        PriceAxisMenuRow::flyout(
+            tr!(chart_menu::PRECISION),
+            PriceAxisMenuFlyout::Precision,
+            flyout,
+        ),
     ]
 }
 
@@ -639,90 +648,63 @@ pub(super) fn price_axis_flyout_rows(
 ) -> Vec<PriceAxisMenuRow> {
     match flyout {
         PriceAxisMenuFlyout::None => Vec::new(),
-        PriceAxisMenuFlyout::Labels => vec![
-            PriceAxisMenuRow::toggle(
-                "Symbol name label",
-                state.enabled(PriceAxisMenuState::TITLE),
-                PriceAxisMenuAction::ToggleTitle,
-            ),
-            PriceAxisMenuRow::toggle(
-                "Symbol last price label",
-                state.enabled(PriceAxisMenuState::LAST_VALUE),
-                PriceAxisMenuAction::ToggleLastValue,
-            ),
-            PriceAxisMenuRow::unavailable("Symbol previous day close price label"),
-            PriceAxisMenuRow::unavailable("Pre/post/night market price label"),
-            PriceAxisMenuRow::unavailable("High and low price labels"),
-            PriceAxisMenuRow::toggle(
-                "Bid and ask labels",
-                state.enabled(PriceAxisMenuState::BID_ASK),
-                PriceAxisMenuAction::ToggleBidAsk,
-            ),
-            PriceAxisMenuRow::toggle(
-                "Indicators and financials name labels",
-                state.enabled(PriceAxisMenuState::INDICATOR_NAMES),
-                PriceAxisMenuAction::ToggleIndicatorNameLabels,
-            ),
-            PriceAxisMenuRow::toggle(
-                "Indicators and financials value labels",
-                state.enabled(PriceAxisMenuState::INDICATOR_VALUES),
-                PriceAxisMenuAction::ToggleIndicatorValueLabels,
-            ),
-            PriceAxisMenuRow::toggle(
-                "Countdown to bar close",
-                state.enabled(PriceAxisMenuState::COUNTDOWN),
-                PriceAxisMenuAction::ToggleCountdown,
-            ),
-            PriceAxisMenuRow::toggle(
-                "No overlapping labels",
-                state.enabled(PriceAxisMenuState::ALIGN_LABELS),
-                PriceAxisMenuAction::ToggleAlignLabels,
-            ),
-        ],
+        PriceAxisMenuFlyout::Labels => price_axis_label_rows(state),
         PriceAxisMenuFlyout::Lines => vec![
             PriceAxisMenuRow::toggle(
-                "Price line",
+                tr!(chart_menu::PRICE_LINE),
                 state.enabled(PriceAxisMenuState::PRICE_LINE),
                 PriceAxisMenuAction::TogglePriceLine,
             ),
-            PriceAxisMenuRow::unavailable("Previous day close price line"),
-            PriceAxisMenuRow::unavailable("Pre/post/night market price line"),
-            PriceAxisMenuRow::unavailable("High and low price lines"),
+            PriceAxisMenuRow::unavailable(tr!(chart_menu::PREV_DAY_CLOSE_LINE)),
+            PriceAxisMenuRow::unavailable(tr!(chart_menu::PRE_POST_MARKET_LINE)),
+            PriceAxisMenuRow::unavailable(tr!(chart_menu::HIGH_LOW_LINES)),
             PriceAxisMenuRow::toggle(
-                "Bid and ask lines",
+                tr!(chart_menu::BID_ASK_LINES),
                 state.enabled(PriceAxisMenuState::BID_ASK),
                 PriceAxisMenuAction::ToggleBidAsk,
             ),
             PriceAxisMenuRow::toggle(
-                "Indicators and financials price lines",
+                tr!(chart_menu::INDICATOR_PRICE_LINES),
                 state.enabled(PriceAxisMenuState::INDICATOR_PRICE_LINES),
                 PriceAxisMenuAction::ToggleIndicatorPriceLines,
             ),
         ],
         PriceAxisMenuFlyout::ScaleMode => vec![
-            PriceAxisMenuRow::toggle("Normal", state.mode == 0, PriceAxisMenuAction::SetMode(0)),
             PriceAxisMenuRow::toggle(
-                "Logarithmic",
+                tr!(chart_menu::SCALE_NORMAL),
+                state.mode == 0,
+                PriceAxisMenuAction::SetMode(0),
+            ),
+            PriceAxisMenuRow::toggle(
+                tr!(chart_menu::SCALE_LOGARITHMIC),
                 state.mode == 1,
                 PriceAxisMenuAction::SetMode(1),
             ),
             PriceAxisMenuRow::toggle(
-                "Percentage",
+                tr!(chart_menu::SCALE_PERCENTAGE),
                 state.mode == 2,
                 PriceAxisMenuAction::SetMode(2),
             ),
             PriceAxisMenuRow::toggle(
-                "Indexed to 100",
+                tr!(chart_menu::SCALE_INDEXED),
                 state.mode == 3,
                 PriceAxisMenuAction::SetMode(3),
             ),
         ],
         PriceAxisMenuFlyout::YAxis => vec![
-            PriceAxisMenuRow::toggle("Right", !state.left, PriceAxisMenuAction::SetLeft(false)),
-            PriceAxisMenuRow::toggle("Left", state.left, PriceAxisMenuAction::SetLeft(true)),
+            PriceAxisMenuRow::toggle(
+                tr!(chart_menu::AXIS_RIGHT),
+                !state.left,
+                PriceAxisMenuAction::SetLeft(false),
+            ),
+            PriceAxisMenuRow::toggle(
+                tr!(chart_menu::AXIS_LEFT),
+                state.left,
+                PriceAxisMenuAction::SetLeft(true),
+            ),
         ],
         PriceAxisMenuFlyout::Precision => std::iter::once(PriceAxisMenuRow::toggle(
-            "Auto",
+            tr!(chart_menu::AUTO),
             state.precision.is_none(),
             PriceAxisMenuAction::SetPrecision(None),
         ))
@@ -737,16 +719,59 @@ pub(super) fn price_axis_flyout_rows(
     }
 }
 
-pub(super) const fn price_axis_precision_label(digits: u8) -> &'static str {
+fn price_axis_label_rows(state: PriceAxisMenuState) -> Vec<PriceAxisMenuRow> {
+    vec![
+        PriceAxisMenuRow::toggle(
+            tr!(chart_menu::SYMBOL_NAME_LABEL),
+            state.enabled(PriceAxisMenuState::TITLE),
+            PriceAxisMenuAction::ToggleTitle,
+        ),
+        PriceAxisMenuRow::toggle(
+            tr!(chart_menu::SYMBOL_LAST_PRICE_LABEL),
+            state.enabled(PriceAxisMenuState::LAST_VALUE),
+            PriceAxisMenuAction::ToggleLastValue,
+        ),
+        PriceAxisMenuRow::unavailable(tr!(chart_menu::SYMBOL_PREV_DAY_CLOSE_LABEL)),
+        PriceAxisMenuRow::unavailable(tr!(chart_menu::PRE_POST_MARKET_LABEL)),
+        PriceAxisMenuRow::unavailable(tr!(chart_menu::HIGH_LOW_LABELS)),
+        PriceAxisMenuRow::toggle(
+            tr!(chart_menu::BID_ASK_LABELS),
+            state.enabled(PriceAxisMenuState::BID_ASK),
+            PriceAxisMenuAction::ToggleBidAsk,
+        ),
+        PriceAxisMenuRow::toggle(
+            tr!(chart_menu::INDICATOR_NAME_LABELS),
+            state.enabled(PriceAxisMenuState::INDICATOR_NAMES),
+            PriceAxisMenuAction::ToggleIndicatorNameLabels,
+        ),
+        PriceAxisMenuRow::toggle(
+            tr!(chart_menu::INDICATOR_VALUE_LABELS),
+            state.enabled(PriceAxisMenuState::INDICATOR_VALUES),
+            PriceAxisMenuAction::ToggleIndicatorValueLabels,
+        ),
+        PriceAxisMenuRow::toggle(
+            tr!(chart_menu::COUNTDOWN_TO_BAR_CLOSE),
+            state.enabled(PriceAxisMenuState::COUNTDOWN),
+            PriceAxisMenuAction::ToggleCountdown,
+        ),
+        PriceAxisMenuRow::toggle(
+            tr!(chart_menu::NO_OVERLAPPING_LABELS),
+            state.enabled(PriceAxisMenuState::ALIGN_LABELS),
+            PriceAxisMenuAction::ToggleAlignLabels,
+        ),
+    ]
+}
+
+pub(super) fn price_axis_precision_label(digits: u8) -> &'static str {
     match digits {
-        0 => "0 decimals",
-        1 => "1 decimal",
-        2 => "2 decimals",
-        3 => "3 decimals",
-        4 => "4 decimals",
-        5 => "5 decimals",
-        6 => "6 decimals",
-        _ => "8 decimals",
+        0 => tr!(chart_menu::DECIMALS_0),
+        1 => tr!(chart_menu::DECIMALS_1),
+        2 => tr!(chart_menu::DECIMALS_2),
+        3 => tr!(chart_menu::DECIMALS_3),
+        4 => tr!(chart_menu::DECIMALS_4),
+        5 => tr!(chart_menu::DECIMALS_5),
+        6 => tr!(chart_menu::DECIMALS_6),
+        _ => tr!(chart_menu::DECIMALS_8),
     }
 }
 
@@ -1074,7 +1099,7 @@ fn chart_settings_title_bar(
                         .text_sm()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
                         .text_color(gpui_color(colors.text_default))
-                        .child("Chart settings"),
+                        .child(tr!(chart_menu::CHART_SETTINGS)),
                 ),
         )
         .child(floating_panel_drag_grip(theme))
@@ -1250,24 +1275,27 @@ fn chart_settings_sidebar(
     templates: ChartSettingsTemplateView<'_>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let sections = TabList::sidebar("chart_settings_sections", "Chart settings sections")
-        .flex_1()
-        .min_h_0()
-        .children(ChartSettingsSection::ALL.into_iter().map(|section| {
-            let terminal = terminal.clone();
-            Tab::new(("chart_settings_section", section as usize), theme)
-                .sidebar()
-                .selected(selected == section)
-                .gap_2()
-                .on_click(move |_, _, cx| {
-                    terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.set_chart_settings_section(section, terminal_cx);
-                    });
-                    cx.stop_propagation();
-                })
-                .child(header_icon(section.icon()).with_size(px(16.0)))
-                .child(section.label())
-        }));
+    let sections = TabList::sidebar(
+        "chart_settings_sections",
+        tr!(chart_menu::CHART_SETTINGS_SECTIONS),
+    )
+    .flex_1()
+    .min_h_0()
+    .children(ChartSettingsSection::ALL.into_iter().map(|section| {
+        let terminal = terminal.clone();
+        Tab::new(("chart_settings_section", section as usize), theme)
+            .sidebar()
+            .selected(selected == section)
+            .gap_2()
+            .on_click(move |_, _, cx| {
+                terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.set_chart_settings_section(section, terminal_cx);
+                });
+                cx.stop_propagation();
+            })
+            .child(header_icon(section.icon()).with_size(px(16.0)))
+            .child(section.label())
+    }));
     div()
         .id("chart_settings_sidebar")
         .w(design_rems(CHART_SETTINGS_SIDEBAR_WIDTH))
@@ -1304,7 +1332,7 @@ fn chart_settings_template_control(
         .trigger()
         .full_width()
         .open(open)
-        .label("Template")
+        .label(tr!(chart_menu::TEMPLATE))
         .caret(header_icon(HugeIcon::ChevronDown))
         .on_click(move |_, _, cx| {
             toggle.update(cx, |terminal, terminal_cx| {
@@ -1354,30 +1382,39 @@ fn chart_settings_template_menu(
     let apply_all = terminal.clone();
     let apply_all_menu = menu.clone();
     let mut actions = vec![
-        MenuRow::compact("chart_template_reset", "Reset to defaults", theme).on_click(
-            move |_, _, cx| {
-                reset.update(cx, |terminal, terminal_cx| {
-                    terminal.reset_chart_settings(&reset_menu, terminal_cx);
-                });
-            },
-        ),
-        MenuRow::compact("chart_template_save", "Save as template…", theme).on_click(
-            move |_, window, cx| {
-                save.update(cx, |terminal, terminal_cx| {
-                    terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
-                });
-            },
-        ),
+        MenuRow::compact(
+            "chart_template_reset",
+            tr!(chart_menu::RESET_TO_DEFAULTS),
+            theme,
+        )
+        .on_click(move |_, _, cx| {
+            reset.update(cx, |terminal, terminal_cx| {
+                terminal.reset_chart_settings(&reset_menu, terminal_cx);
+            });
+        }),
+        MenuRow::compact(
+            "chart_template_save",
+            tr!(chart_menu::SAVE_AS_TEMPLATE),
+            theme,
+        )
+        .on_click(move |_, window, cx| {
+            save.update(cx, |terminal, terminal_cx| {
+                terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
+            });
+        }),
     ];
     if state.apply_to_all {
         actions.push(
-            MenuRow::compact("chart_template_apply_all", "Apply to all charts", theme).on_click(
-                move |_, _, cx| {
-                    apply_all.update(cx, |terminal, terminal_cx| {
-                        terminal.apply_chart_settings_to_all(&apply_all_menu, terminal_cx);
-                    });
-                },
-            ),
+            MenuRow::compact(
+                "chart_template_apply_all",
+                tr!(chart_menu::APPLY_TO_ALL_CHARTS),
+                theme,
+            )
+            .on_click(move |_, _, cx| {
+                apply_all.update(cx, |terminal, terminal_cx| {
+                    terminal.apply_chart_settings_to_all(&apply_all_menu, terminal_cx);
+                });
+            }),
         );
     }
     let actions = actions.into_iter().map(|row| {
@@ -1393,7 +1430,7 @@ fn chart_settings_template_menu(
     let flyout_open = state.overlay == ChartSettingsTemplateOverlay::TemplatesFlyout;
     let hover = terminal.clone();
     let open_flyout = terminal.clone();
-    let templates_row = MenuRow::compact("chart_template_saved", "Templates", theme)
+    let templates_row = MenuRow::compact("chart_template_saved", tr!(chart_menu::TEMPLATES), theme)
         .highlighted(flyout_open)
         .trailing(
             header_icon(HugeIcon::ArrowRight)
@@ -1447,7 +1484,7 @@ fn chart_settings_templates_flyout(
                     .variant(ButtonVariant::Ghost)
                     .button_size(ButtonSize::Sm)
                     .icon(header_icon(HugeIcon::Trash))
-                    .aria_label(format!("Delete template {}", template.name))
+                    .aria_label(tr!(chart_menu::DELETE_TEMPLATE, name = template.name))
                     .danger_on_hover()
                     .tab_stop(false)
                     .on_click(move |_, _, cx| {
@@ -1464,7 +1501,12 @@ fn chart_settings_templates_flyout(
             })
     });
     let empty = state.templates.is_empty().then(|| {
-        MenuRow::compact("chart_template_none", "No saved templates", theme).disabled(true)
+        MenuRow::compact(
+            "chart_template_none",
+            tr!(chart_menu::NO_SAVED_TEMPLATES),
+            theme,
+        )
+        .disabled(true)
     });
     MenuPanel::new(
         "chart_settings_templates_flyout",
@@ -1487,7 +1529,7 @@ fn chart_settings_template_delete_dialog(
     let confirm = terminal.clone();
     ConfirmationDialog::new(
         "chart_template_delete_dialog",
-        "Delete chart template?",
+        tr!(chart_menu::DELETE_CHART_TEMPLATE_TITLE),
         ConfirmationTone::Destructive,
         theme,
         move |_, cx| {
@@ -1501,10 +1543,10 @@ fn chart_settings_template_delete_dialog(
             });
         },
     )
-    .confirm_label("Delete")
-    .message(format!(
-        "Delete the \u{201c}{}\u{201d} template? Charts that already use it keep their settings.",
-        template.name
+    .confirm_label(tr!(chart_menu::DELETE))
+    .message(tr!(
+        chart_menu::DELETE_TEMPLATE_MESSAGE,
+        name = template.name
     ))
     .into_any_element()
 }
@@ -1521,7 +1563,7 @@ fn chart_settings_template_save_dialog(
     let save_menu = menu.clone();
     ConfirmationDialog::new(
         "chart_template_save_dialog",
-        "Save chart template",
+        tr!(chart_menu::SAVE_CHART_TEMPLATE_TITLE),
         ConfirmationTone::Positive,
         theme,
         move |_, cx| {
@@ -1535,7 +1577,7 @@ fn chart_settings_template_save_dialog(
             });
         },
     )
-    .confirm_label("Save")
+    .confirm_label(tr!(chart_menu::SAVE))
     .children(input.map(|input| Input::new(input).platform(theme)))
     .children(error.map(|error| {
         div()
@@ -1675,7 +1717,7 @@ fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
             vec![line_group(ui, title, appearance, colors)]
         }
         ChartType::Area => vec![
-            line_group(ui, "Line", appearance, colors),
+            line_group(ui, tr!(chart_menu::LINE), appearance, colors),
             area_fill_group(ui, colors),
         ],
         ChartType::Baseline => vec![baseline_group(ui, title, appearance, colors)],
@@ -1694,10 +1736,10 @@ fn candle_group(
     settings_group(
         title,
         [
-            settings_pair_captions("Up", "Down", true, ui.theme),
+            settings_pair_captions(tr!(chart_menu::UP), tr!(chart_menu::DOWN), true, ui.theme),
             settings_color_pair_row(
                 ui,
-                "Body",
+                tr!(chart_menu::BODY),
                 [
                     cell(ChartColorSetting::Up, &candle.up),
                     cell(ChartColorSetting::Down, &candle.down),
@@ -1706,7 +1748,7 @@ fn candle_group(
             ),
             settings_color_pair_row(
                 ui,
-                "Borders",
+                tr!(chart_menu::BORDERS),
                 [
                     cell(ChartColorSetting::BorderUp, &candle.border_up),
                     cell(ChartColorSetting::BorderDown, &candle.border_down),
@@ -1718,7 +1760,7 @@ fn candle_group(
             ),
             settings_color_pair_row(
                 ui,
-                "Wicks",
+                tr!(chart_menu::WICKS),
                 [
                     cell(ChartColorSetting::WickUp, &candle.wick_up),
                     cell(ChartColorSetting::WickDown, &candle.wick_down),
@@ -1787,22 +1829,44 @@ fn footprint_group(
         [
             settings_select_row(
                 ui,
-                ChoiceRow::new("footprint_display", "Display"),
+                ChoiceRow::new("footprint_display", tr!(chart_menu::DISPLAY)),
                 &[
-                    mode("Bid × Ask", FootprintDisplayMode::BidAsk),
-                    mode("Total", FootprintDisplayMode::Total),
-                    mode("Delta", FootprintDisplayMode::Delta),
-                    mode("Profile", FootprintDisplayMode::ProfileInBar),
-                    mode("Ladder", FootprintDisplayMode::VolumeLadder),
-                    mode("Imbalance", FootprintDisplayMode::HorizontalImbalance),
-                    mode("Histogram", FootprintDisplayMode::BidAskHistogram),
+                    mode(
+                        tr!(chart_menu::FOOTPRINT_BID_ASK),
+                        FootprintDisplayMode::BidAsk,
+                    ),
+                    mode(
+                        tr!(chart_menu::FOOTPRINT_TOTAL),
+                        FootprintDisplayMode::Total,
+                    ),
+                    mode(
+                        tr!(chart_menu::FOOTPRINT_DELTA),
+                        FootprintDisplayMode::Delta,
+                    ),
+                    mode(
+                        tr!(chart_menu::FOOTPRINT_PROFILE),
+                        FootprintDisplayMode::ProfileInBar,
+                    ),
+                    mode(
+                        tr!(chart_menu::FOOTPRINT_LADDER),
+                        FootprintDisplayMode::VolumeLadder,
+                    ),
+                    mode(
+                        tr!(chart_menu::FOOTPRINT_IMBALANCE),
+                        FootprintDisplayMode::HorizontalImbalance,
+                    ),
+                    mode(
+                        tr!(chart_menu::FOOTPRINT_HISTOGRAM),
+                        FootprintDisplayMode::BidAskHistogram,
+                    ),
                 ],
             ),
             settings_select_row(
                 ui,
-                ChoiceRow::new("footprint_row_size", "Row size").hint("Ticks per row"),
+                ChoiceRow::new("footprint_row_size", tr!(chart_menu::ROW_SIZE))
+                    .hint(tr!(chart_menu::ROW_SIZE_HINT)),
                 &[
-                    rows("Auto", 0),
+                    rows(tr!(chart_menu::AUTO), 0),
                     rows("1", 1),
                     rows("2", 2),
                     rows("5", 5),
@@ -1828,10 +1892,10 @@ fn bar_group(
     settings_group(
         title,
         [
-            settings_pair_captions("Up", "Down", false, ui.theme),
+            settings_pair_captions(tr!(chart_menu::UP), tr!(chart_menu::DOWN), false, ui.theme),
             settings_color_pair_row(
                 ui,
-                "Bars",
+                tr!(chart_menu::BARS),
                 [
                     ColorCell {
                         setting: ChartColorSetting::Up,
@@ -1846,15 +1910,15 @@ fn bar_group(
             ),
             settings_switch_row(
                 ui,
-                "Open tick",
-                Some("The left tick at each bar's open"),
+                tr!(chart_menu::OPEN_TICK),
+                Some(tr!(chart_menu::OPEN_TICK_HINT)),
                 appearance.open_visible,
                 ChartSettingsAction::ToggleOpen,
             ),
             settings_switch_row(
                 ui,
-                "Thin bars",
-                Some("One pixel wide at every zoom"),
+                tr!(chart_menu::THIN_BARS),
+                Some(tr!(chart_menu::THIN_BARS_HINT)),
                 appearance.thin_bars,
                 ChartSettingsAction::ToggleThinBars,
             ),
@@ -1874,7 +1938,7 @@ fn line_group(
         [
             settings_color_row(
                 ui,
-                "Color",
+                tr!(chart_menu::COLOR),
                 ColorCell {
                     setting: ChartColorSetting::Line,
                     value: &colors.line,
@@ -1892,12 +1956,17 @@ fn line_group(
 /// shows the translucent default Aeris Charts derives from the line color.
 fn area_fill_group(ui: SettingsUi<'_>, colors: &ChartSeriesColors) -> AnyElement {
     settings_group(
-        "Fill",
+        tr!(chart_menu::FILL),
         [
-            settings_pair_captions("Top", "Bottom", false, ui.theme),
+            settings_pair_captions(
+                tr!(chart_menu::TOP),
+                tr!(chart_menu::BOTTOM),
+                false,
+                ui.theme,
+            ),
             settings_color_pair_row(
                 ui,
-                "Colors",
+                tr!(chart_menu::COLORS),
                 [
                     ColorCell {
                         setting: ChartColorSetting::AreaTop,
@@ -1924,10 +1993,15 @@ fn baseline_group(
     settings_group(
         title,
         [
-            settings_pair_captions("Above", "Below", false, ui.theme),
+            settings_pair_captions(
+                tr!(chart_menu::ABOVE),
+                tr!(chart_menu::BELOW),
+                false,
+                ui.theme,
+            ),
             settings_color_pair_row(
                 ui,
-                "Colors",
+                tr!(chart_menu::COLORS),
                 [
                     ColorCell {
                         setting: ChartColorSetting::BaselineTop,
@@ -1957,7 +2031,7 @@ fn line_width_row(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> A
     };
     settings_select_row(
         ui,
-        ChoiceRow::new("line_width", "Width"),
+        ChoiceRow::new("line_width", tr!(chart_menu::WIDTH)),
         &[width("1", 1), width("2", 2), width("3", 3), width("4", 4)],
     )
 }
@@ -1972,8 +2046,12 @@ fn line_style_row(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> A
     };
     settings_select_row(
         ui,
-        ChoiceRow::new("line_style", "Style"),
-        &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
+        ChoiceRow::new("line_style", tr!(chart_menu::STYLE)),
+        &[
+            style(tr!(chart_menu::STYLE_SOLID), 0),
+            style(tr!(chart_menu::STYLE_DOTTED), 1),
+            style(tr!(chart_menu::STYLE_DASHED), 2),
+        ],
     )
 }
 
@@ -1994,11 +2072,11 @@ fn canvas_surface_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) ->
     let background = effective_appearance_color(&appearance.background_color, &defaults.background);
     let text = effective_appearance_color(&appearance.text_color, &defaults.text);
     settings_group(
-        "Chart",
+        tr!(chart_menu::CHART),
         [
             settings_color_row(
                 ui,
-                "Background",
+                tr!(chart_menu::BACKGROUND),
                 ColorCell {
                     setting: ChartColorSetting::Background,
                     value: &background,
@@ -2007,7 +2085,7 @@ fn canvas_surface_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) ->
             ),
             settings_color_row(
                 ui,
-                "Text",
+                tr!(chart_menu::TEXT),
                 ColorCell {
                     setting: ChartColorSetting::Text,
                     value: &text,
@@ -2026,11 +2104,11 @@ fn canvas_axis_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> An
     let chart_text = effective_appearance_color(&snapshot.appearance.text_color, &defaults.text);
     let text = effective_appearance_color(&axis.text_color, &chart_text);
     settings_group(
-        "Axes",
+        tr!(chart_menu::AXES),
         [
             settings_color_row(
                 ui,
-                "Border",
+                tr!(chart_menu::BORDER),
                 ColorCell {
                     setting: ChartColorSetting::AxisBorder,
                     value: &border,
@@ -2039,7 +2117,7 @@ fn canvas_axis_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> An
             ),
             settings_color_row(
                 ui,
-                "Text",
+                tr!(chart_menu::TEXT),
                 ColorCell {
                     setting: ChartColorSetting::AxisText,
                     value: &text,
@@ -2063,18 +2141,18 @@ fn canvas_grid_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> An
         )
     };
     settings_group(
-        "Grid lines",
+        tr!(chart_menu::GRID_LINES),
         [
             settings_switch_row(
                 ui,
-                "Show grid lines",
+                tr!(chart_menu::SHOW_GRID_LINES),
                 None,
                 visible,
                 ChartSettingsAction::ToggleGrid,
             ),
             settings_color_row(
                 ui,
-                "Color",
+                tr!(chart_menu::COLOR),
                 ColorCell {
                     setting: ChartColorSetting::Grid,
                     value: &color,
@@ -2083,8 +2161,12 @@ fn canvas_grid_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> An
             ),
             settings_select_row(
                 ui,
-                ChoiceRow::new("grid_style", "Style").enabled(visible),
-                &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
+                ChoiceRow::new("grid_style", tr!(chart_menu::STYLE)).enabled(visible),
+                &[
+                    style(tr!(chart_menu::STYLE_SOLID), 0),
+                    style(tr!(chart_menu::STYLE_DOTTED), 1),
+                    style(tr!(chart_menu::STYLE_DASHED), 2),
+                ],
             ),
         ],
         ui.theme,
@@ -2093,10 +2175,10 @@ fn canvas_grid_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> An
 
 fn crosshair_mode_hint(mode: u8) -> &'static str {
     match mode {
-        1 => "Snaps to each bar's close",
-        CROSSHAIR_HIDDEN => "No crosshair lines or labels",
-        3 => "Snaps to the nearest open, high, low or close",
-        _ => "Follows the pointer freely",
+        1 => tr!(chart_menu::CROSSHAIR_HINT_MAGNET),
+        CROSSHAIR_HIDDEN => tr!(chart_menu::CROSSHAIR_HINT_HIDDEN),
+        3 => tr!(chart_menu::CROSSHAIR_HINT_OHLC),
+        _ => tr!(chart_menu::CROSSHAIR_HINT_NORMAL),
     }
 }
 
@@ -2129,22 +2211,22 @@ fn canvas_crosshair_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
         )
     };
     settings_group(
-        "Crosshair",
+        tr!(chart_menu::CROSSHAIR),
         [
             settings_select_row(
                 ui,
-                ChoiceRow::new("crosshair_mode", "Mode")
+                ChoiceRow::new("crosshair_mode", tr!(chart_menu::MODE))
                     .hint(crosshair_mode_hint(snapshot.crosshair_mode)),
                 &[
-                    mode("Normal", 0),
-                    mode("Magnet", 1),
-                    mode("OHLC", 3),
-                    mode("Hidden", CROSSHAIR_HIDDEN),
+                    mode(tr!(chart_menu::CROSSHAIR_NORMAL), 0),
+                    mode(tr!(chart_menu::CROSSHAIR_MAGNET), 1),
+                    mode(tr!(chart_menu::CROSSHAIR_OHLC), 3),
+                    mode(tr!(chart_menu::CROSSHAIR_HIDDEN), CROSSHAIR_HIDDEN),
                 ],
             ),
             settings_color_row(
                 ui,
-                "Color",
+                tr!(chart_menu::COLOR),
                 ColorCell {
                     setting: ChartColorSetting::Crosshair,
                     value: &color,
@@ -2153,13 +2235,17 @@ fn canvas_crosshair_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
             ),
             settings_select_row(
                 ui,
-                ChoiceRow::new("crosshair_width", "Width").enabled(visible),
+                ChoiceRow::new("crosshair_width", tr!(chart_menu::WIDTH)).enabled(visible),
                 &[width("1", 1), width("2", 2), width("3", 3)],
             ),
             settings_select_row(
                 ui,
-                ChoiceRow::new("crosshair_style", "Style").enabled(visible),
-                &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
+                ChoiceRow::new("crosshair_style", tr!(chart_menu::STYLE)).enabled(visible),
+                &[
+                    style(tr!(chart_menu::STYLE_SOLID), 0),
+                    style(tr!(chart_menu::STYLE_DOTTED), 1),
+                    style(tr!(chart_menu::STYLE_DASHED), 2),
+                ],
             ),
         ],
         ui.theme,
@@ -2170,15 +2256,15 @@ fn chart_legend_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
     let legend = snapshot.legend;
     let groups = [
         settings_group(
-            "Symbol",
+            tr!(chart_menu::SYMBOL),
             [settings_switch_with_option(
                 ui,
                 SwitchWithOption {
-                    label: "Symbol legend",
+                    label: tr!(chart_menu::SYMBOL_LEGEND),
                     hint: None,
                     enabled: legend.symbol,
                     action: ChartSettingsAction::ToggleSymbolLegend,
-                    option: "OHLC values",
+                    option: tr!(chart_menu::OHLC_VALUES),
                     option_checked: legend.symbol_values,
                     option_action: ChartSettingsAction::ToggleSymbolLegendValues,
                 },
@@ -2186,15 +2272,15 @@ fn chart_legend_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
             ui.theme,
         ),
         settings_group(
-            "Indicators",
+            tr!(chart_menu::INDICATORS),
             [settings_switch_with_option(
                 ui,
                 SwitchWithOption {
-                    label: "Indicator legend",
+                    label: tr!(chart_menu::INDICATOR_LEGEND),
                     hint: None,
                     enabled: legend.indicators,
                     action: ChartSettingsAction::ToggleIndicatorLegend,
-                    option: "Indicator values",
+                    option: tr!(chart_menu::INDICATOR_VALUES),
                     option_checked: legend.indicator_values,
                     option_action: ChartSettingsAction::ToggleIndicatorLegendValues,
                 },
@@ -2209,15 +2295,15 @@ fn chart_trading_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
     let visibility = snapshot.trading_visibility;
     let groups = [
         settings_group(
-            "Orders and positions",
+            tr!(chart_menu::ORDERS_AND_POSITIONS),
             [settings_switch_with_option(
                 ui,
                 SwitchWithOption {
-                    label: "Order and position lines",
-                    hint: Some("Working orders, open positions and their TP/SL"),
+                    label: tr!(chart_menu::ORDER_POSITION_LINES),
+                    hint: Some(tr!(chart_menu::ORDER_POSITION_LINES_HINT)),
                     enabled: visibility.show_order_management_lines,
                     action: ChartSettingsAction::ToggleOrderManagementLines,
-                    option: "Extend lines to the left edge",
+                    option: tr!(chart_menu::EXTEND_LINES_LEFT),
                     option_checked: visibility.extend_order_lines_left,
                     option_action: ChartSettingsAction::ToggleExtendOrderLinesLeft,
                 },
@@ -2225,19 +2311,19 @@ fn chart_trading_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
             ui.theme,
         ),
         settings_group(
-            "Executions",
+            tr!(chart_menu::EXECUTIONS),
             [
                 settings_switch_row(
                     ui,
-                    "Execution marks",
-                    Some("Marks where your orders filled"),
+                    tr!(chart_menu::EXECUTION_MARKS),
+                    Some(tr!(chart_menu::EXECUTION_MARKS_HINT)),
                     visibility.show_execution_marks,
                     ChartSettingsAction::ToggleExecutionMarks,
                 ),
                 settings_switch_row(
                     ui,
-                    "Fill glow",
-                    Some("Lights the window edges when an order fills"),
+                    tr!(chart_menu::FILL_GLOW),
+                    Some(tr!(chart_menu::FILL_GLOW_HINT)),
                     snapshot.fill_glow_enabled,
                     ChartSettingsAction::ToggleFillGlow,
                 ),
@@ -2245,11 +2331,11 @@ fn chart_trading_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
             ui.theme,
         ),
         settings_group(
-            "Chart buttons",
+            tr!(chart_menu::CHART_BUTTONS),
             [settings_switch_row(
                 ui,
-                "Quick trade buttons",
-                Some("Buy, quantity and Sell under the symbol on every chart"),
+                tr!(chart_menu::QUICK_TRADE_BUTTONS),
+                Some(tr!(chart_menu::QUICK_TRADE_BUTTONS_HINT)),
                 snapshot.chart_trade_buttons_visible,
                 ChartSettingsAction::ToggleChartTradeButtons,
             )],
@@ -2600,22 +2686,28 @@ fn settings_color_pair_row(
 }
 
 /// A width choice previews its stroke, a line style its dash pattern; other choices read as
-/// their label alone.
-fn settings_choice_glyph(
-    choice: &'static str,
-    action: ChartSettingsAction,
-    theme: &AerisTheme,
-) -> Option<AnyElement> {
+/// their label alone. The dash pattern follows the choice's style code, never its translated
+/// label.
+fn settings_choice_glyph(action: ChartSettingsAction, theme: &AerisTheme) -> Option<AnyElement> {
     match action {
         ChartSettingsAction::LineWidth(width) | ChartSettingsAction::CrosshairWidth(width) => {
             Some(width_glyph(f64::from(width), theme).into_any_element())
         }
-        ChartSettingsAction::LineStyle(_)
-        | ChartSettingsAction::GridStyle(_)
-        | ChartSettingsAction::CrosshairStyle(_) => {
-            Some(choice_glyph(&choice.to_ascii_lowercase(), theme))
+        ChartSettingsAction::LineStyle(style)
+        | ChartSettingsAction::GridStyle(style)
+        | ChartSettingsAction::CrosshairStyle(style) => {
+            Some(choice_glyph(line_style_glyph_name(style), theme))
         }
         _ => None,
+    }
+}
+
+/// The `choice_glyph` dash pattern of a line-style choice code (0 solid, 1 dotted, 2 dashed).
+fn line_style_glyph_name(style: u8) -> &'static str {
+    match style {
+        1 => "dotted",
+        2 => "dashed",
+        _ => "solid",
     }
 }
 
@@ -2631,9 +2723,7 @@ fn settings_select(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> 
         .flex()
         .items_center()
         .gap_2()
-        .children(
-            current.and_then(|&(choice, _, action)| settings_choice_glyph(choice, action, theme)),
-        )
+        .children(current.and_then(|&(_, _, action)| settings_choice_glyph(action, theme)))
         .child(
             div()
                 .truncate()
@@ -2672,10 +2762,7 @@ fn settings_select(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> 
                 let choose = ui.terminal.clone();
                 let menu = ui.menu.clone();
                 MenuRow::compact((id, index), choice, theme)
-                    .when_some(
-                        settings_choice_glyph(choice, action, theme),
-                        MenuRow::leading,
-                    )
+                    .when_some(settings_choice_glyph(action, theme), MenuRow::leading)
                     .checked(selected)
                     .on_click(move |_, _, cx| {
                         choose.update(cx, |terminal, terminal_cx| {

@@ -21,9 +21,10 @@ use std::{
 
 use aeris_account_runtime::AccountService;
 use aeris_account_runtime::{
-    AccountSessionState, AccountView, LoginAuthorization, ProfilePhoto, ProfilePhotoFormat,
-    ProfilePhotoStatus,
+    AccountDetail, AccountSessionState, AccountView, LoginAuthorization, ProfilePhoto,
+    ProfilePhotoFormat, ProfilePhotoStatus,
 };
+use aeris_localization::{runtime, tr, trading};
 
 /// A window's account-change callback. The session holds it weakly.
 pub type AccountChangeWake = Arc<dyn Fn() + Send + Sync>;
@@ -69,7 +70,7 @@ pub fn open_manage_profile() -> Result<(), String> {
             }
         })
         .map(|_| ())
-        .map_err(|_| "profile page could not be opened".to_string())
+        .map_err(|_| tr!(trading::PROFILE_OPEN_FAILED).to_string())
 }
 
 /// Starts one runtime-owned login transaction and opens the returned
@@ -108,9 +109,9 @@ fn open_login_browser_with(
     open_browser: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<(), String> {
     if url.is_empty() || url.len() > aeris_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES {
-        return Err("account service returned an invalid authorization URL".to_string());
+        return Err(tr!(trading::INVALID_AUTHORIZATION_URL).to_string());
     }
-    open_browser(url).map_err(|_| "system browser could not be opened".to_string())
+    open_browser(url).map_err(|_| tr!(trading::BROWSER_OPEN_FAILED).to_string())
 }
 
 /// Returns the current sanitized runtime-owned account view.
@@ -137,14 +138,14 @@ pub fn cancel_login(
 
 /// Human-readable label for one account session state.
 #[must_use]
-pub const fn account_state_label(state: AccountSessionState) -> &'static str {
+pub fn account_state_label(state: AccountSessionState) -> &'static str {
     match state {
-        AccountSessionState::SignedOut => "Signed out",
-        AccountSessionState::Authorizing => "Waiting for browser sign-in",
-        AccountSessionState::Active => "Signed in",
-        AccountSessionState::Offline => "Signed in (offline)",
-        AccountSessionState::ReauthenticationRequired => "Sign-in required",
-        AccountSessionState::TerminalError => "Sign-in unavailable",
+        AccountSessionState::SignedOut => tr!(trading::STATE_SIGNED_OUT),
+        AccountSessionState::Authorizing => tr!(trading::STATE_AUTHORIZING),
+        AccountSessionState::Active => tr!(trading::STATE_SIGNED_IN),
+        AccountSessionState::Offline => tr!(trading::STATE_OFFLINE),
+        AccountSessionState::ReauthenticationRequired => tr!(trading::STATE_SIGN_IN_REQUIRED),
+        AccountSessionState::TerminalError => tr!(trading::STATE_SIGN_IN_UNAVAILABLE),
     }
 }
 
@@ -152,9 +153,77 @@ pub const fn account_state_label(state: AccountSessionState) -> &'static str {
 #[must_use]
 pub fn account_action_label(view: &AccountView) -> &'static str {
     match view.state {
-        AccountSessionState::Active | AccountSessionState::Offline => "Account",
-        AccountSessionState::Authorizing => "Waiting for browser",
-        _ => "Sign in",
+        AccountSessionState::Active | AccountSessionState::Offline => tr!(trading::ACTION_ACCOUNT),
+        AccountSessionState::Authorizing => tr!(trading::ACTION_WAITING),
+        _ => tr!(trading::ACTION_SIGN_IN),
+    }
+}
+
+/// Localized detail for one runtime-owned account detail. `Failure` payloads
+/// are already-redacted runtime error messages and pass through as authored.
+#[must_use]
+fn account_detail_text(detail: &AccountDetail) -> String {
+    match detail {
+        AccountDetail::None => String::new(),
+        AccountDetail::SignedOut => tr!(runtime::ACCOUNT_DETAIL_SIGNED_OUT).to_string(),
+        AccountDetail::RestoringSavedSignIn => {
+            tr!(runtime::ACCOUNT_DETAIL_RESTORING_SAVED_SIGN_IN).to_string()
+        }
+        AccountDetail::SignedInVerifyingSavedSession => {
+            tr!(runtime::ACCOUNT_DETAIL_SIGNED_IN_VERIFYING_SAVED_SESSION).to_string()
+        }
+        AccountDetail::SignedIn => tr!(runtime::ACCOUNT_DETAIL_SIGNED_IN).to_string(),
+        AccountDetail::SignedInOfflineReconnecting => {
+            tr!(runtime::ACCOUNT_DETAIL_SIGNED_IN_OFFLINE_RECONNECTING).to_string()
+        }
+        AccountDetail::WaitingForBrowserAuthorization => {
+            tr!(runtime::ACCOUNT_DETAIL_WAITING_FOR_BROWSER_AUTHORIZATION).to_string()
+        }
+        AccountDetail::CompletingSignIn => {
+            tr!(runtime::ACCOUNT_DETAIL_COMPLETING_SIGN_IN).to_string()
+        }
+        AccountDetail::SignInCancelled => {
+            tr!(runtime::ACCOUNT_DETAIL_SIGN_IN_CANCELLED).to_string()
+        }
+        AccountDetail::SignInTimedOut => tr!(runtime::ACCOUNT_DETAIL_SIGN_IN_TIMED_OUT).to_string(),
+        AccountDetail::SignInWorkerCouldNotStart => {
+            tr!(runtime::ACCOUNT_DETAIL_SIGN_IN_WORKER_COULD_NOT_START).to_string()
+        }
+        AccountDetail::AccountStateUnavailable => {
+            tr!(runtime::ACCOUNT_DETAIL_ACCOUNT_STATE_UNAVAILABLE).to_string()
+        }
+        AccountDetail::CredentialStorageUnavailableSignInAgain => {
+            tr!(runtime::ACCOUNT_DETAIL_CREDENTIAL_STORAGE_UNAVAILABLE_SIGN_IN_AGAIN).to_string()
+        }
+        AccountDetail::CredentialStorageUnavailableRetrySignIn => {
+            tr!(runtime::ACCOUNT_DETAIL_CREDENTIAL_STORAGE_UNAVAILABLE_RETRY_SIGN_IN).to_string()
+        }
+        AccountDetail::SavedSignInExpired => {
+            tr!(runtime::ACCOUNT_DETAIL_SAVED_SIGN_IN_EXPIRED).to_string()
+        }
+        AccountDetail::SignInExpired => tr!(runtime::ACCOUNT_DETAIL_SIGN_IN_EXPIRED).to_string(),
+        AccountDetail::SavedSignInRetireFailed => {
+            tr!(runtime::ACCOUNT_DETAIL_SAVED_SIGN_IN_RETIRE_FAILED).to_string()
+        }
+        AccountDetail::SignInExpiredRetireFailed => {
+            tr!(runtime::ACCOUNT_DETAIL_SIGN_IN_EXPIRED_RETIRE_FAILED).to_string()
+        }
+        AccountDetail::SignOutCleanupAttention => {
+            tr!(runtime::ACCOUNT_DETAIL_SIGN_OUT_CLEANUP_ATTENTION).to_string()
+        }
+        AccountDetail::SavedSignInCleanupUnavailable => {
+            tr!(runtime::ACCOUNT_DETAIL_SAVED_SIGN_IN_CLEANUP_UNAVAILABLE).to_string()
+        }
+        AccountDetail::RestoreCouldNotStart => {
+            tr!(runtime::ACCOUNT_DETAIL_RESTORE_COULD_NOT_START).to_string()
+        }
+        AccountDetail::SavedSignInUnverifiedConnection => {
+            tr!(runtime::ACCOUNT_DETAIL_SAVED_SIGN_IN_UNVERIFIED_CONNECTION).to_string()
+        }
+        AccountDetail::SavedSignInUnverified => {
+            tr!(runtime::ACCOUNT_DETAIL_SAVED_SIGN_IN_UNVERIFIED).to_string()
+        }
+        AccountDetail::Failure(message) => message.clone(),
     }
 }
 
@@ -162,9 +231,10 @@ pub fn account_action_label(view: &AccountView) -> &'static str {
 #[must_use]
 pub fn unavailable_presentation() -> AccountPresentation {
     AccountPresentation {
-        action: "Validation",
-        state: "Validation (sign-in disabled)",
-        plan: "No plan",
+        action: tr!(trading::VALIDATION_ACTION),
+        state: tr!(trading::VALIDATION_STATE),
+        plan: tr!(trading::PLAN_NONE),
+        session: None,
         detail: String::new(),
         display_name: String::new(),
         email: String::new(),
@@ -254,20 +324,22 @@ impl AccountMenuState {
     /// Returns whether the session is signed in.
     #[must_use]
     pub fn signed_in(&self) -> bool {
-        self.presentation.action == "Account"
+        matches!(
+            self.presentation.session,
+            Some(AccountSessionState::Active | AccountSessionState::Offline)
+        )
     }
 
     /// Returns whether the session is waiting on the browser.
     #[must_use]
     pub fn authorizing(&self) -> bool {
-        self.presentation.action == "Waiting for browser"
+        self.presentation.session == Some(AccountSessionState::Authorizing)
     }
 
     /// Returns whether the session is signed in but the identity provider is unreachable.
     #[must_use]
     pub fn offline(&self) -> bool {
-        self.signed_in()
-            && self.presentation.state == account_state_label(AccountSessionState::Offline)
+        self.presentation.session == Some(AccountSessionState::Offline)
     }
 
     /// Returns whether the panel hides identity metadata. A plain signed-out
@@ -276,9 +348,7 @@ impl AccountMenuState {
     /// knows what happened.
     #[must_use]
     pub fn hides_identity(&self) -> bool {
-        !self.signed_in()
-            && !self.authorizing()
-            && self.presentation.state == account_state_label(AccountSessionState::SignedOut)
+        self.presentation.session == Some(AccountSessionState::SignedOut)
     }
 }
 
@@ -298,9 +368,9 @@ pub fn unavailable_menu_state() -> AccountMenuState {
 #[must_use]
 pub fn sanitized_plan_label(plan_id: &str) -> &'static str {
     match plan_id {
-        "" => "No plan",
-        "unlimited" => "Unlimited",
-        _ => "Unknown plan",
+        "" => tr!(trading::PLAN_NONE),
+        "unlimited" => tr!(trading::PLAN_UNLIMITED),
+        _ => tr!(trading::PLAN_UNKNOWN),
     }
 }
 
@@ -376,6 +446,8 @@ pub struct AccountPresentation {
     pub state: &'static str,
     /// Plan label for the settings row.
     pub plan: &'static str,
+    /// The session state the labels describe; `None` when no account session is installed.
+    pub session: Option<AccountSessionState>,
     /// Redacted engine detail for the settings row.
     pub detail: String,
     /// Verified display name; empty unless signed in.
@@ -444,7 +516,7 @@ fn signed_out_view() -> AccountView {
         state: AccountSessionState::SignedOut,
         account_id: String::new(),
         plan_id: String::new(),
-        detail: String::new(),
+        detail: AccountDetail::None,
         request_generation: 0,
         display_name: String::new(),
         email: String::new(),
@@ -549,7 +621,7 @@ impl DesktopAccount {
         std::thread::Builder::new()
             .name("aeris-account-client".to_string())
             .spawn(move || run_account_client_with(&request_rx, &result_tx, handle))
-            .map_err(|_| "desktop account client could not start".to_string())?;
+            .map_err(|_| tr!(trading::ACCOUNT_CLIENT_START_FAILED).to_string())?;
         // Generations seed from the wall clock so a fresh desktop process
         // always supersedes generations from a previous process lifetime.
         // Persisted account generations can survive a desktop restart; restarting
@@ -580,7 +652,7 @@ impl DesktopAccount {
         std::thread::Builder::new()
             .name("aeris-account-poller".to_string())
             .spawn(move || run_account_poller(&poller, &result_rx, cadence))
-            .map_err(|_| "desktop account client could not start".to_string())?;
+            .map_err(|_| tr!(trading::ACCOUNT_CLIENT_START_FAILED).to_string())?;
         // Fetch engine state at startup so a restored session (or an
         // runtime expiry) reaches the UI on the first frames.
         queue_status(&shared);
@@ -603,12 +675,10 @@ impl DesktopAccount {
             .shared
             .change_wakes
             .lock()
-            .map_err(|_| "account change wakes are unavailable".to_string())?;
+            .map_err(|_| tr!(trading::CHANGE_WAKES_UNAVAILABLE).to_string())?;
         wakes.retain(|registered| registered.strong_count() > 0);
         if wakes.len() >= MAXIMUM_CHANGE_WAKES {
-            return Err(format!(
-                "at most {MAXIMUM_CHANGE_WAKES} account change wakes can be registered"
-            ));
+            return Err(tr!(trading::CHANGE_WAKES_BOUND, max = MAXIMUM_CHANGE_WAKES));
         }
         wakes.push(Arc::downgrade(wake));
         Ok(())
@@ -645,7 +715,8 @@ impl DesktopAccount {
             action: account_action_label(&view),
             state: account_state_label(view.state),
             plan: sanitized_plan_label(&view.plan_id),
-            detail: view.detail.clone(),
+            session: Some(view.state),
+            detail: account_detail_text(&view.detail),
             display_name: view.display_name.clone(),
             email: view.email.clone(),
             avatar,
@@ -679,7 +750,7 @@ impl DesktopAccount {
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.begin_request(
             AccountRequest::BeginLogin { generation },
-            "sign-in request is already pending",
+            tr!(trading::SIGN_IN_PENDING),
         )
     }
 
@@ -714,12 +785,12 @@ impl DesktopAccount {
     /// Returns an error when the worker cannot be reached.
     pub fn request_cancel(&self) -> Result<(), String> {
         if self.shared.pending.load(Ordering::Acquire) {
-            return Err("sign-in cancellation is already pending".to_string());
+            return Err(tr!(trading::CANCELLATION_PENDING).to_string());
         }
         let generation = self.shared.generation.load(Ordering::Acquire);
         self.begin_request(
             AccountRequest::CancelLogin { generation },
-            "sign-in cancellation is already pending",
+            tr!(trading::CANCELLATION_PENDING),
         )
     }
 
@@ -746,12 +817,12 @@ impl DesktopAccount {
                 !url.is_empty()
                     && url.len() <= aeris_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES
             })
-            .ok_or_else(|| "no sign-in page to reopen; start sign-in again".to_string())?;
+            .ok_or_else(|| tr!(trading::NO_SIGN_IN_PAGE).to_string())?;
         self.begin_request(
             AccountRequest::ReopenBrowser {
                 authorization_url: url,
             },
-            "sign-in browser reopen is already pending",
+            tr!(trading::REOPEN_PENDING),
         )
     }
 
@@ -763,12 +834,9 @@ impl DesktopAccount {
     /// cannot be reached.
     pub fn request_sign_out(&self) -> Result<(), String> {
         if self.shared.pending.load(Ordering::Acquire) {
-            return Err("another account request is already pending".to_string());
+            return Err(tr!(trading::ANOTHER_REQUEST_PENDING).to_string());
         }
-        self.begin_request(
-            AccountRequest::SignOut,
-            "an account request is already pending",
-        )
+        self.begin_request(AccountRequest::SignOut, tr!(trading::REQUEST_PENDING))
     }
 
     /// Asks the account runtime to refresh the current verified profile on its
@@ -786,18 +854,16 @@ impl DesktopAccount {
             )
         });
         if !refreshable {
-            return Err("account profile refresh requires a signed-in account".to_string());
+            return Err(tr!(trading::REFRESH_REQUIRES_SIGN_IN).to_string());
         }
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         self.shared
             .requests
             .try_send(AccountRequest::RefreshProfile { epoch })
             .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => {
-                    "account profile refresh is already queued".to_string()
-                }
+                mpsc::TrySendError::Full(_) => tr!(trading::REFRESH_QUEUED).to_string(),
                 mpsc::TrySendError::Disconnected(_) => {
-                    "account profile refresh is unavailable".to_string()
+                    tr!(trading::REFRESH_UNAVAILABLE).to_string()
                 }
             })
     }
@@ -814,7 +880,7 @@ impl DesktopAccount {
             .shared
             .view
             .lock()
-            .map_err(|_| "account profile view is unavailable".to_string())?
+            .map_err(|_| tr!(trading::PROFILE_VIEW_UNAVAILABLE).to_string())?
             .state;
         if !matches!(
             refreshable,
@@ -872,7 +938,7 @@ fn tick(shared: &AccountShared) -> Duration {
             return remaining;
         }
         shared.pending.store(false, Ordering::Release);
-        fail(shared, "account request timed out; try again");
+        fail(shared, tr!(trading::ACCOUNT_REQUEST_TIMEOUT));
     }
     if shared.status_in_flight.load(Ordering::Acquire) {
         return IDLE_STATUS_POLL_INTERVAL;
@@ -1269,10 +1335,10 @@ mod tests {
         account_action_label, account_state_label, open_login_browser_with,
         resolve_authoritative_authentication, sanitized_plan_label, unavailable_menu_state,
     };
-    use aeris_account_runtime::{AccountService, AccountServiceConfig};
     use aeris_account_runtime::{
-        AccountSessionState, AccountView, ProfilePhoto, ProfilePhotoStatus,
+        AccountDetail, AccountSessionState, AccountView, ProfilePhoto, ProfilePhotoStatus,
     };
+    use aeris_account_runtime::{AccountService, AccountServiceConfig};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -1322,7 +1388,7 @@ mod tests {
     impl FakeEngine {
         fn authorizing() -> AccountView {
             let mut view = view(AccountSessionState::Authorizing);
-            view.detail = "waiting for browser authorization".to_string();
+            view.detail = AccountDetail::WaitingForBrowserAuthorization;
             view
         }
 
@@ -1462,7 +1528,7 @@ mod tests {
             state,
             account_id: String::new(),
             plan_id: String::new(),
-            detail: String::new(),
+            detail: AccountDetail::None,
             request_generation: 1,
             display_name: String::new(),
             email: String::new(),
@@ -1619,13 +1685,54 @@ mod tests {
     }
 
     #[test]
+    fn account_details_keep_the_runtime_english() {
+        use aeris_account_runtime::AccountDetail;
+
+        let cases = [
+            AccountDetail::SignedOut,
+            AccountDetail::RestoringSavedSignIn,
+            AccountDetail::SignedInVerifyingSavedSession,
+            AccountDetail::SignedIn,
+            AccountDetail::SignedInOfflineReconnecting,
+            AccountDetail::WaitingForBrowserAuthorization,
+            AccountDetail::CompletingSignIn,
+            AccountDetail::SignInCancelled,
+            AccountDetail::SignInTimedOut,
+            AccountDetail::SignInWorkerCouldNotStart,
+            AccountDetail::AccountStateUnavailable,
+            AccountDetail::CredentialStorageUnavailableSignInAgain,
+            AccountDetail::CredentialStorageUnavailableRetrySignIn,
+            AccountDetail::SavedSignInExpired,
+            AccountDetail::SignInExpired,
+            AccountDetail::SavedSignInRetireFailed,
+            AccountDetail::SignInExpiredRetireFailed,
+            AccountDetail::SignOutCleanupAttention,
+            AccountDetail::SavedSignInCleanupUnavailable,
+            AccountDetail::RestoreCouldNotStart,
+            AccountDetail::SavedSignInUnverifiedConnection,
+            AccountDetail::SavedSignInUnverified,
+        ];
+        for detail in cases {
+            assert_eq!(super::account_detail_text(&detail), detail.english());
+        }
+        assert_eq!(super::account_detail_text(&AccountDetail::None), "");
+        assert_eq!(
+            super::account_detail_text(&AccountDetail::Failure("redacted failure".to_string())),
+            "redacted failure"
+        );
+    }
+    #[test]
     fn signed_out_hides_identity_but_errors_and_recovery_show() {
         use super::{AccountMenuState, AccountPresentation};
 
-        let presentation = |action: &'static str, state: &'static str| AccountPresentation {
-            action,
-            state,
+        let presentation = |session: AccountSessionState| AccountPresentation {
+            action: super::account_action_label(&AccountView {
+                state: session,
+                ..super::signed_out_view()
+            }),
+            state: super::account_state_label(session),
             plan: "No plan",
+            session: Some(session),
             detail: String::new(),
             display_name: String::new(),
             email: String::new(),
@@ -1634,7 +1741,7 @@ mod tests {
         };
         // Plain signed out: only the Sign in row (plus any error) renders.
         let signed_out = AccountMenuState {
-            presentation: presentation("Sign in", "Signed out"),
+            presentation: presentation(AccountSessionState::SignedOut),
             error: None,
             retry_sign_out: false,
             sign_in_enabled: true,
@@ -1645,7 +1752,7 @@ mod tests {
         // Signed out with an error still hides identity metadata; the error
         // row carries the actionable message.
         let failed = AccountMenuState {
-            presentation: presentation("Sign in", "Signed out"),
+            presentation: presentation(AccountSessionState::SignedOut),
             error: Some("account request timed out; try again".to_string()),
             retry_sign_out: false,
             sign_in_enabled: true,
@@ -1653,22 +1760,23 @@ mod tests {
         assert!(failed.hides_identity());
         // Every other state names itself: unavailable engine, browser wait,
         // recovery states, and authenticated sessions all show the header.
-        for (action, state) in [
-            ("Sign in", "Sign-in unavailable"),
-            ("Waiting for browser", "Waiting for browser sign-in"),
-            ("Sign in", "Sign-in required"),
-            ("Sign in", "Subscription expired"),
-            ("Sign in", "Sign-in unavailable"),
-            ("Account", "Signed in"),
-            ("Account", "Signed in (offline)"),
+        for session in [
+            AccountSessionState::TerminalError,
+            AccountSessionState::Authorizing,
+            AccountSessionState::ReauthenticationRequired,
+            AccountSessionState::Active,
+            AccountSessionState::Offline,
         ] {
             let menu = AccountMenuState {
-                presentation: presentation(action, state),
+                presentation: presentation(session),
                 error: None,
                 retry_sign_out: false,
                 sign_in_enabled: true,
             };
-            assert!(!menu.hides_identity(), "state must stay visible: {state}");
+            assert!(
+                !menu.hides_identity(),
+                "state must stay visible: {session:?}"
+            );
         }
     }
 
@@ -1813,7 +1921,7 @@ mod tests {
         );
 
         let mut signed_out = view(AccountSessionState::SignedOut);
-        signed_out.detail = "signed out; credential cleanup needs attention".to_string();
+        signed_out.detail = AccountDetail::SignOutCleanupAttention;
         apply_account_response(
             &session.shared,
             AccountResponse::SignOutFailed {

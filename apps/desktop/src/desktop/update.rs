@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use aeris_localization::{panels, shell, tr};
 use serde::Deserialize;
 
 /// How often a window with an update client polls it for check, preparation and restart
@@ -119,19 +120,19 @@ pub struct DesktopUpdater {
 impl DesktopUpdater {
     pub fn new() -> Result<Self, String> {
         if aeris_release_lifecycle::release_config().is_none() {
-            return Err("automatic updates need a release build".to_string());
+            return Err(tr!(panels::UPDATE_NEEDS_RELEASE_BUILD).to_string());
         }
         let (request_tx, request_rx) = mpsc::sync_channel(1);
         let (result_tx, result_rx) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("aeris-update-client".to_string())
             .spawn(move || run_update_worker(&request_rx, &result_tx))
-            .map_err(|_| "update client could not start".to_string())?;
+            .map_err(|_| tr!(panels::UPDATE_CLIENT_START_FAILED).to_string())?;
         let mut updater = Self {
             requests: request_tx,
             results: result_rx,
             presentation: UpdatePresentation {
-                system_version: "Detecting system…".to_string(),
+                system_version: tr!(panels::UPDATE_DETECTING_SYSTEM).to_string(),
                 state: UpdateState::Idle,
             },
             request_pending: false,
@@ -156,8 +157,10 @@ impl DesktopUpdater {
         self.requests
             .try_send(UpdateRequest::Check)
             .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => "update check is already pending".to_string(),
-                mpsc::TrySendError::Disconnected(_) => "update client is unavailable".to_string(),
+                mpsc::TrySendError::Full(_) => tr!(panels::UPDATE_CHECK_PENDING).to_string(),
+                mpsc::TrySendError::Disconnected(_) => {
+                    tr!(shell::UPDATE_CLIENT_UNAVAILABLE).to_string()
+                }
             })?;
         self.request_pending = true;
         self.presentation.state = UpdateState::Checking;
@@ -167,16 +170,18 @@ impl DesktopUpdater {
 
     pub fn request_restart(&mut self) -> Result<(), String> {
         if self.request_pending {
-            return Err("an update request is already pending".to_string());
+            return Err(tr!(panels::UPDATE_REQUEST_PENDING).to_string());
         }
         if !matches!(self.presentation.state, UpdateState::ReadyToRestart { .. }) {
-            return Err("no prepared Aeris update is ready to restart".to_string());
+            return Err(tr!(panels::UPDATE_NONE_PREPARED).to_string());
         }
         self.requests
             .try_send(UpdateRequest::Restart)
             .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => "update restart is already pending".to_string(),
-                mpsc::TrySendError::Disconnected(_) => "update client is unavailable".to_string(),
+                mpsc::TrySendError::Full(_) => tr!(panels::UPDATE_RESTART_PENDING).to_string(),
+                mpsc::TrySendError::Disconnected(_) => {
+                    tr!(shell::UPDATE_CLIENT_UNAVAILABLE).to_string()
+                }
             })?;
         self.request_pending = true;
         self.presentation.state = UpdateState::PreparingRestart;
@@ -202,7 +207,7 @@ impl DesktopUpdater {
                 if self.request_pending {
                     self.request_pending = false;
                     self.presentation.state =
-                        UpdateState::Error("update client stopped unexpectedly".to_string());
+                        UpdateState::Error(tr!(panels::UPDATE_CLIENT_STOPPED).to_string());
                     return changed;
                 }
                 return UpdatePoll::default();
@@ -282,7 +287,7 @@ impl DesktopUpdater {
         let mut prepared = self
             .prepared_restart
             .take()
-            .ok_or_else(|| "update restart is not prepared".to_string())?;
+            .ok_or_else(|| tr!(panels::UPDATE_RESTART_NOT_PREPARED).to_string())?;
         if let Err(error) = prepared.require_running() {
             self.presentation.state = UpdateState::Error(error.clone());
             self.prepared_restart = Some(prepared);
@@ -384,7 +389,7 @@ impl DesktopUpdater {
             Err(mpsc::TrySendError::Full(_)) => false,
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 self.presentation.state =
-                    UpdateState::Error("update client is unavailable".to_string());
+                    UpdateState::Error(tr!(shell::UPDATE_CLIENT_UNAVAILABLE).to_string());
                 self.record_check_failure(now);
                 true
             }
@@ -445,13 +450,13 @@ fn stable_launcher() -> Result<PathBuf, String> {
         aeris_release_lifecycle::native_install_root().map_err(|error| error.to_string())?;
     let launcher = install_root.join(format!("aeris_launcher{}", std::env::consts::EXE_SUFFIX));
     let metadata = std::fs::symlink_metadata(&launcher)
-        .map_err(|_| "installed Aeris launcher is unavailable".to_string())?;
+        .map_err(|_| tr!(panels::UPDATE_LAUNCHER_UNAVAILABLE).to_string())?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.len() == 0
         || metadata.len() > MAXIMUM_LAUNCHER_BYTES
     {
-        return Err("installed Aeris launcher is invalid".to_string());
+        return Err(tr!(panels::UPDATE_LAUNCHER_INVALID).to_string());
     }
     let release = aeris_release_lifecycle::current_release_identity();
     if release.install_generation == 0
@@ -462,7 +467,7 @@ fn stable_launcher() -> Result<PathBuf, String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
-        return Err("installed Aeris release identity is invalid".to_string());
+        return Err(tr!(panels::UPDATE_RELEASE_IDENTITY_INVALID).to_string());
     }
     let signed_launcher = install_root
         .join("versions")
@@ -474,7 +479,7 @@ fn stable_launcher() -> Result<PathBuf, String> {
     if !await_launcher_promotion(LAUNCHER_PROMOTION_WAIT, LAUNCHER_PROMOTION_POLL, || {
         launcher_is_trusted(&launcher, &signed_launcher)
     })? {
-        return Err("installed Aeris launcher is not the active signed launcher".to_string());
+        return Err(tr!(panels::UPDATE_LAUNCHER_NOT_ACTIVE).to_string());
     }
     Ok(launcher)
 }
@@ -547,7 +552,7 @@ fn launcher_identity(launcher: &Path) -> Result<LauncherIdentityReport, String> 
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| "installed Aeris launcher identity could not be queried".to_string())?;
+        .map_err(|_| tr!(panels::UPDATE_LAUNCHER_IDENTITY_QUERY).to_string())?;
     let deadline = Instant::now() + CHECK_TIMEOUT;
     let status = loop {
         match child.try_wait() {
@@ -555,36 +560,36 @@ fn launcher_identity(launcher: &Path) -> Result<LauncherIdentityReport, String> 
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
                 cleanup_after_failure(&mut child);
-                return Err("installed Aeris launcher identity query timed out".to_string());
+                return Err(tr!(panels::UPDATE_LAUNCHER_IDENTITY_TIMEOUT).to_string());
             }
             Err(_) => {
                 cleanup_after_failure(&mut child);
-                return Err("installed Aeris launcher identity query failed".to_string());
+                return Err(tr!(panels::UPDATE_LAUNCHER_IDENTITY_FAILED).to_string());
             }
         }
     };
     if !status.success() {
-        return Err("installed Aeris launcher identity query was rejected".to_string());
+        return Err(tr!(panels::UPDATE_LAUNCHER_IDENTITY_REJECTED).to_string());
     }
     let mut output = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         stdout
             .take(1025)
             .read_to_end(&mut output)
-            .map_err(|_| "installed Aeris launcher identity could not be read".to_string())?;
+            .map_err(|_| tr!(panels::UPDATE_LAUNCHER_IDENTITY_READ).to_string())?;
     }
     if output.len() > 1024 {
-        return Err("installed Aeris launcher identity exceeded its size bound".to_string());
+        return Err(tr!(panels::UPDATE_LAUNCHER_IDENTITY_BOUND).to_string());
     }
     serde_json::from_slice(&output)
-        .map_err(|_| "installed Aeris launcher identity was invalid".to_string())
+        .map_err(|_| tr!(panels::UPDATE_LAUNCHER_IDENTITY_INVALID).to_string())
 }
 
 fn launcher_files_match(left: &Path, right: &Path) -> Result<bool, String> {
     let left_metadata = std::fs::symlink_metadata(left)
-        .map_err(|_| "installed Aeris launcher is unavailable".to_string())?;
+        .map_err(|_| tr!(panels::UPDATE_LAUNCHER_UNAVAILABLE).to_string())?;
     let right_metadata = std::fs::symlink_metadata(right)
-        .map_err(|_| "active signed Aeris launcher is unavailable".to_string())?;
+        .map_err(|_| tr!(panels::UPDATE_ACTIVE_LAUNCHER_UNAVAILABLE).to_string())?;
     if !left_metadata.is_file()
         || left_metadata.file_type().is_symlink()
         || !right_metadata.is_file()
@@ -604,10 +609,10 @@ fn launcher_files_match(left: &Path, right: &Path) -> Result<bool, String> {
     loop {
         let left_count = left
             .read(&mut left_buffer)
-            .map_err(|_| "installed Aeris launcher could not be verified".to_string())?;
+            .map_err(|_| tr!(panels::UPDATE_LAUNCHER_VERIFY).to_string())?;
         let right_count = right
             .read(&mut right_buffer)
-            .map_err(|_| "active signed Aeris launcher could not be verified".to_string())?;
+            .map_err(|_| tr!(panels::UPDATE_ACTIVE_LAUNCHER_VERIFY).to_string())?;
         if left_count != right_count || left_buffer[..left_count] != right_buffer[..right_count] {
             return Ok(false);
         }
@@ -635,9 +640,9 @@ fn run_launcher_check() -> Result<LauncherUpdateCheck, String> {
     run_launcher_report(
         "--check-update",
         CHECK_TIMEOUT,
-        "update check could not start",
-        "update check timed out",
-        "updates could not be checked right now",
+        tr!(panels::UPDATE_CHECK_START_FAILED),
+        tr!(panels::UPDATE_CHECK_TIMEOUT),
+        tr!(panels::UPDATE_CHECK_UNAVAILABLE),
     )
 }
 
@@ -645,9 +650,9 @@ fn run_launcher_prepare() -> Result<LauncherUpdateCheck, String> {
     run_launcher_report(
         "--prepare-update",
         PREPARE_TIMEOUT,
-        "update download could not start",
-        "update download timed out",
-        "update could not be downloaded right now",
+        tr!(panels::UPDATE_DOWNLOAD_START_FAILED),
+        tr!(panels::UPDATE_DOWNLOAD_TIMEOUT),
+        tr!(panels::UPDATE_DOWNLOAD_UNAVAILABLE),
     )
 }
 
@@ -677,7 +682,7 @@ fn run_launcher_report(
             }
             Err(_) => {
                 cleanup_after_failure(&mut child);
-                return Err("update launcher process failed".to_string());
+                return Err(tr!(panels::UPDATE_LAUNCHER_PROCESS_FAILED).to_string());
             }
         }
     };
@@ -689,13 +694,13 @@ fn run_launcher_report(
         stdout
             .take((MAXIMUM_CHECK_OUTPUT_BYTES + 1) as u64)
             .read_to_end(&mut output)
-            .map_err(|_| "update status could not be read".to_string())?;
+            .map_err(|_| tr!(panels::UPDATE_STATUS_READ).to_string())?;
     }
     if output.len() > MAXIMUM_CHECK_OUTPUT_BYTES {
-        return Err("update status exceeded its size bound".to_string());
+        return Err(tr!(panels::UPDATE_STATUS_BOUND).to_string());
     }
-    let report: LauncherUpdateCheck =
-        serde_json::from_slice(&output).map_err(|_| "update status was invalid".to_string())?;
+    let report: LauncherUpdateCheck = serde_json::from_slice(&output)
+        .map_err(|_| tr!(panels::UPDATE_STATUS_INVALID).to_string())?;
     validate_launcher_report(report)
 }
 
@@ -710,7 +715,7 @@ fn validate_launcher_report(report: LauncherUpdateCheck) -> Result<LauncherUpdat
         || report.latest_version.len() > 64
         || report.update_available != (report.latest_generation > report.current_generation)
     {
-        return Err("update status was invalid".to_string());
+        return Err(tr!(panels::UPDATE_STATUS_INVALID).to_string());
     }
     Ok(report)
 }
@@ -753,13 +758,11 @@ pub(super) struct PreparedRestart {
 impl PreparedRestart {
     fn require_running(&mut self) -> Result<(), String> {
         let Some(child) = self.child.as_mut() else {
-            return Err("update restart helper is unavailable".to_string());
+            return Err(tr!(panels::UPDATE_HELPER_UNAVAILABLE).to_string());
         };
         match child.try_wait() {
             Ok(None) => Ok(()),
-            Ok(Some(_)) | Err(_) => {
-                Err("update restart helper stopped before shutdown".to_string())
-            }
+            Ok(Some(_)) | Err(_) => Err(tr!(panels::UPDATE_HELPER_STOPPED).to_string()),
         }
     }
 
@@ -767,7 +770,7 @@ impl PreparedRestart {
         let child = self
             .child
             .as_mut()
-            .ok_or_else(|| "update restart helper is unavailable".to_string())?;
+            .ok_or_else(|| tr!(panels::UPDATE_HELPER_UNAVAILABLE).to_string())?;
         send_restart_commit(child)?;
         self.committed = true;
         if let Some(slot) = self.slot.as_mut() {
@@ -845,11 +848,11 @@ fn terminate_and_reap(child: &mut Child) -> Result<ChildCleanup, &'static str> {
             let reaped = child.wait();
             reaped
                 .map(|_| ChildCleanup::Terminated)
-                .map_err(|_| "update helper could not be reaped after termination")
+                .map_err(|_| tr!(panels::UPDATE_HELPER_CLEANUP_REAP))
         }
         Err(_) => match child.try_wait() {
             Ok(Some(_)) => Ok(ChildCleanup::AlreadyExited),
-            _ => Err("update helper could not be terminated during cleanup"),
+            _ => Err(tr!(panels::UPDATE_HELPER_CLEANUP_TERMINATE)),
         },
     }
 }
@@ -869,7 +872,7 @@ fn spawn_update_restart() -> Result<PreparedRestart, String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|_| "update restart could not start".to_string())?;
+            .map_err(|_| tr!(panels::UPDATE_RESTART_START_FAILED).to_string())?;
         wait_for_restart_ready(child)
     })();
     result.map(|child| PreparedRestart {
@@ -883,7 +886,7 @@ fn claim_restart_slot(in_flight: &AtomicBool) -> Result<(), String> {
     in_flight
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .map(|_| ())
-        .map_err(|_| "update restart is already pending".to_string())
+        .map_err(|_| tr!(panels::UPDATE_RESTART_PENDING).to_string())
 }
 
 fn release_restart_slot(in_flight: &AtomicBool) {
@@ -894,7 +897,7 @@ fn validate_restart_acknowledgement(line: &str) -> Result<(), String> {
     if line == UPDATE_RESTART_READY {
         Ok(())
     } else {
-        Err("update restart was not accepted".to_string())
+        Err(tr!(panels::UPDATE_RESTART_NOT_ACCEPTED).to_string())
     }
 }
 
@@ -902,16 +905,16 @@ fn send_restart_commit(child: &mut Child) -> Result<(), String> {
     let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "update restart commit channel is unavailable".to_string())?;
+        .ok_or_else(|| tr!(panels::UPDATE_RESTART_COMMIT_CHANNEL).to_string())?;
     stdin
         .write_all(UPDATE_RESTART_COMMIT.as_bytes())
-        .map_err(|_| "update restart could not be committed".to_string())
+        .map_err(|_| tr!(panels::UPDATE_RESTART_COMMIT_FAILED).to_string())
 }
 
 fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
     let Some(stdout) = child.stdout.take() else {
         cleanup_after_failure(&mut child);
-        return Err("update restart acknowledgement is unavailable".to_string());
+        return Err(tr!(panels::UPDATE_RESTART_ACK_UNAVAILABLE).to_string());
     };
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let reader = thread::Builder::new()
@@ -922,10 +925,10 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
                 std::io::BufReader::new(stdout).take((MAXIMUM_RESTART_ACK_BYTES + 1) as u64);
             let result = reader
                 .read_line(&mut line)
-                .map_err(|_| "update restart acknowledgement could not be read".to_string())
+                .map_err(|_| tr!(panels::UPDATE_RESTART_ACK_READ).to_string())
                 .and_then(|count| {
                     if count == 0 || line.len() > MAXIMUM_RESTART_ACK_BYTES {
-                        return Err("update restart was not accepted".to_string());
+                        return Err(tr!(panels::UPDATE_RESTART_NOT_ACCEPTED).to_string());
                     }
                     validate_restart_acknowledgement(&line)
                 });
@@ -938,7 +941,7 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
         });
     if reader.is_err() {
         cleanup_after_failure(&mut child);
-        return Err("update restart acknowledgement could not be monitored".to_string());
+        return Err(tr!(panels::UPDATE_RESTART_ACK_MONITOR).to_string());
     }
 
     match ready_rx.recv_timeout(UPDATE_RESTART_VERIFICATION_TIMEOUT) {
@@ -951,11 +954,11 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
                     }
                     Ok(None) => return Ok(child),
                     Ok(Some(_)) => {
-                        return Err("update restart helper stopped before shutdown".to_string());
+                        return Err(tr!(panels::UPDATE_HELPER_STOPPED).to_string());
                     }
                     Err(_) => {
                         cleanup_after_failure(&mut child);
-                        return Err("update restart helper stopped before shutdown".to_string());
+                        return Err(tr!(panels::UPDATE_HELPER_STOPPED).to_string());
                     }
                 }
             }
@@ -966,11 +969,11 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             cleanup_after_failure(&mut child);
-            Err("update restart acknowledgement timed out".to_string())
+            Err(tr!(panels::UPDATE_RESTART_ACK_TIMEOUT).to_string())
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             cleanup_after_failure(&mut child);
-            Err("update restart acknowledgement failed".to_string())
+            Err(tr!(panels::UPDATE_RESTART_ACK_FAILED).to_string())
         }
     }
 }
@@ -1015,18 +1018,18 @@ pub(super) fn launcher_promotion_applies(
 
 pub(super) fn schedule_versioned_launcher_promotion() -> Result<(), String> {
     let executable = std::env::current_exe()
-        .map_err(|_| "desktop executable path is unavailable".to_string())?;
+        .map_err(|_| tr!(panels::UPDATE_DESKTOP_PATH_UNAVAILABLE).to_string())?;
     let release_root = executable
         .parent()
-        .ok_or_else(|| "desktop release directory is unavailable".to_string())?;
+        .ok_or_else(|| tr!(panels::UPDATE_DESKTOP_DIR_UNAVAILABLE).to_string())?;
     let launcher = release_root.join(format!("aeris_launcher{}", std::env::consts::EXE_SUFFIX));
     let metadata = match std::fs::symlink_metadata(&launcher) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err("versioned launcher metadata is unavailable".to_string()),
+        Err(_) => return Err(tr!(panels::UPDATE_LAUNCHER_METADATA).to_string()),
     };
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("versioned launcher is invalid".to_string());
+        return Err(tr!(panels::UPDATE_VERSIONED_LAUNCHER_INVALID).to_string());
     }
     let mut promotion = Command::new(launcher)
         .arg("--promote-stable-launcher")
@@ -1034,7 +1037,7 @@ pub(super) fn schedule_versioned_launcher_promotion() -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| "versioned launcher promotion could not be scheduled".to_string())?;
+        .map_err(|_| tr!(panels::UPDATE_LAUNCHER_PROMOTION_SCHEDULE).to_string())?;
     thread::Builder::new()
         .name("aeris-launcher-promotion".to_string())
         .spawn(move || match promotion.wait() {
@@ -1051,7 +1054,7 @@ pub(super) fn schedule_versioned_launcher_promotion() -> Result<(), String> {
             }
         })
         .map(|_| ())
-        .map_err(|_| "versioned launcher promotion could not be observed".to_string())
+        .map_err(|_| tr!(panels::UPDATE_LAUNCHER_PROMOTION_OBSERVE).to_string())
 }
 
 fn system_version() -> String {

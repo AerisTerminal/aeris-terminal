@@ -1,8 +1,9 @@
 //! Bounded official-source adapters for public context data.
 
 use crate::{
-    ContextFetchError, ContextFetcher, ContextMetric, ContextProvenance, ContextSource,
-    CotPosition, DegreeDayMetric, EconomicEvent, EventImportance, SourcePublication,
+    ContextFetchError, ContextFetcher, ContextMetric, ContextMetricKind, ContextProvenance,
+    ContextSource, CotPosition, CotTraderCategory, DegreeDayMetric, DegreeDayRegion, EconomicEvent,
+    EconomicEventKind, EventImportance, SourcePublication,
 };
 use chrono::{Datelike, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
 use serde_json::Value;
@@ -187,6 +188,7 @@ impl OfficialContextFetcher {
         publication.energy.push(parse_eia_series(
             &crude,
             "commercial-crude-stocks",
+            ContextMetricKind::CommercialCrudeStocks,
             "Commercial crude oil stocks",
             "thousand barrels",
             EIA_CRUDE_URL,
@@ -195,6 +197,7 @@ impl OfficialContextFetcher {
         publication.energy.push(parse_eia_series(
             &gas,
             "lower-48-natural-gas-storage",
+            ContextMetricKind::Lower48NaturalGasStorage,
             "Lower 48 working natural gas storage",
             "billion cubic feet",
             EIA_GAS_URL,
@@ -335,13 +338,33 @@ impl OfficialContextFetcher {
         fetched_unix_seconds: i64,
     ) -> Result<SourcePublication, ContextFetchError> {
         let series = [
-            ("DGS10", "10-year Treasury yield", "percent"),
-            ("DTWEXBGS", "Trade-weighted U.S. dollar index", "index"),
-            ("CPIAUCSL", "Consumer Price Index", "index"),
-            ("PAYEMS", "Total nonfarm payrolls", "thousands of persons"),
+            (
+                "DGS10",
+                ContextMetricKind::TenYearTreasuryYield,
+                "10-year Treasury yield",
+                "percent",
+            ),
+            (
+                "DTWEXBGS",
+                ContextMetricKind::TradeWeightedDollarIndex,
+                "Trade-weighted U.S. dollar index",
+                "index",
+            ),
+            (
+                "CPIAUCSL",
+                ContextMetricKind::ConsumerPriceIndex,
+                "Consumer Price Index",
+                "index",
+            ),
+            (
+                "PAYEMS",
+                ContextMetricKind::NonfarmPayrolls,
+                "Total nonfarm payrolls",
+                "thousands of persons",
+            ),
         ];
         let mut publication = SourcePublication::empty(ContextSource::Fred);
-        for (series_id, label, unit) in series {
+        for (series_id, kind, label, unit) in series {
             let url = format!(
                 "{FRED_URL}?series_id={series_id}&api_key={api_key}&file_type=json&sort_order=desc&limit=2"
             );
@@ -349,6 +372,7 @@ impl OfficialContextFetcher {
             publication.macro_observations.push(parse_fred_series(
                 &json,
                 series_id,
+                kind,
                 label,
                 unit,
                 fetched_unix_seconds,
@@ -441,15 +465,22 @@ fn parse_wasde_report(
         .map(|value| value.format("%Y-%m-%d").to_string())
         .ok_or_else(|| ContextFetchError::unavailable("USDA WASDE release date is invalid"))?;
     let mut publication = SourcePublication::empty(ContextSource::UsdaWasde);
-    for (id, label, row_label) in [
+    for (id, kind, label, row_label) in [
         (
             "corn-production",
+            ContextMetricKind::WasdeCornProduction,
             "WASDE U.S. corn production",
             "Production",
         ),
-        ("corn-exports", "WASDE U.S. corn exports", "Exports"),
+        (
+            "corn-exports",
+            ContextMetricKind::WasdeCornExports,
+            "WASDE U.S. corn exports",
+            "Exports",
+        ),
         (
             "corn-ending-stocks",
+            ContextMetricKind::WasdeCornEndingStocks,
             "WASDE U.S. corn ending stocks",
             "Ending Stocks",
         ),
@@ -466,6 +497,7 @@ fn parse_wasde_report(
             .ok_or_else(|| ContextFetchError::unavailable("USDA WASDE corn value is invalid"))?;
         publication.agriculture.push(ContextMetric {
             id: format!("usda-wasde:{id}"),
+            kind,
             label: label.to_string(),
             period: release_period.clone(),
             value_units: value.0,
@@ -592,6 +624,9 @@ fn parse_fas_exports(
     })?;
     Ok(ContextMetric {
         id: format!("usda-fas:{}-weekly-exports", request.commodity_code),
+        kind: ContextMetricKind::WeeklyExportSales {
+            commodity: request.commodity_name.clone(),
+        },
         label: format!("{} weekly export sales", request.commodity_name),
         period: latest_period.to_string(),
         value_units,
@@ -650,6 +685,7 @@ fn parse_bls_calendar(
         publication.economic_events.push(EconomicEvent {
             id: format!("bls:{}:{scheduled}", slug(summary)),
             title: unescape_ics(summary),
+            kind: EconomicEventKind::Published,
             scheduled_unix_seconds: scheduled,
             importance: importance_for_title(summary),
             provenance: provenance(ContextSource::Bls, BLS_CALENDAR_URL, fetched_unix_seconds),
@@ -720,6 +756,7 @@ fn parse_bea_calendar(
             id: format!("bea:{}:{scheduled}", slug(&title)),
             importance: importance_for_title(&title),
             title,
+            kind: EconomicEventKind::Published,
             scheduled_unix_seconds: scheduled,
             provenance: provenance(ContextSource::Bea, BEA_CALENDAR_URL, fetched_unix_seconds),
         });
@@ -764,6 +801,7 @@ fn parse_fed_calendar(
             publication.economic_events.push(EconomicEvent {
                 id: format!("federal-reserve:fomc:{digits}"),
                 title: "FOMC rate decision and press conference".to_string(),
+                kind: EconomicEventKind::FomcRateDecision,
                 scheduled_unix_seconds: scheduled,
                 importance: EventImportance::High,
                 provenance: provenance(
@@ -785,6 +823,7 @@ fn parse_fed_calendar(
 fn parse_eia_series(
     json: &Value,
     id: &str,
+    kind: ContextMetricKind,
     label: &str,
     unit: &str,
     source_url: &str,
@@ -801,6 +840,7 @@ fn parse_eia_series(
     let (minimum, maximum) = seasonal_range(rows, period)?;
     Ok(ContextMetric {
         id: format!("eia:{id}"),
+        kind,
         label: label.to_string(),
         period: period.to_string(),
         value_units: value.0,
@@ -888,6 +928,7 @@ fn parse_eia_release_schedule(
         events.push(EconomicEvent {
             id: format!("eia:wpsr:{standard_date}"),
             title: "EIA Weekly Petroleum Status Report".to_string(),
+            kind: EconomicEventKind::EiaWeeklyPetroleumStatusReport,
             scheduled_unix_seconds,
             importance: EventImportance::High,
             provenance: provenance(
@@ -958,7 +999,7 @@ fn parse_noaa_degree_days(
         .map(|time| time.and_utc().timestamp())
         .ok_or_else(|| ContextFetchError::unavailable("NOAA CPC issue date is invalid"))?;
     Ok(DegreeDayMetric {
-        region: "CONUS population weighted".to_string(),
+        region: DegreeDayRegion::ConusPopulationWeighted,
         period,
         heating_degree_days_units: heating_total,
         cooling_degree_days_units: cooling_total,
@@ -1024,25 +1065,25 @@ fn parse_cftc(
         let open_interest = required_i64(row, "open_interest_all", "CFTC open interest")?;
         for (category, long_key, short_key, spread_key) in [
             (
-                "Producer/Merchant",
+                CotTraderCategory::ProducerMerchant,
                 "prod_merc_positions_long",
                 "prod_merc_positions_short",
                 None,
             ),
             (
-                "Swap Dealer",
+                CotTraderCategory::SwapDealer,
                 "swap_positions_long_all",
                 "swap__positions_short_all",
                 Some("swap__positions_spread_all"),
             ),
             (
-                "Managed Money",
+                CotTraderCategory::ManagedMoney,
                 "m_money_positions_long_all",
                 "m_money_positions_short_all",
                 Some("m_money_positions_spread"),
             ),
             (
-                "Other Reportable",
+                CotTraderCategory::OtherReportable,
                 "other_rept_positions_long",
                 "other_rept_positions_short",
                 Some("other_rept_positions_spread"),
@@ -1052,7 +1093,7 @@ fn parse_cftc(
                 market_code: market_code.to_string(),
                 market_name: market_name.to_string(),
                 report_date_unix_seconds: report_date,
-                category: category.to_string(),
+                category,
                 long_contracts: required_i64(row, long_key, "CFTC long position")?,
                 short_contracts: required_i64(row, short_key, "CFTC short position")?,
                 spreading_contracts: spread_key
@@ -1085,6 +1126,7 @@ fn parse_usda(
         let unit = required_string(row, "unit_desc", "USDA unit")?;
         publication.agriculture.push(ContextMetric {
             id: format!("usda:{}:{}", slug(short_desc), period),
+            kind: ContextMetricKind::Published,
             label: short_desc.to_string(),
             period: period.to_string(),
             value_units,
@@ -1102,6 +1144,7 @@ fn parse_usda(
 fn parse_fred_series(
     json: &Value,
     series_id: &str,
+    kind: ContextMetricKind,
     label: &str,
     unit: &str,
     fetched_unix_seconds: i64,
@@ -1119,6 +1162,7 @@ fn parse_fred_series(
     let (value_units, value_scale) = required_decimal(observation, "value", "FRED value")?;
     Ok(ContextMetric {
         id: format!("fred:{series_id}"),
+        kind,
         label: label.to_string(),
         period: period.to_string(),
         value_units,
@@ -1447,7 +1491,10 @@ mod tests {
         }]);
         let publication = parse_cftc(&fixture, FETCHED).expect("CFTC fixture parses");
         assert_eq!(publication.commitments.len(), 4);
-        assert_eq!(publication.commitments[2].category, "Managed Money");
+        assert_eq!(
+            publication.commitments[2].category,
+            CotTraderCategory::ManagedMoney
+        );
     }
 
     #[test]
@@ -1464,7 +1511,7 @@ mod tests {
         assert_eq!(metric.heating_degree_days_units, 7);
         assert_eq!(metric.cooling_degree_days_units, 11);
         assert_eq!(metric.scale, 0);
-        assert_eq!(metric.region, "CONUS population weighted");
+        assert_eq!(metric.region, DegreeDayRegion::ConusPopulationWeighted);
         assert_eq!(metric.provenance.release_unix_seconds, 1_790_380_800);
     }
 

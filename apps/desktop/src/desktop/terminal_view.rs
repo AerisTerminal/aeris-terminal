@@ -1,6 +1,7 @@
 use super::trading_hotkeys::TradingHotkey;
 use super::*;
 use aeris_desktop::command_registry::{self, CommandId};
+use aeris_localization::{panels, tr};
 use gpui::Focusable;
 
 fn active_header_state(
@@ -292,7 +293,7 @@ impl TerminalApp {
                 });
                 if !dispatched {
                     self.overlays
-                        .set_command_palette_message("Symbol search could not start");
+                        .set_command_palette_message(tr!(panels::PALETTE_SEARCH_FAILED));
                     cx.notify();
                     return;
                 }
@@ -308,7 +309,7 @@ impl TerminalApp {
             .map(|spec| spec.id)
         else {
             self.overlays
-                .set_command_palette_message("No matching command");
+                .set_command_palette_message(tr!(panels::PALETTE_NO_MATCH));
             cx.notify();
             return;
         };
@@ -387,7 +388,7 @@ impl TerminalApp {
                 surface.context_panel.set_risk_message(
                     result
                         .err()
-                        .map(|error| format!("Economic-event risk action unavailable: {error}")),
+                        .map(|error| tr!(panels::CONTEXT_ACTION_UNAVAILABLE, error = error)),
                 );
                 surface_cx.notify();
             });
@@ -1009,7 +1010,7 @@ fn workspace_tab_close_button(
             terminal.close_workspace(tab_id, window, cx);
         });
     })
-    .aria_label(format!("Close {label}"))
+    .aria_label(tr!(panels::TAB_CLOSE, label = label))
 }
 
 fn handle_workspace_tab_key(
@@ -1052,7 +1053,7 @@ fn workspace_add_button(
         .button_size(ButtonSize::Sm)
         .round()
         .icon(header_icon(HugeIcon::Add))
-        .aria_label("New tab")
+        .aria_label(tr!(panels::NEW_TAB))
         .disabled(!enabled)
         .on_press(move |_, window, cx| {
             terminal.update(cx, |terminal, cx| terminal.open_start_page(window, cx));
@@ -1202,13 +1203,13 @@ fn workspace_tab_change_label(values: MarketSummaryValues) -> Option<String> {
 
 fn workspace_tab_aria_label(label: &str, unsaved: bool, change: Option<&str>) -> String {
     let label = if unsaved {
-        format!("{label}, unsaved changes")
+        tr!(panels::TAB_UNSAVED, label = label)
     } else {
         label.to_string()
     };
     change.map_or_else(
         || label.clone(),
-        |change| format!("{label}, change {change}"),
+        |change| tr!(panels::TAB_CHANGE, label = label, change = change),
     )
 }
 
@@ -1351,7 +1352,7 @@ pub(super) fn workspace_tab_strip(
         .pl_2()
         .overflow_x_hidden()
         .role(Role::TabList)
-        .aria_label("Workspaces")
+        .aria_label(tr!(panels::WORKSPACES))
         .aria_orientation(Orientation::Horizontal)
         .tab_group()
         .on_drag_move::<WorkspaceTabDrag>(move |event, _, cx| {
@@ -1411,7 +1412,7 @@ fn workspace_tab_strip_end(
     [
         chrome_tooltip(
             "add_workspace",
-            "New tab",
+            tr!(panels::NEW_TAB),
             workspace_add_button(terminal.clone(), add_enabled, theme),
             theme,
         )
@@ -1440,16 +1441,16 @@ fn start_page_tab(terminal: &Entity<TerminalApp>, shown: bool, theme: &AerisThem
         .gap_2()
         .px_3()
         .text_sm()
-        .aria_label("New tab")
+        .aria_label(tr!(panels::NEW_TAB))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             show.update(cx, |terminal, cx| terminal.open_start_page(window, cx));
         })
-        .child(div().whitespace_nowrap().child("New tab"))
+        .child(div().whitespace_nowrap().child(tr!(panels::NEW_TAB)))
         .child(
             close_button("close_start_page", theme, move |window, cx| {
                 close.update(cx, |terminal, cx| terminal.close_start_page(window, cx));
             })
-            .aria_label("Close New tab"),
+            .aria_label(tr!(panels::CLOSE_NEW_TAB)),
         )
         .into_any_element()
 }
@@ -1476,7 +1477,7 @@ pub(super) fn terminal_root(
         TerminalShellInit {
             workspaces: vec![WorkspaceTab {
                 id: 1,
-                label: layout_library::UNTITLED_LAYOUT_NAME.to_string(),
+                label: layout_library::untitled_layout_name().to_string(),
                 saved_layout_id: 0,
                 autosaved_snapshot: None,
                 panes: vec![WorkspacePane {
@@ -1539,7 +1540,7 @@ fn terminal_shell_root(
 ) -> Entity<TerminalApp> {
     let terminal_lifecycle = lifecycle.clone();
     let command_palette_input = cx.new(|input_cx| {
-        InputState::new(window, input_cx).placeholder("Search commands or type ES footprint 5m")
+        InputState::new(window, input_cx).placeholder(tr!(panels::PALETTE_PLACEHOLDER))
     });
     let terminal_input = command_palette_input.clone();
     let terminal = cx.new(move |cx| TerminalApp::new(init, terminal_lifecycle, terminal_input, cx));

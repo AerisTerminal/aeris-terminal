@@ -203,6 +203,17 @@ violations and missing verification explicitly, and never describe them as satis
   features; `embedded_demo_replay_is_test_support_only` checks every workspace manifest.
 - The desktop stores `ChartInterval` and must not construct `SeriesCadence`; interval-to-cadence mapping
   belongs to `market_runtime`.
+- `aeris_localization` (`crates/localization`, a leaf crate) owns every translated user-interface
+  string. Catalogs under `catalog/<language>/<area>.lang` compile into typed keys: English is the
+  reference and every other language must carry exactly its areas and keys with the same `{name}`
+  placeholders and the plural categories its grammar needs, or the build fails. Surfaces read text
+  through `tr!`/`tr_count!` in the process display language; only `apps/desktop/src/language.rs`
+  may call `aeris_localization::set_language`, applying the `LanguagePreference` persisted in the
+  workspace chrome section (`system` follows the operating system; a language code pins it; unknown
+  identifiers follow the system). `display_language_is_set_only_by_the_language_owner` in
+  `tools/naming_check` enforces the single owner. The platform face is the bundled Inter
+  (Regular/Medium/Bold), which covers Latin and Cyrillic in one family; Faculty Glyphic stays
+  brand-only. Prices and quantities keep the exchange's number format in every language.
 - Market history is loaded on demand and bounded; do not restore market-history persistence or a
   second desktop-owned market-state model.
 - `aeris_contracts` holds only the persisted workspace schema: the prost messages in

@@ -18,6 +18,7 @@ use aeris_design_system::{
     BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, ThemeColor, TypographyRole, brand_font_family,
     platform_font_stack, platform_typography,
 };
+use aeris_localization::{chart_ui, tr};
 use aeris_observability::diagnostic;
 #[cfg(not(windows))]
 use gpui::{ClipboardItem, Image, ImageFormat};
@@ -69,10 +70,14 @@ fn capture_labels(symbol: &str, time_zone: &str, utc_seconds: i64) -> (String, S
     let Some(time) = aeris_charts_engine::ChartTimeZone::parse(time_zone)
         .and_then(|zone| zone.local_parts(utc_seconds))
     else {
-        return ("Created with Aeris".to_owned(), format!("{symbol}.png"));
+        return (
+            tr!(chart_ui::EXPORT_CREATED_WITH).to_owned(),
+            format!("{symbol}.png"),
+        );
     };
     let caption = format!(
-        "Created with Aeris, {} {:02}:{:02} {}",
+        "{}, {} {:02}:{:02} {}",
+        tr!(chart_ui::EXPORT_CREATED_WITH),
         platform_date_label(time.year, time.month, time.day),
         time.hour,
         time.minute,

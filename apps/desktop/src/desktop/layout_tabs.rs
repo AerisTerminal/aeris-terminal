@@ -3,12 +3,16 @@
 
 use super::*;
 use aeris_desktop::command_registry::CommandId;
+use aeris_localization::{panels, shell, tr};
 use aeris_observability::diagnostic;
 use layout_library::{
     MAXIMUM_LAYOUT_NAME_CHARS, MAXIMUM_SAVED_LAYOUTS, normalized_layout_tab, opened_layout_tab,
 };
 
-const COPY_SUFFIX: &str = " copy";
+/// The suffix a copied layout's name gets, in the display language at the copy.
+fn copy_suffix() -> String {
+    format!(" {}", tr!(shell::LAYOUT_COPY_SUFFIX))
+}
 
 pub(super) fn now_unix_ms(lifecycle: &DesktopLifecycle) -> i64 {
     lifecycle.clock().wall_unix_nanos().div_euclid(1_000_000)
@@ -27,7 +31,7 @@ pub(super) fn restored_layouts(
     for workspace in tabs.iter_mut() {
         let snapshot = normalized_layout_tab(&workspace_tab_state(workspace, cx));
         if library.get(workspace.saved_layout_id).is_none() {
-            let name = library.unique_name(layout_library::UNTITLED_LAYOUT_NAME);
+            let name = library.unique_name(layout_library::untitled_layout_name());
             match library.create(&name, &snapshot, Vec::new(), now_unix_ms) {
                 Ok(layout_id) => {
                     workspace.saved_layout_id = layout_id;
@@ -330,7 +334,7 @@ impl TerminalApp {
     pub(super) fn copy_layout_name(&self, name: &str) -> String {
         self.saved
             .layouts()
-            .unique_name(&suffixed_layout_name(name, COPY_SUFFIX))
+            .unique_name(&suffixed_layout_name(name, &copy_suffix()))
     }
 
     /// Saves the active tab as it is now as a new layout named `name`, which the tab then
@@ -398,7 +402,7 @@ impl TerminalApp {
             .saved
             .layouts()
             .get(layout_id)
-            .ok_or_else(|| "The layout no longer exists".to_string())?;
+            .ok_or_else(|| tr!(shell::LAYOUT_NO_LONGER_EXISTS).to_string())?;
         let name = self.copy_layout_name(&layout.name);
         let (tab, drawings) = (
             layout.tab.clone().unwrap_or_default(),
@@ -492,7 +496,7 @@ impl TerminalApp {
             .into_iter()
             .map(|layout| layout.layout_id)
             .find(|layout_id| !open.contains(layout_id))
-            .ok_or_else(|| "Every saved layout is already open".to_string())?;
+            .ok_or_else(|| tr!(panels::LAYOUTS_ALL_OPEN).to_string())?;
         self.open_saved_layout(layout_id, window, cx)
     }
 
@@ -514,18 +518,18 @@ impl TerminalApp {
             .services
             .market_factory()
             .cloned()
-            .ok_or_else(|| "This window cannot open a layout".to_string())?;
+            .ok_or_else(|| tr!(panels::LAYOUT_WINDOW_CANNOT_OPEN).to_string())?;
         let layout = self
             .saved
             .layouts()
             .get(layout_id)
-            .ok_or_else(|| "The layout no longer exists".to_string())?;
+            .ok_or_else(|| tr!(shell::LAYOUT_NO_LONGER_EXISTS).to_string())?;
         let (name, saved_drawings) = (layout.name.clone(), layout.instrument_drawings.clone());
         let snapshot = layout
             .tab
             .clone()
             .filter(|tab| !tab.panes.is_empty())
-            .ok_or_else(|| format!("Layout \"{name}\" has no charts"))?;
+            .ok_or_else(|| tr!(panels::LAYOUT_NO_CHARTS, name = name))?;
         let charts = snapshot
             .panes
             .iter()
@@ -537,7 +541,7 @@ impl TerminalApp {
                     .map(|instrument| (instrument, interval))
             })
             .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| format!("A chart of layout \"{name}\" has no market"))?;
+            .ok_or_else(|| tr!(panels::LAYOUT_CHART_NO_MARKET, name = name))?;
         let mut market_panes =
             Vec::<engine_market_worker::WorkspaceMarketPane>::with_capacity(charts.len());
         for (instrument, interval) in charts {
@@ -560,7 +564,7 @@ impl TerminalApp {
             .collect::<Vec<_>>();
         let Some(mut tab) = opened_layout_tab(&snapshot, &pane_ids, workspace_id, 1) else {
             self.retire_market_panes(market_panes, cx);
-            return Err(format!("The arrangement of layout \"{name}\" is invalid"));
+            return Err(tr!(panels::LAYOUT_ARRANGEMENT_INVALID, name = name));
         };
         tab.saved_layout_id = layout_id;
         tab.label.clone_from(&name);
@@ -573,7 +577,8 @@ impl TerminalApp {
             cx,
         );
         self.retire_market_panes(market_panes, cx);
-        let mut workspace = workspace.ok_or_else(|| format!("Layout \"{name}\" could not open"))?;
+        let mut workspace =
+            workspace.ok_or_else(|| tr!(panels::LAYOUT_OPEN_FAILED, name = name))?;
         workspace.autosaved_snapshot = Some(normalized_layout_tab(&tab));
         workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
         Self::wire_restored_surfaces(std::slice::from_ref(&workspace), 0, self.frames.dirty(), cx);
@@ -703,11 +708,11 @@ mod tests {
     #[test]
     fn copy_names_fit_the_name_bound() {
         assert_eq!(
-            suffixed_layout_name("Scalping", COPY_SUFFIX),
+            suffixed_layout_name("Scalping", &copy_suffix()),
             "Scalping copy"
         );
-        let long = suffixed_layout_name(&"x".repeat(MAXIMUM_LAYOUT_NAME_CHARS), COPY_SUFFIX);
+        let long = suffixed_layout_name(&"x".repeat(MAXIMUM_LAYOUT_NAME_CHARS), &copy_suffix());
         assert_eq!(long.chars().count(), MAXIMUM_LAYOUT_NAME_CHARS);
-        assert!(long.ends_with(COPY_SUFFIX));
+        assert!(long.ends_with(&copy_suffix()));
     }
 }

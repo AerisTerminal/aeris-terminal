@@ -9,17 +9,18 @@ use crate::desktop::native_ui::tooltip::TooltipPlacement;
 use aeris_chart_integration::{
     ChartReplayCommand, ChartReplayPhase, ChartReplayState, ChartReplayStep,
 };
+use aeris_localization::{Text, common, panels, tr};
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
 /// Playback steps per second the speed menu offers.
 const REPLAY_SPEEDS: [f64; 6] = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0];
 /// Fixed-interval steps the step menu offers after "1 bar", in seconds.
-const REPLAY_INTERVALS: [(i64, &str); 5] = [
-    (60, "1 minute"),
-    (300, "5 minutes"),
-    (900, "15 minutes"),
-    (3_600, "1 hour"),
-    (14_400, "4 hours"),
+const REPLAY_INTERVALS: [(i64, Text); 5] = [
+    (60, panels::REPLAY_INTERVAL_1_MINUTE),
+    (300, panels::REPLAY_INTERVAL_5_MINUTES),
+    (900, panels::REPLAY_INTERVAL_15_MINUTES),
+    (3_600, panels::REPLAY_INTERVAL_1_HOUR),
+    (14_400, panels::REPLAY_INTERVAL_4_HOURS),
 ];
 const REPLAY_MENU_WIDTH: f32 = 140.0;
 const REPLAY_PANEL_HEIGHT: f32 = 40.0;
@@ -116,11 +117,11 @@ const fn header_command(phase: ChartReplayPhase) -> ChartReplayCommand {
     }
 }
 
-const fn header_tooltip(phase: ChartReplayPhase) -> &'static str {
+fn header_tooltip(phase: ChartReplayPhase) -> &'static str {
     match phase {
-        ChartReplayPhase::Off => "Bar replay",
-        ChartReplayPhase::Selecting => "Cancel start bar selection (Esc)",
-        ChartReplayPhase::Paused | ChartReplayPhase::Playing => "Exit bar replay",
+        ChartReplayPhase::Off => tr!(panels::REPLAY_HEADER_TOOLTIP),
+        ChartReplayPhase::Selecting => tr!(panels::REPLAY_CANCEL_SELECTION),
+        ChartReplayPhase::Paused | ChartReplayPhase::Playing => tr!(panels::REPLAY_EXIT),
     }
 }
 
@@ -133,9 +134,8 @@ fn post_bar_replay_unavailable_notice(cx: &mut Context<WorkspaceSurface>) {
         severity: notification_center::NoticeSeverity::Warning,
         tone: notification_center::NoticeTone::Warning,
         source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-        title: "Bar replay isn't available",
-        detail: "Bar replay needs bars on a time-based chart. Wait for the chart to load, then try again."
-            .into(),
+        title: tr!(panels::REPLAY_UNAVAILABLE_TITLE),
+        detail: tr!(panels::REPLAY_UNAVAILABLE_DETAIL).to_string(),
         action: None,
         lifetime: notification_center::NoticeLifetime::Timed(REPLAY_NOTICE_LIFETIME),
     }));
@@ -157,7 +157,7 @@ pub(super) fn bar_replay_header_control(
         theme,
     )
     .icon(header_icon(HugeIcon::Scissor))
-    .label("Replay")
+    .label(tr!(panels::REPLAY_BUTTON))
     .selected(on)
     .disabled(!on && !chart_ready)
     .on_click(move |_, _, cx| {
@@ -183,11 +183,11 @@ pub(super) fn bar_replay_panel(
                 surface,
                 "bar_replay_select",
                 HugeIcon::Scissor,
-                "Choose a new start bar",
+                tr!(panels::REPLAY_CHOOSE_START),
                 ChartReplayCommand::SelectStart,
                 theme,
             )
-            .label("Select bar")
+            .label(tr!(panels::REPLAY_SELECT_BAR))
             .into_any_element(),
             separator(theme).into_any_element(),
         ];
@@ -225,34 +225,39 @@ fn selecting_controls(surface: &Entity<WorkspaceSurface>, theme: &AerisTheme) ->
             .text_sm()
             .whitespace_nowrap()
             .text_color(gpui_color(theme.colors.text_secondary))
-            .child("Click a bar on the chart to start replay from it.")
+            .child(tr!(panels::REPLAY_CLICK_BAR))
             .into_any_element(),
         command_button(
             surface,
             "bar_replay_cancel",
             HugeIcon::CancelCircle,
-            "Cancel start bar selection (Esc)",
+            tr!(panels::REPLAY_CANCEL_SELECTION),
             ChartReplayCommand::CancelSelection,
             theme,
         )
-        .label("Cancel")
+        .label(tr!(common::CANCEL))
         .into_any_element(),
     ]
 }
 
 fn speed_label(speed: f64) -> String {
-    format!("{speed}x")
+    tr!(panels::REPLAY_SPEED_FORMAT, speed = speed)
 }
 
 fn step_label(step: ChartReplayStep) -> String {
     match step {
-        ChartReplayStep::Bar => "1 bar".to_string(),
+        ChartReplayStep::Bar => tr!(panels::REPLAY_STEP_ONE_BAR).to_string(),
         ChartReplayStep::Interval { micros } => REPLAY_INTERVALS
             .iter()
             .find(|(seconds, _)| seconds.saturating_mul(MICROS_PER_SECOND) == micros)
             .map_or_else(
-                || format!("{}s", micros.div_euclid(MICROS_PER_SECOND)),
-                |(_, label)| (*label).to_string(),
+                || {
+                    tr!(
+                        panels::REPLAY_INTERVAL_SECONDS,
+                        seconds = micros.div_euclid(MICROS_PER_SECOND)
+                    )
+                },
+                |(_, label)| label.get().to_string(),
             ),
     }
 }
@@ -379,16 +384,16 @@ fn transport_controls(
 ) -> Vec<AnyElement> {
     let playing = state.phase == ChartReplayPhase::Playing;
     let (play_icon, play_label) = if playing {
-        (HugeIcon::Pause, "Pause (Shift+Down)")
+        (HugeIcon::Pause, tr!(panels::REPLAY_PAUSE))
     } else {
-        (HugeIcon::Play, "Play (Shift+Down)")
+        (HugeIcon::Play, tr!(panels::REPLAY_PLAY))
     };
     vec![
         command_button(
             surface,
             "bar_replay_back",
             HugeIcon::Previous,
-            "Step back (Shift+Left)",
+            tr!(panels::REPLAY_STEP_BACK),
             ChartReplayCommand::StepBack,
             theme,
         )
@@ -408,7 +413,7 @@ fn transport_controls(
             surface,
             "bar_replay_forward",
             HugeIcon::Next,
-            "Step forward (Shift+Right)",
+            tr!(panels::REPLAY_STEP_FORWARD),
             ChartReplayCommand::StepForward,
             theme,
         )
@@ -429,7 +434,7 @@ fn speed_menu(
         BarReplayMenu::Speed,
         open,
         speed_label(speed),
-        "Replay speed",
+        tr!(panels::REPLAY_SPEED),
         move || {
             replay_menu_panel("bar_replay_speed_menu", theme).children(
                 REPLAY_SPEEDS
@@ -463,7 +468,7 @@ fn step_menu(
         BarReplayMenu::Step,
         open,
         step_label(step),
-        "Replay step",
+        tr!(panels::REPLAY_STEP),
         move || {
             let choices = std::iter::once(ChartReplayStep::Bar).chain(
                 REPLAY_INTERVALS
@@ -506,21 +511,21 @@ fn realtime_controls(
             surface,
             "bar_replay_realtime",
             HugeIcon::JumpToEnd,
-            "Jump to real time and leave replay",
+            tr!(panels::REPLAY_JUMP_LEAVE),
             ChartReplayCommand::JumpToRealtime,
             theme,
         )
-        .label("Jump to real time")
+        .label(tr!(panels::REPLAY_JUMP))
         .into_any_element(),
         command_button(
             surface,
             "bar_replay_exit",
             HugeIcon::CancelCircle,
-            "Exit bar replay",
+            tr!(panels::REPLAY_EXIT),
             ChartReplayCommand::Exit,
             theme,
         )
-        .label("Exit")
+        .label(tr!(panels::REPLAY_EXIT_BUTTON))
         .into_any_element(),
     ]
 }
@@ -535,7 +540,7 @@ mod tests {
         assert_eq!(speed_label(10.0), "10x");
         assert_eq!(step_label(ChartReplayStep::Bar), "1 bar");
         for (seconds, label) in REPLAY_INTERVALS {
-            assert_eq!(step_label(interval_step(seconds)), label);
+            assert_eq!(step_label(interval_step(seconds)), label.get());
         }
         assert_eq!(step_label(interval_step(90)), "90s");
     }

@@ -9,7 +9,7 @@ use super::{
     photo::PHOTO_RETRY_DELAY,
     reconcile_profile_photo, signed_in_view,
 };
-use crate::{AccountSessionState, AccountView, ProfilePhoto, ProfilePhotoStatus};
+use crate::{AccountDetail, AccountSessionState, AccountView, ProfilePhoto, ProfilePhotoStatus};
 use aeris_account::AccountId;
 use aeris_platform_runtime::CredentialVault;
 use std::{
@@ -308,7 +308,7 @@ fn restoring_service_with_marker(rejected_restore_marker: Option<PathBuf>) -> Ac
     service.state.lock().expect("account state locks").view = super::cleared_view(
         AccountSessionState::Authorizing,
         0,
-        "restoring saved sign-in",
+        AccountDetail::RestoringSavedSignIn,
     );
     service
 }
@@ -354,7 +354,7 @@ fn active_session(service: &AccountService, generation: u64, subject: &str) {
         &account(subject),
         profile("ada", "ada@example.test"),
         generation,
-        "signed in",
+        AccountDetail::SignedIn,
     );
 }
 
@@ -673,7 +673,8 @@ fn stale_rejected_restore_cannot_delete_newer_session_credentials() {
         let mut state = service.state.lock().expect("account state locks");
         state.last_generation = 7;
         state.restore_allowed = false;
-        state.view = super::cleared_view(AccountSessionState::SignedOut, 7, "signed out");
+        state.view =
+            super::cleared_view(AccountSessionState::SignedOut, 7, AccountDetail::SignedOut);
     }
     assert!(
         service
@@ -721,10 +722,12 @@ fn active_refresh_unavailability_goes_offline_and_verification_restores_active()
     let service = service();
     active_session(&service, 12, "acct_01");
     super::apply_session_outcome(&service, 12, SessionRefresh::Unavailable);
+    // Probed before `account_status` starts the photo worker, whose brief state
+    // lock would make this fail-closed probe report false.
+    assert!(service.is_authenticated());
     let offline = service.account_status();
     assert_eq!(offline.state, AccountSessionState::Offline);
     assert_eq!(offline.display_name, "ada");
-    assert!(service.is_authenticated());
 
     super::apply_session_outcome(&service, 12, SessionRefresh::Verified);
     assert_eq!(service.account_status().state, AccountSessionState::Active);
@@ -918,7 +921,7 @@ fn login_cancelled_during_its_vault_commit_leaves_nothing_restorable() {
     ));
     let view = service.account_status();
     assert_eq!(view.state, AccountSessionState::SignedOut);
-    assert_eq!(view.detail, "sign-in cancelled");
+    assert_eq!(view.detail, AccountDetail::SignInCancelled);
     assert_eq!(view.account_id, "");
     assert!(vault.load(REFRESH_VAULT_KEY).expect("reads").is_none());
     assert!(vault.load(PROFILE_VAULT_KEY).expect("reads").is_none());
@@ -990,14 +993,15 @@ fn verified_profile_refresh_is_account_and_generation_fenced() {
 #[test]
 fn profile_refresh_claims_only_one_current_signed_in_request() {
     let in_flight = AtomicBool::new(false);
-    let signed_out = super::cleared_view(AccountSessionState::SignedOut, 3, "signed out");
+    let signed_out =
+        super::cleared_view(AccountSessionState::SignedOut, 3, AccountDetail::SignedOut);
     assert_eq!(claim_profile_refresh(&signed_out, &in_flight), None);
     let mut signed_in = super::signed_in_view(
         AccountSessionState::Offline,
         &account("acct_01"),
         AccountProfile::default(),
         3,
-        "signed in",
+        AccountDetail::SignedIn,
     );
     assert_eq!(claim_profile_refresh(&signed_in, &in_flight), Some(3));
     signed_in.state = AccountSessionState::Active;
@@ -1279,7 +1283,7 @@ fn callback_validates_state_and_rejects_duplicates() {
 fn retired_completion_results_cannot_mutate_current_state() {
     let service = service();
     service.begin_login(9).expect("login starts");
-    service.fail_generation(8, "stale worker result");
+    service.fail_generation(8, AccountDetail::Failure("stale worker result".to_string()));
     assert_eq!(
         service.account_status().state,
         AccountSessionState::Authorizing
@@ -1399,7 +1403,7 @@ fn signed_in_with_photo(service: &AccountService, name: &str) {
         &account("acct_01"),
         profile(name, &format!("{name}@example.test")),
         1,
-        "signed in",
+        AccountDetail::SignedIn,
     );
 }
 
@@ -1595,10 +1599,11 @@ fn signed_in_views_carry_the_unlimited_plan_and_cleared_views_carry_nothing() {
         &account("acct_01"),
         profile("ada", "ada@example.test"),
         4,
-        "signed in",
+        AccountDetail::SignedIn,
     );
     assert_eq!(signed_in.plan_id, "unlimited");
-    let cleared: AccountView = super::cleared_view(AccountSessionState::SignedOut, 4, "signed out");
+    let cleared: AccountView =
+        super::cleared_view(AccountSessionState::SignedOut, 4, AccountDetail::SignedOut);
     assert_eq!(cleared.plan_id, "");
     assert_eq!(cleared.account_id, "");
 }

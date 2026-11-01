@@ -29,13 +29,106 @@ pub struct LoginAuthorization {
     pub expires_unix_seconds: u64,
 }
 
+/// Runtime-owned account session detail, typed so the desktop localizes it.
+///
+/// `Failure` carries an already-redacted loopback/OIDC error message; those
+/// texts are runtime error payloads and stay in their authored English.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AccountDetail {
+    #[default]
+    None,
+    SignedOut,
+    RestoringSavedSignIn,
+    SignedInVerifyingSavedSession,
+    SignedIn,
+    SignedInOfflineReconnecting,
+    WaitingForBrowserAuthorization,
+    CompletingSignIn,
+    SignInCancelled,
+    SignInTimedOut,
+    SignInWorkerCouldNotStart,
+    AccountStateUnavailable,
+    CredentialStorageUnavailableSignInAgain,
+    CredentialStorageUnavailableRetrySignIn,
+    SavedSignInExpired,
+    SignInExpired,
+    SavedSignInRetireFailed,
+    SignInExpiredRetireFailed,
+    SignOutCleanupAttention,
+    SavedSignInCleanupUnavailable,
+    RestoreCouldNotStart,
+    SavedSignInUnverifiedConnection,
+    SavedSignInUnverified,
+    Failure(String),
+}
+
+impl AccountDetail {
+    /// The authored English wording, used by the runtime-owned browser
+    /// outcome page and as the localization reference.
+    #[must_use]
+    pub fn english(&self) -> &str {
+        match self {
+            Self::None => "",
+            Self::SignedOut => "signed out",
+            Self::RestoringSavedSignIn => "restoring saved sign-in",
+            Self::SignedInVerifyingSavedSession => "signed in; verifying saved session",
+            Self::SignedIn => "signed in",
+            Self::SignedInOfflineReconnecting => "signed in offline; reconnecting",
+            Self::WaitingForBrowserAuthorization => "waiting for browser authorization",
+            Self::CompletingSignIn => "completing sign-in",
+            Self::SignInCancelled => "sign-in cancelled",
+            Self::SignInTimedOut => "sign-in timed out; retry sign-in",
+            Self::SignInWorkerCouldNotStart => "sign-in worker could not start; retry sign-in",
+            Self::AccountStateUnavailable => "account state is unavailable",
+            Self::CredentialStorageUnavailableSignInAgain => {
+                "credential storage is unavailable; sign in again"
+            }
+            Self::CredentialStorageUnavailableRetrySignIn => {
+                "credential storage is unavailable; retry sign-in"
+            }
+            Self::SavedSignInExpired => "saved sign-in expired; sign in again",
+            Self::SignInExpired => "sign-in expired; sign in again",
+            Self::SavedSignInRetireFailed => {
+                "saved sign-in could not be retired; credential storage is unavailable; sign in again"
+            }
+            Self::SignInExpiredRetireFailed => {
+                "sign-in expired but saved credentials could not be retired; sign in again"
+            }
+            Self::SignOutCleanupAttention => "signed out; credential cleanup needs attention",
+            Self::SavedSignInCleanupUnavailable => {
+                "saved sign-in cleanup is unavailable; retry sign-in"
+            }
+            Self::RestoreCouldNotStart => "saved sign-in restore could not start; sign in again",
+            Self::SavedSignInUnverifiedConnection => {
+                "saved sign-in could not be verified; check your connection and sign in again"
+            }
+            Self::SavedSignInUnverified => "saved sign-in could not be verified; sign in again",
+            Self::Failure(message) => message.as_str(),
+        }
+    }
+
+    /// Whether the failure returns the session to a plain signed-out state
+    /// instead of a terminal error.
+    #[must_use]
+    pub fn clears_to_signed_out(&self) -> bool {
+        match self {
+            Self::SignInTimedOut | Self::SignInCancelled => true,
+            // Loopback/OIDC failures arrive as redacted text; the two
+            // browser-driven recoverable outcomes keep their wording check.
+            Self::Failure(message) => {
+                message.contains("timed out") || message.contains("cancelled")
+            }
+            _ => false,
+        }
+    }
+}
 /// Sanitized account state safe for desktop rendering.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccountView {
     pub state: AccountSessionState,
     pub account_id: String,
     pub plan_id: String,
-    pub detail: String,
+    pub detail: AccountDetail,
     pub request_generation: u64,
     pub display_name: String,
     pub email: String,
@@ -141,7 +234,116 @@ pub enum ProfilePhotoStatus {
 #[cfg(test)]
 mod tests {
     use super::{AccountSessionState, ProfilePhoto, ProfilePhotoFormat};
+    #[test]
+    fn account_details_keep_their_authored_english() {
+        use super::AccountDetail;
+        let cases: [(AccountDetail, &str); 22] = [
+            (AccountDetail::SignedOut, "signed out"),
+            (
+                AccountDetail::RestoringSavedSignIn,
+                "restoring saved sign-in",
+            ),
+            (
+                AccountDetail::SignedInVerifyingSavedSession,
+                "signed in; verifying saved session",
+            ),
+            (AccountDetail::SignedIn, "signed in"),
+            (
+                AccountDetail::SignedInOfflineReconnecting,
+                "signed in offline; reconnecting",
+            ),
+            (
+                AccountDetail::WaitingForBrowserAuthorization,
+                "waiting for browser authorization",
+            ),
+            (AccountDetail::CompletingSignIn, "completing sign-in"),
+            (AccountDetail::SignInCancelled, "sign-in cancelled"),
+            (
+                AccountDetail::SignInTimedOut,
+                "sign-in timed out; retry sign-in",
+            ),
+            (
+                AccountDetail::SignInWorkerCouldNotStart,
+                "sign-in worker could not start; retry sign-in",
+            ),
+            (
+                AccountDetail::AccountStateUnavailable,
+                "account state is unavailable",
+            ),
+            (
+                AccountDetail::CredentialStorageUnavailableSignInAgain,
+                "credential storage is unavailable; sign in again",
+            ),
+            (
+                AccountDetail::CredentialStorageUnavailableRetrySignIn,
+                "credential storage is unavailable; retry sign-in",
+            ),
+            (
+                AccountDetail::SavedSignInExpired,
+                "saved sign-in expired; sign in again",
+            ),
+            (
+                AccountDetail::SignInExpired,
+                "sign-in expired; sign in again",
+            ),
+            (
+                AccountDetail::SavedSignInRetireFailed,
+                "saved sign-in could not be retired; credential storage is unavailable; sign in again",
+            ),
+            (
+                AccountDetail::SignInExpiredRetireFailed,
+                "sign-in expired but saved credentials could not be retired; sign in again",
+            ),
+            (
+                AccountDetail::SignOutCleanupAttention,
+                "signed out; credential cleanup needs attention",
+            ),
+            (
+                AccountDetail::SavedSignInCleanupUnavailable,
+                "saved sign-in cleanup is unavailable; retry sign-in",
+            ),
+            (
+                AccountDetail::RestoreCouldNotStart,
+                "saved sign-in restore could not start; sign in again",
+            ),
+            (
+                AccountDetail::SavedSignInUnverifiedConnection,
+                "saved sign-in could not be verified; check your connection and sign in again",
+            ),
+            (
+                AccountDetail::SavedSignInUnverified,
+                "saved sign-in could not be verified; sign in again",
+            ),
+        ];
+        for (detail, english) in cases {
+            assert_eq!(detail.english(), english);
+        }
+        assert_eq!(AccountDetail::None.english(), "");
+        assert_eq!(
+            AccountDetail::Failure("redacted failure".to_string()).english(),
+            "redacted failure"
+        );
+    }
 
+    #[test]
+    fn only_recoverable_failures_clear_to_signed_out() {
+        use super::AccountDetail;
+        assert!(AccountDetail::SignInTimedOut.clears_to_signed_out());
+        assert!(AccountDetail::SignInCancelled.clears_to_signed_out());
+        assert!(
+            AccountDetail::Failure("sign-in timed out waiting for the browser".to_string())
+                .clears_to_signed_out()
+        );
+        assert!(
+            AccountDetail::Failure("sign-in was declined or cancelled".to_string())
+                .clears_to_signed_out()
+        );
+        assert!(!AccountDetail::SignedOut.clears_to_signed_out());
+        assert!(
+            !AccountDetail::Failure("sign-in verification failed".to_string())
+                .clears_to_signed_out()
+        );
+    }
     #[test]
     fn account_session_states_have_stable_values() {
         assert_eq!(AccountSessionState::SignedOut as i32, 0);

@@ -1,8 +1,8 @@
 //! Pure order transitions; the caller commits the returned value and its event atomically.
 
 use aeris_trading::{
-    FixedPoint, Order, OrderEventKind, OrderEventReason, OrderStatus, OrderType, TimeInForce,
-    TradingProvenance,
+    FixedPoint, Order, OrderEventKind, OrderEventNote, OrderEventReason, OrderStatus, OrderType,
+    TimeInForce, TradingProvenance,
     venue::{BrokerOrder, BrokerOrderState},
 };
 
@@ -435,7 +435,7 @@ pub(crate) fn broker_missing(
     mut order: Order,
     bound: bool,
     owner_unix_nanos: i64,
-) -> Result<(Order, OrderEventKind, &'static str), LifecycleError> {
+) -> Result<(Order, OrderEventKind, &'static str, Option<OrderEventNote>), LifecycleError> {
     if !matches!(
         order.status,
         OrderStatus::Pending
@@ -446,29 +446,32 @@ pub(crate) fn broker_missing(
     ) {
         return Err(LifecycleError::InvalidTransition(order.status));
     }
-    let (status, kind, detail) = if order.filled_quantity == order.quantity {
+    let (status, kind, detail, note) = if order.filled_quantity == order.quantity {
         (
             OrderStatus::Filled,
             OrderEventKind::Filled,
             "filled at the broker",
+            None,
         )
     } else if bound || order.filled_quantity.units() > 0 {
         (
             OrderStatus::Cancelled,
             OrderEventKind::Cancelled,
             "no longer open at the broker",
+            Some(OrderEventNote::NoLongerOpenAtVenue),
         )
     } else {
         (
             OrderStatus::Rejected,
             OrderEventKind::Rejected,
             "the broker did not receive the order",
+            Some(OrderEventNote::NotReceivedByVenue),
         )
     };
     advance(&mut order, owner_unix_nanos)?;
     order.status = status;
     order.terminal_unix_nanos = Some(owner_unix_nanos);
-    Ok((order, kind, detail))
+    Ok((order, kind, detail, note))
 }
 
 /// The larger of the broker's known filled quantity and its deduplicated deal sum.
@@ -819,7 +822,7 @@ mod tests {
     fn late_broker_deal_preserves_a_terminal_timestamp() {
         let mut order = super::super::tests::order(2, OrderStatus::Working);
         order.quantity = FixedPoint::try_new(2, 0).expect("quantity");
-        let (cancelled, _, _) = broker_missing(order, true, 2).expect("missing");
+        let (cancelled, _, _, _) = broker_missing(order, true, 2).expect("missing");
         let late = broker_deal(
             &cancelled,
             FixedPoint::try_new(1, 0).expect("quantity"),

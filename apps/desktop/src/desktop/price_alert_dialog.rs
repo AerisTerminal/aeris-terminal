@@ -1,3 +1,4 @@
+use aeris_localization::{Text, common, drawing, tr};
 use aeris_observability::diagnostic;
 
 use super::alerts_controller::{AlertTriggerOutcome, chart_price_scale, scaled_price};
@@ -7,26 +8,25 @@ use super::*;
 pub(super) fn price_alert_trigger_text(trigger: &MarketPriceAlertTrigger) -> (String, String) {
     let scale = trigger.instrument.price_scale;
     (
-        format!(
-            "{} {} {}",
-            trigger.instrument.display_symbol,
-            price_alert_condition_phrase(trigger.condition),
-            market_price_text(trigger.threshold_price, scale)
+        tr!(
+            price_alert_condition_text(trigger.condition),
+            symbol = trigger.instrument.display_symbol,
+            price = market_price_text(trigger.threshold_price, scale)
         ),
-        format!(
-            "Last trade {}",
-            market_price_text(trigger.observed_price, scale)
+        tr!(
+            drawing::TRIGGER_LAST_TRADE,
+            price = market_price_text(trigger.observed_price, scale)
         ),
     )
 }
 
-const fn price_alert_condition_phrase(condition: PriceAlertCondition) -> &'static str {
+const fn price_alert_condition_text(condition: PriceAlertCondition) -> Text {
     match condition {
-        PriceAlertCondition::Crossing => "crossed",
-        PriceAlertCondition::CrossingUp => "crossed up through",
-        PriceAlertCondition::CrossingDown => "crossed down through",
-        PriceAlertCondition::GreaterThan => "moved above",
-        PriceAlertCondition::LessThan => "moved below",
+        PriceAlertCondition::Crossing => drawing::TRIGGER_CROSSING,
+        PriceAlertCondition::CrossingUp => drawing::TRIGGER_CROSSING_UP,
+        PriceAlertCondition::CrossingDown => drawing::TRIGGER_CROSSING_DOWN,
+        PriceAlertCondition::GreaterThan => drawing::TRIGGER_GREATER_THAN,
+        PriceAlertCondition::LessThan => drawing::TRIGGER_LESS_THAN,
     }
 }
 
@@ -145,7 +145,7 @@ impl WorkspaceSurface {
             severity: notification_center::NoticeSeverity::Warning,
             tone: notification_center::NoticeTone::Warning,
             source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-            title: "Price alert could not be changed",
+            title: tr!(drawing::ALERT_ACTION_FAILED),
             detail: detail.into(),
             action: None,
             lifetime: notification_center::NoticeLifetime::UntilCleared,
@@ -173,8 +173,8 @@ impl WorkspaceSurface {
                 severity: notification_center::NoticeSeverity::Error,
                 tone: notification_center::NoticeTone::Loss,
                 source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-                title: "Price alerts unavailable",
-                detail: "Live alert monitoring could not be updated. Try again later.".into(),
+                title: tr!(drawing::ALERTS_UNAVAILABLE),
+                detail: tr!(drawing::ALERTS_UNAVAILABLE_DETAIL).into(),
                 action: None,
                 lifetime: notification_center::NoticeLifetime::UntilCleared,
             }));
@@ -188,10 +188,7 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         let Some(instrument) = self.product.clone() else {
-            Self::post_price_alert_action_notice(
-                "Select a live market before creating an alert.",
-                cx,
-            );
+            Self::post_price_alert_action_notice(tr!(drawing::SELECT_LIVE_MARKET), cx);
             return;
         };
         self.alerts.open_dialog(PriceAlertDialogState {
@@ -277,10 +274,7 @@ impl WorkspaceSurface {
             .try_replace_price_alerts(runtime_price_alerts(&next))
             .is_err()
         {
-            Self::post_price_alert_action_notice(
-                "Market data is unavailable; alert was not created.",
-                cx,
-            );
+            Self::post_price_alert_action_notice(tr!(drawing::ALERT_NOT_CREATED), cx);
             return;
         }
         self.alerts.adopt_created(next);
@@ -304,10 +298,7 @@ impl WorkspaceSurface {
             .try_replace_price_alerts(runtime_price_alerts(&next))
             .is_err()
         {
-            Self::post_price_alert_action_notice(
-                "Market data is unavailable; alert was not removed.",
-                cx,
-            );
+            Self::post_price_alert_action_notice(tr!(drawing::ALERT_NOT_REMOVED), cx);
             return;
         }
         self.alerts.adopt(next);
@@ -359,13 +350,13 @@ const CONDITIONS: [PriceAlertCondition; 5] = [
     PriceAlertCondition::LessThan,
 ];
 
-const fn condition_label(condition: PriceAlertCondition) -> &'static str {
+const fn condition_label(condition: PriceAlertCondition) -> Text {
     match condition {
-        PriceAlertCondition::Crossing => "Crossing",
-        PriceAlertCondition::CrossingUp => "Crossing up",
-        PriceAlertCondition::CrossingDown => "Crossing down",
-        PriceAlertCondition::GreaterThan => "Greater than (>)",
-        PriceAlertCondition::LessThan => "Less than (<)",
+        PriceAlertCondition::Crossing => drawing::CONDITION_CROSSING,
+        PriceAlertCondition::CrossingUp => drawing::CONDITION_CROSSING_UP,
+        PriceAlertCondition::CrossingDown => drawing::CONDITION_CROSSING_DOWN,
+        PriceAlertCondition::GreaterThan => drawing::CONDITION_GREATER_THAN,
+        PriceAlertCondition::LessThan => drawing::CONDITION_LESS_THAN,
     }
 }
 
@@ -434,7 +425,7 @@ fn condition_dropdown(
                 let choose = app.clone();
                 MenuRow::compact(
                     ("price_alert_condition_option", condition as u32),
-                    condition_label(condition),
+                    tr!(condition_label(condition)),
                     theme,
                 )
                 .checked(dialog.condition == condition)
@@ -453,7 +444,7 @@ fn condition_dropdown(
             app,
             PriceAlertDropdown::Condition,
             "price_alert_condition_select",
-            condition_label(dialog.condition),
+            tr!(condition_label(dialog.condition)),
             open,
             theme,
         ),
@@ -461,10 +452,10 @@ fn condition_dropdown(
     )
 }
 
-const fn frequency_label(frequency: PriceAlertFrequency) -> &'static str {
+const fn frequency_label(frequency: PriceAlertFrequency) -> Text {
     match frequency {
-        PriceAlertFrequency::OnlyOnce => "Only once",
-        PriceAlertFrequency::EveryTime => "Every time",
+        PriceAlertFrequency::OnlyOnce => drawing::FREQUENCY_ONLY_ONCE,
+        PriceAlertFrequency::EveryTime => drawing::FREQUENCY_EVERY_TIME,
     }
 }
 
@@ -484,7 +475,7 @@ fn frequency_dropdown(
                 let choose = app.clone();
                 MenuRow::compact(
                     ("price_alert_frequency_option", frequency as u32),
-                    frequency_label(frequency),
+                    tr!(frequency_label(frequency)),
                     theme,
                 )
                 .checked(dialog.frequency == frequency)
@@ -503,7 +494,7 @@ fn frequency_dropdown(
             app,
             PriceAlertDropdown::Frequency,
             "price_alert_frequency_select",
-            frequency_label(dialog.frequency),
+            tr!(frequency_label(dialog.frequency)),
             open,
             theme,
         ),
@@ -539,9 +530,9 @@ fn price_alert_existing_rows(
         let remove = app.clone();
         let id = alert.id.clone();
         let condition =
-            PriceAlertCondition::try_from(alert.condition).map_or("Alert", condition_label);
+            PriceAlertCondition::try_from(alert.condition).map_or(drawing::ALERT, condition_label);
         let alert_price = alert.instrument.as_ref().map_or_else(
-            || "Unavailable".to_string(),
+            || tr!(drawing::UNAVAILABLE).to_string(),
             |value| market_price_text(alert.price, value.price_scale),
         );
         rows = rows.child(
@@ -574,7 +565,7 @@ fn price_alert_existing_rows(
                     Button::new(("delete_price_alert", index), theme)
                         .variant(ButtonVariant::Ghost)
                         .icon(header_icon(HugeIcon::Trash))
-                        .aria_label("Delete price alert")
+                        .aria_label(tr!(drawing::DELETE_PRICE_ALERT))
                         .danger_on_hover()
                         .on_click(move |_, _, cx| {
                             remove.update(cx, |surface, surface_cx| {
@@ -593,7 +584,7 @@ fn price_alert_dialog_subtitle(symbol: &str, price: &str) -> Div {
         .flex()
         .items_center()
         .gap_1()
-        .child(format!("{symbol} at"))
+        .child(tr!(drawing::ALERT_DIALOG_SUBTITLE, symbol = symbol))
         .child(
             div()
                 .font_family(aeris_design_system::platform_font_family())
@@ -617,20 +608,16 @@ fn price_alert_dialog_body(
             div()
                 .text_xs()
                 .text_color(gpui_color(colors.text_muted))
-                .child("Condition"),
+                .child(tr!(drawing::CONDITION)),
         )
-        .child(
-            condition_dropdown(app, dialog, theme),
-        )
+        .child(condition_dropdown(app, dialog, theme))
         .child(
             div()
                 .text_xs()
                 .text_color(gpui_color(colors.text_muted))
-                .child("Frequency"),
+                .child(tr!(drawing::FREQUENCY)),
         )
-        .child(
-            frequency_dropdown(app, dialog, theme),
-        )
+        .child(frequency_dropdown(app, dialog, theme))
         .child(
             div()
                 .px_3()
@@ -639,7 +626,7 @@ fn price_alert_dialog_body(
                 .bg(gpui_color(field_surface(theme)))
                 .text_sm()
                 .text_color(gpui_color(colors.text_secondary))
-                .child("Aeris monitors accepted live trades and sends an operating-system notification while the desktop app is running."),
+                .child(tr!(drawing::MONITORING_NOTE)),
         )
         .children((!existing.is_empty()).then(|| {
             div()
@@ -653,7 +640,7 @@ fn price_alert_dialog_body(
                     div()
                         .text_xs()
                         .text_color(gpui_color(colors.text_muted))
-                        .child("Existing alerts for this market"),
+                        .child(tr!(drawing::EXISTING_ALERTS)),
                 )
                 .child(
                     div()
@@ -678,7 +665,7 @@ pub(super) fn price_alert_dialog_layer(
     let create = app.clone();
     let symbol = dialog.instrument.display_symbol.as_str();
     let price = scaled_price(dialog.request.price, dialog.instrument.price_scale).map_or_else(
-        || "Unavailable".to_string(),
+        || tr!(drawing::UNAVAILABLE).to_string(),
         |price| market_price_text(price, dialog.instrument.price_scale),
     );
     let existing = alerts_for_instrument(alerts, &dialog.instrument);
@@ -686,13 +673,13 @@ pub(super) fn price_alert_dialog_layer(
     Dialog::new("price_alert_dialog", DialogSize::Md, theme, move |_, cx| {
         dismiss.update(cx, WorkspaceSurface::close_price_alert_dialog);
     })
-    .title("Create price alert")
+    .title(tr!(drawing::CREATE_PRICE_ALERT))
     .subtitle(price_alert_dialog_subtitle(symbol, &price))
     .child(price_alert_dialog_body(app, dialog, &existing, theme))
     .action(
         Button::new("price_alert_cancel", theme)
             .variant(ButtonVariant::Secondary)
-            .label("Cancel")
+            .label(tr!(common::CANCEL))
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_price_alert_dialog);
             }),
@@ -701,7 +688,7 @@ pub(super) fn price_alert_dialog_layer(
         Button::new("price_alert_create", theme)
             .variant(ButtonVariant::Primary)
             .icon(header_icon(HugeIcon::Add))
-            .label("Create alert")
+            .label(tr!(drawing::CREATE_ALERT))
             .disabled(alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER)
             .on_click(move |_, _, cx| {
                 create.update(cx, WorkspaceSurface::create_price_alert);

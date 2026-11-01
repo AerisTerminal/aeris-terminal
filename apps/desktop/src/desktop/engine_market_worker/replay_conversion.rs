@@ -8,6 +8,7 @@ use super::{
     SeriesTailOperation, provider_display_name,
 };
 use aeris_instruments::InstrumentClass;
+use aeris_localization::{tr, workspace};
 use aeris_market_data::{OrderQueueFrame, OrderQueueLevel, OrderQueueState};
 use aeris_market_runtime::InstrumentDescriptor;
 use aeris_market_runtime::{MarketOrderLevelStatus, MarketOrderLevelView, MarketOrderQueue};
@@ -255,22 +256,22 @@ pub(crate) fn series_key(
 ) -> Result<BarSeriesKey, String> {
     let presentation =
         super::provider_presentation(product.provider.as_str()).ok_or_else(|| {
-            format!(
-                "{} chart interval is unsupported",
-                provider_display_name(product.provider.as_str())
+            tr!(
+                workspace::PROVIDER_INTERVAL_UNSUPPORTED,
+                provider = provider_display_name(product.provider.as_str())
             )
         })?;
     if product.entitlement_id.trim().is_empty() || product.venue_id.trim().is_empty() {
-        return Err(format!(
-            "{} installed instrument identity is invalid",
-            provider_display_name(product.provider.as_str())
+        return Err(tr!(
+            workspace::PROVIDER_INSTRUMENT_INVALID,
+            provider = provider_display_name(product.provider.as_str())
         ));
     }
     aeris_market_runtime::InstrumentDescriptor::from_install(product, presentation, true).map_err(
         |_| {
-            format!(
-                "{} installed instrument identity is invalid",
-                provider_display_name(product.provider.as_str())
+            tr!(
+                workspace::PROVIDER_INSTRUMENT_INVALID,
+                provider = provider_display_name(product.provider.as_str())
             )
         },
     )?;

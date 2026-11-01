@@ -5,6 +5,7 @@
 use super::chart_chrome::TradingShortcutMode;
 use super::*;
 use aeris_desktop::command_registry::{self, CommandGroup, ShortcutRow};
+use aeris_localization::{shell, tr};
 
 const KEYBOARD_SHORTCUTS_MAX_HEIGHT: f32 = 600.0;
 const SHORTCUT_ROW_HEIGHT: f32 = 32.0;
@@ -60,15 +61,15 @@ fn keyboard_shortcuts_dialog(
             });
         },
     )
-    .title("Keyboard shortcuts")
-    .subtitle("Shortcuts act on the active workspace")
+    .title(tr!(shell::KEYBOARD_SHORTCUTS))
+    .subtitle(tr!(shell::SHORTCUTS_SUBTITLE))
     .max_height(px(KEYBOARD_SHORTCUTS_MAX_HEIGHT))
     .children(
         command_registry::shortcut_sections()
             .into_iter()
             .map(|(group, rows)| shortcut_section(group, &rows, trading_shortcuts, theme)),
     )
-    .footer_leading("Esc close")
+    .footer_leading(tr!(shell::SHORTCUTS_FOOTER))
     .into_any_element()
 }
 
@@ -81,9 +82,9 @@ fn shortcut_section(
     let colors = theme.colors;
     let note = (group == CommandGroup::Trading).then(|| {
         if trading_shortcuts.one_click() {
-            "One-click trading is on: shortcuts send at once."
+            tr!(shell::ONE_CLICK_NOTE)
         } else {
-            "Each shortcut asks for confirmation before it sends."
+            tr!(shell::CONFIRM_NOTE)
         }
     });
     div()
@@ -94,7 +95,7 @@ fn shortcut_section(
                 .text_xs()
                 .font_weight(platform_font_weight(TypographyRole::Strong))
                 .text_color(gpui_color(colors.text_muted))
-                .child(group.label()),
+                .child(tr!(group.label())),
         )
         .children(note.map(|note| {
             div()
@@ -119,7 +120,7 @@ fn shortcut_row(row: &ShortcutRow, theme: &AerisTheme) -> Div {
                     .pr_1()
                     .text_xs()
                     .text_color(gpui_color(colors.text_muted))
-                    .child("or")
+                    .child(tr!(shell::OR))
             }))
             .children(trigger.keys().into_iter().map(|key| keycap(key, theme)))
     });
@@ -137,7 +138,7 @@ fn shortcut_row(row: &ShortcutRow, theme: &AerisTheme) -> Div {
                 .truncate()
                 .text_sm()
                 .text_color(gpui_color(colors.text_default))
-                .child(row.title),
+                .child(tr!(row.title)),
         )
         .child(
             div()

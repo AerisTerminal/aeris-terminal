@@ -10,6 +10,7 @@ use super::order_ticket::TradingOrderControlsState;
 use super::time_sales_panel::{TIME_SALES_PANEL_WIDTH, TimeSalesPanelState, time_sales_panel};
 use super::watchlist_panel::{WatchlistPanelState, watchlist_side_panel};
 use super::*;
+use aeris_localization::{panels, tr};
 use gpui::AppContext;
 
 pub(super) const SIDE_PANEL_HEADER_HEIGHT: f32 = 30.0;
@@ -330,7 +331,7 @@ pub(super) fn side_panel_header(
         .children(actions)
         .child(chrome_tooltip(
             close_id,
-            "Close side panel",
+            tr!(panels::CLOSE_SIDE_PANEL),
             close_button(close_id, theme, move |_, cx| {
                 app.update(cx, |surface, surface_cx| {
                     surface.close_side_panel(panel, surface_cx);

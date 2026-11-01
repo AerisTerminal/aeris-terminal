@@ -30,6 +30,7 @@ use aeris_desktop::test_support::{
 use aeris_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
+use aeris_localization::{tr, workspace};
 use aeris_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
 #[cfg(test)]
 use aeris_market_runtime::MarketSeriesState;
@@ -241,12 +242,9 @@ impl WorkspaceMarketFactory {
         self.additions
             .try_send(endpoint)
             .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => {
-                    "workspace creation is busy; try again after the current workspace opens"
-                        .to_string()
-                }
+                mpsc::TrySendError::Full(_) => tr!(workspace::WORKSPACE_CREATION_BUSY).to_string(),
                 mpsc::TrySendError::Disconnected(_) => {
-                    "the market workspace runtime is unavailable".to_string()
+                    tr!(workspace::WORKSPACE_RUNTIME_UNAVAILABLE).to_string()
                 }
             })?;
         self.market.wake_bridges();
@@ -282,19 +280,19 @@ impl WorkspaceMarketFactory {
 fn allocate_workspace_id(next_workspace_id: &AtomicU64) -> Result<u64, String> {
     next_workspace_id
         .try_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
-        .map_err(|_| "workspace identity space is exhausted".to_string())
+        .map_err(|_| tr!(workspace::WORKSPACE_IDENTITY_EXHAUSTED).to_string())
 }
 
 fn allocate_consumer_id(next_consumer_id: &AtomicU64) -> Result<u64, String> {
     next_consumer_id
         .try_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
-        .map_err(|_| "market consumer identity space is exhausted".to_string())
+        .map_err(|_| tr!(workspace::CONSUMER_IDENTITY_EXHAUSTED).to_string())
 }
 
 fn allocate_pane_id(next_pane_id: &AtomicU64) -> Result<u64, String> {
     next_pane_id
         .try_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
-        .map_err(|_| "workspace pane identity space is exhausted".to_string())
+        .map_err(|_| tr!(workspace::PANE_IDENTITY_EXHAUSTED).to_string())
 }
 
 const fn checked_add_one(value: u64) -> Option<u64> {
@@ -427,10 +425,7 @@ fn restored_workspace_pane_specs(
                 .as_ref()
                 .and_then(|instrument| provider_presentation(&instrument.provider));
             if instrument.is_some() && presentation.is_none() {
-                notices.push(format!(
-                    "Pane {} was skipped because its provider is unavailable",
-                    pane.pane_id
-                ));
+                notices.push(tr!(workspace::PANE_SKIPPED_PROVIDER, pane = pane.pane_id));
                 continue;
             }
             let requested =
@@ -467,17 +462,14 @@ fn restored_workspace_pane_specs(
                     }
                 });
             let Some(interval) = interval else {
-                notices.push(format!(
-                    "Pane {} was skipped because it has no supported chart interval",
-                    pane.pane_id
-                ));
+                notices.push(tr!(workspace::PANE_SKIPPED_INTERVAL, pane = pane.pane_id));
                 continue;
             };
             if requested != Some(interval) {
-                notices.push(format!(
-                    "Pane {} used an unsupported chart interval and was repaired to {}",
-                    pane.pane_id,
-                    interval.label()
+                notices.push(tr!(
+                    workspace::PANE_INTERVAL_REPAIRED,
+                    pane = pane.pane_id,
+                    interval = interval.label()
                 ));
             }
             panes.push(RestoredWorkspacePaneSpec {

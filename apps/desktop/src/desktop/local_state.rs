@@ -371,7 +371,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
     };
     let tab = WorkspaceTabState {
         workspace_id: 1,
-        label: super::layout_library::UNTITLED_LAYOUT_NAME.to_string(),
+        label: super::layout_library::untitled_layout_name().to_string(),
         split_axis: WorkspaceSplitAxis::Horizontal as i32,
         panes: vec![pane],
         active_pane_id: 1,

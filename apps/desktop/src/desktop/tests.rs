@@ -3086,7 +3086,7 @@ mod timeframe_input {
             assert!(
                 created
                     .label
-                    .starts_with(layout_library::UNTITLED_LAYOUT_NAME)
+                    .starts_with(layout_library::untitled_layout_name())
             );
             assert_eq!(
                 terminal
@@ -5099,7 +5099,8 @@ fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
         aeris_desktop::command_registry::command(
             aeris_desktop::command_registry::CommandId::ToggleOrderBook
         )
-        .title,
+        .title
+        .get(),
         "Order book"
     );
     assert_eq!(SidePanel::Watchlist.title(), "Watchlist");
@@ -5107,7 +5108,8 @@ fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
         aeris_desktop::command_registry::command(
             aeris_desktop::command_registry::CommandId::ToggleWatchlist
         )
-        .title,
+        .title
+        .get(),
         "Watchlist"
     );
 }
@@ -5119,7 +5121,8 @@ fn time_sales_is_an_independent_market_panel_with_a_stable_persisted_bit() {
         aeris_desktop::command_registry::command(
             aeris_desktop::command_registry::CommandId::ToggleTimeSales
         )
-        .title,
+        .title
+        .get(),
         "Time & Sales"
     );
     assert!(SidePanel::TimeSales.requires_market());
@@ -5144,7 +5147,8 @@ fn order_entry_is_its_own_market_panel_that_keeps_the_book_demanded() {
         aeris_desktop::command_registry::command(
             aeris_desktop::command_registry::CommandId::ToggleOrderEntry
         )
-        .title,
+        .title
+        .get(),
         "Order entry"
     );
     assert!(SidePanel::OrderEntry.requires_market());

@@ -876,6 +876,7 @@ impl TradingCore {
                 reason: Some(reason),
                 event_unix_nanos: self.command_now,
                 detail: Some("not marketable at placement".to_string()),
+                note: None,
                 provenance: quote.provenance,
             };
             event.validate().map_err(|error| error.to_string())?;
@@ -1037,6 +1038,8 @@ impl TradingCore {
                 .then_some(aeris_trading::OrderEventReason::RiskWarning),
             event_unix_nanos: command.submitted_unix_nanos,
             detail: Some(order_acceptance_detail(&risk_warnings)),
+            note: (!risk_warnings.is_empty())
+                .then(|| aeris_trading::OrderEventNote::RiskWarnings(risk_warnings.clone())),
             provenance: command.provenance,
         };
         event.validate().map_err(|error| error.to_string())?;

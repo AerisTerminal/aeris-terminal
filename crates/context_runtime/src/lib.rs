@@ -8,9 +8,10 @@ mod model;
 mod sources;
 
 pub use model::{
-    ContextDataset, ContextMetric, ContextProvenance, ContextSnapshot, ContextSource,
-    ContextSourceStatus, CotPosition, DegreeDayMetric, EconomicEvent, EventImportance,
-    MAXIMUM_CONTEXT_ITEMS, SourceAvailability, SourcePublication,
+    ContextDataset, ContextMetric, ContextMetricKind, ContextProvenance, ContextSnapshot,
+    ContextSource, ContextSourceStatus, CotPosition, CotTraderCategory, DegreeDayMetric,
+    DegreeDayRegion, EconomicEvent, EconomicEventKind, EventImportance, MAXIMUM_CONTEXT_ITEMS,
+    SourceAvailability, SourcePublication,
 };
 pub use sources::OfficialContextFetcher;
 
@@ -728,6 +729,7 @@ mod tests {
                 publication.economic_events.push(EconomicEvent {
                     id: "bls:employment-situation:fixture".to_string(),
                     title: "Employment Situation".to_string(),
+                    kind: EconomicEventKind::Published,
                     scheduled_unix_seconds: fetched_unix_seconds + 3_600,
                     importance: EventImportance::High,
                     provenance: ContextProvenance {

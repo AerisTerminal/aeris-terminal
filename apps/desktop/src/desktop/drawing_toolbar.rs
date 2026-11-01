@@ -1,6 +1,7 @@
 use super::*;
 use crate::desktop::native_ui::tooltip::TooltipPlacement;
 use ChartDrawingKind as Kind;
+use aeris_localization::{Text, drawing, tr};
 use assets::DrawingIcon as Glyph;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -65,12 +66,12 @@ enum DrawingToolGlyph {
 #[derive(Clone, Copy)]
 struct DrawingToolEntry {
     choice: DrawingToolChoice,
-    label: &'static str,
+    label: Text,
     glyph: DrawingToolGlyph,
 }
 
 impl DrawingToolEntry {
-    const fn tool(kind: ChartDrawingKind, label: &'static str, icon: assets::DrawingIcon) -> Self {
+    const fn tool(kind: ChartDrawingKind, label: Text, icon: assets::DrawingIcon) -> Self {
         Self {
             choice: DrawingToolChoice::Kind(kind),
             label,
@@ -81,7 +82,7 @@ impl DrawingToolEntry {
     const fn stamp(stamp: ChartDrawingStamp) -> Self {
         Self {
             choice: DrawingToolChoice::Stamp(stamp),
-            label: stamp.label(),
+            label: stamp_text(stamp),
             glyph: DrawingToolGlyph::Stamp(stamp),
         }
     }
@@ -109,15 +110,29 @@ impl DrawingToolEntry {
 }
 
 struct DrawingToolSection {
-    title: &'static str,
+    title: Text,
     tools: &'static [DrawingToolEntry],
 }
 
 struct DrawingToolGroup {
     id: &'static str,
     menu_id: &'static str,
-    label: &'static str,
+    label: Text,
     sections: &'static [DrawingToolSection],
+}
+
+/// The sidebar's name for a built-in stamp, translated like the tool labels.
+const fn stamp_text(stamp: ChartDrawingStamp) -> Text {
+    match stamp {
+        ChartDrawingStamp::Check => drawing::STAMP_CHECK,
+        ChartDrawingStamp::Cross => drawing::STAMP_CROSS,
+        ChartDrawingStamp::Star => drawing::STAMP_STAR,
+        ChartDrawingStamp::Alert => drawing::STAMP_ALERT,
+        ChartDrawingStamp::Info => drawing::STAMP_INFO,
+        ChartDrawingStamp::Question => drawing::STAMP_QUESTION,
+        ChartDrawingStamp::Bolt => drawing::STAMP_BOLT,
+        ChartDrawingStamp::Target => drawing::STAMP_TARGET,
+    }
 }
 
 impl DrawingToolGroup {
@@ -147,12 +162,12 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
     DrawingToolGroup {
         id: "drawing_group_cursor",
         menu_id: "drawing_group_cursor_menu",
-        label: "Cursor",
+        label: drawing::CURSOR,
         sections: &[DrawingToolSection {
-            title: "Cursor",
+            title: drawing::CURSOR,
             tools: &[DrawingToolEntry {
                 choice: DrawingToolChoice::Cursor,
-                label: "Cursor",
+                label: drawing::CURSOR,
                 glyph: DrawingToolGlyph::Asset(Glyph::Cursor),
             }],
         }],
@@ -160,93 +175,97 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
     DrawingToolGroup {
         id: "drawing_group_lines",
         menu_id: "drawing_group_lines_menu",
-        label: "Lines, channels, and pitchforks",
+        label: drawing::GROUP_LINES,
         sections: &[
             DrawingToolSection {
-                title: "Lines",
+                title: drawing::LINES,
                 tools: &[
-                    DrawingToolEntry::tool(Kind::TrendLine, "Trend line", Glyph::TrendLine),
-                    DrawingToolEntry::tool(Kind::Ray, "Ray", Glyph::Ray),
-                    DrawingToolEntry::tool(Kind::InfoLine, "Info line", Glyph::InfoLine),
+                    DrawingToolEntry::tool(Kind::TrendLine, drawing::TREND_LINE, Glyph::TrendLine),
+                    DrawingToolEntry::tool(Kind::Ray, drawing::RAY, Glyph::Ray),
+                    DrawingToolEntry::tool(Kind::InfoLine, drawing::INFO_LINE, Glyph::InfoLine),
                     DrawingToolEntry::tool(
                         Kind::ExtendedLine,
-                        "Extended line",
+                        drawing::EXTENDED_LINE,
                         Glyph::ExtendedLine,
                     ),
-                    DrawingToolEntry::tool(Kind::TrendAngle, "Trend angle", Glyph::TrendAngle),
+                    DrawingToolEntry::tool(
+                        Kind::TrendAngle,
+                        drawing::TREND_ANGLE,
+                        Glyph::TrendAngle,
+                    ),
                     DrawingToolEntry::tool(
                         Kind::HorizontalLine,
-                        "Horizontal line",
+                        drawing::HORIZONTAL_LINE,
                         Glyph::HorizontalLine,
                     ),
                     DrawingToolEntry::tool(
                         Kind::HorizontalRay,
-                        "Horizontal ray",
+                        drawing::HORIZONTAL_RAY,
                         Glyph::HorizontalRay,
                     ),
                     DrawingToolEntry::tool(
                         Kind::VerticalLine,
-                        "Vertical line",
+                        drawing::VERTICAL_LINE,
                         Glyph::VerticalLine,
                     ),
-                    DrawingToolEntry::tool(Kind::CrossLine, "Cross line", Glyph::CrossLine),
-                    DrawingToolEntry::tool(Kind::ArrowLine, "Arrow", Glyph::ArrowLine),
+                    DrawingToolEntry::tool(Kind::CrossLine, drawing::CROSS_LINE, Glyph::CrossLine),
+                    DrawingToolEntry::tool(Kind::ArrowLine, drawing::ARROW, Glyph::ArrowLine),
                 ],
             },
             DrawingToolSection {
-                title: "Channels",
+                title: drawing::CHANNELS,
                 tools: &[
                     DrawingToolEntry::tool(
                         Kind::ParallelChannel,
-                        "Parallel channel",
+                        drawing::PARALLEL_CHANNEL,
                         Glyph::ParallelChannel,
                     ),
                     DrawingToolEntry::tool(
                         Kind::RegressionTrend,
-                        "Regression trend",
+                        drawing::REGRESSION_TREND,
                         Glyph::RegressionTrend,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FlatTopChannel,
-                        "Flat top channel",
+                        drawing::FLAT_TOP_CHANNEL,
                         Glyph::FlatTopChannel,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FlatBottomChannel,
-                        "Flat bottom channel",
+                        drawing::FLAT_BOTTOM_CHANNEL,
                         Glyph::FlatBottomChannel,
                     ),
                     DrawingToolEntry::tool(
                         Kind::DisjointChannel,
-                        "Disjoint channel",
+                        drawing::DISJOINT_CHANNEL,
                         Glyph::DisjointChannel,
                     ),
                 ],
             },
             DrawingToolSection {
-                title: "Pitchforks",
+                title: drawing::PITCHFORKS,
                 tools: &[
                     DrawingToolEntry::tool(
                         Kind::AndrewsPitchfork,
-                        "Pitchfork",
+                        drawing::PITCHFORK,
                         Glyph::AndrewsPitchfork,
                     ),
                     DrawingToolEntry::tool(
                         Kind::SchiffPitchfork,
-                        "Schiff pitchfork",
+                        drawing::SCHIFF_PITCHFORK,
                         Glyph::SchiffPitchfork,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ModifiedSchiffPitchfork,
-                        "Modified Schiff pitchfork",
+                        drawing::MODIFIED_SCHIFF_PITCHFORK,
                         Glyph::ModifiedSchiffPitchfork,
                     ),
                     DrawingToolEntry::tool(
                         Kind::InsidePitchfork,
-                        "Inside pitchfork",
+                        drawing::INSIDE_PITCHFORK,
                         Glyph::InsidePitchfork,
                     ),
-                    DrawingToolEntry::tool(Kind::Pitchfan, "Pitchfan", Glyph::Pitchfan),
+                    DrawingToolEntry::tool(Kind::Pitchfan, drawing::PITCHFAN, Glyph::Pitchfan),
                 ],
             },
         ],
@@ -254,74 +273,78 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
     DrawingToolGroup {
         id: "drawing_group_fibonacci",
         menu_id: "drawing_group_fibonacci_menu",
-        label: "Fibonacci and Gann",
+        label: drawing::GROUP_FIBONACCI,
         sections: &[
             DrawingToolSection {
-                title: "Fibonacci",
+                title: drawing::FIBONACCI,
                 tools: &[
                     DrawingToolEntry::tool(
                         Kind::FibonacciRetracement,
-                        "Fib retracement",
+                        drawing::FIB_RETRACEMENT,
                         Glyph::FibonacciRetracement,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciExtension,
-                        "Trend-based fib extension",
+                        drawing::TREND_BASED_FIB_EXTENSION,
                         Glyph::FibonacciExtension,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciChannel,
-                        "Fib channel",
+                        drawing::FIB_CHANNEL,
                         Glyph::FibonacciChannel,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciTimeZones,
-                        "Fib time zone",
+                        drawing::FIB_TIME_ZONE,
                         Glyph::FibonacciTimeZones,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciTrendTime,
-                        "Trend-based fib time",
+                        drawing::TREND_BASED_FIB_TIME,
                         Glyph::FibonacciTrendTime,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciSpeedFan,
-                        "Fib speed resistance fan",
+                        drawing::FIB_SPEED_RESISTANCE_FAN,
                         Glyph::FibonacciSpeedFan,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciSpeedArcs,
-                        "Fib speed resistance arcs",
+                        drawing::FIB_SPEED_RESISTANCE_ARCS,
                         Glyph::FibonacciSpeedArcs,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciCircles,
-                        "Fib circles",
+                        drawing::FIB_CIRCLES,
                         Glyph::FibonacciCircles,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciSpiral,
-                        "Fib spiral",
+                        drawing::FIB_SPIRAL,
                         Glyph::FibonacciSpiral,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FibonacciWedge,
-                        "Fib wedge",
+                        drawing::FIB_WEDGE,
                         Glyph::FibonacciWedge,
                     ),
                 ],
             },
             DrawingToolSection {
-                title: "Gann",
+                title: drawing::GANN,
                 tools: &[
-                    DrawingToolEntry::tool(Kind::GannBox, "Gann box", Glyph::GannBox),
+                    DrawingToolEntry::tool(Kind::GannBox, drawing::GANN_BOX, Glyph::GannBox),
                     DrawingToolEntry::tool(
                         Kind::GannSquareFixed,
-                        "Gann square fixed",
+                        drawing::GANN_SQUARE_FIXED,
                         Glyph::GannSquareFixed,
                     ),
-                    DrawingToolEntry::tool(Kind::GannSquare, "Gann square", Glyph::GannSquare),
-                    DrawingToolEntry::tool(Kind::GannFan, "Gann fan", Glyph::GannFan),
+                    DrawingToolEntry::tool(
+                        Kind::GannSquare,
+                        drawing::GANN_SQUARE,
+                        Glyph::GannSquare,
+                    ),
+                    DrawingToolEntry::tool(Kind::GannFan, drawing::GANN_FAN, Glyph::GannFan),
                 ],
             },
         ],
@@ -329,75 +352,87 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
     DrawingToolGroup {
         id: "drawing_group_patterns",
         menu_id: "drawing_group_patterns_menu",
-        label: "Patterns",
+        label: drawing::GROUP_PATTERNS,
         sections: &[
             DrawingToolSection {
-                title: "Chart patterns",
+                title: drawing::CHART_PATTERNS,
                 tools: &[
                     DrawingToolEntry::tool(
                         Kind::PatternXabcd,
-                        "XABCD pattern",
+                        drawing::XABCD_PATTERN,
                         Glyph::PatternXabcd,
                     ),
                     DrawingToolEntry::tool(
                         Kind::PatternCypher,
-                        "Cypher pattern",
+                        drawing::CYPHER_PATTERN,
                         Glyph::PatternCypher,
                     ),
                     DrawingToolEntry::tool(
                         Kind::PatternHeadShoulders,
-                        "Head and shoulders",
+                        drawing::HEAD_AND_SHOULDERS,
                         Glyph::PatternHeadShoulders,
                     ),
-                    DrawingToolEntry::tool(Kind::PatternAbcd, "ABCD pattern", Glyph::PatternAbcd),
+                    DrawingToolEntry::tool(
+                        Kind::PatternAbcd,
+                        drawing::ABCD_PATTERN,
+                        Glyph::PatternAbcd,
+                    ),
                     DrawingToolEntry::tool(
                         Kind::PatternTriangle,
-                        "Triangle pattern",
+                        drawing::TRIANGLE_PATTERN,
                         Glyph::PatternTriangle,
                     ),
                     DrawingToolEntry::tool(
                         Kind::PatternThreeDrives,
-                        "Three drives pattern",
+                        drawing::THREE_DRIVES_PATTERN,
                         Glyph::PatternThreeDrives,
                     ),
                 ],
             },
             DrawingToolSection {
-                title: "Elliott waves",
+                title: drawing::ELLIOTT_WAVES,
                 tools: &[
                     DrawingToolEntry::tool(
                         Kind::ElliottImpulse,
-                        "Elliott impulse wave (12345)",
+                        drawing::ELLIOTT_IMPULSE_WAVE,
                         Glyph::ElliottImpulse,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ElliottCorrection,
-                        "Elliott correction wave (ABC)",
+                        drawing::ELLIOTT_CORRECTION_WAVE,
                         Glyph::ElliottCorrection,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ElliottTriangle,
-                        "Elliott triangle wave (ABCDE)",
+                        drawing::ELLIOTT_TRIANGLE_WAVE,
                         Glyph::ElliottTriangle,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ElliottDoubleCombination,
-                        "Elliott double combo wave (WXY)",
+                        drawing::ELLIOTT_DOUBLE_COMBO_WAVE,
                         Glyph::ElliottDoubleCombination,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ElliottTripleCombination,
-                        "Elliott triple combo wave (WXYXZ)",
+                        drawing::ELLIOTT_TRIPLE_COMBO_WAVE,
                         Glyph::ElliottTripleCombination,
                     ),
                 ],
             },
             DrawingToolSection {
-                title: "Cycles",
+                title: drawing::CYCLES,
                 tools: &[
-                    DrawingToolEntry::tool(Kind::CyclicLines, "Cyclic lines", Glyph::CyclicLines),
-                    DrawingToolEntry::tool(Kind::TimeCycles, "Time cycles", Glyph::TimeCycles),
-                    DrawingToolEntry::tool(Kind::SineLine, "Sine line", Glyph::SineLine),
+                    DrawingToolEntry::tool(
+                        Kind::CyclicLines,
+                        drawing::CYCLIC_LINES,
+                        Glyph::CyclicLines,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::TimeCycles,
+                        drawing::TIME_CYCLES,
+                        Glyph::TimeCycles,
+                    ),
+                    DrawingToolEntry::tool(Kind::SineLine, drawing::SINE_LINE, Glyph::SineLine),
                 ],
             },
         ],
@@ -405,54 +440,66 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
     DrawingToolGroup {
         id: "drawing_group_forecasting",
         menu_id: "drawing_group_forecasting_menu",
-        label: "Forecasting and measurement",
+        label: drawing::GROUP_FORECASTING,
         sections: &[
             DrawingToolSection {
-                title: "Forecasting",
+                title: drawing::FORECASTING,
                 tools: &[
                     DrawingToolEntry::tool(
                         Kind::LongPosition,
-                        "Long position",
+                        drawing::LONG_POSITION,
                         Glyph::LongPosition,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ShortPosition,
-                        "Short position",
+                        drawing::SHORT_POSITION,
                         Glyph::ShortPosition,
                     ),
-                    DrawingToolEntry::tool(Kind::Forecast, "Forecast", Glyph::Forecast),
-                    DrawingToolEntry::tool(Kind::BarsPattern, "Bars pattern", Glyph::BarsPattern),
-                    DrawingToolEntry::tool(Kind::Projection, "Projection", Glyph::Projection),
+                    DrawingToolEntry::tool(Kind::Forecast, drawing::FORECAST, Glyph::Forecast),
+                    DrawingToolEntry::tool(
+                        Kind::BarsPattern,
+                        drawing::BARS_PATTERN,
+                        Glyph::BarsPattern,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::Projection,
+                        drawing::PROJECTION,
+                        Glyph::Projection,
+                    ),
                 ],
             },
             DrawingToolSection {
-                title: "Volume-based",
+                title: drawing::VOLUME_BASED,
                 tools: &[
                     DrawingToolEntry::tool(
                         Kind::AnchoredVwap,
-                        "Anchored VWAP",
+                        drawing::ANCHORED_VWAP,
                         Glyph::AnchoredVwap,
                     ),
                     DrawingToolEntry::tool(
                         Kind::FixedRangeVolumeProfile,
-                        "Fixed range volume profile",
+                        drawing::FIXED_RANGE_VOLUME_PROFILE,
                         Glyph::FixedRangeVolumeProfile,
                     ),
                     DrawingToolEntry::tool(
                         Kind::AnchoredVolumeProfile,
-                        "Anchored volume profile",
+                        drawing::ANCHORED_VOLUME_PROFILE,
                         Glyph::AnchoredVolumeProfile,
                     ),
                 ],
             },
             DrawingToolSection {
-                title: "Measurers",
+                title: drawing::MEASURERS,
                 tools: &[
-                    DrawingToolEntry::tool(Kind::PriceRange, "Price range", Glyph::PriceRange),
-                    DrawingToolEntry::tool(Kind::DateRange, "Date range", Glyph::DateRange),
+                    DrawingToolEntry::tool(
+                        Kind::PriceRange,
+                        drawing::PRICE_RANGE,
+                        Glyph::PriceRange,
+                    ),
+                    DrawingToolEntry::tool(Kind::DateRange, drawing::DATE_RANGE, Glyph::DateRange),
                     DrawingToolEntry::tool(
                         Kind::DatePriceRange,
-                        "Date and price range",
+                        drawing::DATE_AND_PRICE_RANGE,
                         Glyph::DatePriceRange,
                     ),
                 ],
@@ -462,32 +509,40 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
     DrawingToolGroup {
         id: "drawing_group_shapes",
         menu_id: "drawing_group_shapes_menu",
-        label: "Brushes and shapes",
+        label: drawing::GROUP_SHAPES,
         sections: &[
             DrawingToolSection {
-                title: "Brushes",
+                title: drawing::BRUSHES,
                 tools: &[
-                    DrawingToolEntry::tool(Kind::Brush, "Brush", Glyph::Brush),
-                    DrawingToolEntry::tool(Kind::Highlighter, "Highlighter", Glyph::Highlighter),
+                    DrawingToolEntry::tool(Kind::Brush, drawing::BRUSH, Glyph::Brush),
+                    DrawingToolEntry::tool(
+                        Kind::Highlighter,
+                        drawing::HIGHLIGHTER,
+                        Glyph::Highlighter,
+                    ),
                 ],
             },
             DrawingToolSection {
-                title: "Shapes",
+                title: drawing::SHAPES,
                 tools: &[
-                    DrawingToolEntry::tool(Kind::Rectangle, "Rectangle", Glyph::Rectangle),
+                    DrawingToolEntry::tool(Kind::Rectangle, drawing::RECTANGLE, Glyph::Rectangle),
                     DrawingToolEntry::tool(
                         Kind::RotatedRectangle,
-                        "Rotated rectangle",
+                        drawing::ROTATED_RECTANGLE,
                         Glyph::RotatedRectangle,
                     ),
-                    DrawingToolEntry::tool(Kind::Path, "Path", Glyph::Path),
-                    DrawingToolEntry::tool(Kind::Circle, "Circle", Glyph::Circle),
-                    DrawingToolEntry::tool(Kind::Ellipse, "Ellipse", Glyph::Ellipse),
-                    DrawingToolEntry::tool(Kind::Polyline, "Polyline", Glyph::Polyline),
-                    DrawingToolEntry::tool(Kind::Triangle, "Triangle", Glyph::Triangle),
-                    DrawingToolEntry::tool(Kind::Arc, "Arc", Glyph::Arc),
-                    DrawingToolEntry::tool(Kind::Curve, "Curve", Glyph::Curve),
-                    DrawingToolEntry::tool(Kind::DoubleCurve, "Double curve", Glyph::DoubleCurve),
+                    DrawingToolEntry::tool(Kind::Path, drawing::PATH, Glyph::Path),
+                    DrawingToolEntry::tool(Kind::Circle, drawing::CIRCLE, Glyph::Circle),
+                    DrawingToolEntry::tool(Kind::Ellipse, drawing::ELLIPSE, Glyph::Ellipse),
+                    DrawingToolEntry::tool(Kind::Polyline, drawing::POLYLINE, Glyph::Polyline),
+                    DrawingToolEntry::tool(Kind::Triangle, drawing::TRIANGLE, Glyph::Triangle),
+                    DrawingToolEntry::tool(Kind::Arc, drawing::ARC, Glyph::Arc),
+                    DrawingToolEntry::tool(Kind::Curve, drawing::CURVE, Glyph::Curve),
+                    DrawingToolEntry::tool(
+                        Kind::DoubleCurve,
+                        drawing::DOUBLE_CURVE,
+                        Glyph::DoubleCurve,
+                    ),
                 ],
             },
         ],
@@ -495,29 +550,33 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
     DrawingToolGroup {
         id: "drawing_group_text",
         menu_id: "drawing_group_text_menu",
-        label: "Text and notes",
+        label: drawing::TEXT_AND_NOTES,
         sections: &[DrawingToolSection {
-            title: "Text and notes",
+            title: drawing::TEXT_AND_NOTES,
             tools: &[
-                DrawingToolEntry::tool(Kind::Text, "Text", Glyph::Text),
-                DrawingToolEntry::tool(Kind::AnchoredText, "Anchored text", Glyph::AnchoredText),
-                DrawingToolEntry::tool(Kind::Note, "Note", Glyph::Note),
-                DrawingToolEntry::tool(Kind::PriceNote, "Price note", Glyph::PriceNote),
-                DrawingToolEntry::tool(Kind::Callout, "Callout", Glyph::Callout),
-                DrawingToolEntry::tool(Kind::Comment, "Comment", Glyph::Comment),
-                DrawingToolEntry::tool(Kind::PriceLabel, "Price label", Glyph::PriceLabel),
-                DrawingToolEntry::tool(Kind::Signpost, "Signpost", Glyph::Signpost),
-                DrawingToolEntry::tool(Kind::FlagMark, "Flag mark", Glyph::FlagMark),
+                DrawingToolEntry::tool(Kind::Text, drawing::TEXT, Glyph::Text),
+                DrawingToolEntry::tool(
+                    Kind::AnchoredText,
+                    drawing::ANCHORED_TEXT,
+                    Glyph::AnchoredText,
+                ),
+                DrawingToolEntry::tool(Kind::Note, drawing::NOTE, Glyph::Note),
+                DrawingToolEntry::tool(Kind::PriceNote, drawing::PRICE_NOTE, Glyph::PriceNote),
+                DrawingToolEntry::tool(Kind::Callout, drawing::CALLOUT, Glyph::Callout),
+                DrawingToolEntry::tool(Kind::Comment, drawing::COMMENT, Glyph::Comment),
+                DrawingToolEntry::tool(Kind::PriceLabel, drawing::PRICE_LABEL, Glyph::PriceLabel),
+                DrawingToolEntry::tool(Kind::Signpost, drawing::SIGNPOST, Glyph::Signpost),
+                DrawingToolEntry::tool(Kind::FlagMark, drawing::FLAG_MARK, Glyph::FlagMark),
             ],
         }],
     },
     DrawingToolGroup {
         id: "drawing_group_markers",
         menu_id: "drawing_group_markers_menu",
-        label: "Arrows and stamps",
+        label: drawing::GROUP_MARKERS,
         sections: &[
             DrawingToolSection {
-                title: "Stamps",
+                title: drawing::STAMPS,
                 tools: &[
                     DrawingToolEntry::stamp(ChartDrawingStamp::Check),
                     DrawingToolEntry::stamp(ChartDrawingStamp::Cross),
@@ -530,26 +589,26 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
                 ],
             },
             DrawingToolSection {
-                title: "Arrows",
+                title: drawing::ARROWS,
                 tools: &[
                     DrawingToolEntry::tool(
                         Kind::ArrowMarkerUp,
-                        "Arrow mark up",
+                        drawing::ARROW_MARK_UP,
                         Glyph::ArrowMarkerUp,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ArrowMarkerDown,
-                        "Arrow mark down",
+                        drawing::ARROW_MARK_DOWN,
                         Glyph::ArrowMarkerDown,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ArrowMarkerLeft,
-                        "Arrow mark left",
+                        drawing::ARROW_MARK_LEFT,
                         Glyph::ArrowMarkerLeft,
                     ),
                     DrawingToolEntry::tool(
                         Kind::ArrowMarkerRight,
-                        "Arrow mark right",
+                        drawing::ARROW_MARK_RIGHT,
                         Glyph::ArrowMarkerRight,
                     ),
                 ],
@@ -559,15 +618,15 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
 ];
 
 /// The sidebar's name for a drawing kind, so dialogs title a drawing as its tool reads.
-pub(super) fn drawing_kind_label(kind: ChartDrawingKind) -> &'static str {
+pub(super) fn drawing_kind_label(kind: ChartDrawingKind) -> Text {
     if kind == Kind::IconStamp {
-        return "Icon";
+        return drawing::ICON;
     }
     DRAWING_TOOL_GROUPS
         .iter()
         .flat_map(DrawingToolGroup::entries)
         .find(|entry| entry.choice == DrawingToolChoice::Kind(kind))
-        .map_or("Drawing", |entry| entry.label)
+        .map_or(drawing::DRAWING, |entry| entry.label)
 }
 
 fn drawing_tool_group_of(choice: DrawingToolChoice) -> Option<usize> {
@@ -865,11 +924,11 @@ fn drawing_tool_slot(
     let arm = terminal.clone();
     let button = sidebar_tooltip(
         group.id,
-        entry.label,
+        tr!(entry.label),
         drawing_toolbar_button(
             group.id,
             entry.icon(theme),
-            entry.label,
+            tr!(entry.label),
             entry.toolbar_icon_size(),
             theme,
             slot.selected,
@@ -923,9 +982,9 @@ fn drawing_tool_group_arrow(
     Button::new(group.menu_id, theme)
         .variant(ButtonVariant::Ghost)
         .icon(Icon::new(Glyph::GroupArrow.path()).with_size(px(DRAWING_TOOL_GROUP_ARROW_ICON)))
-        .aria_label(group.label)
+        .aria_label(tr!(group.label))
         .tooltip(
-            TooltipSpec::new(group.label, theme)
+            TooltipSpec::new(tr!(group.label), theme)
                 .show_delay(TOOLTIP_OPEN_DELAY)
                 .placement(TooltipPlacement::Right),
         )
@@ -972,11 +1031,11 @@ pub(super) fn drawing_tool_menu_layer(
         if section_index > 0 {
             panel = panel.separator();
         }
-        panel = panel.child(drawing_tool_menu_title(section.title, theme));
+        panel = panel.child(drawing_tool_menu_title(tr!(section.title), theme));
         for entry in section.tools.iter().copied() {
             let select = terminal.clone();
             panel = panel.child(
-                MenuRow::compact(("drawing_tool_menu_row", row), entry.label, theme)
+                MenuRow::compact(("drawing_tool_menu_row", row), tr!(entry.label), theme)
                     .leading(entry.icon(theme).with_size(px(DRAWING_TOOL_MENU_ICON)))
                     .trailing(drawing_favorite_star(
                         terminal,
@@ -1181,7 +1240,7 @@ pub(super) fn drawing_favorites_toolbar_layer(
         let button = drawing_toolbar_button(
             ("drawing_favorite", index),
             entry.icon(theme),
-            entry.label,
+            tr!(entry.label),
             entry.toolbar_icon_size(),
             theme,
             selected,
@@ -1193,7 +1252,7 @@ pub(super) fn drawing_favorites_toolbar_layer(
                 terminal.select_drawing_tool_on_active_workspace(entry.choice, terminal_cx);
             });
         });
-        let tooltip = TooltipSpec::new(entry.label, theme).show_delay(TOOLTIP_OPEN_DELAY);
+        let tooltip = TooltipSpec::new(tr!(entry.label), theme).show_delay(TOOLTIP_OPEN_DELAY);
         with_tooltip(("drawing_favorite_tooltip", index), button, &tooltip).into_any_element()
     });
     let move_terminal = terminal.clone();
@@ -1208,7 +1267,7 @@ pub(super) fn drawing_favorites_toolbar_layer(
             })
             .child(floating_toolbar_grip(
                 "drawing_favorites_grip",
-                "Move favorites toolbar",
+                tr!(drawing::MOVE_FAVORITES_TOOLBAR),
                 DrawingFavoritesMoveDrag,
                 theme,
                 move |pointer, cx| {
@@ -1232,9 +1291,9 @@ fn drawing_favorite_star(
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let label = if favorite {
-        "Remove from favorites"
+        tr!(drawing::REMOVE_FROM_FAVORITES)
     } else {
-        "Add to favorites"
+        tr!(drawing::ADD_TO_FAVORITES)
     };
     let toggle = terminal.clone();
     let star = if favorite {
@@ -1307,11 +1366,11 @@ fn drawing_favorites_toggle(
     let enabled = !favorites.is_empty();
     let shown = enabled && favorites.toolbar_visible;
     let label = if !enabled {
-        "Star a drawing tool to add it to favorites"
+        tr!(drawing::STAR_TOOL_HINT)
     } else if shown {
-        "Hide favorites toolbar"
+        tr!(drawing::HIDE_FAVORITES_TOOLBAR)
     } else {
-        "Show favorites toolbar"
+        tr!(drawing::SHOW_FAVORITES_TOOLBAR)
     };
     let toggle = terminal.clone();
     sidebar_tooltip(
@@ -1354,7 +1413,7 @@ fn drawing_toolbar_actions(
         .child(drawing_action_control(
             DrawingActionSpec::new(
                 "drawing_delete_selected",
-                "Delete selected chart object",
+                drawing::DELETE_SELECTED_CHART_OBJECT,
                 HugeIcon::Trash,
                 24.0,
                 false,
@@ -1367,7 +1426,7 @@ fn drawing_toolbar_actions(
         .child(drawing_action_control(
             DrawingActionSpec::new(
                 "drawing_lock_selected",
-                "Lock or unlock selected drawing",
+                drawing::LOCK_OR_UNLOCK_SELECTED_DRAWING,
                 HugeIcon::Lock,
                 20.0,
                 state.selected_locked,
@@ -1380,7 +1439,7 @@ fn drawing_toolbar_actions(
         .child(drawing_action_control(
             DrawingActionSpec::new(
                 "drawing_clear_all",
-                "Clear all drawings",
+                drawing::CLEAR_ALL_DRAWINGS,
                 HugeIcon::EraserIcon,
                 24.0,
                 false,
@@ -1395,7 +1454,7 @@ fn drawing_toolbar_actions(
 #[derive(Clone, Copy)]
 struct DrawingActionSpec {
     id: &'static str,
-    tooltip: &'static str,
+    tooltip: Text,
     icon: HugeIcon,
     icon_size: f32,
     selected: bool,
@@ -1406,7 +1465,7 @@ struct DrawingActionSpec {
 impl DrawingActionSpec {
     const fn new(
         id: &'static str,
-        tooltip: &'static str,
+        tooltip: Text,
         icon: HugeIcon,
         icon_size: f32,
         selected: bool,
@@ -1433,7 +1492,7 @@ fn drawing_action_control(
     let button = drawing_toolbar_button(
         spec.id,
         header_icon(spec.icon),
-        spec.tooltip,
+        tr!(spec.tooltip),
         spec.icon_size,
         theme,
         spec.selected,
@@ -1442,7 +1501,7 @@ fn drawing_action_control(
     .on_click(move |_, _, cx| {
         app.update(cx, spec.action);
     });
-    sidebar_tooltip(spec.id, spec.tooltip, button, theme)
+    sidebar_tooltip(spec.id, tr!(spec.tooltip), button, theme)
 }
 
 /// The sidebar sits on the window's left edge, so its tooltips open to the right.

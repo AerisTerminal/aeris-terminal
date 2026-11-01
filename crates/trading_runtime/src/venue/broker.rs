@@ -8,13 +8,13 @@ use crate::core::ledger::{CostBasis, TradeCycle};
 use crate::venue::{VenueEvent, VenueRequest, VenueUpdate};
 use crate::{
     DEMO_VENUE_UNAVAILABLE, FlattenOutcome, ModifyOrder, MoveBracketLevel, PendingExit, PlaceOrder,
-    TradingCore, TradingInstrument, TradingProvenance, store::BrokerFillRecord,
+    TradingCore, TradingInstrument, TradingProvenance, UnaccountedCause, store::BrokerFillRecord,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{
     AccountEnvironment, ClientOrderId, Fill, FillId, FixedPoint, Liquidity, Order, OrderEvent,
-    OrderEventId, OrderEventKind, OrderEventReason, OrderId, OrderSide, OrderStatus, OrderType,
-    Position, TimeInForce, TradingAccount, TradingAccountId,
+    OrderEventId, OrderEventKind, OrderEventNote, OrderEventReason, OrderId, OrderSide,
+    OrderStatus, OrderType, Position, TimeInForce, TradingAccount, TradingAccountId,
     venue::{
         BROKER_VENUE_ID, BracketLevel, BracketSide, BrokerFill, BrokerOrder, BrokerOrderKind,
         BrokerOrderState, ObservedAccount, ServerBracket, VenueAmendment, VenueOrder,
@@ -290,14 +290,10 @@ impl TradingCore {
         )?;
         if !warnings.is_empty() {
             event.reason = Some(aeris_trading::OrderEventReason::RiskWarning);
-            event.detail = Some(format!(
-                "submitted to the broker · {}",
-                warnings
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
+            event.note = Some(aeris_trading::OrderEventNote::RiskWarnings(
+                warnings.clone(),
             ));
+            event.detail = Some(broker_warnings_detail(&warnings));
         }
         let outbound = self.venue_outbound.clone().ok_or(DEMO_VENUE_UNAVAILABLE)?;
         let reservation = outbound
@@ -626,7 +622,7 @@ impl TradingCore {
                 &account_id,
                 &fill.instrument_id,
                 Some(fill.executed_unix_nanos),
-                "its instrument is not registered",
+                UnaccountedCause::InstrumentNotRegistered,
             );
         }
         match &self.owner_scaled(&account_id, &event.update)? {
@@ -654,7 +650,7 @@ impl TradingCore {
                     &account_id,
                     &fill.instrument_id,
                     Some(fill.executed_unix_nanos),
-                    &error,
+                    UnaccountedCause::FillNotApplied(error),
                 ),
             },
             VenueUpdate::Position(position) => {
@@ -1172,12 +1168,19 @@ impl TradingCore {
             .collect();
         for order in missing {
             let bound = self.broker_order_id(&order.id).is_some();
-            let (mut updated, kind, detail) =
+            let (mut updated, kind, text, note) =
                 crate::book::lifecycle::broker_missing(order, bound, self.command_now)
                     .map_err(|error| error.to_string())?;
             updated.provenance = self.venue_provenance();
             let provenance = updated.provenance.clone();
-            self.record_broker_transition(updated, kind, detail, None, provenance, None)?;
+            self.record_broker_transition(
+                updated,
+                kind,
+                EventDetail { text, note },
+                None,
+                provenance,
+                None,
+            )?;
         }
         let unregistered = self.rebase_positions(account_id, &snapshot.positions)?;
         self.settle_reconciled(account_id, &unregistered)
@@ -1402,7 +1405,13 @@ impl TradingCore {
             .then_some(OrderEventReason::UserCancel);
         updated.provenance = self.venue_provenance();
         let provenance = updated.provenance.clone();
-        let detail = reason.unwrap_or(broker_report_detail(state));
+        let detail = match reason {
+            Some(text) => EventDetail { text, note: None },
+            None => EventDetail {
+                text: broker_report_detail(state),
+                note: Some(OrderEventNote::VenueGaveNoReason),
+            },
+        };
         self.record_broker_transition(
             updated,
             kind,
@@ -1440,7 +1449,10 @@ impl TradingCore {
         self.record_broker_transition(
             updated,
             OrderEventKind::Rejected,
-            reason,
+            EventDetail {
+                text: reason,
+                note: None,
+            },
             None,
             provenance,
             None,
@@ -1516,6 +1528,7 @@ impl TradingCore {
             reason: None,
             event_unix_nanos: provenance.observed_unix_nanos,
             detail: Some(detail.to_string()),
+            note: None,
             provenance,
         };
         event.validate().map_err(|error| error.to_string())?;
@@ -1528,16 +1541,22 @@ impl TradingCore {
         &mut self,
         updated: Order,
         kind: OrderEventKind,
-        detail: &str,
+        detail: EventDetail<'_>,
         reason: Option<OrderEventReason>,
         provenance: TradingProvenance,
         binding: Option<&str>,
     ) -> Result<(), String> {
         updated.validate().map_err(|error| error.to_string())?;
         let sequence = self.state.next_sequence;
-        let mut event =
-            Self::broker_event(&updated, sequence, kind, bounded_detail(detail), provenance)?;
+        let mut event = Self::broker_event(
+            &updated,
+            sequence,
+            kind,
+            bounded_detail(detail.text),
+            provenance,
+        )?;
         event.reason = reason;
+        event.note = detail.note;
         let released = if updated.status.is_open() {
             Vec::new()
         } else {
@@ -1625,6 +1644,12 @@ fn venue_basis(average: FixedPoint, net: FixedPoint, scale: u8) -> Result<CostBa
     })
 }
 
+/// One broker event's audit text with the typed note of a text the owner wrote itself.
+struct EventDetail<'a> {
+    text: &'a str,
+    note: Option<OrderEventNote>,
+}
+
 /// The broker's free text cut to the longest event detail the contract stores, on a
 /// character boundary, so an explanation can never block the transition it explains.
 fn bounded_detail(detail: &str) -> &str {
@@ -1646,6 +1671,18 @@ fn broker_report_detail(state: BrokerOrderState) -> &'static str {
         BrokerOrderState::CancelRejected => "cancel rejected",
         BrokerOrderState::Rejected => "rejected",
     }
+}
+
+/// The English audit text a typed risk-warnings note mirrors for its clients.
+fn broker_warnings_detail(warnings: &[aeris_trading::RiskWarning]) -> String {
+    format!(
+        "submitted to the broker · {}",
+        warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
 }
 
 /// How a broker deal found its owner order.

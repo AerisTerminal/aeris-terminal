@@ -189,6 +189,10 @@ pub struct WorkspaceChromeState {
     /// written before the glow existed keep it on.
     #[prost(bool, tag = "16")]
     pub fill_glow_off: bool,
+    /// The display-language choice: `system` follows the operating system, a language code
+    /// pins it. Empty or unknown identifiers follow the system.
+    #[prost(string, tag = "17")]
+    pub language: String,
 }
 
 /// A window-relative logical position in the chrome preferences.

@@ -33,7 +33,7 @@ mod broker;
 mod broker_sync;
 #[path = "../venue/scales.rs"]
 mod scales;
-pub use broker_sync::VENUE_NOTICE_LIMIT;
+pub use broker_sync::{ReverseCancelCause, UnaccountedCause, VENUE_NOTICE_LIMIT, VenueNoticeKind};
 
 use self::ledger::{CostBasis, FillAccounting, TradeCycle};
 use self::market::feed::{MarketFeedInbox, QuoteBook};
@@ -491,7 +491,7 @@ pub struct VenueNotice {
     pub sequence: u64,
     pub account_id: TradingAccountId,
     pub observed_unix_nanos: i64,
-    pub detail: String,
+    pub kind: VenueNoticeKind,
 }
 
 /// Bounded immutable projection of current trading state.
@@ -2216,6 +2216,7 @@ pub(crate) fn flatten_acceptance_event(order: &Order, sequence: u64) -> Result<O
         reason: None,
         event_unix_nanos: order.submitted_unix_nanos,
         detail: Some("accepted by local flatten command".to_string()),
+        note: None,
         provenance: order.provenance.clone(),
     };
     event.validate().map_err(|error| error.to_string())?;
@@ -2237,6 +2238,7 @@ pub(crate) fn flatten_fill_event(
         reason: None,
         event_unix_nanos: fill.execution_unix_nanos,
         detail: Some("filled by local flatten command".to_string()),
+        note: None,
         provenance,
     };
     event.validate().map_err(|error| error.to_string())?;

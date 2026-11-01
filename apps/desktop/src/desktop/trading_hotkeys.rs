@@ -4,6 +4,7 @@
 
 use super::chart_chrome::TradingShortcutMode;
 use super::*;
+use aeris_localization::{tr, trading};
 
 /// A trading command sent by a shortcut or the command palette.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -16,23 +17,23 @@ pub(super) enum TradingHotkey {
 }
 
 impl TradingHotkey {
-    const fn confirm_label(self) -> &'static str {
+    fn confirm_label(self) -> &'static str {
         match self {
-            Self::BuyMarket => "Buy",
-            Self::SellMarket => "Sell",
-            Self::CancelAll => "Cancel orders",
-            Self::FlattenAccount => "Flatten",
-            Self::KillSwitch => "Lock accounts",
+            Self::BuyMarket => tr!(trading::BUY_ACTION),
+            Self::SellMarket => tr!(trading::SELL_ACTION),
+            Self::CancelAll => tr!(trading::HOTKEY_CANCEL_ORDERS),
+            Self::FlattenAccount => tr!(trading::HOTKEY_FLATTEN),
+            Self::KillSwitch => tr!(trading::HOTKEY_LOCK_ACCOUNTS),
         }
     }
 
-    const fn title(self) -> &'static str {
+    fn title(self) -> &'static str {
         match self {
-            Self::BuyMarket => "Buy at market?",
-            Self::SellMarket => "Sell at market?",
-            Self::CancelAll => "Cancel all orders?",
-            Self::FlattenAccount => "Flatten account?",
-            Self::KillSwitch => "Lock every account?",
+            Self::BuyMarket => tr!(trading::TITLE_BUY_MARKET),
+            Self::SellMarket => tr!(trading::TITLE_SELL_MARKET),
+            Self::CancelAll => tr!(trading::TITLE_CANCEL_ALL),
+            Self::FlattenAccount => tr!(trading::TITLE_FLATTEN_ACCOUNT),
+            Self::KillSwitch => tr!(trading::TITLE_LOCK_EVERY_ACCOUNT),
         }
     }
 
@@ -95,17 +96,17 @@ enum ConfirmedTrade {
 }
 
 impl ConfirmedTrade {
-    const fn title(&self) -> &'static str {
+    fn title(&self) -> &'static str {
         match self {
             Self::Hotkey(hotkey) => hotkey.title(),
-            Self::DrawingBracket { .. } => "Place bracket order?",
+            Self::DrawingBracket { .. } => tr!(trading::TITLE_PLACE_BRACKET),
         }
     }
 
-    const fn confirm_label(&self) -> &'static str {
+    fn confirm_label(&self) -> &'static str {
         match self {
             Self::Hotkey(hotkey) => hotkey.confirm_label(),
-            Self::DrawingBracket { .. } => "Place order",
+            Self::DrawingBracket { .. } => tr!(trading::CONFIRM_PLACE_ORDER),
         }
     }
 
@@ -125,9 +126,12 @@ fn market_order_message(
     product: &InstallProviderInstrument,
     account: &str,
 ) -> String {
-    format!(
-        "{side} {quantity} {} at market on {account}.",
-        product.display_symbol
+    tr!(
+        trading::MARKET_ORDER_MESSAGE,
+        side = side,
+        quantity = quantity,
+        symbol = product.display_symbol,
+        account = account
     )
 }
 
@@ -137,15 +141,28 @@ fn drawing_bracket_message(
     product: &InstallProviderInstrument,
     account: &str,
 ) -> String {
-    let side = if long { "Buy" } else { "Sell" };
-    format!(
-        "{side} {quantity} {} when price reaches the drawing's entry, with its stop and target, on {account}.",
-        product.display_symbol
+    let side = if long {
+        tr!(trading::BUY_ACTION)
+    } else {
+        tr!(trading::SELL_ACTION)
+    };
+    tr!(
+        trading::DRAWING_BRACKET_MESSAGE,
+        side = side,
+        quantity = quantity,
+        symbol = product.display_symbol,
+        account = account
     )
 }
 
 pub(super) fn risk_increasing_trade_refusal(account: &str, reason: Option<&str>) -> Option<String> {
-    reason.map(|reason| format!("{account} is locked: {reason}"))
+    reason.map(|reason| {
+        tr!(
+            trading::ACCOUNT_LOCKED_REASON,
+            account = account,
+            reason = reason
+        )
+    })
 }
 
 struct TradingConfirmation {
@@ -184,9 +201,9 @@ impl TerminalApp {
         aeris_desktop::trading::record_notice(
             self.lifecycle.trading_feedback(),
             Ok(if mode.one_click() {
-                "One-click trading on: shortcuts send without confirmation".to_string()
+                tr!(trading::ONE_CLICK_ON).to_string()
             } else {
-                "One-click trading off: shortcuts ask for confirmation".to_string()
+                tr!(trading::ONE_CLICK_OFF).to_string()
             }),
         );
         cx.notify();
@@ -295,7 +312,7 @@ impl TerminalApp {
     fn drawing_bracket_summary(&self, long: bool, cx: &App) -> Result<String, String> {
         let account = self
             .selected_trading_account_name(cx)
-            .ok_or("Choose a trading account first")?;
+            .ok_or(tr!(trading::CHOOSE_TRADING_ACCOUNT))?;
         let surface = self.active_surface();
         let surface = surface.read(cx);
         let trading = &surface.trading_pnl;
@@ -306,8 +323,11 @@ impl TerminalApp {
             return Err(message);
         }
         self.trading_order_frame(cx)
-            .ok_or("No order book for this instrument yet")?;
-        let product = surface.product.as_ref().ok_or("Choose a symbol first")?;
+            .ok_or(tr!(trading::NO_ORDER_BOOK))?;
+        let product = surface
+            .product
+            .as_ref()
+            .ok_or(tr!(trading::CHOOSE_SYMBOL_FIRST))?;
         Ok(drawing_bracket_message(
             long,
             trading.order_entry.quantity,
@@ -324,7 +344,7 @@ impl TerminalApp {
         let account = self.selected_trading_account_name(cx);
         match hotkey {
             TradingHotkey::BuyMarket | TradingHotkey::SellMarket => {
-                let account = account.ok_or("Choose a trading account first")?;
+                let account = account.ok_or(tr!(trading::CHOOSE_TRADING_ACCOUNT))?;
                 // Risk-reducing commands stay available on a locked account; new orders do not.
                 if let Some(message) = risk_increasing_trade_refusal(
                     &account,
@@ -333,8 +353,11 @@ impl TerminalApp {
                     return Err(message);
                 }
                 self.trading_order_frame(cx)
-                    .ok_or("No order book for this instrument yet")?;
-                let product = surface.product.as_ref().ok_or("Choose a symbol first")?;
+                    .ok_or(tr!(trading::NO_ORDER_BOOK))?;
+                let product = surface
+                    .product
+                    .as_ref()
+                    .ok_or(tr!(trading::CHOOSE_SYMBOL_FIRST))?;
                 Ok(market_order_message(
                     hotkey.confirm_label(),
                     trading.order_entry.quantity,
@@ -342,19 +365,12 @@ impl TerminalApp {
                     &account,
                 ))
             }
-            TradingHotkey::CancelAll => {
-                Ok("Cancel every working order on all practice accounts.".to_string())
-            }
+            TradingHotkey::CancelAll => Ok(tr!(trading::CANCEL_ALL_SUMMARY).to_string()),
             TradingHotkey::FlattenAccount => {
-                let account = account.ok_or("Choose a trading account first")?;
-                Ok(format!(
-                    "Cancel working orders and close every position on {account} at the trading owner's current quotes."
-                ))
+                let account = account.ok_or(tr!(trading::CHOOSE_TRADING_ACCOUNT))?;
+                Ok(tr!(trading::FLATTEN_ACCOUNT_SUMMARY, account = account))
             }
-            TradingHotkey::KillSwitch => Ok(
-                "Lock every practice account and cancel its working orders. Accounts stay locked until you unlock them."
-                    .to_string(),
-            ),
+            TradingHotkey::KillSwitch => Ok(tr!(trading::KILL_SWITCH_SUMMARY).to_string()),
         }
     }
 
@@ -520,13 +536,11 @@ impl TerminalApp {
             .child(
                 SwitchRow::new(
                     "trading_hotkey_skip_confirmation",
-                    "Don't ask me again",
+                    tr!(trading::SKIP_CONFIRMATION),
                     confirmation.skip_next_time,
                     &self.theme,
                 )
-                .description(
-                    "Turns on one-click trading: shortcuts and drawing orders send at once. Turn it off from the command palette.",
-                )
+                .description(tr!(trading::SKIP_CONFIRMATION_DESCRIPTION))
                 .on_change(move |checked, _, _, cx| {
                     skip.update(cx, |terminal, terminal_cx| {
                         terminal.set_trading_confirmation_skip(checked, terminal_cx);

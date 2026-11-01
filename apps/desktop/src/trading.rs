@@ -1,9 +1,13 @@
 //! Desktop command access to the single in-process trading owner.
 
 use aeris_instruments::InstrumentId;
+use aeris_localization::{panels, tr, tr_count, trading};
+use aeris_trading::venue::{BracketSide, OperationFailure, VenueOperation};
+use aeris_trading::{OrderEventNote, RiskWarning, TradingValidationError};
 use aeris_trading_runtime::clock::{Clock, SystemClock};
 use aeris_trading_runtime::{
-    CreatePracticeAccount, ModifyOrder, PlaceBracket, PlaceOrder, TradeCopierConfig, TradingService,
+    CreatePracticeAccount, ModifyOrder, PlaceBracket, PlaceOrder, ReverseCancelCause,
+    TradeCopierConfig, TradingService, UnaccountedCause, VenueNoticeKind,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
@@ -11,8 +15,13 @@ use std::sync::{Arc, Mutex, Weak};
 /// At most 64 desktop commands may await a UI result. Holding completed results in the
 /// same map also bounds a suspended window without silently dropping command outcomes.
 pub const MAXIMUM_IN_FLIGHT_TRADING_REQUESTS: usize = 64;
-const REQUEST_CAPACITY_NOTICE: &str = "Too many trading commands are waiting for a result";
-pub const STALE_ORDER_NOTICE: &str = "Order changed before your edit; it was not modified";
+fn request_capacity_notice() -> &'static str {
+    tr!(trading::REQUEST_CAPACITY_NOTICE)
+}
+#[must_use]
+pub fn stale_order_notice() -> &'static str {
+    tr!(trading::STALE_ORDER_NOTICE)
+}
 /// Allows a burst of global commands and venue notices between UI wakes without loss.
 pub const MAXIMUM_UNSCOPED_NOTICES: usize = 64;
 /// The largest quantity one order entry accepts: ten billion, so a market priced in fractions
@@ -168,14 +177,14 @@ impl OrderEntryRefusal {
     #[must_use]
     pub fn message(self) -> String {
         match self {
-            Self::Incomplete => "Choose a valid account and instrument for this order".to_string(),
+            Self::Incomplete => tr!(trading::REFUSAL_CHOOSE_VALID).to_string(),
             Self::QuantityTooPrecise { decimals: 0 } => {
-                "This market takes whole quantities only".to_string()
+                tr!(trading::REFUSAL_WHOLE_QUANTITIES).to_string()
             }
             Self::QuantityTooPrecise { decimals } => {
-                format!("This market takes quantities with at most {decimals} decimals")
+                tr!(trading::REFUSAL_DECIMALS, decimals = decimals)
             }
-            Self::QuantityTooLarge => "This quantity is too large for this market".to_string(),
+            Self::QuantityTooLarge => tr!(trading::REFUSAL_TOO_LARGE).to_string(),
         }
     }
 }
@@ -265,7 +274,7 @@ impl TradingFeedback {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.in_flight.len() >= MAXIMUM_IN_FLIGHT_TRADING_REQUESTS {
             drop(state);
-            self.record(Err(REQUEST_CAPACITY_NOTICE.to_string()));
+            self.record(Err(request_capacity_notice().to_string()));
             return None;
         }
         state.next_request = state.next_request.checked_add(1)?;
@@ -330,7 +339,7 @@ impl TradingFeedback {
         if let Some(request) = state.in_flight.get_mut(&id) {
             request.result = Some(TradingCommandFeedback {
                 revision,
-                message: STALE_ORDER_NOTICE.into(),
+                message: stale_order_notice().into(),
                 is_error: true,
                 stale_order: Some(current),
             });
@@ -381,7 +390,7 @@ impl TradingFeedback {
             let count = std::mem::take(&mut state.dropped_unscoped_notices);
             return Some(TradingCommandFeedback {
                 revision: state.revision,
-                message: format!("{count} notices dropped"),
+                message: tr_count!(trading::NOTICES_DROPPED, count),
                 is_error: true,
                 stale_order: None,
             });
@@ -476,7 +485,7 @@ impl TradingFeedback {
             let unseen = notices
                 .iter()
                 .filter(|notice| notice.sequence > state.venue_notice_seen)
-                .map(|notice| notice.detail.as_str())
+                .map(|notice| venue_notice_text(&notice.kind))
                 .collect::<Vec<_>>()
                 .join(" · ");
             if let Some(newest) = notices.iter().map(|notice| notice.sequence).max() {
@@ -513,18 +522,18 @@ pub fn flatten_feedback(
     let outcome = result?;
     let mut parts = vec![action.to_string()];
     if !outcome.fills.is_empty() {
-        parts.push(format!("{} fill(s)", outcome.fills.len()));
+        parts.push(tr_count!(trading::FILLS_COUNT, outcome.fills.len()));
     }
     if !outcome.pending_exits.is_empty() {
-        parts.push(format!(
-            "{} {} exit request(s) sent",
+        parts.push(tr_count!(
+            trading::EXIT_REQUESTS_SENT,
             outcome.pending_exits.len(),
-            broker_venue_display_name(),
+            venue = broker_venue_display_name()
         ));
     }
     if !outcome.unpriced.is_empty() {
-        parts.push(format!(
-            "{} position(s) lack a verified quote and keep their protection",
+        parts.push(tr_count!(
+            trading::UNPRICED_POSITIONS,
             outcome.unpriced.len()
         ));
     }
@@ -549,25 +558,28 @@ pub fn kill_feedback(
 ) -> Result<String, String> {
     let outcome = result?;
     let mut parts = vec![format!(
-        "{action}: locked {} account(s)",
-        outcome.accounts_locked
+        "{action}: {}",
+        tr_count!(trading::LOCKED_ACCOUNTS, outcome.accounts_locked)
     )];
     if !outcome.fills.is_empty() {
-        parts.push(format!("{} flatten fill(s)", outcome.fills.len()));
+        parts.push(tr_count!(trading::FLATTEN_FILLS_COUNT, outcome.fills.len()));
     }
     if !outcome.cancelled.is_empty() {
-        parts.push(format!("{} order(s) cancelled", outcome.cancelled.len()));
+        parts.push(tr_count!(
+            trading::ORDERS_CANCELLED,
+            outcome.cancelled.len()
+        ));
     }
     if !outcome.pending_exits.is_empty() {
-        parts.push(format!(
-            "{} {} exit request(s) sent",
+        parts.push(tr_count!(
+            trading::EXIT_REQUESTS_SENT,
             outcome.pending_exits.len(),
-            broker_venue_display_name(),
+            venue = broker_venue_display_name()
         ));
     }
     if !outcome.unpriced.is_empty() {
-        parts.push(format!(
-            "{} position(s) lack a verified quote and keep their protection",
+        parts.push(tr_count!(
+            trading::UNPRICED_POSITIONS,
             outcome.unpriced.len()
         ));
     }
@@ -587,7 +599,9 @@ fn broker_venue_display_name() -> &'static str {
         .find(|descriptor| {
             descriptor.broker_venue_id == Some(aeris_trading::venue::BROKER_VENUE_ID)
         })
-        .map_or("broker venue", |descriptor| descriptor.display_name)
+        .map_or(tr!(trading::BROKER_VENUE_FALLBACK), |descriptor| {
+            descriptor.display_name
+        })
 }
 
 pub fn record_outcome<T>(
@@ -638,7 +652,7 @@ pub fn create_practice_account(
                         display_name: name,
                         starting_equity,
                     })
-                    .map(|account| format!("Created {}", account.display_name)),
+                    .map(|account| tr!(trading::ACCOUNT_CREATED, name = account.display_name)),
             );
         })
         .detach();
@@ -656,7 +670,7 @@ pub fn delete_practice_account(
     let account_id = match aeris_trading::TradingAccountId::try_new(account_key) {
         Ok(account_id) => account_id,
         Err(error) => {
-            feedback.record(Err(error.to_string()));
+            feedback.record(Err(account_id_error_text(&error).to_string()));
             return;
         }
     };
@@ -665,7 +679,7 @@ pub fn delete_practice_account(
             feedback.record(
                 service
                     .delete_practice_account(account_id)
-                    .map(|account| format!("Deleted {}", account.display_name)),
+                    .map(|account| tr!(trading::ACCOUNT_DELETED, name = account.display_name)),
             );
         })
         .detach();
@@ -679,33 +693,249 @@ fn parse_usd_equity(value: &str) -> Result<aeris_trading::FixedPoint, String> {
         || fraction.len() > 2
         || !fraction.bytes().all(|byte| byte.is_ascii_digit())
     {
-        return Err(
-            "Starting equity must be a positive USD amount with at most two decimals".to_string(),
-        );
+        return Err(tr!(trading::EQUITY_AMOUNT_INVALID).to_string());
     }
     let whole = whole
         .parse::<i64>()
-        .map_err(|_| "Starting equity is too large".to_string())?;
+        .map_err(|_| tr!(trading::EQUITY_TOO_LARGE).to_string())?;
     let fractional = match fraction.len() {
         0 => 0,
         1 => {
             fraction
                 .parse::<i64>()
-                .map_err(|_| "Starting equity is invalid")?
+                .map_err(|_| tr!(trading::EQUITY_INVALID))?
                 * 10
         }
         _ => fraction
             .parse::<i64>()
-            .map_err(|_| "Starting equity is invalid")?,
+            .map_err(|_| tr!(trading::EQUITY_INVALID))?,
     };
     let units = whole
         .checked_mul(100)
         .and_then(|units| units.checked_add(fractional))
         .filter(|units| *units > 0)
-        .ok_or_else(|| {
-            "Starting equity must be positive and within the supported range".to_string()
-        })?;
-    aeris_trading::FixedPoint::try_new(units, 2).map_err(|error| error.to_string())
+        .ok_or_else(|| tr!(trading::EQUITY_OUT_OF_RANGE).to_string())?;
+    aeris_trading::FixedPoint::try_new(units, 2)
+        .map_err(|_| tr!(trading::EQUITY_INVALID).to_string())
+}
+
+/// Why a desktop-held account key is not a valid trading account identity.
+fn account_id_error_text(error: &TradingValidationError) -> &'static str {
+    match error {
+        TradingValidationError::EmptyField(_) => tr!(trading::ACCOUNT_ID_EMPTY),
+        TradingValidationError::FieldTooLong(_) => tr!(trading::ACCOUNT_ID_TOO_LONG),
+        TradingValidationError::ArithmeticOverflow
+        | TradingValidationError::InexactRescale
+        | TradingValidationError::InvalidOrderPrices
+        | TradingValidationError::InvalidAccountRoute
+        | TradingValidationError::InvalidBracket
+        | TradingValidationError::InvalidStartingEquity
+        | TradingValidationError::InvalidFeeRate(_)
+        | TradingValidationError::InvalidFilledQuantity
+        | TradingValidationError::InvalidTimestamp
+        | TradingValidationError::NegativeFeeAmount(_)
+        | TradingValidationError::NonPositivePrice
+        | TradingValidationError::NonPositivePointValue
+        | TradingValidationError::NonPositiveQuantity
+        | TradingValidationError::ScaleMismatch
+        | TradingValidationError::ScaleOutOfRange(_)
+        | TradingValidationError::SimulationLabelMissing
+        | TradingValidationError::ZeroSequence => tr!(trading::ACCOUNT_ID_INVALID),
+    }
+}
+
+/// One risk warning in the display language, as a lowercase clause for joining.
+#[must_use]
+pub fn risk_warning_text(warning: RiskWarning) -> String {
+    match warning {
+        RiskWarning::ApproachingDailyLossLimit => {
+            tr!(trading::RISK_WARNING_DAILY_LOSS_NEAR).to_string()
+        }
+        RiskWarning::NoAttachedStop => tr!(trading::RISK_WARNING_NO_STOP).to_string(),
+        RiskWarning::ConsistencyLimitExceeded {
+            current_percent,
+            limit_percent,
+        } => tr!(
+            trading::RISK_WARNING_CONSISTENCY,
+            current = current_percent,
+            limit = limit_percent
+        ),
+        RiskWarning::FastStopReentry => tr!(trading::RISK_WARNING_FAST_REENTRY).to_string(),
+        RiskWarning::UnverifiedPriceGrid => tr!(trading::RISK_WARNING_UNVERIFIED_GRID).to_string(),
+    }
+}
+
+/// An order event's explanation in the display language: the owner's typed note when it
+/// wrote one, otherwise the stored detail (a broker's own reason or an event recorded
+/// before notes existed).
+#[must_use]
+pub fn order_event_detail_text(event: &aeris_trading::OrderEvent) -> Option<String> {
+    let Some(note) = event.note.as_ref() else {
+        return event.detail.clone();
+    };
+    Some(match note {
+        OrderEventNote::RiskWarnings(warnings)
+            if event.provenance.venue_id == aeris_trading::venue::BROKER_VENUE_ID =>
+        {
+            tr!(
+                trading::RISK_WARNINGS_AT_BROKER,
+                warnings = joined_risk_warnings(warnings, "; ")
+            )
+        }
+        OrderEventNote::RiskWarnings(warnings) => joined_risk_warnings(warnings, " · "),
+        OrderEventNote::DaySessionEnded => tr!(trading::EVENT_DAY_SESSION_ENDED).to_string(),
+        OrderEventNote::VenueGaveNoReason => tr!(panels::BROKER_NO_REASON).to_string(),
+        OrderEventNote::NoLongerOpenAtVenue => {
+            tr!(trading::EVENT_NO_LONGER_OPEN_AT_BROKER).to_string()
+        }
+        OrderEventNote::NotReceivedByVenue => {
+            tr!(trading::EVENT_BROKER_DID_NOT_RECEIVE).to_string()
+        }
+    })
+}
+
+fn joined_risk_warnings(warnings: &[RiskWarning], separator: &str) -> String {
+    warnings
+        .iter()
+        .map(|warning| risk_warning_text(*warning))
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+/// A broker venue notice in the display language. Instruments, the broker's reasons and
+/// the owner's error texts are shown as received.
+#[must_use]
+pub fn venue_notice_text(kind: &VenueNoticeKind) -> String {
+    let instrument_list = |instruments: &[InstrumentId]| {
+        instruments
+            .iter()
+            .map(InstrumentId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match kind {
+        VenueNoticeKind::PositionUnaccounted {
+            instrument_id,
+            cause,
+        } => {
+            let cause = match cause {
+                UnaccountedCause::InstrumentNotRegistered => {
+                    tr!(trading::VENUE_CAUSE_INSTRUMENT_NOT_REGISTERED)
+                }
+                UnaccountedCause::FillNotApplied(error) => error.as_str(),
+            };
+            tr!(
+                trading::VENUE_POSITION_UNACCOUNTED,
+                instrument = instrument_id.as_str(),
+                cause = cause
+            )
+        }
+        VenueNoticeKind::PositionsAccounted {
+            instruments,
+            orders_available: true,
+        } => tr!(
+            trading::VENUE_POSITIONS_ACCOUNTED_ORDERS_AVAILABLE,
+            instruments = instrument_list(instruments)
+        ),
+        VenueNoticeKind::PositionsAccounted {
+            instruments,
+            orders_available: false,
+        } => tr!(
+            trading::VENUE_POSITIONS_ACCOUNTED,
+            instruments = instrument_list(instruments)
+        ),
+        VenueNoticeKind::ReconcileNotSent {
+            after_registration: true,
+            error,
+        } => tr!(
+            trading::VENUE_RECONCILE_NOT_SENT_AFTER_REGISTRATION,
+            error = error
+        ),
+        VenueNoticeKind::ReconcileNotSent {
+            after_registration: false,
+            error,
+        } => tr!(trading::VENUE_RECONCILE_NOT_SENT, error = error),
+        VenueNoticeKind::OperationFailed {
+            operation,
+            failure,
+            reason,
+        } => {
+            let subject = venue_operation_subject(operation);
+            match failure {
+                OperationFailure::Refused => {
+                    tr!(trading::VENUE_REFUSED, subject = subject, reason = reason)
+                }
+                OperationFailure::Unanswered if *operation == VenueOperation::Reconcile => tr!(
+                    trading::VENUE_UNANSWERED_RECONCILE,
+                    subject = subject,
+                    reason = reason
+                ),
+                OperationFailure::Unanswered => {
+                    tr!(
+                        trading::VENUE_UNANSWERED,
+                        subject = subject,
+                        reason = reason
+                    )
+                }
+            }
+        }
+        VenueNoticeKind::ReverseCancelled {
+            instrument_id,
+            cause: ReverseCancelCause::ExitIncomplete,
+        } => tr!(
+            trading::VENUE_REVERSE_EXIT_INCOMPLETE,
+            instrument = instrument_id.as_str()
+        ),
+        VenueNoticeKind::ReverseCancelled {
+            instrument_id,
+            cause: ReverseCancelCause::NotFlatInTime,
+        } => tr!(
+            trading::VENUE_REVERSE_NOT_FLAT,
+            instrument = instrument_id.as_str()
+        ),
+        VenueNoticeKind::ReverseOpeningNotPlaced {
+            instrument_id,
+            error,
+        } => tr!(
+            trading::VENUE_REVERSE_OPENING_NOT_PLACED,
+            instrument = instrument_id.as_str(),
+            error = error
+        ),
+    }
+}
+
+fn venue_operation_subject(operation: &VenueOperation) -> String {
+    match operation {
+        VenueOperation::OrderCommand { client_order_id } => {
+            tr!(trading::VENUE_SUBJECT_ORDER, id = client_order_id.as_str())
+        }
+        VenueOperation::CancelAll => tr!(trading::VENUE_SUBJECT_CANCEL_ALL).to_string(),
+        VenueOperation::ExitPosition { instrument_id } => tr!(
+            trading::VENUE_SUBJECT_POSITION_EXIT,
+            instrument = instrument_id.as_str()
+        ),
+        VenueOperation::MoveBracketLevel {
+            side: BracketSide::Target,
+            current_ticks,
+            new_ticks,
+            ..
+        } => tr!(
+            trading::VENUE_SUBJECT_MOVE_TARGET,
+            current = current_ticks,
+            new = new_ticks
+        ),
+        VenueOperation::MoveBracketLevel {
+            side: BracketSide::Stop,
+            current_ticks,
+            new_ticks,
+            ..
+        } => tr!(
+            trading::VENUE_SUBJECT_MOVE_STOP,
+            current = current_ticks,
+            new = new_ticks
+        ),
+        VenueOperation::Reconcile => tr!(trading::VENUE_SUBJECT_RECONCILE).to_string(),
+    }
 }
 
 /// Dispatches the selected simulated order-entry instruction off the UI thread.
@@ -719,7 +949,7 @@ pub fn dispatch_simulated_order(
     cx: &mut gpui::App,
 ) {
     if order_type_requires_price(selection.order_type) {
-        feedback.record_for_pane(pane, Err(STOP_PRICE_REQUIRED.to_string()));
+        feedback.record_for_pane(pane, Err(tr!(trading::STOP_PRICE_REQUIRED).to_string()));
         return;
     }
     let service = service.clone();
@@ -772,7 +1002,7 @@ pub fn dispatch_simulated_selected_order(
     cx: &mut gpui::App,
 ) {
     if order_type_requires_price(selection.order_type) {
-        feedback.record_for_pane(pane, Err(STOP_PRICE_REQUIRED.to_string()));
+        feedback.record_for_pane(pane, Err(tr!(trading::STOP_PRICE_REQUIRED).to_string()));
         return;
     }
     let service = service.clone();
@@ -811,8 +1041,6 @@ pub fn dispatch_simulated_selected_order(
         .detach();
 }
 
-const STOP_PRICE_REQUIRED: &str = "Click a ladder price to place a stop order";
-
 fn order_type_requires_price(order_type: aeris_trading::OrderType) -> bool {
     matches!(
         order_type,
@@ -847,7 +1075,9 @@ impl ChartOrderResult {
             Err(aeris_trading_runtime::OrderCommandError::StaleRevision { current }) => {
                 Self::Stale(current)
             }
-            Err(error) => Self::Rejected(error.to_string()),
+            Err(aeris_trading_runtime::OrderCommandError::Other(message)) => {
+                Self::Rejected(message)
+            }
         }
     }
 }
@@ -860,17 +1090,19 @@ pub fn order_outcome(order: &aeris_trading::Order, outcome: OrderOutcome) -> Str
     let id = order.client_order_id.as_str();
     if is_broker_order(order) {
         match outcome {
-            OrderOutcome::Placed => format!("Order {id} sent to the broker"),
-            OrderOutcome::ProtectionPlaced => format!("Protective order {id} sent to the broker"),
-            OrderOutcome::Modified => format!("Change to order {id} sent to the broker"),
-            OrderOutcome::Cancelled => format!("Cancel of order {id} sent to the broker"),
+            OrderOutcome::Placed => tr!(trading::ORDER_SENT_TO_BROKER, id = id),
+            OrderOutcome::ProtectionPlaced => tr!(trading::PROTECTION_SENT_TO_BROKER, id = id),
+            OrderOutcome::Modified => tr!(trading::CHANGE_SENT_TO_BROKER, id = id),
+            OrderOutcome::Cancelled => tr!(trading::CANCEL_SENT_TO_BROKER, id = id),
         }
     } else {
         match outcome {
-            OrderOutcome::Placed => format!("Practice order {id} accepted"),
-            OrderOutcome::ProtectionPlaced => format!("Practice protective order {id} placed"),
-            OrderOutcome::Modified => format!("Practice order {id} modified"),
-            OrderOutcome::Cancelled => format!("Practice order {id} cancelled"),
+            OrderOutcome::Placed => tr!(trading::PRACTICE_ORDER_ACCEPTED, id = id),
+            OrderOutcome::ProtectionPlaced => {
+                tr!(trading::PRACTICE_PROTECTION_PLACED, id = id)
+            }
+            OrderOutcome::Modified => tr!(trading::PRACTICE_ORDER_MODIFIED, id = id),
+            OrderOutcome::Cancelled => tr!(trading::PRACTICE_ORDER_CANCELLED, id = id),
         }
     }
 }
@@ -885,11 +1117,13 @@ fn cancel_all_outcome(orders: &[aeris_trading::Order]) -> String {
     let broker = orders.iter().filter(|order| is_broker_order(order)).count();
     let practice = orders.len() - broker;
     match (practice, broker) {
-        (0, 0) => "No working orders to cancel".to_string(),
-        (practice, 0) => format!("Cancelled {practice} practice order(s)"),
-        (0, broker) => format!("Cancel sent to the broker for {broker} order(s)"),
+        (0, 0) => tr!(trading::NO_WORKING_ORDERS).to_string(),
+        (practice, 0) => tr_count!(trading::CANCELLED_PRACTICE_ORDERS, practice),
+        (0, broker) => tr_count!(trading::BROKER_CANCEL_COUNT, broker),
         (practice, broker) => format!(
-            "Cancelled {practice} practice order(s) · cancel sent to the broker for {broker} order(s)"
+            "{} · {}",
+            tr_count!(trading::CANCELLED_PRACTICE_ORDERS, practice),
+            tr_count!(trading::BROKER_CANCEL_COUNT_JOINED, broker),
         ),
     }
 }
@@ -949,7 +1183,7 @@ pub fn dispatch_simulated_order_at_price(
         }
     };
     let Ok(price) = aeris_trading::FixedPoint::try_new(order.price_units, frame.price_scale) else {
-        feedback.record_for_pane(pane, Err("Order price is invalid".to_string()));
+        feedback.record_for_pane(pane, Err(tr!(trading::ORDER_PRICE_INVALID).to_string()));
         return;
     };
     (command.limit_price, command.stop_price) = price_fields(order.order_type, price);
@@ -1049,11 +1283,11 @@ pub fn dispatch_ticket_order(
     };
     if let Some(price_units) = order.price_units {
         let Ok(scale) = u8::try_from(product.price_scale) else {
-            feedback.record_for_pane(pane, Err("Order price is invalid".to_string()));
+            feedback.record_for_pane(pane, Err(tr!(trading::ORDER_PRICE_INVALID).to_string()));
             return;
         };
         let Ok(price) = aeris_trading::FixedPoint::try_new(price_units, scale) else {
-            feedback.record_for_pane(pane, Err("Order price is invalid".to_string()));
+            feedback.record_for_pane(pane, Err(tr!(trading::ORDER_PRICE_INVALID).to_string()));
             return;
         };
         (entry.limit_price, entry.stop_price) = price_fields(order.order_type, price);
@@ -1086,13 +1320,13 @@ pub fn dispatch_ticket_order(
 /// Feedback for an accepted bracket, worded for the venue that holds its stop and target.
 fn bracket_outcome(placement: &aeris_trading_runtime::PlacementOutcome) -> String {
     match placement {
-        aeris_trading_runtime::PlacementOutcome::Managed(bracket) => format!(
-            "Practice order {} accepted with its stop and target",
-            bracket.entry_client_order_id.as_str()
+        aeris_trading_runtime::PlacementOutcome::Managed(bracket) => tr!(
+            trading::PRACTICE_BRACKET_ACCEPTED,
+            id = bracket.entry_client_order_id.as_str()
         ),
-        aeris_trading_runtime::PlacementOutcome::BrokerProtected(order) => format!(
-            "Order {} sent to the broker with its stop and target",
-            order.client_order_id.as_str()
+        aeris_trading_runtime::PlacementOutcome::BrokerProtected(order) => tr!(
+            trading::BROKER_BRACKET_SENT,
+            id = order.client_order_id.as_str()
         ),
     }
 }
@@ -1110,7 +1344,7 @@ pub fn cancel_simulated_account(
     let Some(account) =
         account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
     else {
-        feedback.record_for_pane(pane, Err("Cancel requires a selected account".to_string()));
+        feedback.record_for_pane(pane, Err(tr!(trading::CANCEL_REQUIRES_ACCOUNT).to_string()));
         return;
     };
     let Some(request_id) = feedback.begin_request(pane) else {
@@ -1148,7 +1382,7 @@ pub fn close_broker_position(
             feedback.finish_request(
                 request_id,
                 flatten_feedback(
-                    "Closing position",
+                    tr!(trading::ACTION_CLOSING_POSITION),
                     service.flatten(aeris_trading_runtime::FlattenScope {
                         account: Some(account_id),
                         instrument: Some(instrument_id),
@@ -1184,10 +1418,7 @@ pub fn modify_simulated_order_at_price(
         price,
     } = modification;
     if order_type == aeris_trading::OrderType::Market {
-        feedback.record_for_pane(
-            pane,
-            Err("Market orders have no price to modify".to_string()),
-        );
+        feedback.record_for_pane(pane, Err(tr!(trading::MARKET_ORDER_NO_PRICE).to_string()));
         return;
     }
     let service = service.clone();
@@ -1271,14 +1502,14 @@ pub fn kill_simulated_account(
     let Some(account) =
         account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
     else {
-        feedback.record(Err("Kill switch requires a selected account".to_string()));
+        feedback.record(Err(tr!(trading::KILL_SWITCH_REQUIRES_ACCOUNT).to_string()));
         return;
     };
     let locked_at = feedback.now();
     cx.background_executor()
         .spawn(async move {
             feedback.record(kill_feedback(
-                "Kill switch",
+                tr!(trading::ACTION_KILL_SWITCH),
                 service.kill_switch(Some(account), "manual kill switch".to_string(), locked_at),
             ));
         })
@@ -1297,7 +1528,7 @@ pub fn unlock_simulated_account(
     let Some(account) =
         account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
     else {
-        feedback.record(Err("Select an account to unlock".to_string()));
+        feedback.record(Err(tr!(trading::SELECT_ACCOUNT_TO_UNLOCK).to_string()));
         return;
     };
     cx.background_executor()
@@ -1305,7 +1536,7 @@ pub fn unlock_simulated_account(
             record_outcome(
                 &feedback,
                 service.unlock_account(account),
-                "Account unlocked",
+                tr!(trading::ACCOUNT_UNLOCKED),
             );
         })
         .detach();
@@ -1329,7 +1560,7 @@ pub fn kill_simulated_accounts(
             feedback.finish_request(
                 request_id,
                 kill_feedback(
-                    "Global kill switch",
+                    tr!(trading::ACTION_GLOBAL_KILL_SWITCH),
                     service.kill_switch(None, "manual global kill switch".to_string(), locked_at),
                 ),
             );
@@ -1351,7 +1582,7 @@ pub fn register_trade_copier(
             record_outcome(
                 &feedback,
                 service.register_trade_copier(config),
-                "Practice trade copier updated",
+                tr!(trading::TRADE_COPIER_UPDATED),
             );
         })
         .detach();
@@ -1493,7 +1724,10 @@ pub fn flatten_simulated_account(
     cx: &mut gpui::App,
 ) {
     let Some(scope) = account_flatten_scope(account_key) else {
-        feedback.record_for_pane(pane, Err("Flatten requires a selected account".to_string()));
+        feedback.record_for_pane(
+            pane,
+            Err(tr!(trading::FLATTEN_REQUIRES_ACCOUNT).to_string()),
+        );
         return;
     };
     let service = service.clone();
@@ -1505,7 +1739,7 @@ pub fn flatten_simulated_account(
         .spawn(async move {
             feedback.finish_request(
                 request_id,
-                flatten_feedback("Flattened", service.flatten(scope)),
+                flatten_feedback(tr!(trading::ACTION_FLATTENED), service.flatten(scope)),
             );
         })
         .detach();
@@ -1525,7 +1759,7 @@ pub fn flatten_simulated_account_for(
     let Some((account_id, instrument)) = prepare_flatten_for(instrument_id, account_key) else {
         feedback.record_for_pane(
             pane,
-            Err("Flatten requires a selected account and instrument".to_string()),
+            Err(tr!(trading::FLATTEN_REQUIRES_ACCOUNT_AND_INSTRUMENT).to_string()),
         );
         return;
     };
@@ -1537,7 +1771,7 @@ pub fn flatten_simulated_account_for(
             feedback.finish_request(
                 request_id,
                 flatten_feedback(
-                    "Flattened",
+                    tr!(trading::ACTION_FLATTENED),
                     service.flatten(aeris_trading_runtime::FlattenScope {
                         account: Some(account_id),
                         instrument: Some(instrument),
@@ -1574,9 +1808,11 @@ pub fn prepare_flatten_for(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAXIMUM_IN_FLIGHT_TRADING_REQUESTS, MAXIMUM_ORDER_QUANTITY, OrderEntryRefusal,
-        OrderQuantity, TradingFeedback, account_flatten_scope, parse_usd_equity,
-        prepare_simulated_order,
+        BracketSide, InstrumentId, MAXIMUM_IN_FLIGHT_TRADING_REQUESTS, MAXIMUM_ORDER_QUANTITY,
+        OperationFailure, OrderEntryRefusal, OrderEventNote, OrderQuantity, ReverseCancelCause,
+        RiskWarning, TradingFeedback, UnaccountedCause, VenueNoticeKind, VenueOperation,
+        account_flatten_scope, order_event_detail_text, parse_usd_equity, prepare_simulated_order,
+        venue_notice_text,
     };
 
     #[test]
@@ -1595,7 +1831,7 @@ mod tests {
         assert!(feedback.take_request_results().is_empty());
         let overflow = feedback.latest().expect("one overflow notice");
         assert!(overflow.is_error);
-        assert_eq!(overflow.message, super::REQUEST_CAPACITY_NOTICE);
+        assert_eq!(overflow.message, super::request_capacity_notice());
         assert_eq!(feedback.take_unscoped_notice(), Some(overflow));
         assert!(
             feedback.take_unscoped_notice().is_none(),
@@ -1672,24 +1908,212 @@ mod tests {
     #[test]
     fn venue_notices_show_once_on_the_feedback_line() {
         let feedback = TradingFeedback::default();
-        let notice = |sequence: u64, detail: &str| aeris_trading_runtime::VenueNotice {
+        let instrument = InstrumentId::try_new("ESZ6").expect("instrument");
+        let notice = |sequence: u64, kind: VenueNoticeKind| aeris_trading_runtime::VenueNotice {
             sequence,
             account_id: aeris_trading::TradingAccountId::try_new("broker-demo-1").expect("id"),
             observed_unix_nanos: 1,
-            detail: detail.to_string(),
+            kind,
         };
-        feedback.record_venue_notices(&[notice(1, "exit refused"), notice(2, "cancel unanswered")]);
+        let refused = notice(
+            1,
+            VenueNoticeKind::OperationFailed {
+                operation: VenueOperation::ExitPosition {
+                    instrument_id: instrument.clone(),
+                },
+                failure: OperationFailure::Refused,
+                reason: "margin exceeded".into(),
+            },
+        );
+        let unanswered = notice(
+            2,
+            VenueNoticeKind::OperationFailed {
+                operation: VenueOperation::CancelAll,
+                failure: OperationFailure::Unanswered,
+                reason: "no answer within 30 seconds".into(),
+            },
+        );
+        let dropped = notice(
+            3,
+            VenueNoticeKind::ReverseCancelled {
+                instrument_id: instrument,
+                cause: ReverseCancelCause::NotFlatInTime,
+            },
+        );
+        feedback.record_venue_notices(&[refused.clone(), unanswered.clone()]);
         let shown = feedback.latest().expect("notice shown");
         assert!(shown.is_error);
-        assert_eq!(shown.message, "exit refused · cancel unanswered");
-        feedback.record_venue_notices(&[notice(1, "exit refused"), notice(2, "cancel unanswered")]);
+        assert_eq!(
+            shown.message,
+            "The broker refused the ESZ6 position exit: margin exceeded · The broker did not \
+             answer the request to cancel every order: no answer within 30 seconds; the account \
+             is being reconciled"
+        );
+        feedback.record_venue_notices(&[refused, unanswered.clone()]);
         assert_eq!(
             feedback.latest().expect("unchanged").revision,
             shown.revision
         );
-        feedback
-            .record_venue_notices(&[notice(2, "cancel unanswered"), notice(3, "reverse dropped")]);
-        assert_eq!(feedback.latest().expect("newer").message, "reverse dropped");
+        feedback.record_venue_notices(&[unanswered, dropped]);
+        assert_eq!(
+            feedback.latest().expect("newer").message,
+            "The ESZ6 reverse was cancelled: the position did not close within 30 seconds, so \
+             no opening order was placed"
+        );
+    }
+
+    #[test]
+    fn english_venue_notices_match_the_owner_notice_text() {
+        let instrument = InstrumentId::try_new("ESZ6").expect("instrument");
+        let other = InstrumentId::try_new("NQZ6").expect("instrument");
+        let mut kinds = vec![
+            VenueNoticeKind::PositionUnaccounted {
+                instrument_id: instrument.clone(),
+                cause: UnaccountedCause::InstrumentNotRegistered,
+            },
+            VenueNoticeKind::PositionUnaccounted {
+                instrument_id: instrument.clone(),
+                cause: UnaccountedCause::FillNotApplied("fill scale mismatch".into()),
+            },
+            VenueNoticeKind::PositionsAccounted {
+                instruments: vec![instrument.clone(), other.clone()],
+                orders_available: true,
+            },
+            VenueNoticeKind::PositionsAccounted {
+                instruments: vec![other],
+                orders_available: false,
+            },
+            VenueNoticeKind::ReconcileNotSent {
+                after_registration: true,
+                error: "queue full".into(),
+            },
+            VenueNoticeKind::ReconcileNotSent {
+                after_registration: false,
+                error: "queue full".into(),
+            },
+            VenueNoticeKind::ReverseCancelled {
+                instrument_id: instrument.clone(),
+                cause: ReverseCancelCause::ExitIncomplete,
+            },
+            VenueNoticeKind::ReverseCancelled {
+                instrument_id: instrument.clone(),
+                cause: ReverseCancelCause::NotFlatInTime,
+            },
+            VenueNoticeKind::ReverseOpeningNotPlaced {
+                instrument_id: instrument.clone(),
+                error: "venue unavailable".into(),
+            },
+        ];
+        let operations = [
+            VenueOperation::OrderCommand {
+                client_order_id: aeris_trading::ClientOrderId::try_new("client-1")
+                    .expect("client order id"),
+            },
+            VenueOperation::CancelAll,
+            VenueOperation::ExitPosition {
+                instrument_id: instrument,
+            },
+            VenueOperation::MoveBracketLevel {
+                entry_broker_order_id: "broker-1".into(),
+                side: BracketSide::Target,
+                current_ticks: 8,
+                new_ticks: 12,
+            },
+            VenueOperation::MoveBracketLevel {
+                entry_broker_order_id: "broker-1".into(),
+                side: BracketSide::Stop,
+                current_ticks: 4,
+                new_ticks: 6,
+            },
+            VenueOperation::Reconcile,
+        ];
+        for operation in operations {
+            for failure in [OperationFailure::Refused, OperationFailure::Unanswered] {
+                kinds.push(VenueNoticeKind::OperationFailed {
+                    operation: operation.clone(),
+                    failure,
+                    reason: "broker reason".into(),
+                });
+            }
+        }
+        for kind in kinds {
+            assert_eq!(venue_notice_text(&kind), kind.to_string());
+        }
+    }
+
+    #[test]
+    fn english_order_event_notes_match_the_owner_detail_text() {
+        let warnings = vec![
+            RiskWarning::ApproachingDailyLossLimit,
+            RiskWarning::NoAttachedStop,
+            RiskWarning::ConsistencyLimitExceeded {
+                current_percent: 42,
+                limit_percent: 30,
+            },
+            RiskWarning::FastStopReentry,
+            RiskWarning::UnverifiedPriceGrid,
+        ];
+        let event = |venue_id: &str, detail: Option<&str>, note: Option<OrderEventNote>| {
+            aeris_trading::OrderEvent {
+                id: aeris_trading::OrderEventId::try_new("event-1").expect("event id"),
+                order_id: aeris_trading::OrderId::try_new("order-1").expect("order id"),
+                sequence: 1,
+                kind: aeris_trading::OrderEventKind::Accepted,
+                reason: None,
+                event_unix_nanos: 1,
+                detail: detail.map(str::to_string),
+                note,
+                provenance: aeris_trading::TradingProvenance {
+                    venue_id: venue_id.to_string(),
+                    provider_id: venue_id.to_string(),
+                    session_generation: 1,
+                    source_sequence: 1,
+                    observed_unix_nanos: 1,
+                },
+            }
+        };
+        let joined = |separator: &str| {
+            warnings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(separator)
+        };
+        let broker = aeris_trading::venue::BROKER_VENUE_ID;
+        let note = Some(OrderEventNote::RiskWarnings(warnings.clone()));
+        assert_eq!(
+            order_event_detail_text(&event("aeris-sim", None, note.clone())),
+            Some(joined(" · "))
+        );
+        assert_eq!(
+            order_event_detail_text(&event(broker, None, note)),
+            Some(format!("submitted to the broker · {}", joined("; ")))
+        );
+        for (note, text) in [
+            (OrderEventNote::DaySessionEnded, "DAY session ended"),
+            (
+                OrderEventNote::VenueGaveNoReason,
+                "The broker gave no reason",
+            ),
+            (
+                OrderEventNote::NoLongerOpenAtVenue,
+                "no longer open at the broker",
+            ),
+            (
+                OrderEventNote::NotReceivedByVenue,
+                "the broker did not receive the order",
+            ),
+        ] {
+            assert_eq!(
+                order_event_detail_text(&event(broker, Some("cancelled"), Some(note))),
+                Some(text.to_string())
+            );
+        }
+        assert_eq!(
+            order_event_detail_text(&event(broker, Some("margin exceeded"), None)),
+            Some("margin exceeded".to_string()),
+            "a broker's own reason and a legacy event keep their stored detail"
+        );
     }
 
     #[test]
@@ -1941,7 +2365,7 @@ mod tests {
                 })
             ),
             Ok(format!(
-                "Flattened · 2 {} exit request(s) sent",
+                "Flattened · 2 {} exit requests sent",
                 super::broker_venue_display_name()
             ))
         );
@@ -1972,7 +2396,7 @@ mod tests {
                     ..EmergencyOutcome::default()
                 })
             ),
-            Ok("Kill switch: locked 1 account(s)".to_string())
+            Ok("Kill switch: locked 1 account".to_string())
         );
         let unpriced = EmergencyOutcome {
             accounts_locked: 1,
@@ -1990,7 +2414,7 @@ mod tests {
         assert_eq!(
             super::kill_feedback("Global kill switch", Ok(unpriced)),
             Ok(
-                "Global kill switch: locked 1 account(s) · 1 position(s) lack a verified quote and keep their protection"
+                "Global kill switch: locked 1 account · 1 position lacks a verified quote and keeps its protection"
                     .to_string()
             )
         );
@@ -2004,7 +2428,7 @@ mod tests {
                 })
             ),
             Err(
-                "Kill switch: locked 1 account(s) · accounts are locked; 1 broker order(s) could not be cancelled"
+                "Kill switch: locked 1 account · accounts are locked; 1 broker order(s) could not be cancelled"
                     .to_string()
             )
         );
@@ -2086,7 +2510,7 @@ mod tests {
         let results = feedback.take_request_results();
         assert_eq!(results.len(), 1);
         assert!(pane.owns(results[0].1.as_ref().expect("pane")));
-        assert_eq!(results[0].2.message, super::STALE_ORDER_NOTICE);
+        assert_eq!(results[0].2.message, super::stale_order_notice());
         assert_eq!(results[0].2.stale_order.as_deref(), Some(&current));
         assert!(feedback.take_unscoped_notice().is_none());
     }
@@ -2115,11 +2539,11 @@ mod tests {
         assert_eq!(cancel_all_outcome(&[]), "No working orders to cancel");
         assert_eq!(
             cancel_all_outcome(std::slice::from_ref(&broker)),
-            "Cancel sent to the broker for 1 order(s)"
+            "Cancel sent to the broker for 1 order"
         );
         assert_eq!(
             cancel_all_outcome(&[practice, broker]),
-            "Cancelled 1 practice order(s) · cancel sent to the broker for 1 order(s)"
+            "Cancelled 1 practice order · cancel sent to the broker for 1 order"
         );
     }
 

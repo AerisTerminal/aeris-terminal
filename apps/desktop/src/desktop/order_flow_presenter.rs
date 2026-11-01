@@ -4,6 +4,7 @@
 
 use super::time_sales_panel::TimeSalesRowsCache;
 use super::{ChartAggressorSide, OrderBookDetail, OrderFlowTapeChange, OrderFlowTrade};
+use aeris_localization::{panels, tr};
 use aeris_market_runtime::{
     MAXIMUM_RECENT_LADDER_TRADES, MarketTradeSweep, MarketTradeTapeOperation,
     MarketTradeTapeUpdate, RetainedMarketTrade,
@@ -20,11 +21,11 @@ pub(super) enum TimeSalesSideFilter {
 }
 
 impl TimeSalesSideFilter {
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
-            Self::All => "All sides",
-            Self::Buy => "Buys",
-            Self::Sell => "Sells",
+            Self::All => tr!(panels::TIME_SALES_SIDE_ALL),
+            Self::Buy => tr!(panels::TIME_SALES_SIDE_BUYS),
+            Self::Sell => tr!(panels::TIME_SALES_SIDE_SELLS),
         }
     }
 

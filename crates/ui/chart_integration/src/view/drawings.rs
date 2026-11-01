@@ -10,6 +10,7 @@ use aeris_charts_engine::{
     DrawingPropertySchema, ProfileDrawingOptions, ProfileSource, drawing_property_schema,
 };
 use aeris_charts_render::color::Color;
+use aeris_localization::{chart_ui, tr};
 use num_traits::ToPrimitive;
 
 /// One drawing as its toolbar and settings dialog edit it: the Aeris Charts property schema of
@@ -29,7 +30,7 @@ impl ChartDrawingSettings {
         let painted_colors = serde_json::from_str(&engine.drawing_painted_colors_json(id)?).ok()?;
         Some(Self {
             id,
-            schema: drawing_property_schema(kind),
+            schema: drawing_property_schema(kind, engine.language()),
             options,
             painted_colors,
         })
@@ -115,9 +116,9 @@ pub enum ChartDrawingAnchorError {
 impl std::fmt::Display for ChartDrawingAnchorError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Price => "Enter a price as a number",
-            Self::Time => "Enter a time as YYYY-MM-DD HH:MM",
-            Self::Rejected => "The chart cannot place the point there",
+            Self::Price => tr!(chart_ui::DRAWING_ANCHOR_PRICE),
+            Self::Time => tr!(chart_ui::DRAWING_ANCHOR_TIME),
+            Self::Rejected => tr!(chart_ui::DRAWING_ANCHOR_REJECTED),
         })
     }
 }

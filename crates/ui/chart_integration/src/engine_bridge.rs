@@ -3,7 +3,8 @@
 use crate::bridge::MergedChartData;
 use crate::view::ChartType;
 use aeris_application::{ProvenancedMarketBar, ReplaySnapshot};
-use aeris_charts_engine::{ChartEngine, PriceScaleTarget, SeriesKind};
+use aeris_charts_engine::{ChartEngine, ChartLanguage, PriceScaleTarget, SeriesKind};
+use aeris_localization::{Language, chart_ui, tr};
 use num_traits::ToPrimitive;
 use std::num::NonZeroUsize;
 
@@ -163,6 +164,30 @@ fn increment_display_precision(increment: i64, scale: u8) -> u8 {
     places
 }
 
+const fn chart_language(language: Language) -> ChartLanguage {
+    match language {
+        Language::English => ChartLanguage::English,
+        Language::Russian => ChartLanguage::Russian,
+    }
+}
+
+/// Brings the engine's built-in text to the process display language. The volume series title
+/// is host-set, so it is re-titled here; the engine re-titles the series it named itself.
+pub(crate) fn sync_chart_language(engine: &mut ChartEngine, volume_series: u32) {
+    let language = chart_language(aeris_localization::language());
+    if engine.language() == language {
+        return;
+    }
+    engine.set_language(language);
+    if let Some(series) = engine
+        .series
+        .iter_mut()
+        .find(|series| series.id == volume_series && !series.removed)
+    {
+        series.title = tr!(chart_ui::INDICATOR_VOLUME).to_string();
+    }
+}
+
 pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
     let id = engine.add_series(SeriesKind::Histogram);
     if let Some(series) = engine
@@ -172,7 +197,7 @@ pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
     {
         series.visible = false;
         series.histogram_updown = true;
-        series.title = "Volume".to_string();
+        series.title = tr!(chart_ui::INDICATOR_VOLUME).to_string();
         series.title_visible = true;
     } else {
         debug_assert!(false, "new Aeris Charts series identity must resolve");

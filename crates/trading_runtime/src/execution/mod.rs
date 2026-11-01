@@ -155,6 +155,7 @@ impl TradingCore {
                 }
                 _ => "cancelled by local command".to_string(),
             }),
+            note: None,
             provenance,
         };
         event.validate().map_err(|error| error.to_string())?;
@@ -428,6 +429,7 @@ impl TradingCore {
                 reason: None,
                 event_unix_nanos: deadline,
                 detail: Some("DAY session ended".to_string()),
+                note: Some(aeris_trading::OrderEventNote::DaySessionEnded),
                 provenance: expired.provenance.clone(),
             };
             event.validate().map_err(|error| error.to_string())?;
@@ -548,6 +550,7 @@ impl TradingCore {
             reason: None,
             event_unix_nanos: command.modified_unix_nanos,
             detail: Some("modified by local command".to_string()),
+            note: None,
             provenance: command.provenance,
         };
         event.validate().map_err(|error| error.to_string())?;
@@ -699,6 +702,7 @@ impl TradingCore {
                 reason: Some(aeris_trading::OrderEventReason::TouchFill),
                 event_unix_nanos: fill.execution_unix_nanos,
                 detail: Some("touch fill".to_string()),
+                note: None,
                 provenance: fill.provenance.clone(),
             };
             let position_key = (order.account_id.clone(), order.instrument_id.clone());
@@ -750,6 +754,7 @@ impl TradingCore {
             reason: None,
             event_unix_nanos: observation.provenance.observed_unix_nanos,
             detail: Some("stop triggered at touch".to_string()),
+            note: None,
             provenance: observation.provenance.clone(),
         };
         event.validate().map_err(|error| error.to_string())?;

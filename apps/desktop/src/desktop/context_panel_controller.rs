@@ -2,6 +2,7 @@
 
 use super::{Entity, InputState, WorkspaceChartState};
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
+use aeris_localization::{panels, tr};
 use num_traits::ToPrimitive;
 use std::sync::Arc;
 
@@ -28,13 +29,13 @@ impl ContextPanelTab {
         Self::Macro,
     ];
 
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Calendar => "Calendar",
-            Self::Energy => "Energy",
-            Self::Commitments => "COT",
-            Self::Agriculture => "Agriculture",
-            Self::Macro => "Macro",
+            Self::Calendar => tr!(panels::CONTEXT_TAB_CALENDAR),
+            Self::Energy => tr!(panels::CONTEXT_TAB_ENERGY),
+            Self::Commitments => tr!(panels::CONTEXT_TAB_COT),
+            Self::Agriculture => tr!(panels::CONTEXT_TAB_AGRICULTURE),
+            Self::Macro => tr!(panels::CONTEXT_TAB_MACRO),
         }
     }
 

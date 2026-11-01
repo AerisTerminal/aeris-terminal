@@ -11,6 +11,7 @@ use super::big_trades_dialog::{
     control_strip, described_setting_row, settings_group, settings_groups,
 };
 use super::*;
+use aeris_localization::{common, tr, trading};
 
 const HEADER_HEIGHT: f32 = 44.0;
 const SIDEBAR_WIDTH: f32 = 184.0;
@@ -28,10 +29,10 @@ pub(super) enum AccountsTab {
 impl AccountsTab {
     const ALL: [Self; 2] = [Self::Connections, Self::TradingAccounts];
 
-    const fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Connections => "Connections",
-            Self::TradingAccounts => "Trading accounts",
+            Self::Connections => tr!(trading::CONNECTIONS_TAB),
+            Self::TradingAccounts => tr!(trading::TRADING_ACCOUNTS_TAB),
         }
     }
 
@@ -217,7 +218,7 @@ fn panel_title_bar(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> impl I
                         .text_sm()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
                         .text_color(gpui_color(colors.text_default))
-                        .child("Accounts and connections"),
+                        .child(tr!(trading::ACCOUNTS_AND_CONNECTIONS)),
                 ),
         )
         .child(chart_context_menus::floating_panel_drag_grip(theme))
@@ -233,7 +234,7 @@ fn panel_sidebar(
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let tabs = TabList::sidebar("accounts_panel_tabs", "Accounts sections")
+    let tabs = TabList::sidebar("accounts_panel_tabs", tr!(trading::ACCOUNTS_SECTIONS))
         .flex_1()
         .min_h_0()
         .children(AccountsTab::ALL.into_iter().map(|tab| {
@@ -287,7 +288,7 @@ fn panel_sidebar(
                     div()
                         .text_xs()
                         .text_color(gpui_color(colors.text_muted))
-                        .child("Trading on"),
+                        .child(tr!(trading::TRADING_ON)),
                 )
                 .child(
                     div()
@@ -299,7 +300,7 @@ fn panel_sidebar(
                             colors.text_muted
                         }))
                         .child(active.map_or_else(
-                            || "No account chosen".to_string(),
+                            || tr!(trading::NO_ACCOUNT_CHOSEN).to_string(),
                             |account| account.display_name.clone(),
                         )),
                 ),
@@ -320,10 +321,10 @@ fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> V
                     descriptor.display_name,
                     [described_setting_row(
                         descriptor.display_name,
-                        [SharedString::from("Public market data")],
+                        [SharedString::from(tr!(trading::PUBLIC_MARKET_DATA))],
                         control_strip(feed_level_pill(provider, theme).into_iter().chain(
                             std::iter::once(pill(
-                                "No login needed",
+                                tr!(trading::NO_LOGIN_NEEDED),
                                 theme.colors.surface_secondary,
                                 theme.colors.text_secondary,
                                 Some(theme.colors.border_subtle),
@@ -380,14 +381,14 @@ fn credential_group(
         if connected {
             Button::new(("accounts_provider_disconnect", index), theme)
                 .variant(ButtonVariant::Secondary)
-                .label("Disconnect")
+                .label(tr!(trading::DISCONNECT))
                 .on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(DisconnectProvider(provider)), cx);
                 })
         } else {
             Button::new(("accounts_provider_connect", index), theme)
                 .variant(ButtonVariant::Default)
-                .label("Connect")
+                .label(tr!(trading::CONNECT))
                 .on_click(move |_, window, cx| {
                     window.dispatch_action(Box::new(ConnectProvider(provider)), cx);
                 })
@@ -398,7 +399,7 @@ fn credential_group(
     });
     let status = if connected {
         pill(
-            "Connected",
+            tr!(trading::CONNECTED),
             colors.positive_subtle,
             colors.text_positive,
             None,
@@ -406,7 +407,7 @@ fn credential_group(
         )
     } else {
         pill(
-            "Not connected",
+            tr!(trading::NOT_CONNECTED),
             colors.surface_secondary,
             colors.text_secondary,
             Some(colors.border_subtle),
@@ -514,17 +515,21 @@ pub(super) fn environment_badge(
     let colors = theme.colors;
     match environment {
         aeris_trading::AccountEnvironment::Simulated => pill(
-            "Simulated",
+            tr!(trading::ENV_SIMULATED),
             colors.surface_secondary,
             colors.text_secondary,
             Some(colors.border_subtle),
             theme,
         ),
-        aeris_trading::AccountEnvironment::Demo => {
-            pill("Demo", colors.indigo_subtle, colors.indigo, None, theme)
-        }
+        aeris_trading::AccountEnvironment::Demo => pill(
+            tr!(trading::ENV_DEMO),
+            colors.indigo_subtle,
+            colors.indigo,
+            None,
+            theme,
+        ),
         aeris_trading::AccountEnvironment::Live => pill(
-            "Live · data only",
+            tr!(trading::ENV_LIVE_DATA_ONLY),
             colors.warning_subtle,
             colors.text_warning,
             None,
@@ -554,7 +559,7 @@ fn practice_accounts(
                 .py_2()
                 .text_sm()
                 .text_color(gpui_color(theme.colors.text_secondary))
-                .child("No practice accounts yet.")
+                .child(tr!(trading::NO_PRACTICE_ACCOUNTS))
                 .into_any_element(),
         );
     }
@@ -564,11 +569,11 @@ fn practice_accounts(
             continue;
         }
         let detail = account.starting_equity.map_or_else(
-            || "Simulated funds".to_string(),
+            || tr!(trading::SIMULATED_FUNDS).to_string(),
             |equity| {
-                format!(
-                    "Started with {}",
-                    super::order_ticket::format_money(&account.currency, equity)
+                tr!(
+                    trading::STARTED_WITH,
+                    equity = super::order_ticket::format_money(&account.currency, equity)
                 )
             },
         );
@@ -589,14 +594,14 @@ fn practice_accounts(
     } else {
         let open = app.clone();
         rows.push(described_setting_row(
-            "New practice account",
-            [SharedString::from(
-                "Trade simulated funds on live prices, starting from any balance",
-            )],
+            tr!(trading::NEW_PRACTICE_ACCOUNT),
+            [SharedString::from(tr!(
+                trading::NEW_PRACTICE_ACCOUNT_DESCRIPTION
+            ))],
             Button::new("accounts_new_practice_account", theme)
                 .variant(ButtonVariant::Default)
                 .icon(header_icon(HugeIcon::Add))
-                .label("New account")
+                .label(tr!(trading::NEW_ACCOUNT))
                 .on_click(move |_, window, cx| {
                     open.update(cx, |surface, surface_cx| {
                         open_practice_account_form(surface, window, surface_cx);
@@ -606,7 +611,7 @@ fn practice_accounts(
             theme,
         ));
     }
-    settings_group("Practice accounts", rows, theme)
+    settings_group(tr!(trading::PRACTICE_ACCOUNTS), rows, theme)
 }
 
 /// Broker accounts registered by the trading owner. They are never deleted here, and a
@@ -642,7 +647,7 @@ fn broker_accounts(
             )
         })
         .collect::<Vec<_>>();
-    (!rows.is_empty()).then(|| settings_group("Broker accounts", rows, theme))
+    (!rows.is_empty()).then(|| settings_group(tr!(trading::BROKER_ACCOUNTS), rows, theme))
 }
 
 fn broker_account_visible(account: &aeris_trading::TradingAccount) -> bool {
@@ -652,9 +657,9 @@ fn broker_account_visible(account: &aeris_trading::TradingAccount) -> bool {
 
 fn broker_account_detail(account: &aeris_trading::TradingAccount, connected: bool) -> String {
     match account.environment {
-        aeris_trading::AccountEnvironment::Live => "Live account · trading is disabled".to_string(),
-        _ if connected => format!("Broker demo server · {}", account.currency),
-        _ => "Broker demo server · not connected".to_string(),
+        aeris_trading::AccountEnvironment::Live => tr!(trading::LIVE_ACCOUNT_DETAIL).to_string(),
+        _ if connected => tr!(trading::BROKER_DEMO_CONNECTED, currency = account.currency),
+        _ => tr!(trading::BROKER_DEMO_DISCONNECTED).to_string(),
     }
 }
 
@@ -693,8 +698,15 @@ fn account_row(
             } else {
                 HugeIcon::User
             }))
-            .label(if selected { "Trading" } else { "Use" })
-            .aria_label(format!("Trade on {}", account.display_name))
+            .label(if selected {
+                tr!(trading::TRADING_USE_SELECTED)
+            } else {
+                tr!(trading::TRADING_USE)
+            })
+            .aria_label(tr!(
+                trading::TRADE_ON_ACCOUNT,
+                account = account.display_name
+            ))
             .on_click(move |_, _, cx| {
                 select.update(cx, |surface, surface_cx| {
                     surface.select_trading_account(account_id.clone(), surface_cx);
@@ -727,7 +739,7 @@ fn delete_account_button(
     Button::new(("accounts_practice_delete", index), theme)
         .variant(ButtonVariant::Ghost)
         .icon(header_icon(HugeIcon::Trash))
-        .aria_label(format!("Delete {}", account.display_name))
+        .aria_label(tr!(trading::DELETE_ACCOUNT, account = account.display_name))
         .danger_on_hover()
         .on_click(move |_, _, cx| {
             delete.update(cx, |surface, surface_cx| {
@@ -750,15 +762,15 @@ fn delete_confirmation(
     let confirm = app.clone();
     let account_key = account.id.as_str().to_string();
     described_setting_row(
-        format!("Delete {}?", account.display_name),
-        [SharedString::from(
-            "Permanently removes its positions, working orders, fills, P/L history, risk state \
-             and copier references. This cannot be undone.",
-        )],
+        tr!(
+            trading::DELETE_ACCOUNT_CONFIRM,
+            account = account.display_name
+        ),
+        [SharedString::from(tr!(trading::DELETE_ACCOUNT_WARNING))],
         control_strip([
             Button::new("accounts_delete_cancel", theme)
                 .variant(ButtonVariant::Secondary)
-                .label("Cancel")
+                .label(tr!(common::CANCEL))
                 .on_click(move |_, _, cx| {
                     cancel.update(cx, |surface, surface_cx| {
                         surface.trading_pnl.account_delete_confirmation = None;
@@ -768,7 +780,7 @@ fn delete_confirmation(
                 .into_any_element(),
             Button::new("accounts_delete_confirm", theme)
                 .variant(ButtonVariant::Destructive)
-                .label("Delete")
+                .label(tr!(trading::DELETE_BUTTON))
                 .on_click(move |_, _, cx| {
                     let service = confirm.read(cx).lifecycle.trading().clone();
                     let feedback = confirm.read(cx).lifecycle.trading_feedback().clone();
@@ -798,9 +810,11 @@ fn open_practice_account_form(
         return;
     }
     surface.trading_pnl.account_delete_confirmation = None;
-    let name = cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Account name"));
-    let equity =
-        cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Starting equity"));
+    let name = cx
+        .new(|input_cx| InputState::new(window, input_cx).placeholder(tr!(trading::ACCOUNT_NAME)));
+    let equity = cx.new(|input_cx| {
+        InputState::new(window, input_cx).placeholder(tr!(trading::STARTING_EQUITY_PLACEHOLDER))
+    });
     name.update(cx, |input, input_cx| {
         input.focus(window, input_cx);
     });
@@ -832,16 +846,14 @@ fn practice_account_form(
     let equity = creator.equity.clone();
     [
         described_setting_row(
-            "Account name",
-            [SharedString::from(
-                "Shown in the header and the order ticket",
-            )],
+            tr!(trading::ACCOUNT_NAME),
+            [SharedString::from(tr!(trading::ACCOUNT_NAME_DESCRIPTION))],
             accounts_field(&creator.name, theme),
             theme,
         ),
         described_setting_row(
-            "Starting balance",
-            [SharedString::from("Simulated US dollars")],
+            tr!(trading::STARTING_BALANCE),
+            [SharedString::from(tr!(trading::SIMULATED_US_DOLLARS))],
             accounts_field(&creator.equity, theme),
             theme,
         ),
@@ -854,7 +866,7 @@ fn practice_account_form(
             .child(
                 Button::new("accounts_create_cancel", theme)
                     .variant(ButtonVariant::Secondary)
-                    .label("Cancel")
+                    .label(tr!(common::CANCEL))
                     .on_click(move |_, _, cx| {
                         cancel.update(cx, |surface, surface_cx| {
                             surface.trading_pnl.account_creator = None;
@@ -865,7 +877,7 @@ fn practice_account_form(
             .child(
                 Button::new("accounts_create_confirm", theme)
                     .variant(ButtonVariant::Primary)
-                    .label("Create account")
+                    .label(tr!(trading::CREATE_ACCOUNT))
                     .on_click(move |_, _, cx| {
                         let name = name.read(cx).value().to_string();
                         let equity = equity.read(cx).value().to_string();

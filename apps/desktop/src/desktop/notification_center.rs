@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use aeris_localization::{panels, shell, tr};
+
 pub(super) const MAXIMUM_NOTICES: usize = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,9 +49,9 @@ pub(super) enum NoticeAction {
 impl NoticeAction {
     pub(super) fn label(&self) -> &'static str {
         match self {
-            Self::OpenFolder(_) => "Open folder",
-            Self::RestartToUpdate => "Restart to update",
-            Self::OpenDownloadPage => "Download",
+            Self::OpenFolder(_) => tr!(panels::NOTICE_OPEN_FOLDER),
+            Self::RestartToUpdate => tr!(shell::ACTION_RESTART_TO_UPDATE),
+            Self::OpenDownloadPage => tr!(shell::UPDATE_DOWNLOAD),
         }
     }
 }

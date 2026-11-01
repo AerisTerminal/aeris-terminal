@@ -10,6 +10,7 @@ use aeris_instruments::InstrumentId;
 use aeris_trading::TradingAccountId;
 use aeris_trading::venue::{OperationFailure, VenueOperation};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 
 /// The newest venue notices the owner keeps for its clients.
 pub const VENUE_NOTICE_LIMIT: usize = 32;
@@ -18,6 +19,162 @@ pub(crate) const REVERSE_FLAT_DEADLINE_NANOS: i64 = 30_000_000_000;
 
 const RECONCILING: &str =
     "the broker account is being reconciled with the broker; try again shortly";
+
+/// What a venue notice reports, so a client can word it in its own language. Instrument
+/// identities, the broker's reasons and the owner's own error texts are carried verbatim;
+/// `Display` is the English notice the diagnostics log records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VenueNoticeKind {
+    /// A deal or position the owner could not account; new orders are blocked until a
+    /// reconcile accounts it.
+    PositionUnaccounted {
+        instrument_id: InstrumentId,
+        cause: UnaccountedCause,
+    },
+    /// A reconcile accounted these formerly unresolved positions.
+    PositionsAccounted {
+        instruments: Vec<InstrumentId>,
+        /// No unresolved contract remains, so new orders are admitted again.
+        orders_available: bool,
+    },
+    /// The reconcile request could not be sent.
+    ReconcileNotSent {
+        /// The reconcile followed a newly registered contract rather than an unanswered
+        /// operation.
+        after_registration: bool,
+        error: String,
+    },
+    /// A venue operation the broker refused or did not answer.
+    OperationFailed {
+        operation: VenueOperation,
+        failure: OperationFailure,
+        reason: String,
+    },
+    /// A reverse ended without placing its opening order.
+    ReverseCancelled {
+        instrument_id: InstrumentId,
+        cause: ReverseCancelCause,
+    },
+    /// A reverse's position closed, but its opening order could not be placed.
+    ReverseOpeningNotPlaced {
+        instrument_id: InstrumentId,
+        error: String,
+    },
+}
+
+/// Why the owner could not account a broker contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UnaccountedCause {
+    InstrumentNotRegistered,
+    /// Applying the broker's fill failed with this owner error.
+    FillNotApplied(String),
+}
+
+/// Why a waiting reverse was dropped before its opening order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReverseCancelCause {
+    ExitIncomplete,
+    NotFlatInTime,
+}
+
+impl ReverseCancelCause {
+    fn as_detail(self) -> &'static str {
+        match self {
+            Self::ExitIncomplete => "its exit did not complete, so no opening order was placed",
+            Self::NotFlatInTime => {
+                "the position did not close within 30 seconds, so no opening order was placed"
+            }
+        }
+    }
+}
+
+impl fmt::Display for VenueNoticeKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PositionUnaccounted {
+                instrument_id,
+                cause,
+            } => {
+                let cause = match cause {
+                    UnaccountedCause::InstrumentNotRegistered => "its instrument is not registered",
+                    UnaccountedCause::FillNotApplied(error) => error,
+                };
+                write!(
+                    formatter,
+                    "The broker's {} position cannot be accounted ({cause}); new orders on \
+                     this account are blocked until it is reconciled",
+                    instrument_id.as_str()
+                )
+            }
+            Self::PositionsAccounted {
+                instruments,
+                orders_available,
+            } => write!(
+                formatter,
+                "The broker's {} position is accounted{}",
+                instrument_list(instruments.iter()),
+                if *orders_available {
+                    "; new orders are available again"
+                } else {
+                    ""
+                }
+            ),
+            Self::ReconcileNotSent {
+                after_registration: true,
+                error,
+            } => write!(
+                formatter,
+                "The account could not be reconciled after a contract registered: {error}"
+            ),
+            Self::ReconcileNotSent {
+                after_registration: false,
+                error,
+            } => write!(formatter, "The account could not be reconciled: {error}"),
+            Self::OperationFailed {
+                operation,
+                failure,
+                reason,
+            } => {
+                let subject = operation_subject(operation);
+                match failure {
+                    OperationFailure::Refused => {
+                        write!(formatter, "The broker refused {subject}: {reason}")
+                    }
+                    OperationFailure::Unanswered if *operation == VenueOperation::Reconcile => {
+                        write!(
+                            formatter,
+                            "The broker did not answer {subject}: {reason}; new orders stay \
+                             blocked until the venue reconnects"
+                        )
+                    }
+                    OperationFailure::Unanswered => write!(
+                        formatter,
+                        "The broker did not answer {subject}: {reason}; the account is being \
+                         reconciled"
+                    ),
+                }
+            }
+            Self::ReverseCancelled {
+                instrument_id,
+                cause,
+            } => write!(
+                formatter,
+                "The {} reverse was cancelled: {}",
+                instrument_id.as_str(),
+                cause.as_detail()
+            ),
+            Self::ReverseOpeningNotPlaced {
+                instrument_id,
+                error,
+            } => write!(
+                formatter,
+                "The {} position closed, but the reverse's opening order was not placed: \
+                 {error}",
+                instrument_id.as_str()
+            ),
+        }
+    }
+}
 
 /// Owner memory of the broker venue's per-generation readiness, waiting reverses and recent
 /// notices. Unresolved contracts are durable store state instead.
@@ -85,8 +242,8 @@ impl TradingCore {
     }
 
     /// Records one venue outcome the user must see.
-    pub(crate) fn notify_venue(&mut self, account_id: &TradingAccountId, detail: String) {
-        aeris_observability::diagnostic!("broker venue notice: {detail}");
+    pub(crate) fn notify_venue(&mut self, account_id: &TradingAccountId, kind: VenueNoticeKind) {
+        aeris_observability::diagnostic!("broker venue notice: {kind}");
         self.broker_sync.next_notice = self.broker_sync.next_notice.saturating_add(1);
         if self.broker_sync.notices.len() == VENUE_NOTICE_LIMIT {
             self.broker_sync.notices.pop_front();
@@ -95,7 +252,7 @@ impl TradingCore {
             sequence: self.broker_sync.next_notice,
             account_id: account_id.clone(),
             observed_unix_nanos: self.command_now,
-            detail,
+            kind,
         });
         self.mark_revision = self.mark_revision.saturating_add(1);
     }
@@ -107,7 +264,7 @@ impl TradingCore {
         account_id: &TradingAccountId,
         instrument_id: &InstrumentId,
         first_deal_unix_nanos: Option<i64>,
-        cause: &str,
+        cause: UnaccountedCause,
     ) -> Result<(), String> {
         self.store
             .put_unresolved_contract(account_id, instrument_id, first_deal_unix_nanos)?;
@@ -128,11 +285,10 @@ impl TradingCore {
         if !known {
             self.notify_venue(
                 account_id,
-                format!(
-                    "The broker's {} position cannot be accounted ({cause}); new orders on \
-                     this account are blocked until it is reconciled",
-                    instrument_id.as_str()
-                ),
+                VenueNoticeKind::PositionUnaccounted {
+                    instrument_id: instrument_id.clone(),
+                    cause,
+                },
             );
         }
         Ok(())
@@ -151,7 +307,7 @@ impl TradingCore {
                 account_id,
                 instrument_id,
                 None,
-                "its instrument is not registered",
+                UnaccountedCause::InstrumentNotRegistered,
             )?;
         }
         let resolved = self
@@ -191,15 +347,10 @@ impl TradingCore {
         }
         self.notify_venue(
             account_id,
-            format!(
-                "The broker's {} position is accounted{}",
-                instrument_list(resolved.iter()),
-                if remaining == 0 {
-                    "; new orders are available again"
-                } else {
-                    ""
-                }
-            ),
+            VenueNoticeKind::PositionsAccounted {
+                instruments: resolved,
+                orders_available: remaining == 0,
+            },
         );
         Ok(())
     }
@@ -227,9 +378,10 @@ impl TradingCore {
             if let Err(error) = self.send_venue_request(request) {
                 self.notify_venue(
                     &account_id,
-                    format!(
-                        "The account could not be reconciled after a contract registered: {error}"
-                    ),
+                    VenueNoticeKind::ReconcileNotSent {
+                        after_registration: true,
+                        error,
+                    },
                 );
             }
         }
@@ -244,43 +396,21 @@ impl TradingCore {
         failure: OperationFailure,
         reason: &str,
     ) -> Result<(), String> {
-        let subject = match operation {
-            VenueOperation::OrderCommand { client_order_id } => {
-                format!("the request for order {}", client_order_id.as_str())
-            }
-            VenueOperation::CancelAll => "the request to cancel every order".into(),
-            VenueOperation::ExitPosition { instrument_id } => {
-                format!("the {} position exit", instrument_id.as_str())
-            }
-            VenueOperation::MoveBracketLevel {
-                side,
-                current_ticks,
-                new_ticks,
-                ..
-            } => format!(
-                "moving the bracket {} from {current_ticks} to {new_ticks} ticks",
-                side.as_str()
-            ),
-            VenueOperation::Reconcile => "the account reconcile".into(),
-        };
         if let VenueOperation::ExitPosition { instrument_id } = operation {
             self.drop_reverse(
                 account_id,
                 instrument_id,
-                "its exit did not complete, so no opening order was placed",
+                ReverseCancelCause::ExitIncomplete,
             )?;
         }
-        let detail = match failure {
-            OperationFailure::Refused => format!("The broker refused {subject}: {reason}"),
-            OperationFailure::Unanswered if *operation == VenueOperation::Reconcile => format!(
-                "The broker did not answer {subject}: {reason}; new orders stay blocked until \
-                 the venue reconnects"
-            ),
-            OperationFailure::Unanswered => format!(
-                "The broker did not answer {subject}: {reason}; the account is being reconciled"
-            ),
-        };
-        self.notify_venue(account_id, detail);
+        self.notify_venue(
+            account_id,
+            VenueNoticeKind::OperationFailed {
+                operation: operation.clone(),
+                failure,
+                reason: reason.to_string(),
+            },
+        );
         if failure == OperationFailure::Unanswered && *operation != VenueOperation::Reconcile {
             self.broker_sync.reconciled.remove(account_id);
             let request = self
@@ -293,7 +423,10 @@ impl TradingCore {
             {
                 self.notify_venue(
                     account_id,
-                    format!("The account could not be reconciled: {error}"),
+                    VenueNoticeKind::ReconcileNotSent {
+                        after_registration: false,
+                        error,
+                    },
                 );
             }
         }
@@ -353,15 +486,15 @@ impl TradingCore {
         &mut self,
         account_id: &TradingAccountId,
         instrument_id: &InstrumentId,
-        why: &str,
+        cause: ReverseCancelCause,
     ) -> Result<(), String> {
         if self.release_reverse(account_id, instrument_id)? {
             self.notify_venue(
                 account_id,
-                format!(
-                    "The {} reverse was cancelled: {why}",
-                    instrument_id.as_str()
-                ),
+                VenueNoticeKind::ReverseCancelled {
+                    instrument_id: instrument_id.clone(),
+                    cause,
+                },
             );
         }
         Ok(())
@@ -393,11 +526,10 @@ impl TradingCore {
             if let Err(error) = self.place_broker_order(&entry) {
                 self.notify_venue(
                     &key.0,
-                    format!(
-                        "The {} position closed, but the reverse's opening order was not \
-                         placed: {error}",
-                        key.1.as_str()
-                    ),
+                    VenueNoticeKind::ReverseOpeningNotPlaced {
+                        instrument_id: key.1.clone(),
+                        error,
+                    },
                 );
             }
         }
@@ -426,7 +558,7 @@ impl TradingCore {
             self.drop_reverse(
                 &account_id,
                 &instrument_id,
-                "the position did not close within 30 seconds, so no opening order was placed",
+                ReverseCancelCause::NotFlatInTime,
             )?;
         }
         Ok(())
@@ -445,6 +577,28 @@ impl TradingCore {
             });
         }
         Ok(())
+    }
+}
+
+fn operation_subject(operation: &VenueOperation) -> String {
+    match operation {
+        VenueOperation::OrderCommand { client_order_id } => {
+            format!("the request for order {}", client_order_id.as_str())
+        }
+        VenueOperation::CancelAll => "the request to cancel every order".into(),
+        VenueOperation::ExitPosition { instrument_id } => {
+            format!("the {} position exit", instrument_id.as_str())
+        }
+        VenueOperation::MoveBracketLevel {
+            side,
+            current_ticks,
+            new_ticks,
+            ..
+        } => format!(
+            "moving the bracket {} from {current_ticks} to {new_ticks} ticks",
+            side.as_str()
+        ),
+        VenueOperation::Reconcile => "the account reconcile".into(),
     }
 }
 

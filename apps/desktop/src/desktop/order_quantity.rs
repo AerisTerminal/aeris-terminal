@@ -7,6 +7,7 @@ use super::*;
 use aeris_desktop::trading::{
     MAXIMUM_ORDER_QUANTITY, MAXIMUM_ORDER_QUANTITY_DECIMALS, OrderQuantity,
 };
+use aeris_localization::{tr, trading};
 use gpui::{anchored, deferred};
 
 /// The quantities the chart's quantity menu offers under its custom field.
@@ -37,8 +38,9 @@ impl OrderQuantityControls {
             input.set_text_align(gpui::TextAlign::Right, input_cx);
             input.set_value(quantity.to_string(), window, input_cx);
         });
-        let menu_input =
-            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Custom quantity"));
+        let menu_input = cx.new(|input_cx| {
+            InputState::new(window, input_cx).placeholder(tr!(trading::CUSTOM_QUANTITY))
+        });
         Self {
             ticket_input,
             ticket_invalid: false,
@@ -317,7 +319,7 @@ impl Render for ChartTradeBar {
             .gap_1()
             .child(trade_bar_order_button(
                 "chart_trade_buy",
-                "Buy",
+                tr!(trading::BUY_ACTION),
                 aeris_trading::OrderSide::Buy,
                 &order,
                 &theme,
@@ -330,7 +332,7 @@ impl Render for ChartTradeBar {
             ))
             .child(trade_bar_order_button(
                 "chart_trade_sell",
-                "Sell",
+                tr!(trading::SELL_ACTION),
                 aeris_trading::OrderSide::Sell,
                 &order,
                 &theme,
@@ -420,7 +422,7 @@ fn quantity_trigger(
                 .button_size(ButtonSize::Sm)
                 .trigger()
                 .open(open)
-                .aria_label("Order quantity")
+                .aria_label(tr!(trading::ORDER_QUANTITY_ARIA))
                 .label(quantity.to_string())
                 .caret(header_icon(HugeIcon::ChevronDown))
                 .on_click(move |_, window, cx| {
@@ -429,6 +431,15 @@ fn quantity_trigger(
                     });
                 }),
         )
+}
+
+/// The quantity menu's validation message: the exact quantity bound and its decimal limit.
+fn quantity_invalid_message() -> String {
+    tr!(
+        trading::QUANTITY_INVALID,
+        max = super::market_screener::grouped_decimal(&MAXIMUM_ORDER_QUANTITY.to_string()),
+        decimals = MAXIMUM_ORDER_QUANTITY_DECIMALS
+    )
 }
 
 /// The open quantity menu of a pane's chart bar: a custom field above the preset quantities.
@@ -462,7 +473,7 @@ pub(super) fn order_quantity_menu_layer(
             .child(
                 Button::new("chart_trade_quantity_apply", theme)
                     .variant(ButtonVariant::Primary)
-                    .label("Set")
+                    .label(tr!(trading::SET_QUANTITY))
                     .on_click(move |_, window, cx| {
                         submit.update(cx, |surface, surface_cx| {
                             surface.submit_order_quantity_menu(window, surface_cx);
@@ -476,10 +487,7 @@ pub(super) fn order_quantity_menu_layer(
                 .px_1()
                 .text_xs()
                 .text_color(gpui_color(theme.colors.danger))
-                .child(format!(
-                    "Enter a quantity above 0, up to {}, with at most {MAXIMUM_ORDER_QUANTITY_DECIMALS} decimals",
-                    super::market_screener::grouped_decimal(&MAXIMUM_ORDER_QUANTITY.to_string())
-                )),
+                .child(quantity_invalid_message()),
         );
     }
     let panel = MenuPanel::new("chart_trade_quantity_menu", MenuPlacement::InFlow, theme)

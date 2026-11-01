@@ -1,4 +1,5 @@
 use super::*;
+use aeris_localization::{chart_menu, tr};
 
 pub(super) fn chrome_overlay_layer(
     app_state: &WorkspaceSurface,
@@ -738,7 +739,7 @@ pub(super) fn quick_timeframe_overlay_content(
                 .text_center()
                 .text_sm()
                 .font_weight(platform_font_weight(TypographyRole::Strong))
-                .child("Time frame"),
+                .child(tr!(chart_menu::TIME_FRAME)),
         )
         .child(
             div()
@@ -813,28 +814,28 @@ pub(super) fn timeframe_group_intervals(
         .collect()
 }
 
-pub(super) const fn timeframe_menu_row_label(interval: ChartInterval) -> &'static str {
+pub(super) fn timeframe_menu_row_label(interval: ChartInterval) -> &'static str {
     match interval {
-        ChartInterval::Tick100 => "100 Ticks",
-        ChartInterval::Second1 => "1 Second",
-        ChartInterval::Second5 => "5 Seconds",
-        ChartInterval::Second10 => "10 Seconds",
-        ChartInterval::Second15 => "15 Seconds",
-        ChartInterval::Second30 => "30 Seconds",
-        ChartInterval::Minute1 => "1 Minute",
-        ChartInterval::Minute3 => "3 Minutes",
-        ChartInterval::Minute5 => "5 Minutes",
-        ChartInterval::Minute15 => "15 Minutes",
-        ChartInterval::Minute30 => "30 Minutes",
-        ChartInterval::Hour1 => "1 Hour",
-        ChartInterval::Hour2 => "2 Hours",
-        ChartInterval::Hour4 => "4 Hours",
-        ChartInterval::Hour8 => "8 Hours",
-        ChartInterval::Hour12 => "12 Hours",
-        ChartInterval::Day1 => "1 Day",
-        ChartInterval::Day3 => "3 Days",
-        ChartInterval::Week1 => "1 Week",
-        ChartInterval::Month1 => "1 Month",
+        ChartInterval::Tick100 => tr!(chart_menu::INTERVAL_100_TICKS),
+        ChartInterval::Second1 => tr!(chart_menu::INTERVAL_1_SECOND),
+        ChartInterval::Second5 => tr!(chart_menu::INTERVAL_5_SECONDS),
+        ChartInterval::Second10 => tr!(chart_menu::INTERVAL_10_SECONDS),
+        ChartInterval::Second15 => tr!(chart_menu::INTERVAL_15_SECONDS),
+        ChartInterval::Second30 => tr!(chart_menu::INTERVAL_30_SECONDS),
+        ChartInterval::Minute1 => tr!(chart_menu::INTERVAL_1_MINUTE),
+        ChartInterval::Minute3 => tr!(chart_menu::INTERVAL_3_MINUTES),
+        ChartInterval::Minute5 => tr!(chart_menu::INTERVAL_5_MINUTES),
+        ChartInterval::Minute15 => tr!(chart_menu::INTERVAL_15_MINUTES),
+        ChartInterval::Minute30 => tr!(chart_menu::INTERVAL_30_MINUTES),
+        ChartInterval::Hour1 => tr!(chart_menu::INTERVAL_1_HOUR),
+        ChartInterval::Hour2 => tr!(chart_menu::INTERVAL_2_HOURS),
+        ChartInterval::Hour4 => tr!(chart_menu::INTERVAL_4_HOURS),
+        ChartInterval::Hour8 => tr!(chart_menu::INTERVAL_8_HOURS),
+        ChartInterval::Hour12 => tr!(chart_menu::INTERVAL_12_HOURS),
+        ChartInterval::Day1 => tr!(chart_menu::INTERVAL_1_DAY),
+        ChartInterval::Day3 => tr!(chart_menu::INTERVAL_3_DAYS),
+        ChartInterval::Week1 => tr!(chart_menu::INTERVAL_1_WEEK),
+        ChartInterval::Month1 => tr!(chart_menu::INTERVAL_1_MONTH),
     }
 }
 

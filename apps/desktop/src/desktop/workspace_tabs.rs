@@ -2,6 +2,7 @@
 
 use super::market_watch::{DragMove, FlagPress, PickerColor};
 use super::*;
+use aeris_localization::{shell, tr};
 use aeris_observability::diagnostic;
 
 pub(super) fn move_item<T>(items: &mut Vec<T>, source: usize, destination: usize) -> bool {
@@ -94,7 +95,7 @@ fn start_market_summary(
     });
     let message = worker
         .is_none()
-        .then(|| "Market data unavailable".to_string());
+        .then(|| tr!(shell::MARKET_DATA_UNAVAILABLE).to_string());
     MarketSummaryEntry::new(instrument, worker, message, resource_class)
 }
 
@@ -320,22 +321,22 @@ impl TerminalApp {
         let (kind, title, detail, action) = match outcome {
             local_state::RestoreOutcome::NewerVersion { .. } => (
                 "workspace_newer_version",
-                "Workspace opened read-only",
-                "This workspace was saved by a newer Aeris Terminal. Update the app to edit it; changes in this session will not be saved.",
+                tr!(shell::WORKSPACE_READONLY_TITLE),
+                tr!(shell::WORKSPACE_READONLY_DETAIL),
                 folder.map(notification_center::NoticeAction::OpenFolder),
             ),
             local_state::RestoreOutcome::RestoredFromFallback { quarantined } => (
                 "workspace_fallback_restore",
-                "Workspace restored from a backup",
-                "The saved workspace could not be read, so the last working copy was used.",
+                tr!(shell::WORKSPACE_FALLBACK_TITLE),
+                tr!(shell::WORKSPACE_FALLBACK_DETAIL),
                 quarantined
                     .clone()
                     .map(notification_center::NoticeAction::OpenFolder),
             ),
             local_state::RestoreOutcome::Defaulted { .. } => (
                 "workspace_defaulted",
-                "Workspace could not be restored",
-                "The saved workspace could not be read, so a fresh layout is used. The unreadable files were kept in the data folder.",
+                tr!(shell::WORKSPACE_DEFAULTED_TITLE),
+                tr!(shell::WORKSPACE_DEFAULTED_DETAIL),
                 folder.map(notification_center::NoticeAction::OpenFolder),
             ),
             local_state::RestoreOutcome::Fresh
@@ -459,7 +460,7 @@ impl TerminalApp {
                         .or_else(|| {
                             summary
                                 .is_none()
-                                .then(|| "Market data unavailable".to_string())
+                                .then(|| tr!(shell::MARKET_DATA_UNAVAILABLE).to_string())
                         }),
                     active: active.is_some_and(|active| {
                         active.provider == instrument.provider
@@ -1315,10 +1316,8 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let Some(color) = normalize_hex_color(color) else {
-            self.chart_menus.set_color_error(
-                setting,
-                Some("Enter a hex color such as #2962FF or #2962FF80.".to_string()),
-            );
+            self.chart_menus
+                .set_color_error(setting, Some(tr!(shell::HEX_COLOR_HINT).to_string()));
             cx.notify();
             return;
         };
@@ -1730,8 +1729,9 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input =
-            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Template name"));
+        let input = cx.new(|input_cx| {
+            InputState::new(window, input_cx).placeholder(tr!(shell::TEMPLATE_NAME_PLACEHOLDER))
+        });
         input.update(cx, |input, input_cx| input.focus(window, input_cx));
         if self.chart_menus.open_template_save(input) {
             cx.notify();
@@ -1762,7 +1762,7 @@ impl TerminalApp {
             || name.chars().any(char::is_control)
         {
             self.chart_menus
-                .set_template_error("Use a name between 1 and 64 characters.");
+                .set_template_error(tr!(shell::TEMPLATE_NAME_INVALID));
             cx.notify();
             return;
         }
@@ -1771,7 +1771,7 @@ impl TerminalApp {
         };
         if !self.saved.store_chart_settings_template(template) {
             self.chart_menus
-                .set_template_error("You can save up to 32 chart templates.");
+                .set_template_error(tr!(shell::TEMPLATE_LIMIT));
             cx.notify();
             return;
         }
@@ -1947,7 +1947,7 @@ impl TerminalApp {
             diagnostic!("Aeris update check degraded");
             self.post_workspace_notice(
                 "update_check",
-                "Update check unavailable",
+                tr!(shell::UPDATE_CHECK_FAILED),
                 notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
                 cx,
             );
@@ -1965,7 +1965,7 @@ impl TerminalApp {
                 diagnostic!("Aeris update restart degraded");
                 self.post_workspace_notice(
                     "update_restart",
-                    "Update restart unavailable",
+                    tr!(shell::UPDATE_RESTART_UNAVAILABLE),
                     notification_center::NoticeLifetime::UntilDismissed,
                     cx,
                 );
@@ -2017,8 +2017,8 @@ impl TerminalApp {
         };
         self.post_update_notice(
             UPDATE_READY_NOTICE,
-            "Update ready",
-            format!("Aeris Terminal {latest_version} is ready. Restart to finish updating."),
+            tr!(shell::UPDATE_READY),
+            tr!(shell::UPDATE_READY_DETAIL, version = latest_version),
             notification_center::NoticeAction::RestartToUpdate,
             cx,
         );
@@ -2074,7 +2074,7 @@ impl TerminalApp {
                     tone: notification_center::NoticeTone::Warning,
                     source: notification_center::NoticeSource::Workspace,
                     title,
-                    detail: "Please try again later.".into(),
+                    detail: tr!(shell::TRY_AGAIN_LATER).into(),
                     action: None,
                     lifetime,
                 },
@@ -2093,7 +2093,7 @@ impl TerminalApp {
             diagnostic!("Aeris account profile refresh could not resume after update rollback");
             self.post_workspace_notice(
                 "profile_refresh",
-                "Account profile refresh unavailable",
+                tr!(shell::PROFILE_REFRESH_UNAVAILABLE),
                 notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
                 cx,
             );
@@ -2130,7 +2130,7 @@ impl TerminalApp {
             drop(account_refresh);
             self.resume_profile_after_failed_restart(cx);
             self.notices
-                .show_workspace_error("update client is unavailable");
+                .show_workspace_error(tr!(shell::UPDATE_CLIENT_UNAVAILABLE));
             cx.notify();
             return;
         };
@@ -2176,15 +2176,20 @@ impl TerminalApp {
         cx.spawn_in(window, async move |terminal, cx| {
             let durable_generations = durability.await;
             let update = terminal.update_in(cx, |terminal, _, terminal_cx| {
-                let decision = durable_generations.map(|(workspace_generation, account_refresh)| {
-                    update_restart_commit_claim(workspace_generation, account_refresh, |generation| {
-                        // The workspace writer owns chrome too, so its one generation fence
-                        // covers both.
-                        terminal.saved.writer().is_none_or(|persistence| {
-                            persistence.shutdown_generation_is_current(generation)
-                        })
-                    })
-                });
+                let decision =
+                    durable_generations.map(|(workspace_generation, account_refresh)| {
+                        update_restart_commit_claim(
+                            workspace_generation,
+                            account_refresh,
+                            |generation| {
+                                // The workspace writer owns chrome too, so its one generation fence
+                                // covers both.
+                                terminal.saved.writer().is_none_or(|persistence| {
+                                    persistence.shutdown_generation_is_current(generation)
+                                })
+                            },
+                        )
+                    });
                 match decision {
                     Ok(Ok(account_refresh)) => {
                         terminal
@@ -2193,8 +2198,7 @@ impl TerminalApp {
                     Ok(Err(account_refresh)) => {
                         drop(account_refresh);
                         terminal.cancel_update_restart_after_persistence_failure(
-                            "desktop state changed while update restart was preparing; retry the update"
-                                .to_string(),
+                            tr!(shell::UPDATE_RESTART_STATE_CHANGED).to_string(),
                             terminal_cx,
                         );
                     }
@@ -2268,6 +2272,7 @@ impl TerminalApp {
                 update_prompt: self.update_prompt(),
                 window_frame: self.chrome.preferences().window_frame,
                 drawing_toolbar_visible: self.chrome.preferences().drawing_toolbar.shown(),
+                language: self.chrome.preferences().language,
                 attribution: self.held_provider_attribution(cx),
                 now_unix_seconds: self
                     .lifecycle
@@ -2896,16 +2901,15 @@ impl TerminalApp {
     pub(super) fn check_workspace_capacity(&self) -> Result<(), String> {
         let open = self.tabs.len();
         if open >= MAXIMUM_OPEN_WORKSPACES {
-            return Err(format!(
-                "At most {MAXIMUM_OPEN_WORKSPACES} workspaces can be open"
+            return Err(tr!(
+                shell::WORKSPACE_LIMIT,
+                maximum = MAXIMUM_OPEN_WORKSPACES
             ));
         }
         if let Some(maximum) = aeris_desktop::account::plan_policy().open_workspaces
             && open >= maximum
         {
-            return Err(format!(
-                "Your plan supports at most {maximum} open workspaces"
-            ));
+            return Err(tr!(shell::PLAN_WORKSPACE_LIMIT, maximum = maximum));
         }
         Ok(())
     }
@@ -2928,7 +2932,7 @@ impl TerminalApp {
             .services
             .market_factory()
             .cloned()
-            .ok_or_else(|| "This window cannot open another tab".to_string())?;
+            .ok_or_else(|| tr!(shell::WINDOW_CANNOT_OPEN_TAB).to_string())?;
         self.saved.layouts().check_new_layout(name)?;
         let active = self.active_surface();
         let (product, interval) = {
@@ -2936,7 +2940,7 @@ impl TerminalApp {
             let product = active
                 .product
                 .clone()
-                .ok_or_else(|| "The active workspace has no market to copy".to_string())?;
+                .ok_or_else(|| tr!(shell::WORKSPACE_NO_MARKET_TO_COPY).to_string())?;
             (product, active.interval)
         };
         let pane = factory.create_workspace(product, interval)?;
@@ -3028,15 +3032,14 @@ impl TerminalApp {
     ) {
         let Some(factory) = self.services.market_factory().cloned() else {
             self.notices
-                .show_workspace_error("This window cannot open another chart pane");
+                .show_workspace_error(tr!(shell::WINDOW_CANNOT_OPEN_PANE));
             cx.notify();
             return;
         };
         let workspace = self.tabs.active();
         if workspace.panes.len() >= CHART_PANE_CAPACITY {
-            self.notices.show_workspace_error(format!(
-                "At most {CHART_PANE_CAPACITY} chart panes fit in one workspace"
-            ));
+            self.notices
+                .show_workspace_error(tr!(shell::PANE_LIMIT, maximum = CHART_PANE_CAPACITY));
             cx.notify();
             return;
         }
@@ -3044,7 +3047,7 @@ impl TerminalApp {
             let source = workspace.panes[workspace.active_pane].surface.read(cx);
             let Some(product) = source.product.clone() else {
                 self.notices
-                    .show_workspace_error("The active pane has no market to copy");
+                    .show_workspace_error(tr!(shell::PANE_NO_MARKET_TO_COPY));
                 cx.notify();
                 return;
             };
@@ -3226,6 +3229,31 @@ impl TerminalApp {
                 });
             }
         }
+        cx.notify();
+    }
+
+    /// Switches the display language everywhere at once and saves the choice. Text resolves
+    /// through the catalog at render time, so refreshing the window repaints it translated.
+    pub(super) fn set_language_preference(
+        &mut self,
+        preference: aeris_desktop::language::LanguagePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chrome.preferences().language == preference {
+            return;
+        }
+        self.chrome.preferences_mut().language = preference;
+        preference.apply();
+        for workspace in self.tabs.iter() {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.chart_chrome.language = preference;
+                });
+            }
+        }
+        self.save_chart_chrome_preferences(cx);
+        window.refresh();
         cx.notify();
     }
 
@@ -3562,7 +3590,7 @@ impl TerminalApp {
             diagnostic!("Aeris profile refresh degraded");
             self.post_workspace_notice(
                 "profile_refresh",
-                "Account profile refresh unavailable",
+                tr!(shell::PROFILE_REFRESH_UNAVAILABLE),
                 notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
                 cx,
             );
@@ -3680,8 +3708,8 @@ impl TerminalApp {
             if let Some(latest_version) = poll.announce {
                 self.post_update_notice(
                     UPDATE_DOWNLOAD_NOTICE,
-                    "Update available",
-                    format!("Aeris Terminal {latest_version} is available to download."),
+                    tr!(shell::UPDATE_AVAILABLE),
+                    tr!(shell::UPDATE_AVAILABLE_DETAIL, version = latest_version),
                     notification_center::NoticeAction::OpenDownloadPage,
                     cx,
                 );

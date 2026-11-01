@@ -942,6 +942,7 @@ mod tests {
                     y: 96.5,
                 }),
                 fill_glow_off: false,
+                language: "system".to_string(),
             },
             "the fold carries the legacy values verbatim"
         );

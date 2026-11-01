@@ -3,8 +3,9 @@
 
 use super::big_trades_dialog::described_setting_row;
 use super::*;
+use aeris_localization::{common, runtime, tr, trading};
 use aeris_market_runtime::{
-    ConnectMethod, LoginFieldValue, ProviderLoginServer, SavedProviderLogin,
+    ConnectMethod, LoginFieldKind, LoginFieldValue, ProviderLoginServer, SavedProviderLogin,
 };
 use zeroize::Zeroizing;
 
@@ -45,15 +46,15 @@ impl ProviderLoginView {
 
     pub(super) fn detail(&self) -> String {
         match (self.operation, &self.saved) {
-            (Some(LoginOperation::SigningIn), _) => "Signing in…".to_string(),
-            (Some(LoginOperation::Forgetting), _) => "Disconnecting…".to_string(),
+            (Some(LoginOperation::SigningIn), _) => tr!(trading::SIGNING_IN_DETAIL).to_string(),
+            (Some(LoginOperation::Forgetting), _) => tr!(trading::DISCONNECTING_DETAIL).to_string(),
             (Some(LoginOperation::Checking), SavedLogin::Unchecked) => {
-                "Checking saved login…".to_string()
+                tr!(trading::CHECKING_SAVED_LOGIN).to_string()
             }
             (_, SavedLogin::Saved(login)) => {
                 format!("{} · {}", login.system_name, login.server_label)
             }
-            _ => "Credentials required".to_string(),
+            _ => tr!(trading::CREDENTIALS_REQUIRED).to_string(),
         }
     }
 }
@@ -102,6 +103,15 @@ enum Systems {
 enum LoginDropdown {
     Server,
     System,
+}
+
+fn login_field_label(kind: LoginFieldKind) -> &'static str {
+    match kind {
+        LoginFieldKind::Server => tr!(runtime::LOGIN_FIELD_SERVER),
+        LoginFieldKind::System => tr!(runtime::LOGIN_FIELD_SYSTEM),
+        LoginFieldKind::UserId => tr!(runtime::LOGIN_FIELD_USER_ID),
+        LoginFieldKind::Password => tr!(runtime::LOGIN_FIELD_PASSWORD),
+    }
 }
 
 fn retained_system(chosen: Option<String>, systems: &[String]) -> Option<String> {
@@ -183,11 +193,16 @@ impl TerminalApp {
         let inputs = schema
             .fields
             .iter()
-            .filter(|field| field.id != "server" && field.id != "system")
+            .filter(|field| {
+                matches!(
+                    field.kind,
+                    LoginFieldKind::UserId | LoginFieldKind::Password
+                )
+            })
             .map(|field| {
                 let input = cx.new(|input_cx| {
                     InputState::new(window, input_cx)
-                        .placeholder(field.label)
+                        .placeholder(login_field_label(field.kind))
                         .masked(field.secret)
                 });
                 (field.id, input)
@@ -330,7 +345,7 @@ impl TerminalApp {
         }
         form.systems = match result {
             Ok(systems) if systems.is_empty() => {
-                Systems::Failed("This server offers no systems".to_string())
+                Systems::Failed(tr!(trading::SERVER_OFFERS_NO_SYSTEMS).to_string())
             }
             Ok(systems) => {
                 form.system = retained_system(form.system.take(), &systems);
@@ -353,7 +368,7 @@ impl TerminalApp {
             return;
         }
         let Some(system) = form.system.clone() else {
-            form.message = Some("Choose a system".to_string());
+            form.message = Some(tr!(trading::CHOOSE_SYSTEM).to_string());
             cx.notify();
             return;
         };
@@ -368,13 +383,13 @@ impl TerminalApp {
             .fields
             .iter()
             .filter_map(|field| {
-                let value = match field.id {
-                    "server" => form.server.to_string(),
-                    "system" => system.clone(),
-                    id => form
+                let value = match field.kind {
+                    LoginFieldKind::Server => form.server.to_string(),
+                    LoginFieldKind::System => system.clone(),
+                    LoginFieldKind::UserId | LoginFieldKind::Password => form
                         .inputs
                         .iter()
-                        .find(|(field_id, _)| *field_id == id)?
+                        .find(|(field_id, _)| *field_id == field.id)?
                         .1
                         .read(cx)
                         .value()
@@ -384,7 +399,7 @@ impl TerminalApp {
             })
             .collect::<Vec<_>>();
         if fields.len() != schema.fields.len() {
-            form.message = Some("Login form is incomplete".to_string());
+            form.message = Some(tr!(trading::LOGIN_FORM_INCOMPLETE).to_string());
             cx.notify();
             return;
         }
@@ -409,7 +424,7 @@ impl TerminalApp {
         let view = self.provider_login.connections.view_mut(provider);
         if self.provider_login.operations.contains_key(provider.id()) {
             if operation != LoginOperation::Checking {
-                view.message = Some("A login change is already running; wait for it.".to_string());
+                view.message = Some(tr!(trading::LOGIN_CHANGE_RUNNING).to_string());
                 view.failed = true;
                 cx.notify();
             }
@@ -431,7 +446,7 @@ impl TerminalApp {
                     login.submit(provider, |id, fields| market.sign_in_provider(id, fields))?;
                     market.saved_provider_login(provider.id())
                 }
-                (LoginOperation::SigningIn, None) => Err("Enter a login to sign in".to_string()),
+                (LoginOperation::SigningIn, None) => Err(tr!(trading::ENTER_LOGIN).to_string()),
             }
         });
         let task = cx.spawn_in(window, async move |terminal, cx| {
@@ -474,7 +489,7 @@ impl TerminalApp {
                         view.failed = false;
                     }
                     (LoginOperation::Forgetting, _) => {
-                        view.message = Some("Login removed from this computer.".to_string());
+                        view.message = Some(tr!(trading::LOGIN_REMOVED).to_string());
                         view.failed = false;
                     }
                 }
@@ -534,9 +549,10 @@ impl TerminalApp {
 }
 
 fn signed_in_message(login: &SavedProviderLogin) -> String {
-    format!(
-        "Signed in to {} on {}. The login is saved on this computer.",
-        login.system_name, login.server_label
+    tr!(
+        trading::SIGNED_IN_MESSAGE,
+        system = login.system_name,
+        server = login.server_label
     )
 }
 
@@ -573,21 +589,31 @@ pub(super) fn provider_login_form(
         .fields
         .iter()
         .filter_map(|definition| {
-            let control = match definition.id {
-                "server" => field(server_dropdown(terminal, form, theme).into_any_element()),
-                "system" => field(system_dropdown(terminal, form, theme).into_any_element()),
-                id => accounts_panel::accounts_field(
-                    &form.inputs.iter().find(|(field_id, _)| *field_id == id)?.1,
-                    theme,
-                ),
+            let control = match definition.kind {
+                LoginFieldKind::Server => {
+                    field(server_dropdown(terminal, form, theme).into_any_element())
+                }
+                LoginFieldKind::System => {
+                    field(system_dropdown(terminal, form, theme).into_any_element())
+                }
+                LoginFieldKind::UserId | LoginFieldKind::Password => {
+                    accounts_panel::accounts_field(
+                        &form
+                            .inputs
+                            .iter()
+                            .find(|(field_id, _)| *field_id == definition.id)?
+                            .1,
+                        theme,
+                    )
+                }
             };
             let description = if definition.secret {
-                "Kept only in this computer's protected credential storage"
+                tr!(trading::CREDENTIAL_STORAGE_NOTE)
             } else {
                 ""
             };
             Some(described_setting_row(
-                definition.label,
+                login_field_label(definition.kind),
                 [SharedString::from(description)],
                 control,
                 theme,
@@ -612,9 +638,12 @@ pub(super) fn provider_login_form(
                     .pb_2()
                     .text_sm()
                     .text_color(gpui_color(colors.text_secondary))
-                    .child(format!(
-                        "Signing in to {}…",
-                        form.system.as_deref().unwrap_or("provider")
+                    .child(tr!(
+                        trading::SIGNING_IN_TO,
+                        system = form
+                            .system
+                            .as_deref()
+                            .unwrap_or(tr!(trading::PROVIDER_FALLBACK))
                     ))
             }))
             .children(form.message.as_ref().map(|message| {
@@ -655,7 +684,7 @@ fn discovery_failure(
             .child(
                 Button::new("provider_login_retry_discovery", theme)
                     .variant(ButtonVariant::Secondary)
-                    .label("Retry")
+                    .label(tr!(trading::RETRY))
                     .on_click(move |_, _, cx| {
                         retry.update(cx, |terminal, terminal_cx| {
                             terminal.discover_provider_systems(terminal_cx);
@@ -682,7 +711,7 @@ fn form_actions(
         .child(
             Button::new("provider_login_cancel", theme)
                 .variant(ButtonVariant::Secondary)
-                .label("Cancel")
+                .label(tr!(common::CANCEL))
                 .on_click(move |_, _, cx| {
                     cancel.update(cx, TerminalApp::close_provider_login_form);
                 }),
@@ -690,7 +719,11 @@ fn form_actions(
         .child(
             Button::new("provider_login_save", theme)
                 .variant(ButtonVariant::Primary)
-                .label(if signing_in { "Signing in" } else { "Connect" })
+                .label(if signing_in {
+                    tr!(trading::SIGNING_IN_BUTTON)
+                } else {
+                    tr!(trading::CONNECT)
+                })
                 .loading(signing_in)
                 .disabled(signing_in || form.system.is_none())
                 .on_click(move |_, window, cx| {
@@ -784,7 +817,7 @@ fn server_dropdown(
             form.servers
                 .iter()
                 .find(|server| server.id == form.server)
-                .map_or("Choose a server", |server| server.label)
+                .map_or(tr!(trading::CHOOSE_SERVER), |server| server.label)
                 .to_string(),
             open,
             theme,
@@ -823,10 +856,10 @@ fn system_dropdown(
         ))
     });
     let label = match (&form.systems, &form.system) {
-        (Systems::Discovering, _) => "Finding systems on this server…".to_string(),
+        (Systems::Discovering, _) => tr!(trading::FINDING_SYSTEMS).to_string(),
         (_, Some(system)) => system.clone(),
-        (Systems::Listed(_), None) => "Choose a system".to_string(),
-        (Systems::Failed(_), None) => "No systems found".to_string(),
+        (Systems::Listed(_), None) => tr!(trading::CHOOSE_SYSTEM).to_string(),
+        (Systems::Failed(_), None) => tr!(trading::NO_SYSTEMS_FOUND).to_string(),
     };
     let trigger = dropdown_trigger(
         terminal,
@@ -857,6 +890,20 @@ mod tests {
         assert_eq!(
             retained_system(None, &offered[..1]),
             Some("Paper".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_login_field_labels_keep_their_english_wording() {
+        assert_eq!(
+            [
+                LoginFieldKind::Server,
+                LoginFieldKind::System,
+                LoginFieldKind::UserId,
+                LoginFieldKind::Password,
+            ]
+            .map(login_field_label),
+            ["Server", "System", "User ID", "Password"]
         );
     }
 

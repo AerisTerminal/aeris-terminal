@@ -2576,6 +2576,7 @@ mod tests {
             | "aeris_contracts"
             | "aeris_design_system"
             | "aeris_instruments"
+            | "aeris_localization"
             | "aeris_market_data"
             | "aeris_platform_sys"
             | "aeris_provider_history"
@@ -2837,6 +2838,11 @@ mod tests {
             "crates/platform_runtime/src/data_root.rs",
             "fs::rename(",
             "owned legacy data migration moves entries without replacing files",
+        ),
+        (
+            "crates/localization/build.rs",
+            "fs::write(",
+            "Cargo build output is generated inside OUT_DIR",
         ),
         (
             "crates/platform_sys/src/fs.rs",
@@ -5131,6 +5137,30 @@ mod tests {
         .expect("desktop source");
         assert!(violations.is_empty(), "{violations:?}");
     }
+
+    /// The process display language has one owner: `apps/desktop/src/language.rs` resolves
+    /// the user's choice against the operating system and applies it through
+    /// `aeris_localization::set_language`. A second caller would let surfaces disagree about
+    /// which language they render.
+    #[test]
+    fn display_language_is_set_only_by_the_language_owner() {
+        for root in ["apps", "crates"] {
+            for path in production_sources_under(root) {
+                let relative = relative_string(&path);
+                if relative == "apps/desktop/src/language.rs" {
+                    continue;
+                }
+                let source = fs::read_to_string(&path).expect("source");
+                let production = super::production_source_prefix(&source);
+                assert!(
+                    !production.contains("aeris_localization::set_language")
+                        && !production.contains("localization::set_language"),
+                    "{relative} sets the display language outside apps/desktop/src/language.rs"
+                );
+            }
+        }
+    }
+
     #[test]
     fn provider_runtime_registry_remains_the_single_engine_dispatch_boundary() {
         for root in ["apps/desktop/src", "crates/market_engine/src", "crates/ui"] {

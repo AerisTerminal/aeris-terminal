@@ -12,6 +12,7 @@ use aeris_chart_integration::{
     ChartDrawingProperty, ChartDrawingPropertyGroup as Group, ChartDrawingPropertyType as Type,
     ChartDrawingSettings, MAX_DRAWING_LEVELS, normalize_chart_drawing_text,
 };
+use aeris_localization::{Text, common, drawing, tr};
 use chart_context_menus::{clamp_floating_panel_origin, color_swatch_dot};
 use drawing_context_toolbar::{choice_glyph, width_choices, width_glyph, width_label};
 use drawing_toolbar::drawing_kind_label;
@@ -19,23 +20,33 @@ use serde_json::{Value, json};
 
 /// The dialog tabs in display order. `General` properties belong to the toolbar and object
 /// tree, so the dialog never shows them.
-const DIALOG_GROUPS: [(Group, &str); 5] = [
-    (Group::Inputs, "Inputs"),
-    (Group::Style, "Style"),
-    (Group::Text, "Text"),
-    (Group::Coordinates, "Coordinates"),
-    (Group::Visibility, "Visibility"),
+const DIALOG_GROUPS: [(Group, Text); 5] = [
+    (Group::Inputs, drawing::INPUTS),
+    (Group::Style, drawing::STYLE),
+    (Group::Text, drawing::TEXT),
+    (Group::Coordinates, drawing::COORDINATES),
+    (Group::Visibility, drawing::VISIBILITY),
 ];
 
 /// The interval units the Visibility tab offers and the span each unit's range may cover.
-const INTERVAL_UNITS: [(ChartDrawingIntervalUnit, &str, f64, f64); 7] = [
-    (ChartDrawingIntervalUnit::Ticks, "Ticks", 1.0, 1000.0),
-    (ChartDrawingIntervalUnit::Seconds, "Seconds", 1.0, 59.0),
-    (ChartDrawingIntervalUnit::Minutes, "Minutes", 1.0, 59.0),
-    (ChartDrawingIntervalUnit::Hours, "Hours", 1.0, 24.0),
-    (ChartDrawingIntervalUnit::Days, "Days", 1.0, 366.0),
-    (ChartDrawingIntervalUnit::Weeks, "Weeks", 1.0, 52.0),
-    (ChartDrawingIntervalUnit::Months, "Months", 1.0, 12.0),
+const INTERVAL_UNITS: [(ChartDrawingIntervalUnit, Text, f64, f64); 7] = [
+    (ChartDrawingIntervalUnit::Ticks, drawing::TICKS, 1.0, 1000.0),
+    (
+        ChartDrawingIntervalUnit::Seconds,
+        drawing::SECONDS,
+        1.0,
+        59.0,
+    ),
+    (
+        ChartDrawingIntervalUnit::Minutes,
+        drawing::MINUTES,
+        1.0,
+        59.0,
+    ),
+    (ChartDrawingIntervalUnit::Hours, drawing::HOURS, 1.0, 24.0),
+    (ChartDrawingIntervalUnit::Days, drawing::DAYS, 1.0, 366.0),
+    (ChartDrawingIntervalUnit::Weeks, drawing::WEEKS, 1.0, 52.0),
+    (ChartDrawingIntervalUnit::Months, drawing::MONTHS, 1.0, 12.0),
 ];
 
 /// The font sizes the font menu offers, within the property's own bounds.
@@ -45,10 +56,10 @@ const LINE_PARTS: [&str; 3] = ["color", "width", "style"];
 /// The font row that opens the Text tab.
 const FONT_PARTS: [&str; 4] = ["text_color", "text_size", "text_bold", "text_italic"];
 /// Two choices that read as one setting, shown side by side under one label.
-const PAIRED_CHOICES: [(&str, &str, &str); 3] = [
-    ("stroke_start", "stroke_end", "Line ends"),
-    ("text_v_align", "text_h_align", "Text alignment"),
-    ("level_label_align", "level_label_v_align", "Labels"),
+const PAIRED_CHOICES: [(&str, &str, Text); 3] = [
+    ("stroke_start", "stroke_end", drawing::LINE_ENDS),
+    ("text_v_align", "text_h_align", drawing::TEXT_ALIGNMENT),
+    ("level_label_align", "level_label_v_align", drawing::LABELS),
 ];
 /// A checkbox and the color it turns on, shown on one row.
 const TOGGLED_COLORS: [(&str, &str); 1] = [("fill_enabled", "fill_color")];
@@ -62,11 +73,11 @@ const TOGGLED_LINES: [(&str, [&str; 3]); 1] = [(
     ],
 )];
 /// The Extend choices over `extend_left` and `extend_right`.
-const EXTEND_CHOICES: [(&str, bool, bool); 4] = [
-    ("Don't extend", false, false),
-    ("Left", true, false),
-    ("Right", false, true),
-    ("Both", true, true),
+const EXTEND_CHOICES: [(Text, bool, bool); 4] = [
+    (drawing::DONT_EXTEND, false, false),
+    (drawing::LEFT, true, false),
+    (drawing::RIGHT, false, true),
+    (drawing::BOTH, true, true),
 ];
 /// The menu key of the combined Extend choice; every other menu is keyed by its property.
 const EXTEND_MENU: &str = "extend";
@@ -86,7 +97,7 @@ const DIALOG_MAX_HEIGHT: f32 = 640.0;
 pub(super) struct DrawingSettingsDialogState {
     chart: Entity<AerisChartView>,
     drawing: ChartDrawingId,
-    title: &'static str,
+    title: Text,
     tab: Group,
     /// Held by the panel while none of its fields has focus, so keys never reach the chart.
     focus: FocusHandle,
@@ -183,11 +194,7 @@ enum Row<'a> {
     /// The drawing's own text.
     TextBody,
     /// Two choices under one label.
-    Pair(
-        &'static str,
-        &'a ChartDrawingProperty,
-        &'a ChartDrawingProperty,
-    ),
+    Pair(Text, &'a ChartDrawingProperty, &'a ChartDrawingProperty),
     /// A checkbox and the color it turns on.
     ToggledColor(&'a ChartDrawingProperty, &'a ChartDrawingProperty),
     /// A checkbox and the stroke color, width and style it turns on.
@@ -369,7 +376,7 @@ fn text_body_input(
     let input = cx.new(|input_cx| {
         TextareaState::new(window, input_cx)
             .submit_on_enter(true)
-            .placeholder("Add text")
+            .placeholder(tr!(drawing::ADD_TEXT))
     });
     input.update(cx, |input, input_cx| {
         input.set_value(text.to_string(), window, input_cx);
@@ -638,8 +645,8 @@ impl WorkspaceSurface {
         if !began {
             Self::post_indicator_failure(
                 "drawing",
-                "Drawing unavailable",
-                "This drawing cannot be edited right now.",
+                tr!(drawing::DRAWING_UNAVAILABLE),
+                tr!(drawing::DRAWING_UNAVAILABLE_DETAIL),
                 cx,
             );
             cx.notify();
@@ -1166,7 +1173,7 @@ impl WorkspaceSurface {
         {
             picker.error = normalized
                 .is_none()
-                .then(|| "Enter a hex color such as #2962FF or #2962FF80.".to_string());
+                .then(|| tr!(drawing::INVALID_HEX_COLOR).to_string());
         }
         let Some(color) = normalized else {
             cx.notify();
@@ -1405,9 +1412,9 @@ fn number_select(
                 .collect(),
         ),
         NumberMenu::FontSize => (
-            current.map_or_else(|| "Auto".to_string(), number_text),
+            current.map_or_else(|| tr!(drawing::AUTO).to_string(), number_text),
             std::iter::once(SelectOption {
-                label: "Auto".to_string(),
+                label: tr!(drawing::AUTO).to_string(),
                 glyph: None,
                 checked: current.is_none(),
                 patch: single_option(&property.name, Value::Null),
@@ -1446,7 +1453,9 @@ fn color_control(
         .color_picker
         .as_ref()
         .filter(|picker| picker.target == target);
-    let shown = value.clone().unwrap_or_else(|| "Auto".to_string());
+    let shown = value
+        .clone()
+        .unwrap_or_else(|| tr!(drawing::AUTO).to_string());
     let toggle = ui.surface.clone();
     let toggle_target = target.clone();
     let mut control = div().relative().flex_none().flex().child(
@@ -1549,11 +1558,11 @@ fn extend_select(ui: DialogUi<'_>) -> Div {
     let current = EXTEND_CHOICES
         .iter()
         .find(|(_, l, r)| (*l, *r) == (left, right))
-        .map_or("Don't extend", |(label, _, _)| label);
+        .map_or_else(|| tr!(drawing::DONT_EXTEND), |(label, _, _)| label.get());
     let options = EXTEND_CHOICES
         .iter()
         .map(|&(label, l, r)| SelectOption {
-            label: label.to_string(),
+            label: label.get().to_string(),
             glyph: None,
             checked: (l, r) == (left, right),
             patch: json!({ "extend_left": l, "extend_right": r }),
@@ -1564,7 +1573,7 @@ fn extend_select(ui: DialogUi<'_>) -> Div {
         ("drawing_setting_extend", 0),
         EXTEND_MENU,
         SELECT_WIDTH,
-        "Extend",
+        tr!(drawing::EXTEND),
         select_text(current, ui.theme),
         options,
     )
@@ -1614,7 +1623,7 @@ fn row_element(ui: DialogUi<'_>, row: &Row<'_>) -> Option<AnyElement> {
     let theme = ui.theme;
     Some(match row {
         Row::Line(parts) => field_row(
-            "Line",
+            tr!(drawing::LINE),
             controls().children(parts.iter().map(|part| stroke_control(ui, part))),
             theme,
         )
@@ -1629,7 +1638,7 @@ fn row_element(ui: DialogUi<'_>, row: &Row<'_>) -> Option<AnyElement> {
             )
             .children(parts.iter().map(|part| stroke_control(ui, part)))
             .into_any_element(),
-        Row::Extend => field_row("Extend", extend_select(ui), theme).into_any_element(),
+        Row::Extend => field_row(tr!(drawing::EXTEND), extend_select(ui), theme).into_any_element(),
         Row::Font(parts) => controls()
             .min_h(px(FIELD_HEIGHT + 4.0))
             .children(parts.iter().map(|part| {
@@ -1644,7 +1653,7 @@ fn row_element(ui: DialogUi<'_>, row: &Row<'_>) -> Option<AnyElement> {
         Row::TextBody => TextArea::new(ui.dialog.text_body.as_ref()?, px(TEXT_BODY_HEIGHT), theme)
             .into_any_element(),
         Row::Pair(label, first, second) => field_row(
-            *label,
+            tr!(*label),
             controls()
                 .child(enum_select(ui, first, SELECT_WIDTH))
                 .child(enum_select(ui, second, SELECT_WIDTH)),
@@ -1716,7 +1725,7 @@ fn levels_editor(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> AnyElemen
             .child(color_control(
                 ui,
                 ("drawing_level_color", row_id),
-                format!("Level {} color", index + 1).into(),
+                tr!(drawing::LEVEL_COLOR, number = index + 1).into(),
                 DrawingColorTarget::Level {
                     property: name.clone(),
                     index,
@@ -1728,7 +1737,7 @@ fn levels_editor(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> AnyElemen
                     .variant(ButtonVariant::Ghost)
                     .button_size(ButtonSize::Sm)
                     .icon(Icon::new(HugeIcon::Trash.path()))
-                    .aria_label("Remove level")
+                    .aria_label(tr!(drawing::REMOVE_LEVEL))
                     .danger_on_hover()
                     .on_press(move |_, window, cx| {
                         remove.update(cx, |surface, surface_cx| {
@@ -1751,7 +1760,7 @@ fn levels_editor(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> AnyElemen
                     .variant(ButtonVariant::Ghost)
                     .button_size(ButtonSize::Sm)
                     .icon(Icon::new(HugeIcon::Add.path()))
-                    .label("Add level")
+                    .label(tr!(drawing::ADD_LEVEL))
                     .disabled(levels.len() >= MAX_DRAWING_LEVELS)
                     .on_press(move |_, window, cx| {
                         add.update(cx, |surface, surface_cx| {
@@ -1804,7 +1813,7 @@ fn labels_editor(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> AnyElemen
         .flex()
         .flex_col()
         .gap_1()
-        .child(section_title("Info", ui.theme))
+        .child(section_title(tr!(drawing::INFO), ui.theme))
         .child(div().flex().flex_wrap().children(cells))
         .into_any_element()
 }
@@ -1824,7 +1833,7 @@ fn intervals_editor(ui: DialogUi<'_>) -> AnyElement {
                     div().w(px(LABEL_WIDTH)).flex_none().child(
                         CheckboxRow::new(
                             ("drawing_interval_unit", slot),
-                            label,
+                            tr!(label),
                             unit_checked(&visibility, unit),
                             theme,
                         )
@@ -1840,7 +1849,7 @@ fn intervals_editor(ui: DialogUi<'_>) -> AnyElement {
                     div()
                         .text_sm()
                         .text_color(gpui_color(theme.colors.text_muted))
-                        .child("to"),
+                        .child(tr!(drawing::TO)),
                 )
                 .child(input_control(&inputs.max, INTERVAL_FIELD_WIDTH, theme))
         });
@@ -1892,7 +1901,7 @@ fn anchors_editor(ui: DialogUi<'_>) -> impl IntoElement + use<> {
                     .pt_1()
                     .text_xs()
                     .text_color(gpui_color(theme.colors.text_muted))
-                    .child("Times are YYYY-MM-DD HH:MM in the chart's time zone."),
+                    .child(tr!(drawing::TIMES_HINT)),
             )
         })
 }
@@ -1906,17 +1915,21 @@ fn tab_strip(ui: DialogUi<'_>) -> impl IntoElement + use<> {
             let select = ui.surface.clone();
             Tab::new(("drawing_settings_tab", index), ui.theme)
                 .selected(ui.dialog.tab == group)
-                .child(label)
+                .child(tr!(label))
                 .on_click(move |_, _, cx| {
                     select.update(cx, |surface, surface_cx| {
                         surface.select_drawing_settings_tab(group, surface_cx);
                     });
                 })
         });
-    div()
-        .flex()
-        .pb_1()
-        .child(TabList::new("drawing_settings_tabs", "Drawing settings", ui.theme).children(tabs))
+    div().flex().pb_1().child(
+        TabList::new(
+            "drawing_settings_tabs",
+            tr!(drawing::DRAWING_SETTINGS),
+            ui.theme,
+        )
+        .children(tabs),
+    )
 }
 
 pub(super) fn drawing_settings_dialog_layer(
@@ -1951,7 +1964,7 @@ pub(super) fn drawing_settings_dialog_layer(
                 });
             },
         )
-        .title(dialog.title)
+        .title(tr!(dialog.title))
         .movable(dialog.origin, move |step, cx| {
             mover.update(cx, |surface, surface_cx| {
                 surface.move_drawing_settings_dialog(step, surface_cx);
@@ -1967,7 +1980,7 @@ pub(super) fn drawing_settings_dialog_layer(
         .action(
             Button::new("drawing_settings_cancel", theme)
                 .variant(ButtonVariant::Secondary)
-                .label("Cancel")
+                .label(tr!(common::CANCEL))
                 .on_click(move |_, window, cx| {
                     cancel.update(cx, |surface, surface_cx| {
                         surface.cancel_drawing_settings_dialog(window, surface_cx);
@@ -1977,7 +1990,7 @@ pub(super) fn drawing_settings_dialog_layer(
         .action(
             Button::new("drawing_settings_ok", theme)
                 .variant(ButtonVariant::Primary)
-                .label("Ok")
+                .label(tr!(drawing::OK))
                 .on_click(move |_, window, cx| {
                     confirm.update(cx, |surface, surface_cx| {
                         surface.confirm_drawing_settings_dialog(window, surface_cx);

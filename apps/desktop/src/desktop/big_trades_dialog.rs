@@ -1,16 +1,17 @@
 use super::*;
+use aeris_localization::{Text, common, panels, tr};
 
-const FILTER_CHOICES: [(&str, Option<BigTradesIntensity>); 4] = [
-    ("Weak", Some(BigTradesIntensity::Weak)),
-    ("Medium", Some(BigTradesIntensity::Medium)),
-    ("Strong", Some(BigTradesIntensity::Strong)),
-    ("Fixed", None),
+const FILTER_CHOICES: [(Text, Option<BigTradesIntensity>); 4] = [
+    (panels::CHOICE_WEAK, Some(BigTradesIntensity::Weak)),
+    (panels::CHOICE_MEDIUM, Some(BigTradesIntensity::Medium)),
+    (panels::CHOICE_STRONG, Some(BigTradesIntensity::Strong)),
+    (panels::CHOICE_FIXED, None),
 ];
 
-const SIZE_CHOICES: [(&str, BigTradesSize); 3] = [
-    ("Small", BigTradesSize::Small),
-    ("Medium", BigTradesSize::Medium),
-    ("Large", BigTradesSize::Large),
+const SIZE_CHOICES: [(Text, BigTradesSize); 3] = [
+    (panels::CHOICE_SMALL, BigTradesSize::Small),
+    (panels::CHOICE_MEDIUM, BigTradesSize::Medium),
+    (panels::CHOICE_LARGE, BigTradesSize::Large),
 ];
 
 /// A titled group of related settings with no lines between its rows. Stack groups with
@@ -271,14 +272,31 @@ impl<T: Clone + 'static> SettingDropdown<'_, T> {
     }
 }
 
-pub(super) fn dropdown_choices<T: Copy>(
-    choices: &[(&'static str, T)],
+/// A dropdown choice label, whether a catalog key or a plain literal.
+pub(super) trait ChoiceLabel: Copy {
+    fn text(self) -> &'static str;
+}
+
+impl ChoiceLabel for &'static str {
+    fn text(self) -> &'static str {
+        self
+    }
+}
+
+impl ChoiceLabel for Text {
+    fn text(self) -> &'static str {
+        self.get()
+    }
+}
+
+pub(super) fn dropdown_choices<T: Copy, L: ChoiceLabel>(
+    choices: &[(L, T)],
     selected: impl Fn(T) -> bool,
 ) -> Vec<DropdownChoice<T>> {
     choices
         .iter()
         .map(|&(label, value)| DropdownChoice {
-            label: label.into(),
+            label: label.text().into(),
             value,
             selected: selected(value),
         })
@@ -292,24 +310,24 @@ fn filter_row(
 ) -> AnyElement {
     let choices = SettingDropdown {
         menu: "big_trades_filter",
-        label: "Filter",
+        label: tr!(panels::BIG_TRADES_FILTER),
         open_menu: dialog.menu.as_deref(),
         enabled: true,
         choices: dropdown_choices(&FILTER_CHOICES, |intensity| dialog.intensity == intensity),
     }
     .render(app, WorkspaceSurface::set_big_trades_dialog_filter, theme);
     let description = if dialog.intensity.is_some() {
-        "Adapts to recent order sizes. Weak shows the most bubbles, Strong only the largest orders."
+        tr!(panels::BIG_TRADES_FILTER_ADAPTIVE)
     } else {
-        "Every order of at least the minimum volume."
+        tr!(panels::BIG_TRADES_FILTER_FIXED)
     };
-    setting_row("Filter", description, choices, theme)
+    setting_row(tr!(panels::BIG_TRADES_FILTER), description, choices, theme)
 }
 
 fn minimum_volume_row(dialog: &BigTradesDialogState, theme: &AerisTheme) -> AnyElement {
     setting_row(
-        "Minimum volume",
-        "Total volume of one aggressive order, summed across its fills.",
+        tr!(panels::BIG_TRADES_MINIMUM_VOLUME),
+        tr!(panels::BIG_TRADES_MINIMUM_VOLUME_DESCRIPTION),
         setting_input(&dialog.minimum_volume, theme),
         theme,
     )
@@ -322,15 +340,15 @@ fn size_row(
 ) -> AnyElement {
     let choices = SettingDropdown {
         menu: "big_trades_size",
-        label: "Bubble size",
+        label: tr!(panels::BIG_TRADES_BUBBLE_SIZE),
         open_menu: dialog.menu.as_deref(),
         enabled: true,
         choices: dropdown_choices(&SIZE_CHOICES, |size| dialog.size == size),
     }
     .render(app, WorkspaceSurface::set_big_trades_dialog_size, theme);
     setting_row(
-        "Bubble size",
-        "Bubbles grow with order volume within this range.",
+        tr!(panels::BIG_TRADES_BUBBLE_SIZE),
+        tr!(panels::BIG_TRADES_BUBBLE_SIZE_DESCRIPTION),
         choices,
         theme,
     )
@@ -347,11 +365,11 @@ fn show_volume_row(
         .child(
             SwitchRow::new(
                 "big_trades_show_volume",
-                "Show volume",
+                tr!(panels::BIG_TRADES_SHOW_VOLUME),
                 dialog.show_volume,
                 theme,
             )
-            .description("Print the order volume inside bubbles large enough to hold it.")
+            .description(tr!(panels::BIG_TRADES_SHOW_VOLUME_DESCRIPTION))
             .on_change(move |show_volume, _, _, cx| {
                 update.update(cx, |surface, surface_cx| {
                     surface.set_big_trades_dialog_show_volume(show_volume, surface_cx);
@@ -374,13 +392,13 @@ pub(super) fn big_trades_dialog_layer(
     Dialog::new("big_trades_dialog", DialogSize::Md, theme, move |_, cx| {
         dismiss.update(cx, WorkspaceSurface::close_big_trades_dialog);
     })
-    .title("Indicator settings")
-    .subtitle("Big Trades")
+    .title(tr!(panels::INDICATOR_SETTINGS))
+    .subtitle(tr!(panels::BIG_TRADES))
     .max_height(px(640.0))
     .child(settings_groups(
         [
             settings_group(
-                "Filter",
+                tr!(panels::BIG_TRADES_FILTER),
                 std::iter::once(filter_row(app, dialog, theme)).chain(
                     dialog
                         .intensity
@@ -390,7 +408,7 @@ pub(super) fn big_trades_dialog_layer(
                 theme,
             ),
             settings_group(
-                "Bubbles",
+                tr!(panels::BIG_TRADES_GROUP_BUBBLES),
                 [
                     size_row(app, dialog, theme),
                     show_volume_row(app, dialog, theme),
@@ -409,7 +427,7 @@ pub(super) fn big_trades_dialog_layer(
     .footer_leading(
         Button::new("big_trades_reset", theme)
             .variant(ButtonVariant::Destructive)
-            .label("Reset to defaults")
+            .label(tr!(panels::RESET_TO_DEFAULTS))
             .on_click(move |_, window, cx| {
                 reset.update(cx, |surface, surface_cx| {
                     surface.reset_big_trades_dialog(window, surface_cx);
@@ -419,7 +437,7 @@ pub(super) fn big_trades_dialog_layer(
     .action(
         Button::new("big_trades_cancel", theme)
             .variant(ButtonVariant::Secondary)
-            .label("Cancel")
+            .label(tr!(common::CANCEL))
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_big_trades_dialog);
             }),
@@ -427,7 +445,7 @@ pub(super) fn big_trades_dialog_layer(
     .action(
         Button::new("big_trades_apply", theme)
             .variant(ButtonVariant::Primary)
-            .label("Apply")
+            .label(tr!(panels::APPLY))
             .on_click(move |_, _, cx| {
                 apply.update(cx, WorkspaceSurface::apply_big_trades_dialog);
             }),

@@ -13,6 +13,7 @@ use aeris_contracts::{
     WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspacePaneState,
     WorkspaceSavedLayoutState, WorkspaceState, WorkspaceTabState,
 };
+use aeris_localization::{panels, shell, tr};
 use aeris_observability::diagnostic;
 
 use super::chart_drawings::{bounded_instrument_drawings, legacy_pane_drawings};
@@ -21,7 +22,11 @@ pub(super) const MAXIMUM_SAVED_LAYOUTS: usize = 100;
 pub(super) const MAXIMUM_LAYOUT_NAME_CHARS: usize = 64;
 /// Drawing-document bytes the whole library keeps, so it stays inside the workspace file bound.
 pub(super) const MAXIMUM_SAVED_LAYOUT_DRAWING_BYTES: usize = 8 * 1_048_576;
-pub(super) const UNTITLED_LAYOUT_NAME: &str = "Untitled";
+
+/// The name a new layout starts with, in the display language at its creation.
+pub(super) fn untitled_layout_name() -> &'static str {
+    tr!(shell::UNTITLED)
+}
 
 /// The saved layouts, in creation order. Each layout is shared with pending persistence
 /// requests, so a save clones only the layout it changes.
@@ -60,7 +65,7 @@ impl LayoutLibrary {
         self.layouts
             .iter()
             .position(|layout| layout.layout_id == layout_id)
-            .ok_or_else(|| "The layout no longer exists".to_string())
+            .ok_or_else(|| tr!(shell::LAYOUT_NO_LONGER_EXISTS).to_string())
     }
 
     fn changed(&mut self, index: usize) -> &mut WorkspaceSavedLayoutState {
@@ -91,15 +96,15 @@ impl LayoutLibrary {
     fn validated_name(&self, name: &str) -> Result<String, String> {
         let name = trimmed_name(name)?;
         if self.name_taken(name) {
-            return Err(format!("A layout named \"{name}\" already exists"));
+            return Err(tr!(panels::LAYOUT_NAME_TAKEN, name = name));
         }
         Ok(name.to_string())
     }
 
     /// `base` when no layout uses it, otherwise `base` numbered from 2. An invalid base is
-    /// replaced by `UNTITLED_LAYOUT_NAME`.
+    /// replaced by the untitled layout name.
     pub(super) fn unique_name(&self, base: &str) -> String {
-        let base = trimmed_name(base).unwrap_or(UNTITLED_LAYOUT_NAME);
+        let base = trimmed_name(base).unwrap_or_else(|_| untitled_layout_name());
         if !self.name_taken(base) {
             return base.to_string();
         }
@@ -115,7 +120,7 @@ impl LayoutLibrary {
                 return candidate;
             }
         }
-        format!("{UNTITLED_LAYOUT_NAME} {}", self.next_id())
+        format!("{} {}", untitled_layout_name(), self.next_id())
     }
 
     fn next_id(&self) -> u64 {
@@ -140,9 +145,9 @@ impl LayoutLibrary {
             .map(|layout| drawing_bytes(&layout.instrument_drawings))
             .sum::<usize>();
         if others.saturating_add(drawing_bytes(&drawings)) > MAXIMUM_SAVED_LAYOUT_DRAWING_BYTES {
-            return Err(format!(
-                "Saved layouts can keep at most {} MiB of drawings",
-                MAXIMUM_SAVED_LAYOUT_DRAWING_BYTES / 1_048_576
+            return Err(tr!(
+                panels::LAYOUT_DRAWINGS_LIMIT,
+                limit = MAXIMUM_SAVED_LAYOUT_DRAWING_BYTES / 1_048_576
             ));
         }
         Ok(drawings)
@@ -166,7 +171,7 @@ impl LayoutLibrary {
         let instrument_drawings = self.checked_drawings(None, drawings)?;
         let layout_id = self.next_id();
         if layout_id == u64::MAX {
-            return Err("The layout identity space is exhausted".to_string());
+            return Err(tr!(panels::LAYOUT_IDENTITY_EXHAUSTED).to_string());
         }
         self.layouts.push(Arc::new(WorkspaceSavedLayoutState {
             layout_id,
@@ -231,7 +236,7 @@ impl LayoutLibrary {
             .iter()
             .any(|layout| layout.layout_id != layout_id && layout.name.to_lowercase() == lowered)
         {
-            return Err(format!("A layout named \"{name}\" already exists"));
+            return Err(tr!(panels::LAYOUT_NAME_TAKEN, name = name));
         }
         Ok(index)
     }
@@ -248,9 +253,9 @@ impl LayoutLibrary {
     ) -> Result<usize, String> {
         let index = self.index(layout_id)?;
         if open_layout_ids.contains(&layout_id) {
-            return Err(format!(
-                "\"{}\" is open in a tab. Close it before deleting the layout.",
-                self.layouts[index].name
+            return Err(tr!(
+                panels::LAYOUT_OPEN_IN_TAB,
+                name = self.layouts[index].name
             ));
         }
         Ok(index)
@@ -331,23 +336,22 @@ impl LayoutLibrary {
 }
 
 pub(super) fn full_library_message() -> String {
-    format!(
-        "You can keep at most {MAXIMUM_SAVED_LAYOUTS} saved layouts. Delete one to create another."
-    )
+    tr!(panels::LAYOUT_LIBRARY_FULL, maximum = MAXIMUM_SAVED_LAYOUTS)
 }
 
 fn trimmed_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("A layout needs a name".to_string());
+        return Err(tr!(panels::LAYOUT_NAME_REQUIRED).to_string());
     }
     if name.chars().count() > MAXIMUM_LAYOUT_NAME_CHARS {
-        return Err(format!(
-            "A layout name can have at most {MAXIMUM_LAYOUT_NAME_CHARS} characters"
+        return Err(tr!(
+            panels::LAYOUT_NAME_TOO_LONG,
+            maximum = MAXIMUM_LAYOUT_NAME_CHARS
         ));
     }
     if name.chars().any(char::is_control) {
-        return Err("A layout name cannot contain control characters".to_string());
+        return Err(tr!(panels::LAYOUT_NAME_CONTROL_CHARS).to_string());
     }
     Ok(name)
 }
@@ -606,7 +610,7 @@ pub(super) fn sanitize_saved_layouts(workspace: &mut WorkspaceState) {
             tab.label.clone_from(&layout.name);
             continue;
         }
-        let name = library.unique_name(UNTITLED_LAYOUT_NAME);
+        let name = library.unique_name(untitled_layout_name());
         let layout_id = library.next_id();
         library.layouts.push(Arc::new(WorkspaceSavedLayoutState {
             layout_id,

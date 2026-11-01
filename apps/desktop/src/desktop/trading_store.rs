@@ -847,6 +847,7 @@ mod tests {
                 reason: None,
                 event_unix_nanos: 1,
                 detail: None,
+                note: None,
                 provenance: provenance.clone(),
             })
             .collect();

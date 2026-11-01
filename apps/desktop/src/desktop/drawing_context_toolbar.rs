@@ -19,6 +19,8 @@ use drawing_toolbar::{
 use local_state::{MAXIMUM_DRAWING_TEMPLATE_NAME_BYTES, MAXIMUM_DRAWING_TEMPLATES};
 use serde_json::Value;
 
+use aeris_localization::{panels, shell, tr};
+
 /// The widths a toolbar width menu offers, within the property's own bounds.
 const LINE_WIDTHS: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
 const ORDER_BUTTON_WIDTH: f32 = 128.0;
@@ -136,7 +138,7 @@ pub(super) fn width_choices(property: &ChartDrawingProperty) -> impl Iterator<It
 }
 
 pub(super) fn width_label(width: f64) -> String {
-    format!("{width}px")
+    tr!(panels::DRAWING_WIDTH_PX, width = width)
 }
 
 /// A template name the workspace sanitizer keeps.
@@ -317,7 +319,7 @@ impl TerminalApp {
         let normalized = normalize_hex_color(color);
         picker.error = normalized
             .is_none()
-            .then(|| "Enter a hex color such as #2962FF or #2962FF80.".to_string());
+            .then(|| tr!(shell::HEX_COLOR_HINT).to_string());
         let property = picker.property.clone();
         match normalized {
             Some(color) => self.apply_drawing_toolbar_option(&property, Value::String(color), cx),
@@ -390,8 +392,9 @@ impl TerminalApp {
     }
 
     fn open_drawing_template_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input =
-            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Template name"));
+        let input = cx.new(|input_cx| {
+            InputState::new(window, input_cx).placeholder(tr!(shell::TEMPLATE_NAME_PLACEHOLDER))
+        });
         input.update(cx, |input, input_cx| input.focus(window, input_cx));
         let terminal = cx.entity().downgrade();
         let submit = window.subscribe(&input, cx, move |_, event: &InputEvent, _, cx| {
@@ -430,15 +433,17 @@ impl TerminalApp {
 
     fn store_drawing_template(&mut self, name: &str, cx: &App) -> Result<(), String> {
         if !valid_template_name(name) {
-            return Err("Use a name between 1 and 64 characters.".to_string());
+            return Err(tr!(shell::TEMPLATE_NAME_INVALID).to_string());
         }
-        let selected = self.toolbar_drawing(cx).ok_or("Select a drawing first.")?;
+        let selected = self
+            .toolbar_drawing(cx)
+            .ok_or(tr!(panels::DRAWING_SELECT_FIRST))?;
         let template_json = selected
             .chart
             .read(cx)
             .drawing_template_json(selected.settings.id, name)
             .filter(|json| json.len() <= MAX_DRAWING_TEMPLATE_BYTES)
-            .ok_or("This drawing's style cannot be saved as a template.")?;
+            .ok_or(tr!(panels::DRAWING_STYLE_NOT_TEMPLATABLE))?;
         let kind = selected.settings.kind().name().to_string();
         let template = WorkspaceDrawingTemplateState {
             kind,
@@ -446,8 +451,9 @@ impl TerminalApp {
             template_json,
         };
         if !self.saved.store_drawing_template(template) {
-            return Err(format!(
-                "You can save up to {MAXIMUM_DRAWING_TEMPLATES} drawing templates."
+            return Err(tr!(
+                panels::DRAWING_TEMPLATE_LIMIT,
+                maximum = MAXIMUM_DRAWING_TEMPLATES
             ));
         }
         self.record_layout_change(cx);
@@ -476,7 +482,7 @@ impl TerminalApp {
             toolbar.menu = None;
             toolbar.template_error = None;
         } else {
-            toolbar.template_error = Some("This template no longer fits this drawing.".to_string());
+            toolbar.template_error = Some(tr!(panels::DRAWING_TEMPLATE_NO_LONGER_FITS).to_string());
         }
         cx.notify();
     }
@@ -590,7 +596,7 @@ impl TerminalApp {
                 })
                 .child(floating_toolbar_grip(
                     "drawing_context_grip",
-                    "Move drawing toolbar",
+                    tr!(panels::DRAWING_TOOLBAR_MOVE),
                     DrawingContextMoveDrag,
                     theme,
                     move |pointer, cx| {
@@ -605,7 +611,7 @@ impl TerminalApp {
                     ui,
                     "drawing_context_settings",
                     HugeIcon::Settings,
-                    "Settings",
+                    tr!(panels::SETTINGS),
                     TerminalApp::open_selected_drawing_settings,
                 ))
                 .child(lock_button(ui))
@@ -614,7 +620,7 @@ impl TerminalApp {
                         ui,
                         "drawing_context_remove",
                         HugeIcon::Trash,
-                        "Remove",
+                        tr!(panels::REMOVE),
                         |terminal, _, cx| terminal.remove_selected_drawing(cx),
                     )
                     .danger_on_hover(),
@@ -670,9 +676,9 @@ fn action_button(
 fn lock_button(ui: ToolbarUi<'_>) -> Button {
     let locked = ui.settings.flag("locked");
     let (icon, label) = if locked {
-        (HugeIcon::Lock, "Unlock")
+        (HugeIcon::Lock, tr!(panels::UNLOCK))
     } else {
-        (HugeIcon::Unlock, "Lock")
+        (HugeIcon::Unlock, tr!(panels::LOCK))
     };
     action_button(
         ui,
@@ -753,7 +759,7 @@ fn color_control(ui: ToolbarUi<'_>, slot: usize, property: &ChartDrawingProperty
     let shown = ui
         .settings
         .color(&name)
-        .unwrap_or_else(|| "Auto".to_string());
+        .unwrap_or_else(|| tr!(panels::AUTO).to_string());
     let open_picker = ui
         .toolbar
         .color_picker
@@ -909,7 +915,7 @@ fn templates_control(ui: ToolbarUi<'_>) -> AnyElement {
     let trigger = menu_trigger(
         ui,
         "drawing_context_templates",
-        "Template",
+        tr!(panels::TEMPLATE),
         ToolbarMenu::Templates,
     )
     .icon(header_icon(HugeIcon::Template));
@@ -942,7 +948,7 @@ fn templates_menu(ui: ToolbarUi<'_>) -> MenuPanel {
                 .child(
                     Button::new("drawing_context_template_save", theme)
                         .variant(ButtonVariant::Primary)
-                        .label("Save")
+                        .label(tr!(panels::CONTEXT_SAVE))
                         .on_press(move |_, _, cx| {
                             save.update(cx, TerminalApp::save_drawing_template);
                         }),
@@ -953,7 +959,7 @@ fn templates_menu(ui: ToolbarUi<'_>) -> MenuPanel {
         panel = panel.child(
             MenuRow::compact(
                 "drawing_context_template_save_as",
-                "Save drawing template as…",
+                tr!(panels::DRAWING_TEMPLATE_SAVE_AS),
                 theme,
             )
             .on_click(move |_, window, cx| {
@@ -996,7 +1002,7 @@ fn templates_menu(ui: ToolbarUi<'_>) -> MenuPanel {
                 .variant(ButtonVariant::Ghost)
                 .button_size(ButtonSize::Sm)
                 .icon(header_icon(HugeIcon::Trash))
-                .aria_label("Remove template")
+                .aria_label(tr!(panels::DRAWING_TEMPLATE_REMOVE))
                 .danger_on_hover()
                 .on_press(move |_, _, cx| {
                     remove.update(cx, |terminal, terminal_cx| {
@@ -1014,25 +1020,38 @@ fn templates_menu(ui: ToolbarUi<'_>) -> MenuPanel {
 
 fn more_control(ui: ToolbarUi<'_>) -> AnyElement {
     let theme = ui.theme;
-    let trigger = menu_trigger(ui, "drawing_context_more", "More", ToolbarMenu::More)
-        .icon(header_icon(HugeIcon::More));
+    let trigger = menu_trigger(
+        ui,
+        "drawing_context_more",
+        tr!(panels::MORE),
+        ToolbarMenu::More,
+    )
+    .icon(header_icon(HugeIcon::More));
     let panel = ui.menu_open(&ToolbarMenu::More).then(|| {
         let clone = ui.terminal.clone();
         let hide = ui.terminal.clone();
         menu_panel("drawing_context_more_menu", TOOLBAR_MENU_WIDTH, theme)
             .child(
-                MenuRow::compact("drawing_context_clone", "Clone", theme)
-                    .leading_icon(header_icon(HugeIcon::Copy))
-                    .on_click(move |_, _, cx| {
-                        clone.update(cx, TerminalApp::clone_selected_drawing);
-                    }),
+                MenuRow::compact(
+                    "drawing_context_clone",
+                    tr!(panels::DRAWING_ACTION_CLONE),
+                    theme,
+                )
+                .leading_icon(header_icon(HugeIcon::Copy))
+                .on_click(move |_, _, cx| {
+                    clone.update(cx, TerminalApp::clone_selected_drawing);
+                }),
             )
             .child(
-                MenuRow::compact("drawing_context_hide", "Hide", theme)
-                    .leading_icon(header_icon(HugeIcon::ViewOff))
-                    .on_click(move |_, _, cx| {
-                        hide.update(cx, TerminalApp::hide_selected_drawing);
-                    }),
+                MenuRow::compact(
+                    "drawing_context_hide",
+                    tr!(panels::DRAWING_ACTION_HIDE),
+                    theme,
+                )
+                .leading_icon(header_icon(HugeIcon::ViewOff))
+                .on_click(move |_, _, cx| {
+                    hide.update(cx, TerminalApp::hide_selected_drawing);
+                }),
             )
     });
     toolbar_menu(ui, "drawing_context_more_anchor", trigger, panel).into_any_element()
@@ -1050,7 +1069,7 @@ fn order_button(ui: ToolbarUi<'_>) -> AnyElement {
                 .variant(ButtonVariant::Ghost)
                 .button_size(ButtonSize::Default)
                 .full_width()
-                .label("Create order")
+                .label(tr!(panels::DRAWING_CREATE_ORDER))
                 .on_press(move |_, window, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
                         terminal.request_selected_drawing_order(window, terminal_cx);

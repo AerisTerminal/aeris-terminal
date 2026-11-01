@@ -3,6 +3,7 @@
 //! Market orders use the solid buy and sell fills, resting orders the tinted ones.
 
 use super::*;
+use aeris_localization::{Text, common, panels, tr, tr_count};
 use gpui::ClickEvent;
 
 const FIELD_HEIGHT: f32 = 28.0;
@@ -11,7 +12,7 @@ const STEP_BUTTON_SIZE: f32 = 18.0;
 const SELECT_MENU_MAX_HEIGHT: f32 = 240.0;
 /// The largest tick distance a ticket field accepts.
 const MAXIMUM_TICKS: u32 = 999;
-const STOP_OFFSET_REQUIRED: &str = "Turn on Ticks diff to set how far from the market a stop rests";
+const STOP_OFFSET_REQUIRED: Text = panels::TICKET_STOP_OFFSET_REQUIRED;
 
 /// The ticket's resting-order offset and bracket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,13 +260,15 @@ impl TicketBroker {
 
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Practice => "Practice",
+            Self::Practice => tr!(panels::TICKET_BROKER_PRACTICE),
             Self::Broker => aeris_market_runtime::built_in_provider_presentations()
                 .iter()
                 .find(|descriptor| {
                     descriptor.broker_venue_id == Some(aeris_trading::venue::BROKER_VENUE_ID)
                 })
-                .map_or("Broker", |descriptor| descriptor.display_name),
+                .map_or(tr!(panels::TICKET_BROKER), |descriptor| {
+                    descriptor.display_name
+                }),
         }
     }
 }
@@ -398,7 +401,7 @@ pub(super) fn trading_order_controls(
                 .store
                 .current()
                 .and_then(|set| set.market_observation_error.as_ref())
-                .map(|error| format!("Trading market update failed: {error}"))
+                .map(|error| tr!(panels::TICKET_MARKET_UPDATE_FAILED, error = error))
                 .as_deref(),
             theme,
         ))
@@ -529,7 +532,7 @@ fn menu_toggle(
 
 fn symbol_field(state: &TradingOrderControlsState<'_>) -> impl IntoElement + use<> {
     let symbol = state.product.map_or_else(
-        || "Choose a symbol".to_string(),
+        || tr!(panels::TICKET_CHOOSE_SYMBOL).to_string(),
         |product| product.display_symbol.clone(),
     );
     let open = state.app.clone();
@@ -572,7 +575,7 @@ fn position_stats(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
             row.border_color(gpui::transparent_black())
                 .bg(gpui_color(fill))
         })
-        .child(field_label("Open Qty", label_color))
+        .child(field_label(tr!(panels::TICKET_OPEN_QTY), label_color))
         .child(
             div()
                 .flex_none()
@@ -612,8 +615,18 @@ fn position_stats(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
         .flex_col()
         .gap(px(GAP))
         .child(open_qty)
-        .child(money_stat("Open P/L", open_pnl, currency, theme))
-        .child(money_stat("Daily P/L", daily_pnl, currency, theme))
+        .child(money_stat(
+            tr!(panels::TICKET_OPEN_PNL),
+            open_pnl,
+            currency,
+            theme,
+        ))
+        .child(money_stat(
+            tr!(panels::TICKET_DAILY_PNL),
+            daily_pnl,
+            currency,
+            theme,
+        ))
 }
 
 fn money_stat(
@@ -658,7 +671,7 @@ fn quantity_field(state: &TradingOrderControlsState<'_>) -> impl IntoElement + u
         .when(state.quantity.ticket_invalid(), |field| {
             field.border_color(gpui_color(colors.danger))
         })
-        .child(field_label("Qty", colors.text_secondary))
+        .child(field_label(tr!(panels::TICKET_QTY), colors.text_secondary))
         .child(super::order_quantity::ticket_quantity_field(state.quantity))
         .child(
             div()
@@ -678,9 +691,9 @@ fn step_button(id: &'static str, plus: bool, theme: &AerisTheme) -> Button {
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .aria_label(if plus {
-            "Increase quantity"
+            tr!(panels::TICKET_INCREASE_QUANTITY)
         } else {
-            "Decrease quantity"
+            tr!(panels::TICKET_DECREASE_QUANTITY)
         })
         .size(px(STEP_BUTTON_SIZE))
         .p_0()
@@ -738,13 +751,13 @@ fn broker_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) ->
             })
         }))
     });
-    let value = view.broker.map_or("Choose", TicketBroker::label);
+    let value = view.broker.map_or(tr!(panels::CHOOSE), TicketBroker::label);
     ticket_select(
         state.app,
         "ticket_broker_field",
         select_trigger(
             "ticket_broker",
-            Some("Broker"),
+            Some(tr!(panels::TICKET_BROKER)),
             value,
             theme,
             menu_toggle(state.app, TicketMenu::Broker),
@@ -800,7 +813,7 @@ fn account_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
                     .current()
                     .is_some_and(|set| set.connected_broker_accounts.contains(&account.id))
             {
-                row = row.detail("Not connected");
+                row = row.detail(tr!(panels::TICKET_NOT_CONNECTED));
             }
             row.on_click(move |_, _, cx| {
                 choose.update(cx, |surface, surface_cx| {
@@ -810,7 +823,7 @@ fn account_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
         }))
     });
     let value = view.account.map_or_else(
-        || "Choose".to_string(),
+        || tr!(panels::CHOOSE).to_string(),
         |account| account.display_name.clone(),
     );
     ticket_select(
@@ -818,7 +831,7 @@ fn account_field(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
         "ticket_account_field",
         select_trigger(
             "ticket_account",
-            Some("Account"),
+            Some(tr!(panels::TICKET_ACCOUNT)),
             value,
             theme,
             menu_toggle(state.app, TicketMenu::Account),
@@ -855,13 +868,18 @@ fn offset_field(state: &TradingOrderControlsState<'_>) -> Div {
             field.border_color(gpui_color(theme.colors.danger))
         })
         .child(
-            CheckboxRow::new("ticket_offset_toggle", "Ticks diff", enabled, theme)
-                .compact()
-                .on_change(move |on, _, _, cx| {
-                    toggle.update(cx, |surface, surface_cx| {
-                        surface.update_ticket(|ticket| ticket.offset_enabled = on, surface_cx);
-                    });
-                }),
+            CheckboxRow::new(
+                "ticket_offset_toggle",
+                tr!(panels::TICKET_TICKS_DIFF),
+                enabled,
+                theme,
+            )
+            .compact()
+            .on_change(move |on, _, _, cx| {
+                toggle.update(cx, |surface, surface_cx| {
+                    surface.update_ticket(|ticket| ticket.offset_enabled = on, surface_cx);
+                });
+            }),
         )
         .child(ticks_value(state, TicketNumber::Offset, enabled))
 }
@@ -938,14 +956,14 @@ fn ticket_price(
         (TicketAction::Touch | TicketAction::Limit, Sell)
         | (TicketAction::Stop | TicketAction::StopLimit, Buy) => (ask, false),
     };
-    let touch = touch.ok_or("Waiting for a quoted price on this instrument")?;
+    let touch = touch.ok_or(tr!(panels::TICKET_PRICE_WAITING))?;
     let offset = if action == TicketAction::Touch {
         0
     } else {
         offset_ticks
     };
     if offset == 0 && matches!(action, TicketAction::Stop | TicketAction::StopLimit) {
-        return Err(STOP_OFFSET_REQUIRED);
+        return Err(STOP_OFFSET_REQUIRED.get());
     }
     let distance = if offset == 0 {
         0
@@ -953,10 +971,10 @@ fn ticket_price(
         let tick = frame
             .price_increment
             .filter(|tick| *tick > 0)
-            .ok_or("The instrument's price increment is unknown")?;
+            .ok_or(tr!(panels::TICKET_PRICE_INCREMENT_UNKNOWN))?;
         i64::from(offset)
             .checked_mul(tick)
-            .ok_or("Order price is invalid")?
+            .ok_or(tr!(panels::TICKET_PRICE_INVALID))?
     };
     if below {
         touch.checked_sub(distance)
@@ -965,7 +983,7 @@ fn ticket_price(
     }
     .filter(|price| *price > 0)
     .map(Some)
-    .ok_or("Order price is invalid")
+    .ok_or(tr!(panels::TICKET_PRICE_INVALID))
 }
 
 fn order_grid(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> Div {
@@ -992,8 +1010,8 @@ fn order_grid(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> D
         div()
             .flex()
             .gap(px(GAP))
-            .child(side_label("BUY"))
-            .child(side_label("SELL")),
+            .child(side_label(tr!(panels::TICKET_SIDE_BUY)))
+            .child(side_label(tr!(panels::TICKET_SIDE_SELL))),
     );
     for action in TicketAction::ROWS {
         grid = grid.child(row(
@@ -1074,8 +1092,8 @@ fn cancel_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
     let account = view.account_key();
     Button::new("ticket_cancel", state.theme)
         .variant(ButtonVariant::Destructive)
-        .label("Cancel")
-        .aria_label("Cancel working orders")
+        .label(tr!(common::CANCEL))
+        .aria_label(tr!(panels::TICKET_CANCEL_WORKING))
         .disabled(account.is_none())
         .on_click(move |_, _, cx| {
             let service = app.read(cx).lifecycle.trading().clone();
@@ -1101,8 +1119,8 @@ fn flat_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> 
     let account = view.account_key();
     Button::new("ticket_flat", state.theme)
         .variant(ButtonVariant::Warning)
-        .label("Flat")
-        .aria_label("Flatten this instrument")
+        .label(tr!(panels::TICKET_FLAT))
+        .aria_label(tr!(panels::TICKET_FLATTEN))
         .disabled(account.is_none() || instrument.is_none())
         .on_click(move |_, _, cx| {
             let Some(instrument) = instrument.as_ref() else {
@@ -1130,11 +1148,11 @@ fn bracket_header(state: &TradingOrderControlsState<'_>) -> Div {
         .items_center()
         .justify_between()
         .font_weight(platform_font_weight(TypographyRole::Emphasis))
-        .child("OCO Strategy")
+        .child(tr!(panels::TICKET_OCO_STRATEGY))
         .child(
             Switch::new(
                 "ticket_bracket_switch",
-                "OCO Strategy",
+                tr!(panels::TICKET_OCO_STRATEGY),
                 state.trading.order_entry.ticket.bracket_enabled,
                 state.theme,
             )
@@ -1148,7 +1166,11 @@ fn bracket_header(state: &TradingOrderControlsState<'_>) -> Div {
 
 /// Only paired brackets exist: the owner's bracket template always carries one stop and at
 /// least one target, so the single-leg modes are listed but cannot be chosen.
-const BRACKET_MODES: [(&str, bool); 3] = [("SL/TP", true), ("SL only", false), ("TP only", false)];
+const BRACKET_MODES: [(Text, bool); 3] = [
+    (panels::TICKET_BRACKET_SL_TP, true),
+    (panels::TICKET_BRACKET_SL_ONLY, false),
+    (panels::TICKET_BRACKET_TP_ONLY, false),
+];
 
 fn bracket_fields(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> Div {
     let theme = state.theme;
@@ -1163,7 +1185,7 @@ fn bracket_fields(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
                     .enumerate()
                     .map(|(index, (label, available))| {
                         let choose = state.app.clone();
-                        MenuRow::compact(("ticket_bracket_mode_option", index), *label, theme)
+                        MenuRow::compact(("ticket_bracket_mode_option", index), label.get(), theme)
                             .checked(index == 0)
                             .disabled(!available)
                             .on_click(move |_, _, cx| {
@@ -1177,8 +1199,8 @@ fn bracket_fields(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
             "ticket_bracket_mode_field",
             select_trigger(
                 "ticket_bracket_mode",
-                Some("Mode"),
-                BRACKET_MODES[0].0,
+                Some(tr!(panels::TICKET_MODE)),
+                BRACKET_MODES[0].0.get(),
                 theme,
                 menu_toggle(state.app, TicketMenu::BracketMode),
             ),
@@ -1187,8 +1209,8 @@ fn bracket_fields(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
         .into_any_element()
     } else {
         locked_field(theme)
-            .child(field_label("Mode", colors.text_muted))
-            .child(field_value(BRACKET_MODES[0].0))
+            .child(field_label(tr!(panels::TICKET_MODE), colors.text_muted))
+            .child(field_value(BRACKET_MODES[0].0.get()))
             .child(chevron(colors.text_muted))
             .into_any_element()
     };
@@ -1219,8 +1241,8 @@ fn bracket_fields(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
         .flex_col()
         .gap(px(GAP))
         .child(mode)
-        .child(leg("SL Ticks", TicketNumber::Stop))
-        .child(leg("TP Ticks", TicketNumber::Target))
+        .child(leg(tr!(panels::TICKET_SL_TICKS), TicketNumber::Stop))
+        .child(leg(tr!(panels::TICKET_TP_TICKS), TicketNumber::Target))
         .child(
             div()
                 .flex()
@@ -1228,8 +1250,18 @@ fn bracket_fields(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
                 .px(px(2.0))
                 .py_1()
                 .text_color(gpui_color(colors.text_secondary))
-                .child(held_by("Server", server_held, enabled, theme))
-                .child(held_by("Client", !server_held, enabled, theme)),
+                .child(held_by(
+                    tr!(panels::TICKET_SERVER),
+                    server_held,
+                    enabled,
+                    theme,
+                ))
+                .child(held_by(
+                    tr!(panels::TICKET_CLIENT),
+                    !server_held,
+                    enabled,
+                    theme,
+                )),
         )
 }
 
@@ -1275,18 +1307,21 @@ pub(super) fn ticket_status(
     working_orders: usize,
 ) -> String {
     let side = match net {
-        Some(net) if net.units() > 0 => format!("Long {}", format_quantity(net)),
-        Some(net) if net.units() < 0 => {
-            format!("Short {}", format_quantity(net).trim_start_matches('-'))
+        Some(net) if net.units() > 0 => {
+            tr!(panels::TICKET_SIDE_LONG, quantity = format_quantity(net))
         }
-        _ => "Flat".to_string(),
+        Some(net) if net.units() < 0 => tr!(
+            panels::TICKET_SIDE_SHORT,
+            quantity = format_quantity(net).trim_start_matches('-')
+        ),
+        _ => tr!(panels::TICKET_SIDE_FLAT).to_string(),
     };
-    let orders = match working_orders {
-        0 => "no working orders".to_string(),
-        1 => "1 working order".to_string(),
-        count => format!("{count} working orders"),
+    let orders = if working_orders == 0 {
+        tr!(panels::TICKET_NO_WORKING_ORDERS).to_string()
+    } else {
+        tr_count!(panels::TICKET_WORKING_ORDERS, working_orders)
     };
-    format!("{side} · {orders}")
+    tr!(panels::TICKET_STATUS_LINE, side = side, orders = orders)
 }
 
 /// An exact quantity without trailing fractional zeros.
@@ -1466,7 +1501,7 @@ mod tests {
         );
         assert_eq!(
             ticket_price(TicketAction::Stop, Buy, &frame, 0),
-            Err(STOP_OFFSET_REQUIRED)
+            Err(STOP_OFFSET_REQUIRED.get())
         );
         // An offset through zero is refused rather than sent as a non-positive price.
         assert!(ticket_price(TicketAction::Limit, Buy, &frame, 400).is_err());

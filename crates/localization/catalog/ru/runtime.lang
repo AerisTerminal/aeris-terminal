@@ -1,0 +1,75 @@
+# Runtime-published market, account and study text: built-in study settings, official context
+# statistics and provider login fields. Publisher-authored text (third-party study settings,
+# official release titles and statistic names) is shown as published and never enters here.
+
+## Built-in study settings
+study_setting_period = Период
+study_setting_period_description = Количество баров, используемых в расчёте.
+study_setting_deviation = Отклонение
+study_setting_deviation_description = Множитель стандартного отклонения для границ полос.
+study_setting_fast_period = Быстрый период
+study_setting_fast_period_description = Период быстрой EMA.
+study_setting_slow_period = Медленный период
+study_setting_slow_period_description = Период медленной EMA.
+study_setting_signal_period = Сигнальный период
+study_setting_signal_period_description = Период сигнальной EMA.
+study_setting_k_period = Период %K
+study_setting_k_period_description = Окно расчёта быстрого осциллятора.
+study_setting_d_period = Период %D
+study_setting_d_period_description = Окно сглаживания сигнальной линии.
+
+## Market context sources, events and statistics
+context_source_federal_reserve = ФРС
+context_event_fomc_rate_decision = Решение FOMC по ставке и пресс-конференция
+context_event_eia_petroleum_status = Еженедельный отчёт EIA о запасах нефти
+context_metric_commercial_crude_stocks = Коммерческие запасы сырой нефти
+context_metric_lower_48_gas_storage = Рабочие запасы природного газа (48 штатов)
+context_metric_ten_year_treasury_yield = Доходность 10-летних казначейских облигаций
+context_metric_trade_weighted_dollar = Торгово-взвешенный индекс доллара США
+context_metric_consumer_price_index = Индекс потребительских цен
+context_metric_nonfarm_payrolls = Занятость вне сельского хозяйства
+context_metric_wasde_corn_production = WASDE: производство кукурузы в США
+context_metric_wasde_corn_exports = WASDE: экспорт кукурузы из США
+context_metric_wasde_corn_ending_stocks = WASDE: конечные запасы кукурузы в США
+context_metric_weekly_export_sales = {commodity}: недельные экспортные продажи
+context_unit_thousand_barrels = тыс. баррелей
+context_unit_billion_cubic_feet = млрд куб. футов
+context_unit_percent = %
+context_unit_index = пунктов
+context_unit_thousands_of_persons = тыс. человек
+context_unit_million_bushels = млн бушелей
+context_unit_metric_tons = метрических тонн
+context_region_conus_population_weighted = континентальные США, взвешено по населению
+context_cot_producer_merchant = Производители/торговцы
+context_cot_swap_dealer = Своп-дилеры
+context_cot_managed_money = Управляющие активами
+context_cot_other_reportable = Прочие отчитывающиеся
+
+## Provider login fields
+login_field_server = Сервер
+login_field_system = Система
+login_field_user_id = Логин
+login_field_password = Пароль
+## Account session details
+account_detail_signed_out = выход выполнен
+account_detail_restoring_saved_sign_in = восстановление сохранённого входа
+account_detail_signed_in_verifying_saved_session = вход выполнен; проверка сохранённой сессии
+account_detail_signed_in = вход выполнен
+account_detail_signed_in_offline_reconnecting = вход выполнен офлайн; переподключение
+account_detail_waiting_for_browser_authorization = ожидание авторизации в браузере
+account_detail_completing_sign_in = завершение входа
+account_detail_sign_in_cancelled = вход отменён
+account_detail_sign_in_timed_out = время входа истекло; повторите вход
+account_detail_sign_in_worker_could_not_start = не удалось запустить вход; повторите вход
+account_detail_account_state_unavailable = состояние аккаунта недоступно
+account_detail_credential_storage_unavailable_sign_in_again = хранилище учётных данных недоступно; войдите снова
+account_detail_credential_storage_unavailable_retry_sign_in = хранилище учётных данных недоступно; повторите вход
+account_detail_saved_sign_in_expired = сохранённый вход истёк; войдите снова
+account_detail_sign_in_expired = срок входа истёк; войдите снова
+account_detail_saved_sign_in_retire_failed = не удалось удалить сохранённый вход; хранилище учётных данных недоступно; войдите снова
+account_detail_sign_in_expired_retire_failed = срок входа истёк, но сохранённые учётные данные не удалось удалить; войдите снова
+account_detail_sign_out_cleanup_attention = выход выполнен; требуется очистка учётных данных
+account_detail_saved_sign_in_cleanup_unavailable = очистка сохранённого входа недоступна; повторите вход
+account_detail_restore_could_not_start = не удалось запустить восстановление сохранённого входа; войдите снова
+account_detail_saved_sign_in_unverified_connection = не удалось проверить сохранённый вход; проверьте подключение и войдите снова
+account_detail_saved_sign_in_unverified = не удалось проверить сохранённый вход; войдите снова

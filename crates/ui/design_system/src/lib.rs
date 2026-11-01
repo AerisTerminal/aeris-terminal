@@ -14,12 +14,13 @@ include!(concat!(env!("OUT_DIR"), "/platform_tokens.rs"));
 /// Canonical portable stylesheet shared with the native presentation layer.
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
-/// The bundled platform faces referenced by `platform.css`: DM Sans (`--font-sans`)
-/// at the regular, medium and bold weights.
+/// The bundled platform faces referenced by `platform.css`: Inter (`--font-sans`)
+/// at the regular, medium and bold weights. Inter covers Latin and Cyrillic, so every
+/// supported display language renders in one face.
 pub static PLATFORM_FONT_BYTES: [&[u8]; 3] = [
-    include_bytes!("../assets/fonts/dm_sans_regular.ttf"),
-    include_bytes!("../assets/fonts/dm_sans_medium.ttf"),
-    include_bytes!("../assets/fonts/dm_sans_bold.ttf"),
+    include_bytes!("../assets/fonts/inter_regular.ttf"),
+    include_bytes!("../assets/fonts/inter_medium.ttf"),
+    include_bytes!("../assets/fonts/inter_bold.ttf"),
 ];
 
 /// Bundled Aeris brand face. It is intentionally separate from the platform
@@ -1143,13 +1144,9 @@ mod tests {
         bundled_fonts.sort();
         assert_eq!(
             bundled_fonts,
-            [
-                "dm_sans_bold.ttf",
-                "dm_sans_medium.ttf",
-                "dm_sans_regular.ttf",
-            ]
+            ["inter_bold.ttf", "inter_medium.ttf", "inter_regular.ttf",]
         );
-        assert!(font_dir.join("dm_sans_license.txt").is_file());
+        assert!(font_dir.join("inter_license.txt").is_file());
         let brand_font = font_dir.join("faculty-glyphic/FacultyGlyphic-Regular.ttf");
         let brand_license = font_dir.join("faculty-glyphic/OFL.txt");
         assert!(brand_font.is_file());
@@ -1222,14 +1219,14 @@ mod tests {
     fn css_manifest_carries_the_portable_interaction_contract() {
         let css = include_str!("../platform.css");
         for required in [
-            "--font-sans: \"DM Sans\", sans-serif;",
+            "--font-sans: \"Inter\", sans-serif;",
             "--font-weight-normal: 400;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 700;",
             "--font-feature-tabular-numerals: \"tnum\";",
-            "dm_sans_regular.ttf",
-            "dm_sans_medium.ttf",
-            "dm_sans_bold.ttf",
+            "inter_regular.ttf",
+            "inter_medium.ttf",
+            "inter_bold.ttf",
             "font-weight: 400;",
             "font-weight: 500;",
             "font-weight: var(--font-weight-strong);",
@@ -1260,8 +1257,8 @@ mod tests {
         assert!(
             css.contains("--sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);")
         );
-        assert_eq!(platform_font_family(), "DM Sans");
-        assert_eq!(platform_font_stack(), "\"DM Sans\", sans-serif");
+        assert_eq!(platform_font_family(), "Inter");
+        assert_eq!(platform_font_stack(), "\"Inter\", sans-serif");
 
         let typography = platform_typography();
         assert_eq!(typography.weight(TypographyRole::Normal), 400);

@@ -6,6 +6,7 @@ use super::{
     WorkspaceStudyDependencyKind, WorkspaceSurface,
 };
 use aeris_chart_integration::ChartHostEditId;
+use aeris_localization::{tr, workspace};
 use std::collections::HashSet;
 
 /// Runtime studies one edit added or removed, as they stood.
@@ -105,7 +106,7 @@ impl WorkspaceSurface {
         let mut local_ids = HashMap::with_capacity(studies.len());
         for study in &studies {
             let Some(local_id) = self.studies.allocate_local_id() else {
-                Self::post_study_failure("Study identity space is exhausted.", cx);
+                Self::post_study_failure(tr!(workspace::STUDY_IDENTITY_EXHAUSTED), cx);
                 return studies;
             };
             local_ids.insert(study.local_id, local_id);

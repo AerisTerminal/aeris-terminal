@@ -5,6 +5,7 @@ use super::{
     OrderFlowTrade, chart_color_hex,
 };
 use aeris_design_system::AerisTheme;
+use aeris_localization::{chart_ui, tr};
 use num_traits::ToPrimitive;
 
 use aeris_charts_engine::{
@@ -21,10 +22,10 @@ pub(super) enum OrderFlowStudy {
 }
 
 impl OrderFlowStudy {
-    pub(super) const fn title(self) -> &'static str {
+    pub(super) fn title(self) -> &'static str {
         match self {
-            Self::CumulativeDelta => "CVD",
-            Self::Delta => "Delta",
+            Self::CumulativeDelta => tr!(chart_ui::ORDER_FLOW_CVD),
+            Self::Delta => tr!(chart_ui::ORDER_FLOW_DELTA),
         }
     }
 }

@@ -6,13 +6,18 @@ use super::{
     ReplayRecoveryCommand, WorkerEndpoint, chart_demand_streams, demand_error,
     replay_runtime_snapshot, series_key,
 };
+use aeris_localization::{tr, workspace};
 use aeris_observability::diagnostic;
 
 pub(super) fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
     let (title, description) = crate::desktop::price_alert_trigger_text(trigger);
     let notification = aeris_platform_runtime::NativeUserNotification::try_new(
-        "Aeris price alert",
-        format!("{title}. {description}."),
+        tr!(workspace::PRICE_ALERT_TITLE),
+        tr!(
+            workspace::PRICE_ALERT_BODY,
+            title = title,
+            description = description
+        ),
     );
     match notification.and_then(aeris_platform_runtime::try_send_user_notification) {
         Ok(()) => {}

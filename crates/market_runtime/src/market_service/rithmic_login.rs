@@ -7,7 +7,8 @@
 use super::{
     MarketService,
     descriptors::{
-        LoginField, LoginFieldValue, LoginSchema, ProviderLoginServer, SavedProviderLogin,
+        LoginField, LoginFieldKind, LoginFieldValue, LoginSchema, ProviderLoginServer,
+        SavedProviderLogin,
     },
 };
 use crate::rithmic_realtime::RithmicLoginRevision;
@@ -31,22 +32,22 @@ pub(super) const LOGIN_SCHEMA: LoginSchema = LoginSchema {
     fields: &[
         LoginField {
             id: "server",
-            label: "Server",
+            kind: LoginFieldKind::Server,
             secret: false,
         },
         LoginField {
             id: "system",
-            label: "System",
+            kind: LoginFieldKind::System,
             secret: false,
         },
         LoginField {
             id: "user",
-            label: "User ID",
+            kind: LoginFieldKind::UserId,
             secret: false,
         },
         LoginField {
             id: "password",
-            label: "Password",
+            kind: LoginFieldKind::Password,
             secret: true,
         },
     ],

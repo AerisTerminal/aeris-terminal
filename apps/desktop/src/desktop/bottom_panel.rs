@@ -9,6 +9,7 @@
 
 use super::side_panel_dock::SIDE_PANEL_HEADER_HEIGHT;
 use super::*;
+use aeris_localization::{tr, tr_count, trading};
 use gpui::{Stateful, UniformListScrollHandle, uniform_list};
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -19,7 +20,6 @@ const TRADE_HISTORY_MAXIMUM_HEIGHT: f32 = 640.0;
 /// Space a resize always leaves for the title bar, chart header and workspace above.
 const TRADE_HISTORY_MINIMUM_WORKSPACE_HEIGHT: f32 = 240.0;
 const TRADE_HISTORY_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
-const BOTTOM_PANEL_TITLE: &str = "Portfolio";
 const ACCOUNT_STATS_GAP: f32 = 24.0;
 const ACCOUNT_STATS_DIVIDER_HEIGHT: f32 = 28.0;
 const TABLE_HEADER_HEIGHT: f32 = 30.0;
@@ -557,7 +557,7 @@ impl BottomPanelState {
 
     fn filter_label(&self) -> String {
         match &self.filter {
-            TradeHistoryAccountFilter::All => "All accounts".to_string(),
+            TradeHistoryAccountFilter::All => tr!(trading::ALL_ACCOUNTS).to_string(),
             TradeHistoryAccountFilter::Account(account_key) => {
                 self.history.account_name(account_key)
             }
@@ -787,7 +787,9 @@ impl TerminalApp {
         let Some(account) = aeris_trading::TradingAccountId::try_new(account_key).ok() else {
             self.lifecycle
                 .trading_feedback()
-                .record(Err("Position close requires a selected account".to_string()));
+                .record(Err(
+                    tr!(trading::POSITION_CLOSE_REQUIRES_ACCOUNT).to_string()
+                ));
             return;
         };
         let service = self.lifecycle.trading().clone();
@@ -796,7 +798,7 @@ impl TerminalApp {
         cx.background_executor()
             .spawn(async move {
                 feedback.record(aeris_desktop::trading::flatten_feedback(
-                    "Position closed",
+                    tr!(trading::ACTION_POSITION_CLOSED),
                     service.flatten(aeris_trading_runtime::FlattenScope {
                         account: Some(account),
                         instrument: Some(instrument),
@@ -918,7 +920,7 @@ fn trade_history_header(
                 .px_1()
                 .font_weight(platform_font_weight(TypographyRole::Emphasis))
                 .text_color(gpui_color(colors.text_default))
-                .child(BOTTOM_PANEL_TITLE),
+                .child(tr!(trading::PORTFOLIO_TITLE)),
         )
         .child(div().flex_1())
         .when_some(attribution, |header, attribution| {
@@ -992,17 +994,17 @@ fn account_summary_stats(summary: &AccountSummary, theme: &AerisTheme) -> [Div; 
     };
     [
         stat(
-            "Balance",
+            tr!(trading::BALANCE),
             div()
                 .text_color(gpui_color(colors.text_default))
                 .child(trade_history_money_text(summary.balance, &summary.currency)),
         ),
         stat(
-            "Realized P&L",
+            tr!(trading::REALIZED_PNL),
             trade_history_pnl_value(summary.realized, &summary.currency, theme),
         ),
         stat(
-            "Unrealized P&L",
+            tr!(trading::UNREALIZED_PNL),
             trade_history_pnl_value(summary.unrealized, &summary.currency, theme),
         ),
     ]
@@ -1019,17 +1021,14 @@ fn bottom_panel_tab_bar(
         BottomPanelTab::TradeHistory => {
             let count = state.history.rows.len();
             format!(
-                "{count} {} · {} older trades",
-                if count == 1 { "trade" } else { "trades" },
-                state.history.older_rows.len()
+                "{} · {}",
+                tr_count!(trading::TRADES_COUNT, count),
+                tr_count!(trading::OLDER_TRADES_COUNT, state.history.older_rows.len()),
             )
         }
         BottomPanelTab::Positions => {
             let count = state.positions.rows.len();
-            format!(
-                "{count} {}",
-                if count == 1 { "position" } else { "positions" }
-            )
+            tr_count!(trading::POSITIONS_COUNT, count)
         }
     };
     div()
@@ -1061,8 +1060,8 @@ fn trading_report_button(
     Button::new("trading_report_open", theme)
         .variant(ButtonVariant::Outline)
         .button_size(ButtonSize::Sm)
-        .label("Report")
-        .aria_label("Create a trading report")
+        .label(tr!(trading::REPORT_BUTTON))
+        .aria_label(tr!(trading::CREATE_REPORT))
         .disabled(state.report_running)
         .on_click(move |_, window, cx| {
             open_terminal.update(cx, |terminal, terminal_cx| {
@@ -1076,18 +1075,22 @@ fn bottom_panel_tabs(
     state: &BottomPanelState,
     theme: &AerisTheme,
 ) -> TabList {
-    TabList::new("bottom_panel_tabs", "Bottom panel", theme)
+    TabList::new("bottom_panel_tabs", tr!(trading::BOTTOM_PANEL), theme)
         .compact()
         .children(
             [BottomPanelTab::Positions, BottomPanelTab::TradeHistory].map(|tab| {
                 let select_terminal = terminal.clone();
                 let (id, label, aria_label) = match tab {
-                    BottomPanelTab::TradeHistory => {
-                        ("trade_history_tab", "Trade history", "Show trade history")
-                    }
-                    BottomPanelTab::Positions => {
-                        ("positions_tab", "Positions", "Show open positions")
-                    }
+                    BottomPanelTab::TradeHistory => (
+                        "trade_history_tab",
+                        tr!(trading::TRADE_HISTORY_TAB),
+                        tr!(trading::SHOW_TRADE_HISTORY),
+                    ),
+                    BottomPanelTab::Positions => (
+                        "positions_tab",
+                        tr!(trading::POSITIONS_TAB),
+                        tr!(trading::SHOW_OPEN_POSITIONS),
+                    ),
                 };
                 Tab::new(id, theme)
                     .compact()
@@ -1110,9 +1113,9 @@ fn trade_history_expand_button(
 ) -> impl IntoElement {
     let toggle_terminal = terminal.clone();
     let label = if open {
-        "Collapse bottom panel"
+        tr!(trading::COLLAPSE_BOTTOM_PANEL)
     } else {
-        "Expand bottom panel"
+        tr!(trading::EXPAND_BOTTOM_PANEL)
     };
     let chevron = header_icon(HugeIcon::ChevronDown);
     let chevron = if open { chevron } else { chevron.rotate(0.5) };
@@ -1143,7 +1146,7 @@ fn trade_history_account_filter(
         .variant(ButtonVariant::Outline)
         .button_size(ButtonSize::Sm)
         .open(state.account_menu_open)
-        .aria_label("Filter trades by account")
+        .aria_label(tr!(trading::FILTER_TRADES_BY_ACCOUNT))
         .label(state.filter_label())
         .caret(header_icon(HugeIcon::ChevronDown))
         .on_click(move |_, _, cx| {
@@ -1179,13 +1182,17 @@ fn trade_history_account_menu(
     .width(px(TRADE_HISTORY_ACCOUNT_MENU_WIDTH))
     .max_height(px(TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT))
     .child(
-        MenuRow::compact("trade_history_account_all", "All accounts", theme)
-            .checked(state.filter == TradeHistoryAccountFilter::All)
-            .on_click(move |_, _, cx| {
-                all_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.set_trade_history_filter(TradeHistoryAccountFilter::All, terminal_cx);
-                });
-            }),
+        MenuRow::compact(
+            "trade_history_account_all",
+            tr!(trading::ALL_ACCOUNTS),
+            theme,
+        )
+        .checked(state.filter == TradeHistoryAccountFilter::All)
+        .on_click(move |_, _, cx| {
+            all_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.set_trade_history_filter(TradeHistoryAccountFilter::All, terminal_cx);
+            });
+        }),
     );
     for (index, account) in state.history.accounts.iter().enumerate() {
         let select_terminal = terminal.clone();
@@ -1211,19 +1218,51 @@ fn trade_history_account_menu(
 
 fn trade_history_column_header(show_account: bool, theme: &AerisTheme) -> impl IntoElement {
     table_header_frame(theme)
-        .child(text_cell(TRADE_HISTORY_TIME_WIDTH, "Opened", theme))
-        .child(text_cell(TRADE_HISTORY_TIME_WIDTH, "Closed", theme))
+        .child(text_cell(
+            TRADE_HISTORY_TIME_WIDTH,
+            tr!(trading::COL_OPENED),
+            theme,
+        ))
+        .child(text_cell(
+            TRADE_HISTORY_TIME_WIDTH,
+            tr!(trading::COL_CLOSED),
+            theme,
+        ))
         .when(show_account, |row| {
-            row.child(text_cell(TRADE_HISTORY_ACCOUNT_WIDTH, "Account", theme))
+            row.child(text_cell(
+                TRADE_HISTORY_ACCOUNT_WIDTH,
+                tr!(trading::ACCOUNT_LABEL),
+                theme,
+            ))
         })
-        .child(text_cell(TRADE_HISTORY_SYMBOL_WIDTH, "Symbol", theme))
-        .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, "Side", theme))
-        .child(numeric_cell(TRADE_HISTORY_QUANTITY_WIDTH, "Qty", theme))
-        .child(numeric_cell(TRADE_HISTORY_PRICE_WIDTH, "Entry", theme))
-        .child(numeric_cell(TRADE_HISTORY_PRICE_WIDTH, "Exit", theme))
+        .child(text_cell(
+            TRADE_HISTORY_SYMBOL_WIDTH,
+            tr!(trading::COL_SYMBOL),
+            theme,
+        ))
+        .child(text_cell(
+            TRADE_HISTORY_SIDE_WIDTH,
+            tr!(trading::COL_SIDE),
+            theme,
+        ))
+        .child(numeric_cell(
+            TRADE_HISTORY_QUANTITY_WIDTH,
+            tr!(trading::QTY),
+            theme,
+        ))
+        .child(numeric_cell(
+            TRADE_HISTORY_PRICE_WIDTH,
+            tr!(trading::COL_ENTRY),
+            theme,
+        ))
+        .child(numeric_cell(
+            TRADE_HISTORY_PRICE_WIDTH,
+            tr!(trading::COL_EXIT),
+            theme,
+        ))
         .child(last_cell(numeric_cell(
             TRADE_HISTORY_PNL_WIDTH,
-            "P&L",
+            tr!(trading::COL_PNL),
             theme,
         )))
 }
@@ -1236,9 +1275,9 @@ fn trade_history_list(
     let colors = theme.colors;
     if state.history.rows.is_empty() && state.history.older_rows.is_empty() {
         let message = if state.history.round_trips.iter().any(|trip| trip.closed) {
-            "No closed trades for this account"
+            tr!(trading::NO_CLOSED_TRADES_FOR_ACCOUNT)
         } else {
-            "No closed trades yet"
+            tr!(trading::NO_CLOSED_TRADES)
         };
         return div()
             .flex_1()
@@ -1249,7 +1288,7 @@ fn trade_history_list(
             .text_sm()
             .text_color(gpui_color(colors.text_secondary))
             .child(if state.history.loading {
-                "Loading older trades..."
+                tr!(trading::LOADING_OLDER_TRADES)
             } else {
                 message
             })
@@ -1311,15 +1350,15 @@ fn history_page_controls(
     let history = &state.history;
     let capped = history.pages >= MAX_LOADED_HISTORY_PAGES && history.has_more;
     let message = if capped {
-        "Showing at most 2,000 older trades. Close and reopen history to start again."
+        tr!(trading::HISTORY_CAPPED)
     } else if history.loading {
-        "Loading older trades..."
+        tr!(trading::LOADING_OLDER_TRADES)
     } else if history.error.is_some() {
-        "Older trade history unavailable. Retry below."
+        tr!(trading::HISTORY_UNAVAILABLE)
     } else if history.initialized && !history.has_more {
-        "End of trade history"
+        tr!(trading::END_OF_HISTORY)
     } else {
-        "Load older closed trades"
+        tr!(trading::LOAD_OLDER_TRADES)
     };
     let load_terminal = terminal.clone();
     div()
@@ -1339,9 +1378,9 @@ fn history_page_controls(
                         .variant(ButtonVariant::Ghost)
                         .button_size(ButtonSize::Sm)
                         .child(if history.error.is_some() {
-                            "Retry"
+                            tr!(trading::RETRY)
                         } else {
-                            "Load older"
+                            tr!(trading::LOAD_OLDER)
                         })
                         .on_click(move |_, _, cx| {
                             load_terminal.update(cx, TerminalApp::request_history_page);
@@ -1387,8 +1426,8 @@ fn trade_history_row(
         .exit
         .map(|exit| trade_history_time(chart, exit.last_unix_nanos));
     let (side, side_color) = match trip.side {
-        aeris_trading::OrderSide::Buy => ("Long", colors.text_positive),
-        aeris_trading::OrderSide::Sell => ("Short", colors.text_negative),
+        aeris_trading::OrderSide::Buy => (tr!(trading::SIDE_LONG), colors.text_positive),
+        aeris_trading::OrderSide::Sell => (tr!(trading::SIDE_SHORT), colors.text_negative),
     };
     // A trade that opened before the retained history still reports the size it closed.
     let quantity = trip
@@ -1451,17 +1490,53 @@ fn trade_history_row(
 
 fn position_column_header(show_account: bool, theme: &AerisTheme) -> impl IntoElement {
     table_header_frame(theme)
-        .child(text_cell(TRADE_HISTORY_TIME_WIDTH, "Opened", theme))
+        .child(text_cell(
+            TRADE_HISTORY_TIME_WIDTH,
+            tr!(trading::COL_OPENED),
+            theme,
+        ))
         .when(show_account, |row| {
-            row.child(text_cell(TRADE_HISTORY_ACCOUNT_WIDTH, "Account", theme))
+            row.child(text_cell(
+                TRADE_HISTORY_ACCOUNT_WIDTH,
+                tr!(trading::ACCOUNT_LABEL),
+                theme,
+            ))
         })
-        .child(text_cell(TRADE_HISTORY_SYMBOL_WIDTH, "Symbol", theme))
-        .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, "Side", theme))
-        .child(numeric_cell(TRADE_HISTORY_QUANTITY_WIDTH, "Qty", theme))
-        .child(numeric_cell(POSITION_PRICE_WIDTH, "Entry", theme))
-        .child(numeric_cell(POSITION_PRICE_WIDTH, "SL", theme))
-        .child(numeric_cell(POSITION_PRICE_WIDTH, "TP", theme))
-        .child(numeric_cell(TRADE_HISTORY_PNL_WIDTH, "Open P&L", theme))
+        .child(text_cell(
+            TRADE_HISTORY_SYMBOL_WIDTH,
+            tr!(trading::COL_SYMBOL),
+            theme,
+        ))
+        .child(text_cell(
+            TRADE_HISTORY_SIDE_WIDTH,
+            tr!(trading::COL_SIDE),
+            theme,
+        ))
+        .child(numeric_cell(
+            TRADE_HISTORY_QUANTITY_WIDTH,
+            tr!(trading::QTY),
+            theme,
+        ))
+        .child(numeric_cell(
+            POSITION_PRICE_WIDTH,
+            tr!(trading::COL_ENTRY),
+            theme,
+        ))
+        .child(numeric_cell(
+            POSITION_PRICE_WIDTH,
+            tr!(trading::COL_SL),
+            theme,
+        ))
+        .child(numeric_cell(
+            POSITION_PRICE_WIDTH,
+            tr!(trading::COL_TP),
+            theme,
+        ))
+        .child(numeric_cell(
+            TRADE_HISTORY_PNL_WIDTH,
+            tr!(trading::COL_OPEN_PNL),
+            theme,
+        ))
         .child(position_action_cell())
 }
 
@@ -1474,9 +1549,9 @@ fn position_list(
     let colors = theme.colors;
     if state.positions.rows.is_empty() {
         let message = if state.positions.positions.is_empty() {
-            "No open positions"
+            tr!(trading::NO_OPEN_POSITIONS)
         } else {
-            "No open positions for this account"
+            tr!(trading::NO_OPEN_POSITIONS_FOR_ACCOUNT)
         };
         return div()
             .flex_1()
@@ -1533,8 +1608,8 @@ fn position_row(
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let (side, side_color) = match position.side {
-        aeris_trading::OrderSide::Buy => ("Long", colors.text_positive),
-        aeris_trading::OrderSide::Sell => ("Short", colors.text_negative),
+        aeris_trading::OrderSide::Buy => (tr!(trading::SIDE_LONG), colors.text_positive),
+        aeris_trading::OrderSide::Sell => (tr!(trading::SIDE_SHORT), colors.text_negative),
     };
     let price = |value: Option<aeris_trading::FixedPoint>| {
         trade_history_text(value.map(trade_history_decimal))
@@ -1617,8 +1692,10 @@ fn position_close_button(
         .round()
         .danger_on_hover()
         .icon(header_icon(HugeIcon::Close))
-        .aria_label("Close position")
-        .tooltip(TooltipSpec::new("Close position", theme).show_delay(TOOLTIP_OPEN_DELAY));
+        .aria_label(tr!(trading::CLOSE_POSITION))
+        .tooltip(
+            TooltipSpec::new(tr!(trading::CLOSE_POSITION), theme).show_delay(TOOLTIP_OPEN_DELAY),
+        );
     let terminal = terminal.clone();
     match position.closer {
         PositionCloser::Broker { connected } => {

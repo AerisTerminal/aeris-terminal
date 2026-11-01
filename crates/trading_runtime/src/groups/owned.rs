@@ -434,6 +434,7 @@ impl TradingCore {
             reason: Some(OrderEventReason::LocalManaged),
             event_unix_nanos: entry.submitted_unix_nanos,
             detail: Some(detail),
+            note: None,
             provenance: entry.provenance.clone(),
         };
         event.validate().map_err(|error| error.to_string())?;
@@ -655,6 +656,7 @@ impl TradingCore {
                 reason: Some(OrderEventReason::LocalManaged),
                 event_unix_nanos: entry_fill.execution_unix_nanos,
                 detail: Some("activated at the entry fill".to_string()),
+                note: None,
                 provenance: activated.provenance.clone(),
             };
             event.validate().map_err(|error| error.to_string())?;
@@ -811,6 +813,7 @@ impl TradingCore {
             reason,
             event_unix_nanos,
             detail: Some(detail),
+            note: None,
             provenance,
         };
         event.validate().map_err(|error| error.to_string())?;
@@ -1050,6 +1053,7 @@ impl TradingCore {
             reason: Some(reason),
             event_unix_nanos: self.command_now,
             detail: Some("moved by local command".to_string()),
+            note: None,
             provenance: moved.provenance.clone(),
         };
         event.validate().map_err(|error| error.to_string())?;
@@ -1197,6 +1201,7 @@ impl TradingCore {
                 reason: Some(reason),
                 event_unix_nanos: self.command_now,
                 detail: Some("repriced with the bracket entry".to_string()),
+                note: None,
                 provenance: repriced.provenance.clone(),
             };
             event.validate().map_err(|error| error.to_string())?;
@@ -1613,6 +1618,7 @@ impl TradingCore {
                 "{} protection resized to the position",
                 BracketView::MANAGEMENT_LABEL
             )),
+            note: None,
             provenance: order.provenance.clone(),
         };
         event.validate().map_err(|error| error.to_string())?;

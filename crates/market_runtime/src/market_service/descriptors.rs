@@ -17,11 +17,22 @@ pub enum ConnectMethod {
     VaultCredentials { schema: &'static LoginSchema },
 }
 
+/// What a login field asks for; surfaces choose its control and wording from it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LoginFieldKind {
+    /// One of the provider's published login servers.
+    Server,
+    /// A system discovered on the chosen server.
+    System,
+    UserId,
+    Password,
+}
+
 /// Static, non-secret login fields supplied by provider registration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoginField {
     pub id: &'static str,
-    pub label: &'static str,
+    pub kind: LoginFieldKind,
     pub secret: bool,
 }
 

@@ -3,6 +3,7 @@
 //! bounded cadence only while the page is shown; leaving the page stops all screen traffic.
 
 use super::*;
+use aeris_localization::{panels, tr};
 use aeris_market_runtime::{
     ProviderMarketStatistics, ProviderPresentationDescriptor, ScreenProviderMarkets,
 };
@@ -31,10 +32,10 @@ pub(super) enum AppView {
 impl AppView {
     pub(super) const ALL: [Self; 2] = [Self::Terminal, Self::Screener];
 
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Terminal => "Terminal",
-            Self::Screener => "Screener",
+            Self::Terminal => tr!(panels::APP_VIEW_TERMINAL),
+            Self::Screener => tr!(panels::APP_VIEW_SCREENER),
         }
     }
 
@@ -64,10 +65,10 @@ impl ScreenerMarketKind {
         }
     }
 
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Perpetual => "Perp",
-            Self::Spot => "Spot",
+            Self::Perpetual => tr!(panels::SCREENER_KIND_PERP),
+            Self::Spot => tr!(panels::SCREENER_KIND_SPOT),
         }
     }
 }
@@ -83,11 +84,11 @@ pub(super) enum ScreenerCategory {
 impl ScreenerCategory {
     pub(super) const ALL: [Self; 3] = [Self::All, Self::Perpetuals, Self::Spot];
 
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
-            Self::All => "All markets",
-            Self::Perpetuals => "Perpetuals",
-            Self::Spot => "Spot",
+            Self::All => tr!(panels::SCREENER_CATEGORY_ALL),
+            Self::Perpetuals => tr!(panels::SCREENER_CATEGORY_PERPETUALS),
+            Self::Spot => tr!(panels::SCREENER_CATEGORY_SPOT),
         }
     }
 
@@ -561,11 +562,11 @@ impl MarketScreener {
             return;
         }
         let Some(provider) = self.provider else {
-            self.message = Some("No connected provider offers a market screen".to_string());
+            self.message = Some(tr!(panels::SCREENER_NO_PROVIDER).to_string());
             return;
         };
         let Some(factory) = factory else {
-            self.message = Some("Market data is unavailable in this window".to_string());
+            self.message = Some(tr!(panels::SCREENER_NO_MARKET_DATA).to_string());
             return;
         };
         match factory.create_market_screen_worker(workspace_id, provider.id) {
@@ -576,7 +577,7 @@ impl MarketScreener {
             }
             Err(error) => {
                 diagnostic!("Aeris market screener could not start: {error}");
-                self.message = Some(format!("Screener unavailable: {error}"));
+                self.message = Some(tr!(panels::SCREENER_UNAVAILABLE, error = error));
             }
         }
     }
@@ -619,7 +620,7 @@ impl MarketScreener {
             self.pending_screen = Some((generation, now));
             false
         } else {
-            self.message = Some("Market statistics are busy; retrying shortly".to_string());
+            self.message = Some(tr!(panels::SCREENER_BUSY).to_string());
             true
         }
     }
@@ -642,9 +643,9 @@ impl MarketScreener {
             entitlement_id: provider.selection_entitlement_id.to_string(),
         };
         if worker.try_select_provider(request).is_err() {
-            self.message = Some(format!(
-                "{} could not be opened; try again",
-                row.display_symbol
+            self.message = Some(tr!(
+                panels::SCREENER_OPEN_FAILED,
+                symbol = row.display_symbol
             ));
             return;
         }
@@ -726,7 +727,7 @@ impl MarketScreener {
             self.worker = None;
             self.pending_screen = None;
             self.pending_selection = None;
-            self.message = Some("Market statistics are unavailable".to_string());
+            self.message = Some(tr!(panels::SCREENER_STATS_UNAVAILABLE).to_string());
             outcome.changed = true;
         }
         outcome
@@ -760,7 +761,7 @@ impl MarketScreener {
                     .is_some_and(|(generation, _)| generation == rejection.command_generation) =>
             {
                 self.pending_screen = None;
-                self.message = Some("Market statistics are unavailable; retrying".to_string());
+                self.message = Some(tr!(panels::SCREENER_STATS_RETRYING).to_string());
                 true
             }
             ProviderCatalogEvent::SelectionInstalled {
@@ -782,7 +783,10 @@ impl MarketScreener {
             {
                 let selection = self.pending_selection.take();
                 self.message = selection.map(|selection| {
-                    format!("{} is not available to open", selection.display_symbol)
+                    tr!(
+                        panels::SCREENER_SELECTION_UNAVAILABLE,
+                        symbol = selection.display_symbol
+                    )
                 });
                 true
             }

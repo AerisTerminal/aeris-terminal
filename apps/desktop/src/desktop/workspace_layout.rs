@@ -1,6 +1,7 @@
 use super::toaster::{ToastLayer, ToastStack, toast_stack};
 use super::*;
 use aeris_desktop::command_registry::{self, WorkspaceShortcut};
+use aeris_localization::{panels, tr};
 
 pub(super) fn workspace_pane_grid(
     terminal: &Entity<TerminalApp>,
@@ -651,13 +652,13 @@ fn trading_result_notice_style(
         (
             notification_center::NoticeSeverity::Error,
             notification_center::NoticeTone::Loss,
-            "Trading command failed",
+            tr!(panels::TRADING_COMMAND_FAILED),
         )
     } else {
         (
             notification_center::NoticeSeverity::Info,
             notification_center::NoticeTone::Info,
-            "Trading command completed",
+            tr!(panels::TRADING_COMMAND_COMPLETED),
         )
     }
 }
@@ -941,8 +942,8 @@ pub(super) fn refresh_chart_trading_projection(
         aeris_observability::diagnostic!("Aeris chart trading projection could not be applied");
         WorkspaceSurface::post_indicator_failure(
             "trading_projection",
-            "Chart trading unavailable",
-            "Trading overlays could not be shown. Try again.",
+            tr!(panels::CHART_TRADING_UNAVAILABLE),
+            tr!(panels::CHART_TRADING_UNAVAILABLE_DETAIL),
             cx,
         );
     } else {

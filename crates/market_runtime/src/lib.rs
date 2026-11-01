@@ -433,8 +433,9 @@ pub use aeris_market_engine::{
 };
 pub use market_service::descriptors::{
     ConnectMethod, DescriptorError, InstrumentDescriptor, InstrumentRef, InstrumentRequest,
-    LoginField, LoginFieldValue, LoginSchema, ProviderDescriptor, ProviderLoginServer,
-    ResolvedSeries, SavedProviderLogin, SelectionError, SelectionOutcome, SelectionRequest,
+    LoginField, LoginFieldKind, LoginFieldValue, LoginSchema, ProviderDescriptor,
+    ProviderLoginServer, ResolvedSeries, SavedProviderLogin, SelectionError, SelectionOutcome,
+    SelectionRequest,
 };
 pub use market_service::{
     BrokerVenueLink, MAXIMUM_RECENT_LADDER_TRADES, MarketService, MarketServiceStatus,

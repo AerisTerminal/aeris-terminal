@@ -1,0 +1,190 @@
+# Chart surfaces: indicator names, chart types, legend rows and controls, drawing
+# stamps, capture export, and the read-only order book.
+
+# Legacy indicator catalog names.
+indicator_volume = Volume
+indicator_vwap = Volume Weighted Average Price
+indicator_sma = Simple Moving Average
+indicator_ema = Exponential Moving Average
+indicator_wma = Weighted Moving Average
+indicator_bollinger = Bollinger Bands
+indicator_rsi = Relative Strength Index
+indicator_macd = MACD
+indicator_stochastic = Stochastic
+indicator_atr = Average True Range
+indicator_volume_profile = Volume Profile (Visible Range)
+
+# Aeris Charts built-in indicator names.
+indicator_dema = Double Exponential Moving Average
+indicator_tema = Triple Exponential Moving Average
+indicator_smma = Smoothed Moving Average (RMA)
+indicator_hma = Hull Moving Average
+indicator_alma = Arnaud Legoux Moving Average
+indicator_kama = Kaufman Adaptive Moving Average
+indicator_mcginley = McGinley Dynamic
+indicator_vwma = Volume Weighted Moving Average
+indicator_linear_regression = Linear Regression Channel
+indicator_envelopes = Moving Average Envelopes
+indicator_donchian = Donchian Channels
+indicator_keltner = Keltner Channels
+indicator_atr_bands = ATR Bands
+indicator_vwap_bands = VWAP Bands
+indicator_parabolic_sar = Parabolic SAR
+indicator_supertrend = SuperTrend
+indicator_ichimoku = Ichimoku Cloud
+indicator_zigzag = Zig Zag
+indicator_pivot_standard = Pivot Points Standard
+indicator_pivot_fibonacci = Pivot Points Fibonacci
+indicator_pivot_camarilla = Pivot Points Camarilla
+indicator_pivot_woodie = Pivot Points Woodie
+indicator_pivot_demark = Pivot Points DeMark
+indicator_swing_points = Swing Highs and Lows
+indicator_session_levels = Session High and Low
+indicator_previous_period_levels = Previous Day High and Low
+indicator_opening_range = Opening Range
+indicator_aroon = Aroon
+indicator_awesome_oscillator = Awesome Oscillator
+indicator_dpo = Detrended Price Oscillator
+indicator_chande_momentum = Chande Momentum Oscillator
+indicator_bollinger_metrics = Bollinger %B and Bandwidth
+indicator_standard_deviation = Standard Deviation
+indicator_cci = Commodity Channel Index
+indicator_williams_r = Williams %R
+indicator_stochastic_rsi = Stochastic RSI
+indicator_momentum = Momentum
+indicator_roc = Rate of Change
+indicator_adx_dmi = ADX and DMI
+indicator_choppiness = Choppiness Index
+indicator_historical_volatility = Historical Volatility
+indicator_trix = TRIX
+indicator_kst = Know Sure Thing
+indicator_tsi = True Strength Index
+indicator_mass_index = Mass Index
+indicator_vortex = Vortex Indicator
+indicator_coppock = Coppock Curve
+indicator_fisher = Fisher Transform
+indicator_ultimate_oscillator = Ultimate Oscillator
+indicator_obv = On Balance Volume
+indicator_accumulation_distribution = Accumulation/Distribution
+indicator_price_volume_trend = Price Volume Trend
+indicator_chaikin_oscillator = Chaikin Oscillator
+indicator_klinger = Klinger Oscillator
+indicator_relative_volume = Relative Volume
+indicator_volume_oscillator = Volume Oscillator
+indicator_elder_force = Elder Force Index
+indicator_ease_of_movement = Ease of Movement
+indicator_cmf = Chaikin Money Flow
+indicator_mfi = Money Flow Index
+
+# Indicator parameter summaries shown beside the names.
+params_volume = Up/down volume · optional moving average
+params_session_anchored = Session anchored
+params_period_20 = Period 20
+params_period_20_deviation_2 = Period 20 · Deviation 2
+params_bollinger = Period 14 · Deviation 2
+params_period_14 = Period 14
+params_macd = Fast 12 · Slow 26 · Signal 9
+params_stochastic = %K 14 · %D 3
+params_volume_profile = Rows 48 · Value area 70%
+params_alma = Period 14 · Offset 0.85 · Sigma 6
+params_kama = Period 10 · Fast 2 · Slow 30
+params_envelopes = Period 14 · 2%
+params_multiplier_2 = Period 14 · Multiplier 2
+params_vwap_bands = Session anchored · 1 standard deviation
+params_multiplier_3 = Period 14 · Multiplier 3
+params_deviation_2_percent = Deviation 2%
+params_standard = Standard settings
+params_prior_period_levels = Prior period levels
+params_swing_points = Left 5 · Right 5
+params_utc_sessions = UTC sessions
+params_utc_days = UTC days
+params_opening_range = 30 minutes · UTC sessions
+params_stochastic_rsi = RSI 14 · Stochastic 14
+params_historical_volatility = Period 14 · 252 days
+params_trix = Period 14 · Signal 9
+params_kst = ROC 10 · 15 · 20 · 30 · Signal 9
+params_tsi = Long 25 · Short 13 · Signal 13
+params_mass_index = EMA 9 · Sum 25
+params_coppock = Long 14 · Short 11 · Smoothing 10
+params_ultimate_oscillator = Periods 7 · 14 · 28
+params_cumulative = Cumulative
+params_chaikin_oscillator = Fast 3 · Slow 10
+params_klinger = Fast 34 · Slow 55 · Signal 13
+
+# Chart types.
+chart_type_candles = Candles
+chart_type_hollow_candles = Hollow candles
+chart_type_hollow_candles_bullish = Hollow candles: bullish only
+chart_type_hollow_candles_bearish = Hollow candles: bearish only
+chart_type_footprint = Footprint
+chart_type_bars = Bars
+chart_type_line = Line
+chart_type_line_with_markers = Line with markers
+chart_type_area = Area
+chart_type_baseline = Baseline
+chart_type_brushable_area = Brushable area
+
+# Icon-stamp drawing tool glyphs.
+stamp_check = Check mark
+stamp_cross = Cross mark
+stamp_star = Star
+stamp_alert = Alert
+stamp_info = Info
+stamp_question = Question
+stamp_bolt = Lightning
+stamp_target = Target
+
+# Chart legend rows and row controls.
+legend_waiting_for_order_flow = Waiting for order flow
+legend_volume_profile = Volume Profile
+legend_big_trades = Big Trades
+legend_order_book = Order Book
+legend_depth_heatmap = Depth Heatmap
+legend_loading = Loading
+legend_hide = Hide
+legend_show = Show
+legend_settings = Settings
+legend_remove = Remove
+order_flow_cvd = CVD
+order_flow_delta = Delta
+
+# Typed drawing-anchor input errors.
+drawing_anchor_price = Enter a price as a number
+drawing_anchor_time = Enter a time as YYYY-MM-DD HH:MM
+drawing_anchor_rejected = The chart cannot place the point there
+
+# Chart capture export caption.
+export_created_with = Created with Aeris
+
+# Session plan price-line title.
+session_plan_line = PLAN · {label}
+
+# Read-only order book columns, banners and cell markers.
+book_column_pnl = P/L
+book_column_bid = Bid
+book_column_sell = Sell
+book_column_price = Price
+book_column_buy = Buy
+book_column_ask = Ask
+book_column_orders = Orders
+book_column_queue = Queue
+book_offline = Order Book offline · internet disconnected
+book_reconnecting = Order Book reconnecting · awaiting fresh snapshot
+book_level_one_note = Level 1 · best bid/ask
+book_unavailable = Order Book unavailable
+book_waiting_snapshot = Waiting for order-book snapshot
+book_loading = Loading order book…
+book_drag_buy = BUY
+book_drag_sell = SELL
+book_position = POS {quantity}
+book_own_order = YOU {quantity}
+queues_loading = Order queues loading
+queues_recovering = Order queues recovering · awaiting a complete order image
+queues_unavailable = Order queues unavailable for this market
+queues_limit_reached = Order queues limit reached · close the queue column on another book
+book_stale = Order Book stale · last sequence {watermark}
+book_recovering = Order Book recovering · {reason}
+recovery_awaiting_snapshot = awaiting snapshot
+recovery_sequence_gap = sequence gap
+recovery_crossed_book = crossed book
+recovery_invalid_update = invalid update

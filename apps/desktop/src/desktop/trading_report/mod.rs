@@ -13,6 +13,7 @@ mod period;
 mod statistics;
 
 use super::*;
+use aeris_localization::{panels, tr};
 
 pub(super) use dialog::ReportDialog;
 
@@ -31,12 +32,12 @@ enum ReportError {
 }
 
 impl ReportError {
-    const fn notice_detail(&self) -> &'static str {
+    fn notice_detail(&self) -> &'static str {
         match self {
-            Self::History(_) => "Aeris could not read the trade history. Try again in a moment.",
-            Self::AmountOverflow => "A P&L total was too large to report exactly.",
-            Self::Render => "The report could not be composed.",
-            Self::Write(_) => "The report could not be saved in the Aeris Reports folder.",
+            Self::History(_) => tr!(panels::REPORT_ERROR_HISTORY),
+            Self::AmountOverflow => tr!(panels::REPORT_ERROR_OVERFLOW),
+            Self::Render => tr!(panels::REPORT_ERROR_RENDER),
+            Self::Write(_) => tr!(panels::REPORT_ERROR_WRITE),
         }
     }
 }

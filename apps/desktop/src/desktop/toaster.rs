@@ -22,6 +22,7 @@ use super::notification_center::{
     NoticeAction, NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, UserNotice,
 };
 use super::*;
+use aeris_localization::{panels, tr};
 use gpui::{DispatchPhase, EntityId, MouseMoveEvent, MouseUpEvent};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -862,17 +863,18 @@ impl Toaster {
                             .unwrap_or_else(|| {
                                 let (title, tone) = match event.reason {
                                     Some(aeris_trading::OrderEventReason::ProtectionNotPlaced) => {
-                                        ("Protection not placed", ToastTone::Loss)
+                                        (tr!(panels::TOAST_PROTECTION_NOT_PLACED), ToastTone::Loss)
                                     }
                                     Some(aeris_trading::OrderEventReason::KillSwitch) => {
-                                        ("Risk lock", ToastTone::Warning)
+                                        (tr!(panels::TOAST_RISK_LOCK), ToastTone::Warning)
                                     }
-                                    _ => ("Order rejected", ToastTone::Loss),
+                                    _ => (tr!(panels::TOAST_ORDER_REJECTED), ToastTone::Loss),
                                 };
                                 (
                                     tone,
                                     title.to_string(),
-                                    event.detail.clone().unwrap_or_default(),
+                                    aeris_desktop::trading::order_event_detail_text(event)
+                                        .unwrap_or_default(),
                                 )
                             });
                     if event.reason == Some(aeris_trading::OrderEventReason::RiskWarning) {
@@ -1081,7 +1083,7 @@ fn risk_warning_user_notice(event: &aeris_trading::OrderEvent, detail: String) -
         severity: notification_center::NoticeSeverity::Warning,
         tone: NoticeTone::Warning,
         source: notification_center::NoticeSource::Workspace,
-        title: "Risk warning",
+        title: tr!(panels::TOAST_RISK_WARNING),
         detail,
         action: None,
         lifetime: NoticeLifetime::Timed(ORDER_END_LIFETIME),
@@ -1095,8 +1097,8 @@ fn fill_notice_text(
     accounts: &[aeris_trading::TradingAccount],
 ) -> (String, String) {
     let verb = match fill.side {
-        aeris_trading::OrderSide::Buy => "Bought",
-        aeris_trading::OrderSide::Sell => "Sold",
+        aeris_trading::OrderSide::Buy => tr!(panels::FILL_BOUGHT),
+        aeris_trading::OrderSide::Sell => tr!(panels::FILL_SOLD),
     };
     let symbol = instruments
         .iter()
@@ -1113,8 +1115,13 @@ fn fill_notice_text(
     let quantity = market_price_text(fill.quantity.units(), u32::from(fill.quantity.scale()));
     let price = market_price_text(fill.price.units(), u32::from(fill.price.scale()));
     (
-        format!("{verb} {quantity} {symbol}"),
-        format!("at {price} · {account}"),
+        tr!(
+            panels::FILL_TITLE,
+            verb = verb,
+            quantity = quantity,
+            symbol = symbol
+        ),
+        tr!(panels::FILL_DETAIL, price = price, account = account),
     )
 }
 
@@ -1136,14 +1143,15 @@ fn order_end_notice(
             return None;
         }
         let title = order.map_or_else(
-            || "Order expired".to_string(),
-            |order| format!("{} expired", order_label(order)),
+            || tr!(panels::ORDER_EXPIRED).to_string(),
+            |order| tr!(panels::ORDER_LABEL_EXPIRED, order = order_label(order)),
         );
-        let reason = event.detail.as_deref().unwrap_or("Its time in force ended");
+        let reason = aeris_desktop::trading::order_event_detail_text(event)
+            .unwrap_or_else(|| tr!(panels::ORDER_EXPIRED_REASON).to_string());
         return Some((
             ToastTone::Warning,
             title,
-            with_account(reason, placed, accounts),
+            with_account(&reason, placed, accounts),
         ));
     }
     let (verb, tone) = match event.kind {
@@ -1153,16 +1161,20 @@ fn order_end_notice(
         _ => return None,
     };
     let title = order.map_or_else(
-        || format!("Broker {verb} an order"),
-        |order| format!("Broker {verb} {}", order_label(order)),
+        || match verb {
+            "cancelled" => tr!(panels::BROKER_CANCELLED_AN_ORDER).to_string(),
+            "expired" => tr!(panels::BROKER_EXPIRED_AN_ORDER).to_string(),
+            _ => tr!(panels::BROKER_REJECTED_AN_ORDER).to_string(),
+        },
+        |order| match verb {
+            "cancelled" => tr!(panels::BROKER_CANCELLED_ORDER, order = order_label(order)),
+            "expired" => tr!(panels::BROKER_EXPIRED_ORDER, order = order_label(order)),
+            _ => tr!(panels::BROKER_REJECTED_ORDER, order = order_label(order)),
+        },
     );
-    // The owner stores the bare state name when the broker gave no explanation.
-    let reason = event
-        .detail
-        .as_deref()
-        .filter(|detail| *detail != verb && *detail != "cancel rejected")
-        .unwrap_or("The broker gave no reason");
-    Some((tone, title, with_account(reason, placed, accounts)))
+    let reason = aeris_desktop::trading::order_event_detail_text(event)
+        .unwrap_or_else(|| tr!(panels::BROKER_NO_REASON).to_string());
+    Some((tone, title, with_account(&reason, placed, accounts)))
 }
 
 /// "Risk warning on Buy 1 ESZ5" over the owner's warnings and the account, for an order the
@@ -1177,16 +1189,16 @@ fn order_warning_notice(
     {
         return None;
     }
-    let warnings = event.detail.as_deref()?;
+    let warnings = aeris_desktop::trading::order_event_detail_text(event)?;
     let title = order.map_or_else(
-        || "Risk warning".to_string(),
-        |order| format!("Risk warning on {}", order_label(order)),
+        || tr!(panels::TOAST_RISK_WARNING).to_string(),
+        |order| tr!(panels::RISK_WARNING_ON, order = order_label(order)),
     );
     Some((
         ToastTone::Warning,
         title,
         with_account(
-            &capitalized(warnings),
+            &capitalized(&warnings),
             order.map(|order| &order.order),
             accounts,
         ),
@@ -1197,8 +1209,8 @@ fn order_warning_notice(
 fn order_label(announced: &trading_store::AnnouncedOrder) -> String {
     let order = &announced.order;
     let side = match order.side {
-        aeris_trading::OrderSide::Buy => "Buy",
-        aeris_trading::OrderSide::Sell => "Sell",
+        aeris_trading::OrderSide::Buy => tr!(panels::ORDER_SIDE_BUY),
+        aeris_trading::OrderSide::Sell => tr!(panels::ORDER_SIDE_SELL),
     };
     let symbol = announced
         .instrument
@@ -1207,7 +1219,12 @@ fn order_label(announced: &trading_store::AnnouncedOrder) -> String {
             instrument.contract.provenance.display_symbol.as_str()
         });
     let quantity = market_price_text(order.quantity.units(), u32::from(order.quantity.scale()));
-    format!("{side} {quantity} {symbol}")
+    tr!(
+        panels::ORDER_LABEL_FORMAT,
+        side = side,
+        quantity = quantity,
+        symbol = symbol
+    )
 }
 
 fn with_account(
@@ -1223,7 +1240,13 @@ fn with_account(
         })
         .map_or_else(
             || text.to_string(),
-            |account| format!("{text} · {}", account.display_name),
+            |account| {
+                tr!(
+                    panels::TOAST_WITH_ACCOUNT,
+                    text = text,
+                    account = account.display_name
+                )
+            },
         )
 }
 
@@ -1984,6 +2007,7 @@ mod tests {
             reason,
             event_unix_nanos: NOW_UNIX,
             detail: Some(detail.to_string()),
+            note: None,
             provenance: aeris_trading::TradingProvenance {
                 venue_id: venue_id.to_string(),
                 provider_id: venue_id.to_string(),
@@ -2009,7 +2033,32 @@ mod tests {
                 ToastTone::Warning,
                 "Risk warning".to_string(),
                 "Fast re-entry within 60 seconds of a filled stop".to_string()
-            ))
+            )),
+            "an event recorded before notes existed shows its stored detail"
+        );
+        let warned = |venue_id: &str| aeris_trading::OrderEvent {
+            note: Some(aeris_trading::OrderEventNote::RiskWarnings(vec![
+                aeris_trading::RiskWarning::NoAttachedStop,
+                aeris_trading::RiskWarning::FastStopReentry,
+            ])),
+            ..order_event(Kind::Accepted, Some(Reason::RiskWarning), venue_id, "")
+        };
+        assert_eq!(
+            notice(&warned("aeris-sim")).map(|(_, _, description)| description),
+            Some(
+                "Order has no attached stop; loss at stop is unbounded · fast re-entry within \
+                 60 seconds of a filled stop"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            notice(&warned(aeris_trading::venue::BROKER_VENUE_ID))
+                .map(|(_, _, description)| description),
+            Some(
+                "Submitted to the broker · order has no attached stop; loss at stop is \
+                 unbounded; fast re-entry within 60 seconds of a filled stop"
+                    .to_string()
+            )
         );
         assert_eq!(
             notice(&order_event(
@@ -2063,7 +2112,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            notice(&order_event(Kind::Rejected, None, broker, "rejected")),
+            notice(&aeris_trading::OrderEvent {
+                note: Some(aeris_trading::OrderEventNote::VenueGaveNoReason),
+                ..order_event(Kind::Rejected, None, broker, "rejected")
+            }),
             Some((
                 ToastTone::Loss,
                 "Broker rejected an order".to_string(),

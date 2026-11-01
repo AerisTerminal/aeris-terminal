@@ -1,3 +1,4 @@
+use crate::language::LanguagePreference;
 use aeris_chart_integration::{
     ChartDrawingKind, ChartDrawingStamp, ChartIndicatorChrome, ChartType,
 };
@@ -364,6 +365,8 @@ pub struct ChartChromePreferences {
     pub drawing_context_toolbar_origin: Option<(f32, f32)>,
     /// The window edge glow on a new fill.
     pub fill_glow: ChromeVisibility,
+    /// The display-language choice; `System` follows the operating system.
+    pub language: LanguagePreference,
 }
 
 const STAMP_FAVORITE_PREFIX: &str = "stamp:";
@@ -574,6 +577,7 @@ impl Default for ChartChromePreferences {
             chart_trade_buttons: ChromeVisibility::Shown,
             drawing_context_toolbar_origin: None,
             fill_glow: ChromeVisibility::Shown,
+            language: LanguagePreference::System,
         }
     }
 }
@@ -610,6 +614,7 @@ impl ChartChromePreferences {
                 self.drawing_context_toolbar_origin,
             ),
             fill_glow_off: !self.fill_glow.shown(),
+            language: self.language.identifier().to_string(),
         }
     }
 
@@ -656,6 +661,7 @@ impl ChartChromePreferences {
         preferences.drawing_context_toolbar_origin =
             chrome_point_origin(state.drawing_context_toolbar_origin.as_ref());
         preferences.fill_glow = ChromeVisibility::from_shown(!state.fill_glow_off);
+        preferences.language = LanguagePreference::from_identifier(&state.language);
         preferences
     }
 }
@@ -986,6 +992,7 @@ mod tests {
             chart_trade_buttons: ChromeVisibility::Hidden,
             drawing_context_toolbar_origin: Some((640.0, 96.5)),
             fill_glow: ChromeVisibility::Shown,
+            language: crate::language::LanguagePreference::System,
         }
     }
 
@@ -1092,6 +1099,7 @@ mod tests {
                 chart_trade_buttons_visible: false,
                 drawing_context_toolbar_origin: Some(WorkspaceChromePoint { x: 640.0, y: 96.5 }),
                 fill_glow_off: false,
+                language: "system".to_string(),
             },
             "the document form keeps the legacy identifiers"
         );
@@ -1111,5 +1119,31 @@ mod tests {
             ChartChromePreferences::from_workspace_chrome(Some(&marked_line.to_workspace_chrome())),
             marked_line
         );
+    }
+
+    #[test]
+    fn language_preference_round_trips_and_unknown_identifiers_follow_the_system() {
+        use crate::language::LanguagePreference;
+        for preference in LanguagePreference::ALL {
+            let preferences = ChartChromePreferences {
+                language: preference,
+                ..ChartChromePreferences::default()
+            };
+            assert_eq!(
+                ChartChromePreferences::from_workspace_chrome(Some(
+                    &preferences.to_workspace_chrome()
+                ))
+                .language,
+                preference
+            );
+        }
+        for unknown in ["", "klingon"] {
+            let mut state = ChartChromePreferences::default().to_workspace_chrome();
+            state.language = unknown.to_string();
+            assert_eq!(
+                ChartChromePreferences::from_workspace_chrome(Some(&state)).language,
+                LanguagePreference::System
+            );
+        }
     }
 }
