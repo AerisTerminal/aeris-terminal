@@ -233,7 +233,7 @@ impl AerisChartView {
         if self.order_flow_settings.depth_heatmap.is_none() {
             return false;
         }
-        self.set_order_flow_settings(OrderFlowSettings {
+        self.edit_order_flow_settings(OrderFlowSettings {
             depth_heatmap: None,
             ..self.order_flow_settings
         })

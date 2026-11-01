@@ -71,6 +71,14 @@ impl AerisChartView {
                     host_events.extend(removal.host_event());
                 }
                 ChartInputEvent::IndicatorRemoved(binding) => self.indicator_removed(binding),
+                ChartInputEvent::VolumeProfileRemoved(id) => {
+                    self.volume_profile_removed(id);
+                    self.invalidate_series_layout();
+                    self.mark_user_state_changed();
+                }
+                ChartInputEvent::HistoryChanged => {
+                    host_events.extend(self.follow_history_changes());
+                }
                 ChartInputEvent::PanesResized => self.remember_pane_heights(),
                 ChartInputEvent::ReplayChanged => {
                     host_events.push(ChartHostEvent::ReplayChanged);

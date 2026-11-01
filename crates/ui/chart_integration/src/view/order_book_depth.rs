@@ -151,7 +151,7 @@ impl AerisChartView {
         if self.order_flow_settings.order_book_depth.is_none() {
             return false;
         }
-        self.set_order_flow_settings(OrderFlowSettings {
+        self.edit_order_flow_settings(OrderFlowSettings {
             order_book_depth: None,
             ..self.order_flow_settings
         })

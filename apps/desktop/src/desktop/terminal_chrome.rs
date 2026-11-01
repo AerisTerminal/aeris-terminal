@@ -575,16 +575,16 @@ pub(super) fn header_controls(
             state.controls.enabled(HeaderControls::INDICATOR),
             &state.theme,
         ))
-        .child(drawing_history_control(
+        .child(chart_history_control(
             app.clone(),
-            DrawingHistoryControl::Undo,
-            state.drawing_history,
+            ChartHistoryControl::Undo,
+            state.chart_history,
             &state.theme,
         ))
-        .child(drawing_history_control(
+        .child(chart_history_control(
             app.clone(),
-            DrawingHistoryControl::Redo,
-            state.drawing_history,
+            ChartHistoryControl::Redo,
+            state.chart_history,
             &state.theme,
         ))
         .child(super::bar_replay::bar_replay_header_control(
@@ -963,23 +963,23 @@ fn panel_toggle(
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum DrawingHistoryControl {
+pub(super) enum ChartHistoryControl {
     Undo,
     Redo,
 }
 
-impl DrawingHistoryControl {
+impl ChartHistoryControl {
     pub(super) const fn id(self) -> &'static str {
         match self {
-            Self::Undo => "drawing_undo",
-            Self::Redo => "drawing_redo",
+            Self::Undo => "chart_undo",
+            Self::Redo => "chart_redo",
         }
     }
 
     const fn tooltip(self) -> &'static str {
         match self {
-            Self::Undo => "Undo drawing edit",
-            Self::Redo => "Redo drawing edit",
+            Self::Undo => "Undo",
+            Self::Redo => "Redo",
         }
     }
 
@@ -990,7 +990,7 @@ impl DrawingHistoryControl {
         }
     }
 
-    pub(super) const fn enabled(self, history: DrawingHistoryState) -> bool {
+    pub(super) const fn enabled(self, history: ChartHistoryState) -> bool {
         match self {
             Self::Undo => history.can_undo,
             Self::Redo => history.can_redo,
@@ -999,18 +999,19 @@ impl DrawingHistoryControl {
 
     const fn step(self) -> fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>) {
         match self {
-            Self::Undo => WorkspaceSurface::undo_drawing,
-            Self::Redo => WorkspaceSurface::redo_drawing,
+            Self::Undo => WorkspaceSurface::undo_chart_edit,
+            Self::Redo => WorkspaceSurface::redo_chart_edit,
         }
     }
 }
 
-/// Steps the active chart's drawing history from the header toolbar. The control greys out when
-/// its side of the history is empty, so the header never offers an edit the chart cannot make.
-fn drawing_history_control(
+/// Steps the active chart's undo history (drawings and indicators) from the header toolbar. The
+/// control greys out when its side of the history is empty, so the header never offers an edit
+/// the chart cannot make.
+fn chart_history_control(
     app: Entity<WorkspaceSurface>,
-    control: DrawingHistoryControl,
-    history: DrawingHistoryState,
+    control: ChartHistoryControl,
+    history: ChartHistoryState,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let step = control.step();

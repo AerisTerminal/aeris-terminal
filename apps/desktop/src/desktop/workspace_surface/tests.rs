@@ -2315,4 +2315,69 @@ mod instrument_drawings {
         show(&surface, "A", cx);
         assert!(!study_retry_armed(&surface, cx));
     }
+
+    #[gpui::test]
+    fn undo_and_redo_follow_a_removed_runtime_study(cx: &mut TestAppContext) {
+        let study_id = StudyInstanceId::try_from_u64(9).expect("study id");
+        let original = default_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study");
+        let (surface, requests, cx) = open_surface(cx, instrument("A"), None);
+        show(&surface, "A", cx);
+        requests.try_iter().for_each(drop);
+        surface.update(cx, |surface, cx| {
+            surface.studies.activate(RuntimeStudyState {
+                study_id,
+                persisted: original.clone(),
+                resolved_chart_series: None,
+            });
+            surface.remove_runtime_study(study_id, cx);
+        });
+        assert!(requests.try_iter().any(|command| {
+            matches!(command, MarketWorkerCommand::RemoveStudy(removed) if removed == study_id)
+        }));
+        assert!(cx.read(|cx| {
+            surface
+                .read(cx)
+                .chart
+                .as_ref()
+                .is_some_and(|chart| chart.read(cx).can_undo())
+        }));
+
+        surface.update(cx, WorkspaceSurface::undo_chart_edit);
+        cx.run_until_parked();
+        assert_eq!(
+            queued_registrations(&requests),
+            1,
+            "undo registers the removed study again"
+        );
+        let restored = cx.read(|cx| {
+            surface
+                .read(cx)
+                .studies
+                .pending()
+                .values()
+                .map(|pending| pending.persisted.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(restored.len(), 1);
+        assert_ne!(
+            restored[0].local_id, original.local_id,
+            "the restored study gets a fresh identity"
+        );
+        assert_eq!(
+            WorkspaceChartStudyState {
+                local_id: original.local_id,
+                ..restored[0].clone()
+            },
+            original
+        );
+        assert_eq!(cx.read(|cx| surface.read(cx).studies.count()), 1);
+
+        surface.update(cx, WorkspaceSurface::redo_chart_edit);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read(|cx| surface.read(cx).studies.count()),
+            0,
+            "redo cancels the registration still in flight"
+        );
+    }
 }

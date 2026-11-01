@@ -282,7 +282,7 @@ use symbol_menu::{
 };
 #[cfg(test)]
 use terminal_chrome::{
-    CaptionPlatform, CaptionPointerOwner, DrawingHistoryControl, WindowMoveGestureTransition,
+    CaptionPlatform, CaptionPointerOwner, ChartHistoryControl, WindowMoveGestureTransition,
     caption_keyboard_activates, caption_pointer_owner, connection_presentation,
     window_move_gesture_transition,
 };
@@ -2836,32 +2836,47 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
         })
         .detach();
         cx.subscribe(chart, |app, _, event: &ChartHostEvent, cx| {
-            match event {
-                ChartHostEvent::Activate => {
-                    app.pending_pane_activate = PaneActivationRequest::Pending;
-                }
-                ChartHostEvent::ContextMenu(request) => {
-                    app.pending_chart_context_menu = Some(request.clone());
-                }
-                ChartHostEvent::Settings(request) => {
-                    if let Some(request) = legend_settings_request(*request) {
-                        app.pending_settings_request = Some(request);
-                    }
-                }
-                ChartHostEvent::RemoveStudy(study_id) => {
-                    if let Some(study_id) = StudyInstanceId::try_from_u64(*study_id) {
-                        app.pending_study_remove_request = Some(study_id);
-                    }
-                }
-                ChartHostEvent::ReplayChanged => {
-                    app.observe_bar_replay_change(cx);
-                    return;
-                }
-            }
-            cx.notify();
+            follow_chart_host_event(app, event, cx);
         })
         .detach();
     }
+}
+
+fn follow_chart_host_event(
+    app: &mut WorkspaceSurface,
+    event: &ChartHostEvent,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    match event {
+        ChartHostEvent::Activate => {
+            app.pending_pane_activate = PaneActivationRequest::Pending;
+        }
+        ChartHostEvent::ContextMenu(request) => {
+            app.pending_chart_context_menu = Some(request.clone());
+        }
+        ChartHostEvent::Settings(request) => {
+            if let Some(request) = legend_settings_request(*request) {
+                app.pending_settings_request = Some(request);
+            }
+        }
+        ChartHostEvent::RemoveStudy(study_id) => {
+            if let Some(study_id) = StudyInstanceId::try_from_u64(*study_id) {
+                app.pending_study_remove_request = Some(study_id);
+            }
+        }
+        ChartHostEvent::HostEdit { edit, undo } => {
+            app.follow_runtime_study_edit(*edit, *undo, cx);
+        }
+        ChartHostEvent::OrderFlowSettingsChanged => {
+            app.order_flow_settings_applied(cx);
+            return;
+        }
+        ChartHostEvent::ReplayChanged => {
+            app.observe_bar_replay_change(cx);
+            return;
+        }
+    }
+    cx.notify();
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2920,7 +2935,7 @@ struct HeaderState {
     now_unix_nanos: i64,
     account_label: Option<String>,
     pending: HeaderPendingState,
-    drawing_history: DrawingHistoryState,
+    chart_history: ChartHistoryState,
     bar_replay_phase: aeris_chart_integration::ChartReplayPhase,
     controls: HeaderControls,
     chart_link_group: u8,
@@ -2931,9 +2946,9 @@ struct HeaderState {
     instrument_scroll: ScrollHandle,
 }
 
-/// Whether the active chart's drawing history has an edit to step back to or forward to.
+/// Whether the active chart's undo history has an edit to step back to or forward to.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct DrawingHistoryState {
+struct ChartHistoryState {
     can_undo: bool,
     can_redo: bool,
 }

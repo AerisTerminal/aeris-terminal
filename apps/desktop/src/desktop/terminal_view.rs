@@ -41,7 +41,7 @@ fn active_header_state(
             symbol_selection: workspace.market_state.symbol_selection_pending,
             series: workspace.chart_pane_controller.selection_in_progress(),
         },
-        drawing_history: workspace.drawing_history_state(cx),
+        chart_history: workspace.chart_history_state(cx),
         bar_replay_phase: workspace.bar_replay_phase(cx),
         controls: HeaderControls::from_state(
             workspace.symbol_entry.input().is_some()

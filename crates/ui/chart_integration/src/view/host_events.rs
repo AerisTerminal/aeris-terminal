@@ -1,6 +1,7 @@
 //! Requests the chart sends to its host, and the selection removal that can raise one.
 
 use super::{AerisChartView, ChartSettingsRequest};
+use aeris_charts_engine::HostEditId;
 use gpui::{Context, Pixels, Point, SharedString};
 
 /// Distinguishes a pane-canvas right-click from a price-axis right-click.
@@ -30,6 +31,12 @@ pub enum ChartHostEvent {
     Settings(ChartSettingsRequest),
     /// The user removed a runtime-managed study, by its runtime study identity.
     RemoveStudy(u64),
+    /// Undo (`undo: true`) or redo reached an edit the host recorded through
+    /// [`AerisChartView::record_host_edit`]; read it through [`AerisChartView::host_edit`].
+    HostEdit { edit: HostEditId, undo: bool },
+    /// Undo or redo added or removed order-flow indicators; the host follows the new
+    /// [`AerisChartView::order_flow_settings`] as it does after setting them.
+    OrderFlowSettingsChanged,
     /// Bar replay's phase, clock, speed or step changed; read it through
     /// [`AerisChartView::bar_replay_state`].
     ReplayChanged,

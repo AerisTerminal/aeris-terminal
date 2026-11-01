@@ -586,44 +586,6 @@ impl AerisChartView {
         self.engine.clear_drawings();
         self.invalidate_series_frame();
     }
-
-    /// Returns whether a committed drawing edit can be reversed.
-    #[must_use]
-    pub fn can_undo_drawing(&self) -> bool {
-        self.engine.can_undo_drawing()
-    }
-
-    /// Returns whether a reversed drawing edit can be reapplied.
-    #[must_use]
-    pub fn can_redo_drawing(&self) -> bool {
-        self.engine.can_redo_drawing()
-    }
-
-    /// Reverses the newest committed drawing edit.
-    pub fn undo_drawing(&mut self) -> bool {
-        self.step_drawing_history(true)
-    }
-
-    /// Reapplies the newest reversed drawing edit.
-    pub fn redo_drawing(&mut self) -> bool {
-        self.step_drawing_history(false)
-    }
-
-    /// Steps the engine's chart-local drawing history. An in-flight gesture is settled first; the
-    /// armed toolbar tool stays armed.
-    fn step_drawing_history(&mut self, undo: bool) -> bool {
-        let _ = self.finish_text_edit();
-        self.engine.input_cancel();
-        let stepped = if undo {
-            self.engine.undo_drawing()
-        } else {
-            self.engine.redo_drawing()
-        };
-        if stepped {
-            self.invalidate_series_frame();
-        }
-        stepped
-    }
 }
 
 #[cfg(test)]

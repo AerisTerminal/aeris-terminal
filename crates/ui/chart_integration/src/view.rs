@@ -769,6 +769,26 @@ impl std::fmt::Display for OrderFlowApplyError {
 
 impl std::error::Error for OrderFlowApplyError {}
 
+/// Why order-flow settings were refused; the chart keeps its current settings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvalidOrderFlowSettings {
+    /// A fixed big-trades minimum volume is not finite and positive.
+    BigTradesMinimumVolume,
+    /// Order-book depth settings are out of range.
+    OrderBookDepth,
+}
+
+impl std::fmt::Display for InvalidOrderFlowSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::BigTradesMinimumVolume => "big-trades minimum volume must be finite and positive",
+            Self::OrderBookDepth => "order-book settings are out of range",
+        })
+    }
+}
+
+impl std::error::Error for InvalidOrderFlowSettings {}
+
 /// Aeris Charts-owned typed financial appearance, re-exported under the Terminal API name.
 pub type ChartAppearanceSettings = FinancialAppearance;
 /// The painted primary-series colors, in the hex form [`AerisChartView::series_colors`] returns.
@@ -989,6 +1009,9 @@ pub struct AerisChartView {
     /// profile and data-bound drawings read it.
     volume_series: u32,
     volume: Option<VolumeIndicator>,
+    /// Settings of removed volume indicators the undo history can bring back, by the binding
+    /// each had.
+    retired_volumes: std::collections::VecDeque<(u32, VolumeSettings)>,
     /// Engine handle of the visible-range volume profile drawn on the price series.
     volume_profile: Option<aeris_charts_engine::NativePrimitiveId>,
     asset_legend_title: String,
@@ -1109,6 +1132,7 @@ impl AerisChartView {
             quantity_divisor: 1.0,
             volume_series,
             volume: None,
+            retired_volumes: std::collections::VecDeque::new(),
             asset_legend_title: String::new(),
             provider_display_name: None,
             asset_symbol: String::new(),
@@ -1220,6 +1244,7 @@ impl AerisChartView {
             quantity_divisor: replay_quantity_divisor(replay),
             volume_series,
             volume: None,
+            retired_volumes: std::collections::VecDeque::new(),
             asset_legend_title: replay_legend_title(replay, None),
             provider_display_name: None,
             asset_symbol: replay.instrument().symbol.clone(),
@@ -2720,6 +2745,7 @@ pub use bar_replay::{ChartReplayCommand, ChartReplayError, ChartReplayState};
 mod builtin_indicators;
 pub use builtin_indicators::BuiltinIndicator;
 mod export;
+mod history;
 mod host_events;
 use host_events::SelectionRemoval;
 pub use host_events::{ChartContextKind, ChartContextRequest, ChartHostEvent};

@@ -92,12 +92,22 @@ impl AerisChartView {
         }
         states
     }
-    /// Recreates indicator instances captured from an earlier engine for this chart surface.
+    /// Recreates indicator instances captured from an earlier engine for this chart surface. A
+    /// restore is not an edit, so the chart's undo history starts over.
     ///
     /// # Errors
     ///
     /// Returns the first native indicator creation error.
     pub fn restore_indicator_states(
+        &mut self,
+        states: &[ChartIndicatorState],
+    ) -> Result<(), ChartIndicatorError> {
+        let restored = self.recreate_indicators(states);
+        self.clear_history();
+        restored
+    }
+
+    fn recreate_indicators(
         &mut self,
         states: &[ChartIndicatorState],
     ) -> Result<(), ChartIndicatorError> {
@@ -136,11 +146,28 @@ impl AerisChartView {
             || self.order_flow_settings.order_book_depth.is_some()
             || self.order_flow_settings.depth_heatmap.is_some()
     }
-    /// Removes every indicator. The product-owned price and volume series stay in place.
+    /// Removes every indicator as one undo step. The product-owned price and volume series stay
+    /// in place.
     pub fn clear_indicators(&mut self) -> bool {
+        self.engine.begin_history_group();
+        let cleared = self.remove_every_indicator();
+        self.engine.end_history_group();
+        if !cleared {
+            return false;
+        }
+        self.invalidate_series_layout();
+        self.mark_user_state_changed();
+        true
+    }
+
+    fn remove_every_indicator(&mut self) -> bool {
+        let volume = self.volume.as_ref().map(|volume| volume.columns);
         let mut cleared = self.engine.clear_indicator_bindings();
         // Clearing the bindings above already removed the volume outputs.
-        cleared |= self.volume.take().is_some();
+        if let Some(columns) = volume {
+            self.retire_volume(columns);
+            cleared = true;
+        }
         cleared |= self.remove_volume_profile();
         for study in [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta] {
             if self.has_order_flow_study(study) {
@@ -150,12 +177,7 @@ impl AerisChartView {
         cleared |= self.remove_big_trades();
         cleared |= self.remove_order_book_depth();
         cleared |= self.remove_depth_heatmap();
-        if !cleared {
-            return false;
-        }
-        self.invalidate_series_layout();
-        self.mark_user_state_changed();
-        true
+        cleared
     }
     pub(super) fn legend_rows(&self) -> Vec<LegendRow> {
         self.legend_rows_at(
@@ -412,14 +434,22 @@ impl AerisChartView {
     }
 
     /// Replaces the volume indicator with one Aeris Charts builds from `settings` and returns its
-    /// outputs. The engine computes, places and draws the columns and their average; the host
-    /// supplies only the product volume weights and the durable settings.
+    /// outputs, as one undo step. The engine computes, places and draws the columns and their
+    /// average; the host supplies only the product volume weights and the durable settings.
     fn install_volume(&mut self, settings: VolumeSettings, visible: bool) -> Option<Vec<u32>> {
         if !VolumeSettings::AVERAGE_LENGTHS.contains(&settings.average.length) {
             return None;
         }
-        if let Some(previous) = self.volume.take() {
-            let _ = self.engine.remove_indicator_binding(previous.columns);
+        self.engine.begin_history_group();
+        let outputs = self.replace_volume(settings, visible);
+        self.engine.end_history_group();
+        outputs
+    }
+
+    fn replace_volume(&mut self, settings: VolumeSettings, visible: bool) -> Option<Vec<u32>> {
+        if let Some(previous) = self.volume.as_ref().map(|volume| volume.columns) {
+            self.retire_volume(previous);
+            let _ = self.engine.remove_indicator_binding(previous);
         }
         // The weights are both the source and the volume input, so the columns follow traded
         // volume even where a footprint leaves the price row as whitespace.
@@ -490,22 +520,18 @@ impl AerisChartView {
     /// Records an indicator the chart removed itself, such as one deleted from the keyboard, so
     /// it is not restored on the next instrument or interval.
     pub(super) fn indicator_removed(&mut self, binding: u32) {
-        if self
-            .volume
-            .as_ref()
-            .is_some_and(|volume| volume.columns == binding)
-        {
-            self.volume = None;
-        }
+        self.retire_volume(binding);
         self.invalidate_series_layout();
         self.mark_user_state_changed();
     }
 
     /// Removes the volume indicator; the product volume weights stay for the other readers.
     pub(super) fn remove_volume(&mut self) -> bool {
-        self.volume
-            .take()
-            .is_some_and(|volume| self.engine.remove_indicator_binding(volume.columns))
+        let Some(columns) = self.volume.as_ref().map(|volume| volume.columns) else {
+            return false;
+        };
+        self.retire_volume(columns);
+        self.engine.remove_indicator_binding(columns)
     }
 
     /// Indicator name-chip chrome for every indicator on this chart, owned by Aeris Charts.

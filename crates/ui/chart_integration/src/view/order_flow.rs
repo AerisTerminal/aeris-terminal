@@ -1,8 +1,8 @@
 use super::{
     AerisChartView, BigTradesFilter, BigTradesSettings, CumulativeDeltaReset,
-    CumulativeDeltaSettings, FootprintDisplayMode, OrderFlowAggregation, OrderFlowApplyError,
-    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade,
-    chart_color_hex,
+    CumulativeDeltaSettings, FootprintDisplayMode, InvalidOrderFlowSettings, OrderFlowAggregation,
+    OrderFlowApplyError, OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange,
+    OrderFlowTrade, chart_color_hex,
 };
 use aeris_design_system::AerisTheme;
 use num_traits::ToPrimitive;
@@ -61,21 +61,25 @@ impl AerisChartView {
     /// place, so its footprint history survives row, display, study, and big-trades changes.
     ///
     /// # Errors
-    /// Returns an error when a fixed big-trades minimum volume is not finite and positive.
-    pub fn set_order_flow_settings(&mut self, settings: OrderFlowSettings) -> Result<bool, String> {
+    /// Returns an error when a fixed big-trades minimum volume is not finite and positive or the
+    /// order-book depth settings are out of range.
+    pub fn set_order_flow_settings(
+        &mut self,
+        settings: OrderFlowSettings,
+    ) -> Result<bool, InvalidOrderFlowSettings> {
         if let Some(BigTradesSettings {
             filter: BigTradesFilter::Fixed { minimum_volume },
             ..
         }) = settings.big_trades
             && !(minimum_volume.is_finite() && minimum_volume > 0.0)
         {
-            return Err("big-trades minimum volume must be finite and positive".to_string());
+            return Err(InvalidOrderFlowSettings::BigTradesMinimumVolume);
         }
         if settings
             .order_book_depth
             .is_some_and(|book| !book.is_valid())
         {
-            return Err("order-book settings are out of range".to_string());
+            return Err(InvalidOrderFlowSettings::OrderBookDepth);
         }
         if self.order_flow_settings == settings {
             return Ok(false);
@@ -431,7 +435,7 @@ impl AerisChartView {
             OrderFlowStudy::CumulativeDelta => settings.show_cumulative_delta = false,
             OrderFlowStudy::Delta => settings.show_delta_histogram = false,
         }
-        self.set_order_flow_settings(settings).unwrap_or(false)
+        self.edit_order_flow_settings(settings).unwrap_or(false)
     }
 
     /// Removes the big-trades indicator through the durable order-flow settings owner, so the
@@ -440,7 +444,7 @@ impl AerisChartView {
         if self.order_flow_settings.big_trades.is_none() {
             return false;
         }
-        self.set_order_flow_settings(OrderFlowSettings {
+        self.edit_order_flow_settings(OrderFlowSettings {
             big_trades: None,
             ..self.order_flow_settings
         })

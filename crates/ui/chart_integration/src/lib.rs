@@ -37,7 +37,7 @@ pub use aeris_charts_engine::{
 };
 pub use aeris_charts_engine::{
     AppearanceColor as ChartAppearanceColor, FinancialThemeColors as ChartThemeColors,
-    IndicatorChromeOptions as ChartIndicatorChrome,
+    HostEditId as ChartHostEditId, IndicatorChromeOptions as ChartIndicatorChrome,
 };
 pub use aeris_charts_engine::{
     DrawingAnchorDescriptor as ChartDrawingAnchorDescriptor, DrawingId as ChartDrawingId,
@@ -68,10 +68,10 @@ pub use view::{
     ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeDefaults,
     ChartType, CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle,
     DeltaHistogramSettings, DepthHeatmapSettings, DrawingsLockSummary, FootprintDisplayMode,
-    OrderBookDepthSettings, OrderFlowAggregation, OrderFlowApplyError, OrderFlowDefaultColors,
-    OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade, PriceAxisMenuAction,
-    PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings, VolumeDefaultColors,
-    VolumePlacement, VolumeSettings, chart_color_hex, drawing_color_hex,
+    InvalidOrderFlowSettings, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowApplyError,
+    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade,
+    PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings,
+    VolumeDefaultColors, VolumePlacement, VolumeSettings, chart_color_hex, drawing_color_hex,
 };
 pub use view::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};
 pub use workspace::{AerisChartWorkspace, ChartSplitDirection, ChartWorkspaceLayout};

@@ -5548,6 +5548,19 @@ fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
     assert!(!key(&mut chart, ChartKey::Backspace));
 }
 
+fn step_chart_history(chart: &mut AerisChartView, undo: bool) -> (bool, Vec<ChartHostEvent>) {
+    let stepped = chart.apply_history_step(undo);
+    (stepped, chart.process_input_events())
+}
+
+fn undo_chart(chart: &mut AerisChartView) -> bool {
+    step_chart_history(chart, true).0
+}
+
+fn redo_chart(chart: &mut AerisChartView) -> bool {
+    step_chart_history(chart, false).0
+}
+
 #[test]
 fn clearing_every_drawing_kind_keeps_frames_and_history_working() {
     let mut chart = interactive_chart();
@@ -5572,7 +5585,7 @@ fn clearing_every_drawing_kind_keeps_frames_and_history_working() {
     std::hint::black_box(chart.engine.build_frame());
     move_to(&mut chart, pointer(320.0, 210.0), false);
     std::hint::black_box(chart.engine.build_frame());
-    assert!(chart.undo_drawing());
+    assert!(undo_chart(&mut chart));
     assert!(chart.drawing_count() > 0);
     std::hint::black_box(chart.engine.build_frame());
 }
@@ -5580,9 +5593,9 @@ fn clearing_every_drawing_kind_keeps_frames_and_history_working() {
 #[test]
 fn drawing_history_steps_back_and_forward_and_keeps_the_armed_tool() {
     let mut chart = interactive_chart();
-    assert!(!chart.can_undo_drawing());
-    assert!(!chart.can_redo_drawing());
-    assert!(!chart.undo_drawing());
+    assert!(!chart.can_undo());
+    assert!(!chart.can_redo());
+    assert!(!undo_chart(&mut chart));
 
     let revision = chart.user_state_revision();
     chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
@@ -5590,7 +5603,7 @@ fn drawing_history_steps_back_and_forward_and_keeps_the_armed_tool() {
     chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
     click(&mut chart, 300.0, 240.0);
     assert_eq!(chart.drawing_count(), 2);
-    assert!(chart.can_undo_drawing());
+    assert!(chart.can_undo());
     assert!(
         chart.user_state_revision() > revision,
         "committed drawings dirty durable state"
@@ -5598,20 +5611,177 @@ fn drawing_history_steps_back_and_forward_and_keeps_the_armed_tool() {
 
     chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
     let revision = chart.user_state_revision();
-    assert!(chart.undo_drawing());
+    assert!(undo_chart(&mut chart));
     assert!(chart.user_state_revision() > revision);
     assert_eq!(chart.drawing_count(), 1);
-    assert!(chart.can_redo_drawing());
+    assert!(chart.can_redo());
     assert_eq!(chart.drawing_tool(), Some(DrawingKind::HorizontalLine));
     assert!(
         !chart.engine.drawing_create_active(),
         "stepping history must keep the tool selected without a pre-click handle"
     );
 
-    assert!(chart.redo_drawing());
+    assert!(redo_chart(&mut chart));
     assert_eq!(chart.drawing_count(), 2);
-    assert!(!chart.can_redo_drawing());
-    assert!(!chart.redo_drawing());
+    assert!(!chart.can_redo());
+    assert!(!redo_chart(&mut chart));
+}
+
+fn has_legend_row(chart: &AerisChartView, item: LegendItem) -> bool {
+    chart.legend_rows().iter().any(|row| row.item == item)
+}
+
+fn indicator_rows(chart: &AerisChartView) -> usize {
+    chart
+        .legend_rows()
+        .iter()
+        .filter(|row| matches!(row.item, LegendItem::Indicator(_)))
+        .count()
+}
+
+#[test]
+fn removed_indicators_come_back_on_undo_and_leave_again_on_redo() {
+    let mut chart = interactive_chart();
+    let sma = chart
+        .add_indicator(ChartIndicator::Sma)
+        .expect("SMA is created")[0];
+    assert!(chart.can_undo());
+    assert!(chart.remove_legend_indicator(LegendItem::Indicator(sma)));
+    assert_eq!(indicator_rows(&chart), 0);
+
+    let revision = chart.user_state_revision();
+    assert!(undo_chart(&mut chart));
+    assert_eq!(indicator_rows(&chart), 1, "undo brings the SMA back");
+    assert!(chart.user_state_revision() > revision);
+    assert!(chart.can_redo());
+
+    assert!(redo_chart(&mut chart));
+    assert_eq!(indicator_rows(&chart), 0, "redo removes it again");
+    assert!(undo_chart(&mut chart));
+    assert!(undo_chart(&mut chart));
+    assert_eq!(
+        indicator_rows(&chart),
+        0,
+        "the first undo step removes the added SMA"
+    );
+    assert!(!chart.can_undo());
+}
+
+#[test]
+fn undoing_a_volume_removal_restores_its_settings_and_pane() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is created");
+    let settings = custom_volume_settings();
+    assert!(chart.set_volume_settings(settings.clone()));
+    let panes = chart.engine.panes.len();
+
+    assert!(chart.remove_legend_indicator(LegendItem::Volume));
+    assert_eq!(chart.volume_settings(), None);
+    assert!(undo_chart(&mut chart));
+    assert_eq!(chart.volume_settings(), Some(settings.clone()));
+    assert!(has_legend_row(&chart, LegendItem::Volume));
+    assert_eq!(chart.engine.panes.len(), panes);
+    assert_eq!(volume_binding(&chart).outputs.len(), 2);
+
+    // The settings change is its own step: undo returns the defaults, redo the custom ones.
+    assert!(undo_chart(&mut chart));
+    assert_eq!(chart.volume_settings(), Some(VolumeSettings::default()));
+    assert!(redo_chart(&mut chart));
+    assert_eq!(chart.volume_settings(), Some(settings));
+    assert!(redo_chart(&mut chart));
+    assert_eq!(chart.volume_settings(), None);
+    assert!(!has_legend_row(&chart, LegendItem::Volume));
+}
+
+#[test]
+fn undoing_a_volume_profile_removal_tracks_the_restored_profile() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::VolumeProfile)
+        .expect("volume profile binds to price and volume");
+    assert!(chart.remove_legend_indicator(LegendItem::VolumeProfile));
+    assert!(!has_legend_row(&chart, LegendItem::VolumeProfile));
+
+    assert!(undo_chart(&mut chart));
+    assert!(has_legend_row(&chart, LegendItem::VolumeProfile));
+    assert!(
+        chart.add_indicator(ChartIndicator::VolumeProfile).is_err(),
+        "the restored profile is the chart's one profile"
+    );
+    assert!(chart.remove_legend_indicator(LegendItem::VolumeProfile));
+    assert!(!has_legend_row(&chart, LegendItem::VolumeProfile));
+}
+
+#[test]
+fn order_flow_indicator_removal_is_undone_through_the_durable_settings() {
+    let (mut chart, _) = candle_chart_with_big_trades(BigTradesSettings {
+        size: BigTradesSize::Large,
+        ..BigTradesSettings::default()
+    });
+    assert!(chart.remove_legend_indicator(LegendItem::BigTrades));
+    assert_eq!(chart.order_flow_settings().big_trades, None);
+
+    let (stepped, events) = step_chart_history(&mut chart, true);
+    assert!(stepped);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ChartHostEvent::OrderFlowSettingsChanged)),
+        "the host follows the restored order-flow settings"
+    );
+    assert_eq!(
+        chart.order_flow_settings().big_trades.map(|big| big.size),
+        Some(BigTradesSize::Large)
+    );
+    apply_two_print_tape(&mut chart);
+    assert!(chart.drawn_big_trades().is_some());
+
+    assert!(redo_chart(&mut chart));
+    assert_eq!(chart.order_flow_settings().big_trades, None);
+    apply_two_print_tape(&mut chart);
+    assert_eq!(chart.drawn_big_trades(), None);
+}
+
+#[test]
+fn clearing_indicators_is_one_undo_step() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is shown");
+    chart
+        .add_indicator(ChartIndicator::Macd)
+        .expect("MACD is created");
+    chart
+        .add_indicator(ChartIndicator::VolumeProfile)
+        .expect("volume profile is created");
+    let states = chart.indicator_states();
+
+    assert!(chart.clear_indicators());
+    assert!(!chart.has_indicators());
+    assert!(undo_chart(&mut chart));
+    assert_eq!(chart.indicator_states(), states);
+    assert!(redo_chart(&mut chart));
+    assert!(!chart.has_indicators());
+}
+
+#[test]
+fn restored_indicators_start_a_fresh_history() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is shown");
+    chart
+        .add_indicator(ChartIndicator::Sma)
+        .expect("SMA is created");
+    let mut restored = interactive_chart();
+    restored
+        .restore_indicator_states(&chart.indicator_states())
+        .expect("saved indicators restore");
+    assert_eq!(restored.indicator_states(), chart.indicator_states());
+    assert!(!restored.can_undo());
+    assert!(!restored.can_redo());
 }
 
 #[test]

@@ -4933,28 +4933,28 @@ fn chrome_menus_never_exceed_a_tiny_viewport() {
 
 #[test]
 fn header_history_controls_gate_on_their_own_half_of_the_stack() {
-    use super::{DrawingHistoryControl, DrawingHistoryState};
+    use super::{ChartHistoryControl, ChartHistoryState};
 
-    let empty = DrawingHistoryState::default();
-    assert!(!DrawingHistoryControl::Undo.enabled(empty));
-    assert!(!DrawingHistoryControl::Redo.enabled(empty));
+    let empty = ChartHistoryState::default();
+    assert!(!ChartHistoryControl::Undo.enabled(empty));
+    assert!(!ChartHistoryControl::Redo.enabled(empty));
 
-    let undo_only = DrawingHistoryState {
+    let undo_only = ChartHistoryState {
         can_undo: true,
         can_redo: false,
     };
-    assert!(DrawingHistoryControl::Undo.enabled(undo_only));
+    assert!(ChartHistoryControl::Undo.enabled(undo_only));
     assert!(
-        !DrawingHistoryControl::Redo.enabled(undo_only),
+        !ChartHistoryControl::Redo.enabled(undo_only),
         "redo must stay disabled while nothing has been reversed"
     );
 
     assert_ne!(
-        DrawingHistoryControl::Undo.id(),
-        DrawingHistoryControl::Redo.id()
+        ChartHistoryControl::Undo.id(),
+        ChartHistoryControl::Redo.id()
     );
-    assert_eq!(DrawingHistoryControl::Undo.icon(), super::HugeIcon::Undo);
-    assert_eq!(DrawingHistoryControl::Redo.icon(), super::HugeIcon::Redo);
+    assert_eq!(ChartHistoryControl::Undo.icon(), super::HugeIcon::Undo);
+    assert_eq!(ChartHistoryControl::Redo.icon(), super::HugeIcon::Redo);
 }
 
 #[test]

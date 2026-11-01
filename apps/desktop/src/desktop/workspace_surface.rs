@@ -5552,6 +5552,20 @@ impl WorkspaceSurface {
         true
     }
 
+    /// Follows order-flow settings the chart now holds: persists them and feeds the tape and
+    /// order book the indicators they show.
+    pub(super) fn order_flow_settings_applied(&mut self, cx: &mut Context<Self>) {
+        Self::clear_indicator_failure("order_flow", cx);
+        self.retained_chart_presentation.rejected_saved.order_flow = false;
+        self.persistence.mark_dirty();
+        if self.order_flow.tape().is_some() {
+            self.apply_trade_tape_to_chart(TapeApply::Reset, cx);
+        }
+        self.sync_order_book_demand(cx);
+        self.apply_order_book_to_chart(cx);
+        cx.notify();
+    }
+
     /// Applies `settings` through the chart, returning whether the chart holds them now.
     pub(super) fn set_chart_order_flow_settings(
         &mut self,
@@ -5562,22 +5576,14 @@ impl WorkspaceSurface {
             return false;
         };
         match chart.update(cx, |chart, chart_cx| {
-            let changed = chart.set_order_flow_settings(settings)?;
+            let changed = chart.edit_order_flow_settings(settings)?;
             if changed {
                 chart_cx.notify();
             }
-            Ok::<_, String>(changed)
+            Ok::<_, aeris_chart_integration::InvalidOrderFlowSettings>(changed)
         }) {
             Ok(true) => {
-                Self::clear_indicator_failure("order_flow", cx);
-                self.retained_chart_presentation.rejected_saved.order_flow = false;
-                self.persistence.mark_dirty();
-                if self.order_flow.tape().is_some() {
-                    self.apply_trade_tape_to_chart(TapeApply::Reset, cx);
-                }
-                self.sync_order_book_demand(cx);
-                self.apply_order_book_to_chart(cx);
-                cx.notify();
+                self.order_flow_settings_applied(cx);
                 true
             }
             Ok(false) => true,
@@ -6677,26 +6683,22 @@ impl WorkspaceSurface {
         }
     }
 
-    pub(super) fn undo_drawing(&mut self, cx: &mut Context<Self>) {
-        self.step_drawing_history(true, cx);
+    pub(super) fn undo_chart_edit(&mut self, cx: &mut Context<Self>) {
+        self.step_chart_history(true, cx);
     }
 
-    pub(super) fn redo_drawing(&mut self, cx: &mut Context<Self>) {
-        self.step_drawing_history(false, cx);
+    pub(super) fn redo_chart_edit(&mut self, cx: &mut Context<Self>) {
+        self.step_chart_history(false, cx);
     }
 
-    fn step_drawing_history(&mut self, undo: bool, cx: &mut Context<Self>) {
+    fn step_chart_history(&mut self, undo: bool, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             let stepped = chart.update(cx, |chart, chart_cx| {
-                let stepped = if undo {
-                    chart.undo_drawing()
+                if undo {
+                    chart.undo(chart_cx)
                 } else {
-                    chart.redo_drawing()
-                };
-                if stepped {
-                    chart_cx.notify();
+                    chart.redo(chart_cx)
                 }
-                stepped
             });
             if stepped {
                 cx.notify();
@@ -7067,27 +7069,33 @@ impl WorkspaceSurface {
             );
             return;
         }
-        match self.market_worker.try_remove_study(study_id) {
-            Ok(()) => {
-                self.studies.mark_removing(study_id);
-                if self
-                    .study_settings_dialog()
-                    .is_some_and(|dialog| dialog.study_id == study_id)
-                {
-                    self.indicator_settings_dialog = None;
-                }
-                Self::clear_indicator_failure("study", cx);
-            }
-            Err(_) => {
-                Self::post_indicator_failure(
-                    "study",
-                    "Study unavailable",
-                    "The study could not be removed. Try again.",
-                    cx,
-                );
-            }
+        let removed = self.shown_study_states(Some(study_id), cx);
+        if self.request_study_removal(study_id, cx) {
+            Self::clear_indicator_failure("study", cx);
+            self.record_runtime_study_edit(false, removed, cx);
         }
         cx.notify();
+    }
+
+    /// Queues the removal of an active study and closes its settings; a refusal is reported.
+    fn request_study_removal(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) -> bool {
+        if self.market_worker.try_remove_study(study_id).is_err() {
+            Self::post_indicator_failure(
+                "study",
+                "Study unavailable",
+                "The study could not be removed. Try again.",
+                cx,
+            );
+            return false;
+        }
+        self.studies.mark_removing(study_id);
+        if self
+            .study_settings_dialog()
+            .is_some_and(|dialog| dialog.study_id == study_id)
+        {
+            self.indicator_settings_dialog = None;
+        }
+        true
     }
 
     pub(super) fn set_study_setting_boolean(
@@ -7716,7 +7724,12 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    /// Removes every runtime study and chart indicator as one undo step.
     pub(super) fn clear_indicators(&mut self, cx: &mut Context<Self>) {
+        let shown = self.shown_study_states(None, cx);
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, _| chart.begin_history_group());
+        }
         for study_id in self.studies.removable_ids() {
             match self.market_worker.try_remove_study(study_id) {
                 Ok(()) => {
@@ -7733,11 +7746,18 @@ impl WorkspaceSurface {
             }
         }
         let unregistered_removed = self.studies.discard_unregistered();
+        let still_shown = self.studies.shown_local_ids();
+        let removed = shown
+            .into_iter()
+            .filter(|study| !still_shown.contains(&study.local_id))
+            .collect();
+        self.record_runtime_study_edit(false, removed, cx);
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
                 if chart.clear_indicators() {
                     chart_cx.notify();
                 }
+                chart.end_history_group();
             });
         }
         if unregistered_removed {
@@ -7784,7 +7804,7 @@ impl WorkspaceSurface {
                 return false;
             };
             let state = PendingRuntimeStudyState {
-                persisted,
+                persisted: persisted.clone(),
                 resolved_chart_series: None,
                 remove_on_registration: false,
                 persist_on_registration: true,
@@ -7794,6 +7814,7 @@ impl WorkspaceSurface {
                 Self::post_study_failure("The study could not be queued. Try again.", cx);
                 return false;
             }
+            self.record_runtime_study_edit(true, vec![persisted], cx);
             Self::clear_indicator_failure("study", cx);
             self.persistence.mark_dirty();
             cx.notify();
@@ -7819,14 +7840,14 @@ impl WorkspaceSurface {
     }
 
     /// Reports what the header's undo and redo controls may offer for the active chart.
-    pub(super) fn drawing_history_state(&self, cx: &App) -> DrawingHistoryState {
+    pub(super) fn chart_history_state(&self, cx: &App) -> ChartHistoryState {
         self.chart
             .as_ref()
-            .map_or_else(DrawingHistoryState::default, |chart| {
+            .map_or_else(ChartHistoryState::default, |chart| {
                 let chart = chart.read(cx);
-                DrawingHistoryState {
-                    can_undo: chart.can_undo_drawing(),
-                    can_redo: chart.can_redo_drawing(),
+                ChartHistoryState {
+                    can_undo: chart.can_undo(),
+                    can_redo: chart.can_redo(),
                 }
             })
     }
@@ -7839,6 +7860,8 @@ impl WorkspaceSurface {
             })
     }
 }
+
+mod study_history;
 
 #[cfg(test)]
 mod tests;

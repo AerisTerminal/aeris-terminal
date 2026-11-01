@@ -648,7 +648,8 @@ Chart behavior is owned by Aeris Charts, never re-implemented here:
   cursor arbitration, key bindings, drawing-tool mirrors, host-side drawing state (locks, selection,
   creation), brush styling, or other engine-owned state to Terminal. `tools/naming_check` rejects the
   engine's low-level interaction primitives in this crate.
-- Chart requests to the host (pane activation, context menu, settings, study removal) leave
+- Chart requests to the host (pane activation, context menu, settings, study removal, undo and
+  redo of edits the host recorded in the chart's one engine-owned history) leave
   `AerisChartView` as `ChartHostEvent`s (`view/host_events.rs`) that the desktop subscribes to per
   chart. `chart_host_requests_are_emitted_events_not_pending_polls` rejects chart-side `pending_*`
   request fields and `take_*_request` drains in chart integration and desktop production source.

@@ -164,6 +164,105 @@ impl StudiesController {
         persisted
     }
 
+    /// Local identities of the studies the trader still sees, as [`Self::count`] counts them.
+    pub(super) fn shown_local_ids(&self) -> HashSet<u64> {
+        self.active
+            .iter()
+            .filter(|state| {
+                !self.removing.contains(&state.study_id)
+                    && !self.automatic_removals.contains(&state.study_id)
+            })
+            .map(|state| &state.persisted)
+            .chain(
+                self.pending
+                    .values()
+                    .filter(|state| !state.remove_on_registration)
+                    .map(|state| &state.persisted),
+            )
+            .chain(self.deferred.iter().map(|state| &state.persisted))
+            .map(|persisted| persisted.local_id)
+            .collect()
+    }
+
+    /// The durable states of the studies the trader still sees, in local-identity order.
+    pub(super) fn shown_persisted_states(
+        &self,
+        visible: impl FnMut(StudyInstanceId) -> Option<bool>,
+    ) -> Vec<WorkspaceChartStudyState> {
+        let shown = self.shown_local_ids();
+        let mut states = self.persisted_states(visible);
+        states.retain(|state| shown.contains(&state.local_id));
+        states
+    }
+
+    /// The durable states of an active study and of every shown study reading its outputs,
+    /// directly or through another: what removing the study takes off the chart.
+    pub(super) fn persisted_subtree(
+        &self,
+        study_id: StudyInstanceId,
+        visible: impl FnMut(StudyInstanceId) -> Option<bool>,
+    ) -> Vec<WorkspaceChartStudyState> {
+        let Some(root) = self
+            .active_study(study_id)
+            .map(|state| state.persisted.local_id)
+        else {
+            return Vec::new();
+        };
+        let mut states = self.shown_persisted_states(visible);
+        let mut subtree = HashSet::from([root]);
+        loop {
+            let previous_len = subtree.len();
+            for state in &states {
+                if reads_study_outputs(state, &subtree) {
+                    subtree.insert(state.local_id);
+                }
+            }
+            if subtree.len() == previous_len {
+                break;
+            }
+        }
+        states.retain(|state| subtree.contains(&state.local_id));
+        states
+    }
+
+    /// Active studies with these local identities and no removal in flight.
+    pub(super) fn removable_ids_for(&self, local_ids: &HashSet<u64>) -> Vec<StudyInstanceId> {
+        self.active
+            .iter()
+            .filter(|state| {
+                local_ids.contains(&state.persisted.local_id)
+                    && !self.removing.contains(&state.study_id)
+                    && !self.automatic_removals.contains(&state.study_id)
+            })
+            .map(|state| state.study_id)
+            .collect()
+    }
+
+    /// Cancels the pending registrations and drops the deferred studies with these local
+    /// identities. Returns whether a study the trader still saw was discarded.
+    pub(super) fn cancel_unregistered(&mut self, local_ids: &HashSet<u64>) -> bool {
+        let mut changed = false;
+        for pending in self.pending.values_mut() {
+            if local_ids.contains(&pending.persisted.local_id) && !pending.remove_on_registration {
+                pending.remove_on_registration = true;
+                changed = true;
+            }
+        }
+        let previous_len = self.deferred.len();
+        self.deferred
+            .retain(|state| !local_ids.contains(&state.persisted.local_id));
+        changed || self.deferred.len() != previous_len
+    }
+
+    /// Queues studies brought back by the chart's undo history for registration after every
+    /// deferred one, so a study registers only once the studies it reads are registered.
+    pub(super) fn defer_restored(
+        &mut self,
+        states: impl IntoIterator<Item = PendingRuntimeStudyState>,
+    ) {
+        self.deferred.extend(states);
+    }
+
     /// Adopts the chart's visibility of each active study it reports.
     pub(super) fn retain_visibility(
         &mut self,
@@ -466,12 +565,7 @@ impl StudiesController {
         loop {
             let previous_len = removed_local_ids.len();
             for state in self.pending.values().chain(self.deferred.iter()) {
-                if state.persisted.dependencies.iter().any(|dependency| {
-                    WorkspaceStudyDependencyKind::try_from(dependency.kind).is_ok_and(|kind| {
-                        kind == WorkspaceStudyDependencyKind::StudyOutput
-                            && removed_local_ids.contains(&dependency.study_local_id)
-                    })
-                }) {
+                if reads_study_outputs(&state.persisted, &removed_local_ids) {
                     removed_local_ids.insert(state.persisted.local_id);
                 }
             }
@@ -598,6 +692,16 @@ impl StudiesController {
     pub(super) fn is_automatic_removal(&self, study_id: StudyInstanceId) -> bool {
         self.automatic_removals.contains(&study_id)
     }
+}
+
+/// Whether `state` reads an output of a study with one of `local_ids`.
+fn reads_study_outputs(state: &WorkspaceChartStudyState, local_ids: &HashSet<u64>) -> bool {
+    state.dependencies.iter().any(|dependency| {
+        WorkspaceStudyDependencyKind::try_from(dependency.kind).is_ok_and(|kind| {
+            kind == WorkspaceStudyDependencyKind::StudyOutput
+                && local_ids.contains(&dependency.study_local_id)
+        })
+    })
 }
 
 #[cfg(test)]
