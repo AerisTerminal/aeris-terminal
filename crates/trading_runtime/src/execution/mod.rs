@@ -113,7 +113,7 @@ impl TradingCore {
             .ok_or_else(|| "order client identifier is not registered".to_string())?;
         match self.route(&order.account_id)? {
             VenueRoute::Simulated => {}
-            VenueRoute::BrokerDemo => return self.cancel_broker_order(order),
+            VenueRoute::Broker => return self.cancel_broker_order(order),
         }
         if !order.status.is_open() {
             return Ok(order);
@@ -481,7 +481,7 @@ impl TradingCore {
             .ok_or_else(|| "trading account is not registered".to_string())?;
         match VenueRoute::from_account(account)? {
             VenueRoute::Simulated => {}
-            VenueRoute::BrokerDemo => return self.modify_broker_order(order, &command),
+            VenueRoute::Broker => return self.modify_broker_order(order, &command),
         }
         command.provenance.venue_id.clone_from(&account.venue_id);
         if !matches!(
@@ -581,7 +581,7 @@ impl TradingCore {
         if let Some(account_id) = account_id {
             self.route(account_id)?;
         }
-        // Globally, accounts Aeris cannot trade (data-only live accounts) are skipped.
+        // Globally, accounts Aeris cannot trade (those of a retired venue) are skipped.
         let open_orders = if let Some(account_id) = account_id {
             self.state.orders.open_for_account(account_id)
         } else {

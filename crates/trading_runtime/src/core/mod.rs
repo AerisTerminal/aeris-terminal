@@ -97,9 +97,7 @@ pub(crate) const REPLY_CAPACITY: usize = 1;
 pub(crate) const MAXIMUM_OPEN_ORDERS: usize = 4_096;
 pub(crate) const MAXIMUM_COPY_DISPATCHES: usize = 128;
 pub(crate) const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
-pub(crate) const LIVE_TRADING_DISABLED: &str =
-    "broker live accounts are data-only; trading is disabled";
-pub(crate) const DEMO_VENUE_UNAVAILABLE: &str = "broker demo venue is not connected";
+pub(crate) const BROKER_VENUE_UNAVAILABLE: &str = "broker venue is not connected";
 pub(crate) const VENUE_UNSUPPORTED: &str = "trading account venue is not supported";
 pub(crate) const BROKER_PNL_UNAVAILABLE: &str =
     "the broker account is unreachable, so its open P&L for the loss rules is unknown";
@@ -112,20 +110,23 @@ pub(crate) type Reply<T> = SyncSender<Result<T, String>>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VenueRoute {
     Simulated,
-    BrokerDemo,
+    /// The broker venue relay, for demo and live broker accounts alike.
+    Broker,
 }
 
 impl VenueRoute {
-    /// Rejects live accounts before a trading command can reach any venue.
+    /// Resolves the venue an account trades on before a trading command can reach it.
     ///
     /// # Errors
-    /// Returns an error for invalid account routing or a data-only live account.
+    /// Returns an error for invalid account routing or an account of a venue this build no
+    /// longer routes.
     pub fn from_account(account: &TradingAccount) -> Result<Self, String> {
         account.validate().map_err(|error| error.to_string())?;
         match (account.venue_id.as_str(), account.environment) {
             ("aeris-sim", AccountEnvironment::Simulated) => Ok(Self::Simulated),
-            (BROKER_VENUE_ID, AccountEnvironment::Demo) => Ok(Self::BrokerDemo),
-            (BROKER_VENUE_ID, AccountEnvironment::Live) => Err(LIVE_TRADING_DISABLED.into()),
+            (BROKER_VENUE_ID, AccountEnvironment::Demo | AccountEnvironment::Live) => {
+                Ok(Self::Broker)
+            }
             // Accounts recorded by a venue this build no longer routes stay readable but
             // can never trade.
             (_, AccountEnvironment::Demo | AccountEnvironment::Live) => {
@@ -1072,7 +1073,7 @@ impl TradingService {
         self.request(|reply| Command::Modify(order, reply))
     }
 
-    /// Attaches a bounded demo-venue writer under the next session generation, which the
+    /// Attaches a bounded broker-venue writer under the next session generation, which the
     /// owner assigns and persists. The relay stamps every event with that generation, and
     /// the receiver (64 slots) belongs to it alone; any earlier generation is retired.
     /// `capabilities` is what the relay's venue supports.
@@ -1080,7 +1081,7 @@ impl TradingService {
     /// # Errors
     /// Returns an error for invalid capabilities, when the owner is unavailable or when the
     /// generation cannot be stored.
-    pub fn attach_demo_venue(
+    pub fn attach_broker_venue(
         &self,
         capabilities: VenueCapabilities,
     ) -> Result<(u64, VenueRequestReceiver), String> {
@@ -1089,7 +1090,7 @@ impl TradingService {
 
     /// Returns the shared bounded event inbox for the broker reader.
     #[must_use]
-    pub fn demo_venue_inbox(&self) -> Arc<VenueInbox> {
+    pub fn broker_venue_inbox(&self) -> Arc<VenueInbox> {
         Arc::clone(&self.runtime.venue_inbox)
     }
 
@@ -1168,8 +1169,8 @@ impl TradingService {
     /// risk-checked like a new bracket.
     ///
     /// # Errors
-    /// Returns an error for an unknown entry, a non-broker or live account, a bracket that does
-    /// not hold the level, an unacknowledged entry, a risk refusal, or an unattached demo venue.
+    /// Returns an error for an unknown entry, a non-broker account, a bracket that does not
+    /// hold the level, an unacknowledged entry, a risk refusal, or an unattached broker venue.
     pub fn move_bracket_level(&self, command: MoveBracketLevel) -> Result<(), String> {
         self.request(|reply| Command::MoveBracketLevel(command, reply))
     }
@@ -1252,8 +1253,8 @@ impl TradingService {
     /// reported through the outcome.
     ///
     /// # Errors
-    /// Returns an error when no target account exists, a targeted account is data-only,
-    /// or the durable step cannot be committed.
+    /// Returns an error when no target account exists, a targeted account's venue is not
+    /// routed, or the durable step cannot be committed.
     pub fn kill_switch(
         &self,
         account_id: Option<TradingAccountId>,

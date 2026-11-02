@@ -37,8 +37,9 @@ impl TradingCore {
         if accounts.is_empty() {
             return Err("kill switch account is not registered".to_string());
         }
-        // A targeted command on a data-only live account is refused before any change; a
-        // global one skips such accounts, which cannot trade, and protects the rest.
+        // A targeted command on an account of a venue this build no longer routes is refused
+        // before any change; a global one skips such accounts, which cannot trade, and
+        // protects the rest.
         if let Some(account_id) = account_id {
             self.route(account_id)?;
         }
@@ -69,7 +70,7 @@ impl TradingCore {
             Ok(staged)
         })?;
         for account in &tradable {
-            if !matches!(self.route(account), Ok(VenueRoute::BrokerDemo)) {
+            if !matches!(self.route(account), Ok(VenueRoute::Broker)) {
                 continue;
             }
             match self.flatten_broker_account(account, None) {
@@ -117,7 +118,7 @@ impl TradingCore {
             core.stage_scope_cancellations(&scope, CancellationCause::KillSwitch)?;
             Ok(())
         })?;
-        if matches!(self.route(account_id), Ok(VenueRoute::BrokerDemo)) {
+        if matches!(self.route(account_id), Ok(VenueRoute::Broker)) {
             let (_, failure) = self.cancel_open_orders(Some(account_id), None)?;
             if let Some(failure) = failure {
                 return Err(format!("accounts are locked; {failure}"));
@@ -167,8 +168,9 @@ impl TradingCore {
         if self.state.accounts.is_empty() {
             return Err("flatten requires at least one registered account".to_string());
         }
-        // A targeted command on an unknown or data-only live account is refused before any
-        // change; a global one skips such accounts, which cannot trade, and handles the rest.
+        // A targeted command on an unknown account or one of a venue this build no longer
+        // routes is refused before any change; a global one skips such accounts, which cannot
+        // trade, and handles the rest.
         if let Some(account_id) = &scope.account {
             self.route(account_id)?;
         }
@@ -196,7 +198,7 @@ impl TradingCore {
             .keys()
             .filter(|account| {
                 scope.account.as_ref().is_none_or(|scope| scope == *account)
-                    && matches!(self.route(account), Ok(VenueRoute::BrokerDemo))
+                    && matches!(self.route(account), Ok(VenueRoute::Broker))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -230,7 +232,7 @@ impl TradingCore {
         }
         match self.route(account_id)? {
             VenueRoute::Simulated => {}
-            VenueRoute::BrokerDemo => {
+            VenueRoute::Broker => {
                 let observation = self.market_observation(instrument_id)?;
                 return self.reverse_broker_position(
                     account_id,

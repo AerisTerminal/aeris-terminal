@@ -1569,7 +1569,7 @@ fn wrong_side_stops_share_owner_quote_refusal_across_both_routes() {
         })
         .expect("demo account");
     let (generation, outbound) = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("venue");
     while outbound.try_recv().is_ok() {}
     crate::tests::settle_reconcile(&service, generation, "fixture-demo");

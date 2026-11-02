@@ -7,14 +7,15 @@ use crate::BracketStrategyTemplate;
 use crate::core::ledger::{CostBasis, TradeCycle};
 use crate::venue::{VenueEvent, VenueRequest, VenueUpdate};
 use crate::{
-    DEMO_VENUE_UNAVAILABLE, FlattenOutcome, ModifyOrder, MoveBracketLevel, PendingExit, PlaceOrder,
-    TradingCore, TradingInstrument, TradingProvenance, UnaccountedCause, store::BrokerFillRecord,
+    BROKER_VENUE_UNAVAILABLE, FlattenOutcome, ModifyOrder, MoveBracketLevel, PendingExit,
+    PlaceOrder, TradingCore, TradingInstrument, TradingProvenance, UnaccountedCause,
+    store::BrokerFillRecord,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{
-    AccountEnvironment, ClientOrderId, Fill, FillId, FixedPoint, Liquidity, Order, OrderEvent,
-    OrderEventId, OrderEventKind, OrderEventNote, OrderEventReason, OrderId, OrderSide,
-    OrderStatus, OrderType, Position, TimeInForce, TradingAccount, TradingAccountId,
+    ClientOrderId, Fill, FillId, FixedPoint, Liquidity, Order, OrderEvent, OrderEventId,
+    OrderEventKind, OrderEventNote, OrderEventReason, OrderId, OrderSide, OrderStatus, OrderType,
+    Position, TimeInForce, TradingAccount, TradingAccountId,
     venue::{
         BROKER_VENUE_ID, BracketLevel, BracketSide, BrokerFill, BrokerOrder, BrokerOrderKind,
         BrokerOrderState, ObservedAccount, ServerBracket, VenueAmendment, VenueOrder,
@@ -83,7 +84,7 @@ impl TradingCore {
 
     /// Registers a broker account the relay can reach, under a stable id derived from the
     /// broker account. A known account keeps its id and money scale; only its name follows
-    /// the broker. A newly registered demo account is reconciled at once.
+    /// the broker. A newly registered account is reconciled at once.
     fn register_observed_account(
         &mut self,
         broker_account: &str,
@@ -124,9 +125,7 @@ impl TradingCore {
             currency_scale: observed.currency_scale,
             starting_equity: None,
         };
-        let reconcile = (account.environment == AccountEnvironment::Demo)
-            .then(|| self.reconcile_request(&account))
-            .flatten();
+        let reconcile = self.reconcile_request(&account);
         self.connected_broker_accounts.insert(account.id.clone());
         self.register_account(account)?;
         match reconcile {
@@ -211,7 +210,7 @@ impl TradingCore {
         bracket: Option<ServerBracket>,
     ) -> Result<Order, String> {
         if self.venue_outbound.is_none() {
-            return Err(DEMO_VENUE_UNAVAILABLE.into());
+            return Err(BROKER_VENUE_UNAVAILABLE.into());
         }
         self.require_broker_ready(&command.account_id)?;
         let instrument = self
@@ -224,7 +223,7 @@ impl TradingCore {
             self,
             &instrument,
             command,
-            crate::VenueRoute::BrokerDemo,
+            crate::VenueRoute::Broker,
             0,
             &[],
             crate::core::admission::AdmissionRisk::Enforced {
@@ -235,7 +234,7 @@ impl TradingCore {
         // currency equal the account currency does not: the broker converts profit and loss
         // into the deposit currency.
         let time_in_force =
-            crate::core::admission::RouteCapabilities::for_route(crate::VenueRoute::BrokerDemo)
+            crate::core::admission::RouteCapabilities::for_route(crate::VenueRoute::Broker)
                 .effective_tif(command.order_type, command.time_in_force);
         let request = VenueRequest::Place(VenueOrder {
             client_order_id: command.client_order_id.clone(),
@@ -295,7 +294,10 @@ impl TradingCore {
             ));
             event.detail = Some(broker_warnings_detail(&warnings));
         }
-        let outbound = self.venue_outbound.clone().ok_or(DEMO_VENUE_UNAVAILABLE)?;
+        let outbound = self
+            .venue_outbound
+            .clone()
+            .ok_or(BROKER_VENUE_UNAVAILABLE)?;
         let reservation = outbound
             .try_reserve(request)
             .map_err(|error| outbound_error(&error))?;
@@ -328,7 +330,7 @@ impl TradingCore {
         if command.modified_unix_nanos <= 0 {
             return Err("order modification timestamp must be positive".into());
         }
-        if crate::core::admission::RouteCapabilities::for_route(crate::VenueRoute::BrokerDemo)
+        if crate::core::admission::RouteCapabilities::for_route(crate::VenueRoute::Broker)
             .effective_tif(order.order_type, command.time_in_force)
             != order.time_in_force
         {
@@ -457,7 +459,7 @@ impl TradingCore {
         request.validate().map_err(|error| error.to_string())?;
         self.venue_outbound
             .as_ref()
-            .ok_or(DEMO_VENUE_UNAVAILABLE)?
+            .ok_or(BROKER_VENUE_UNAVAILABLE)?
             .try_send(request)
             .map_err(|error| outbound_error(&error))
     }
@@ -1479,7 +1481,10 @@ impl TradingCore {
     ) -> Result<(), String> {
         updated.validate().map_err(|error| error.to_string())?;
         request.validate().map_err(|error| error.to_string())?;
-        let outbound = self.venue_outbound.clone().ok_or(DEMO_VENUE_UNAVAILABLE)?;
+        let outbound = self
+            .venue_outbound
+            .clone()
+            .ok_or(BROKER_VENUE_UNAVAILABLE)?;
         if self.state.orders.get(&updated.id).is_none() {
             return Err("broker order is not registered".into());
         }
@@ -1699,6 +1704,6 @@ enum DealOrigin {
 fn outbound_error<T>(error: &TrySendError<T>) -> String {
     match error {
         TrySendError::Full(_) => "broker venue outbound queue is full".into(),
-        TrySendError::Disconnected(_) => DEMO_VENUE_UNAVAILABLE.into(),
+        TrySendError::Disconnected(_) => BROKER_VENUE_UNAVAILABLE.into(),
     }
 }

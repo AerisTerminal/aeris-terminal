@@ -49,10 +49,10 @@ fn setup(
         .register_instrument(instrument())
         .expect("instrument");
     let (generation, receiver) = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("attach");
     assert_eq!(generation, 1);
-    // Every attach first reconciles each demo broker account; with nothing recorded yet
+    // Every attach first reconciles each broker account; with nothing recorded yet
     // there are no deals to replay.
     assert!(matches!(
         receiver.try_recv(),
@@ -61,7 +61,7 @@ fn setup(
     ));
     // The account takes new orders once that reconcile's snapshot settles it.
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(1, VenueUpdate::Snapshot(VenueSnapshot::default())))
         .expect("reconcile snapshot");
     let feed = service
@@ -288,7 +288,7 @@ fn saturated_writer_does_not_leave_pending_modify_or_cancel() {
         .place_order_caller_priced(limit_request("amend-target", 9_000))
         .expect("place");
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             order_update(report(&placed, "501", 0), BrokerOrderState::Accepted),
@@ -342,7 +342,7 @@ fn pending_broker_modify_preserves_revision_and_time_after_restart() {
         VenueRequest::Place(_)
     ));
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             order_update(report(&placed, "501", 0), BrokerOrderState::Accepted),
@@ -388,7 +388,7 @@ fn stale_broker_commands_do_not_reserve_venue_requests_or_mutate_facts() {
         VenueRequest::Place(_)
     ));
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             order_update(report(&placed, "501", 0), BrokerOrderState::Accepted),
@@ -479,7 +479,7 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
         .expect("place");
     assert_eq!(order.id.as_str(), "broker-order-1");
     assert_eq!(
-        VenueRoute::BrokerDemo,
+        VenueRoute::Broker,
         VenueRoute::from_account(&broker()).expect("route")
     );
     let VenueRequest::Place(sent) = receiver.recv().expect("request") else {
@@ -487,10 +487,10 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
     };
     assert_eq!(sent.broker_account, BROKER_ACCOUNT);
     let (generation, _retired) = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("reconnect");
     assert_eq!(generation, 2);
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(venue(
             1,
@@ -530,7 +530,7 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
 
     let restarted = start_service(&directory);
     let (generation, receiver) = restarted
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("advance");
     assert_eq!(generation, 3, "a restart never reuses a generation");
     // The open order makes the reconcile replay deals from its submission.
@@ -611,7 +611,7 @@ fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices
         receiver.recv().expect("place"),
         VenueRequest::Place(_)
     ));
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     let id = pending.client_order_id.clone();
     let push = |order: BrokerOrder, state| {
         inbox
@@ -724,7 +724,7 @@ fn refusals_rejections_and_expiry_are_terminal_and_ignore_late_updates() {
         let order = service
             .place_order_caller_priced(request(label))
             .expect("pending");
-        let inbox = service.demo_venue_inbox();
+        let inbox = service.broker_venue_inbox();
         let update = state.map_or_else(
             || VenueUpdate::Refused {
                 client_order_id: order.client_order_id.clone(),
@@ -773,7 +773,7 @@ fn a_report_for_another_account_never_moves_an_order() {
         .place_order_caller_priced(request("shared-id"))
         .expect("pending");
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(VenueEvent {
             broker_account: "other".into(),
             ..venue(
@@ -791,7 +791,7 @@ fn a_report_for_another_account_never_moves_an_order() {
 #[test]
 fn a_broker_cancel_keeps_its_reason_and_a_requested_cancel_is_marked() {
     let (_directory, service, _receiver) = setup("venue-cancel-reason");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     let ended = service
         .place_order_caller_priced(limit_request("broker-ended", 9_000))
         .expect("pending");
@@ -872,7 +872,7 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
     let mut place = request("filled");
     place.quantity = point(3, 0);
     let order = service.place_order_caller_priced(place).expect("pending");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(venue(
             1,
@@ -938,7 +938,7 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
 #[test]
 fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart() {
     let (directory, service, _receiver) = setup("venue-round-trips");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     for (deal, quantity) in [("d1", 1), ("d2", 2)] {
         inbox
             .push(venue(1, VenueUpdate::Fill(fill(deal, "801", quantity))))
@@ -1019,7 +1019,7 @@ fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart
 #[test]
 fn reconcile_settles_every_open_order_and_rebases_positions_the_venue_disagrees_with() {
     let (directory, service, receiver) = setup("venue-reconcile");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     // A position report is not a fill: only deals and reconciles move the ledger.
     inbox
         .push(venue(1, VenueUpdate::Position(position(2))))
@@ -1128,7 +1128,7 @@ fn a_broker_flatten_exits_every_ledger_position_and_waits_for_the_fills() {
     service
         .register_instrument(second_instrument.clone())
         .expect("second instrument");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(venue(1, VenueUpdate::Fill(fill("d1", "801", 2))))
         .expect("long position");
@@ -1263,7 +1263,7 @@ fn bracket_levels_move_when_the_venue_confirms_and_end_with_the_position() {
             .contains("not acknowledged")
     );
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             order_update(report(&entry, "1201", 0), BrokerOrderState::Accepted),
@@ -1287,7 +1287,7 @@ fn bracket_levels_move_when_the_venue_confirms_and_end_with_the_position() {
         "the level keeps its distance until the venue confirms the move"
     );
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             VenueUpdate::BracketLevelMoved {
@@ -1306,7 +1306,7 @@ fn bracket_levels_move_when_the_venue_confirms_and_end_with_the_position() {
     // The moved level survives a restart.
     let restarted = start_service(&directory);
     let (generation, receiver) = restarted
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("reattach");
     restarted
         .move_bracket_level(stop(6, 5))
@@ -1314,7 +1314,7 @@ fn bracket_levels_move_when_the_venue_confirms_and_end_with_the_position() {
     while receiver.try_recv().is_ok() {}
 
     // The entry fills, a released stop closes the position, and the levels end with it.
-    let inbox = restarted.demo_venue_inbox();
+    let inbox = restarted.broker_venue_inbox();
     inbox
         .push(venue(generation, VenueUpdate::Fill(fill("d1", "1201", 1))))
         .expect("entry fill");
@@ -1384,7 +1384,7 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
         );
     }
     let (generation, _receiver) = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("attach");
     crate::tests::settle_reconcile(&service, generation, BROKER_ACCOUNT);
     assert!(
@@ -1446,7 +1446,7 @@ fn the_simulator_never_fills_a_broker_order() {
         .place_order_caller_priced(request("broker-market"))
         .expect("pending");
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             order_update(report(&order, "1001", 0), BrokerOrderState::Accepted),
@@ -1484,7 +1484,7 @@ fn broker_day_orders_rest_as_day_and_market_orders_fill_or_cancel() {
     assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Place(_))));
 
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             order_update(report(&placed, "1101", 0), BrokerOrderState::Accepted),
@@ -1535,7 +1535,7 @@ fn an_off_grid_broker_amendment_is_rejected_before_it_is_recorded_or_routed() {
         .expect("limit");
     assert!(matches!(receiver.try_recv(), Ok(VenueRequest::Place(_))));
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             order_update(report(&placed, "1201", 0), BrokerOrderState::Accepted),
@@ -1617,7 +1617,7 @@ fn risk_profile(daily_loss_limit: i64, max_contracts: i64) -> crate::RiskProfile
 /// Announces the scripted broker account, so the venue can reach it.
 fn observe_broker(service: &TradingService) {
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             VenueUpdate::AccountObserved(aeris_trading::venue::ObservedAccount {
@@ -1638,7 +1638,7 @@ fn open_broker_positions_count_toward_the_maximum_contract_rule() {
         .expect("profile");
     observe_broker(&service);
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(1, VenueUpdate::Fill(fill("d1", "801", 2))))
         .expect("position");
     assert!(
@@ -1676,7 +1676,7 @@ fn broker_loss_rules_count_session_deals_and_the_broker_open_pnl() {
     );
 
     observe_broker(&service);
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(venue(1, VenueUpdate::Fill(fill("d1", "801", 2))))
         .expect("entry");
@@ -1716,7 +1716,7 @@ fn broker_loss_rules_count_session_deals_and_the_broker_open_pnl() {
 fn connected_broker_positions_carry_the_venue_open_pnl() {
     let (_directory, service, receiver) = setup("venue-open-pnl");
     observe_broker(&service);
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(venue(
             1,
@@ -1775,7 +1775,7 @@ fn connected_broker_positions_carry_the_venue_open_pnl() {
 
     // A new generation reaches no account yet: no open P&L, balance or equity is claimed.
     let (_generation, next) = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("reattach");
     let snapshot = service.snapshot().expect("snapshot");
     let pnl = snapshot
@@ -1805,7 +1805,7 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
             currency_scale: 2,
         })
     };
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(VenueEvent {
             broker_account: "2002".into(),
@@ -1853,7 +1853,7 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
     assert!(connected.contains(&TradingAccountId::try_new("broker-demo-2002").expect("id")));
     assert!(!connected.contains(&broker().id));
     let _next = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("reattach");
     assert_eq!(
         service
@@ -1866,10 +1866,63 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
 }
 
 #[test]
+fn an_observed_live_account_reconciles_and_trades_through_the_broker_venue() {
+    let (_directory, service, receiver) = setup("venue-live");
+    let inbox = service.broker_venue_inbox();
+    inbox
+        .push(VenueEvent {
+            broker_account: "3003".into(),
+            ..venue(
+                1,
+                VenueUpdate::AccountObserved(aeris_trading::venue::ObservedAccount {
+                    environment: AccountEnvironment::Live,
+                    display_name: "Broker Live · Example 3003".into(),
+                    currency: "USD".into(),
+                    currency_scale: 2,
+                }),
+            )
+        })
+        .expect("observed");
+    let live = service
+        .snapshot()
+        .expect("snapshot")
+        .accounts
+        .into_iter()
+        .find(|account| account.broker_ref.as_deref() == Some("3003"))
+        .expect("registered");
+    assert_eq!(live.id.as_str(), "broker-live-3003");
+    assert_eq!(live.environment, AccountEnvironment::Live);
+    assert_eq!(VenueRoute::from_account(&live), Ok(VenueRoute::Broker));
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(VenueRequest::Reconcile { broker_account, .. }) if broker_account == "3003"
+    ));
+    inbox
+        .push(VenueEvent {
+            broker_account: "3003".into(),
+            ..venue(1, VenueUpdate::Snapshot(VenueSnapshot::default()))
+        })
+        .expect("reconcile snapshot");
+    let mut request = limit_request("live-entry", 9_000);
+    request.account_id = live.id.clone();
+    let order = service
+        .place_order_caller_priced(request)
+        .expect("live order");
+    assert_eq!(order.status, OrderStatus::Pending);
+    let VenueRequest::Place(sent) = receiver.recv().expect("request") else {
+        panic!("a place request");
+    };
+    assert_eq!(sent.broker_account, "3003");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
 fn venue_reports_are_brought_to_the_owner_scales_exactly() {
     let (_directory, service, _receiver) = setup("venue-scales");
     observe_broker(&service);
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     // A broker wire carries 90.00 as 90 and one contract at a finer quantity scale.
     inbox
         .push(venue(
@@ -1953,7 +2006,7 @@ fn latest_notice(service: &TradingService) -> String {
 #[test]
 fn deals_first_seen_on_the_broker_take_owner_sequence_ids_that_never_collide() {
     let (directory, service, _receiver) = setup("mirror-ids");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     for (index, broker_order_id) in ["900", "901", "902"].into_iter().enumerate() {
         service
             .place_order_caller_priced(limit_request(&format!("placed-{index}"), 9_000))
@@ -1990,7 +2043,7 @@ fn a_deal_before_the_acknowledgement_fills_the_placed_order_instead_of_a_mirror(
     let placed = service
         .place_order_caller_priced(request("early-deal"))
         .expect("place");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(venue(
             1,
@@ -2022,10 +2075,10 @@ fn a_deal_before_the_acknowledgement_fills_the_placed_order_instead_of_a_mirror(
         .expect("shutdown");
     let restarted = start_service(&directory);
     let (generation, _receiver) = restarted
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("reattach");
     restarted
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             generation,
             VenueUpdate::Fill(fill("early-1", "501", 1)),
@@ -2046,7 +2099,7 @@ fn new_orders_wait_for_the_reconcile_of_each_venue_generation() {
         .place_order_caller_priced(request("ready"))
         .expect("reconciled");
     let (generation, receiver) = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("reattach");
     let refused = service
         .place_order_caller_priced(request("before-reconcile"))
@@ -2063,7 +2116,7 @@ fn new_orders_wait_for_the_reconcile_of_each_venue_generation() {
     // An unanswered request makes the venue state uncertain: the account is reconciled
     // again and takes no new orders until that reconcile settles it.
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             generation,
             VenueUpdate::OperationFailed {
@@ -2094,7 +2147,7 @@ fn new_orders_wait_for_the_reconcile_of_each_venue_generation() {
 fn a_refused_exit_is_reported_to_the_user() {
     let (_directory, service, _receiver) = setup("refused-exit");
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(
             1,
             VenueUpdate::OperationFailed {
@@ -2128,7 +2181,7 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
         ..fill("other-1", "950", 1)
     };
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(1, VenueUpdate::Fill(unaccounted.clone())))
         .expect("deal in an unregistered contract");
     assert_eq!(service.status().expect("status").venue_error, None);
@@ -2151,7 +2204,7 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
         .expect("shutdown");
     let restarted = start_service(&directory);
     let (generation, receiver) = restarted
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("reattach");
     assert!(matches!(
         sent(&receiver).as_slice(),
@@ -2180,7 +2233,7 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
             ..
         }]
     ));
-    let inbox = restarted.demo_venue_inbox();
+    let inbox = restarted.broker_venue_inbox();
     inbox
         .push(venue(generation, VenueUpdate::Fill(unaccounted)))
         .expect("replayed deal");
@@ -2223,7 +2276,7 @@ fn an_unregistered_contract_blocks_new_orders_until_a_reconcile_accounts_it() {
 #[test]
 fn a_reverse_opens_the_opposite_position_only_after_its_exit_flattens() {
     let (_directory, service, receiver) = setup("managed-reverse");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(venue(1, VenueUpdate::Fill(fill("long-1", "700", 1))))
         .expect("long position");
@@ -2262,7 +2315,7 @@ fn a_reverse_opens_the_opposite_position_only_after_its_exit_flattens() {
 #[test]
 fn a_reverse_whose_exit_fails_never_opens_the_opposite_position() {
     let (_directory, service, receiver) = setup("failed-reverse");
-    let inbox = service.demo_venue_inbox();
+    let inbox = service.broker_venue_inbox();
     inbox
         .push(venue(1, VenueUpdate::Fill(fill("long-1", "700", 1))))
         .expect("long position");
@@ -2303,7 +2356,7 @@ fn a_reverse_whose_exit_fails_never_opens_the_opposite_position() {
 fn a_reverse_waiting_at_shutdown_is_reported_at_the_next_start_and_never_completed() {
     let (directory, service, _receiver) = setup("interrupted-reverse");
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(venue(1, VenueUpdate::Fill(fill("long-1", "700", 1))))
         .expect("long position");
     service

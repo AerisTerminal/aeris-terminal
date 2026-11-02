@@ -44,7 +44,7 @@ pub(crate) const VENUE_CAPABILITIES: aeris_trading::venue::VenueCapabilities =
 /// the account takes new orders in that venue generation.
 pub(crate) fn settle_reconcile(service: &TradingService, generation: u64, broker_account: &str) {
     service
-        .demo_venue_inbox()
+        .broker_venue_inbox()
         .push(aeris_trading::venue::VenueEvent {
             session_generation: generation,
             broker_account: broker_account.into(),
@@ -164,7 +164,7 @@ fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
         })
         .expect("broker account");
     let (generation, _receiver) = service
-        .attach_demo_venue(VENUE_CAPABILITIES)
+        .attach_broker_venue(VENUE_CAPABILITIES)
         .expect("venue");
     settle_reconcile(&service, generation, "fixture-demo");
     let mut request = market_order("unknown-grid", OrderSide::Buy, 1, 1_000);

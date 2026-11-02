@@ -31,7 +31,7 @@ fn practice_currency_is_checked_in_shared_admission_broker_is_exempt() {
         Err(RejectReason::CurrencyMismatch)
     );
     assert_eq!(
-        validate_currency(&instrument, "EUR", VenueRoute::BrokerDemo),
+        validate_currency(&instrument, "EUR", VenueRoute::Broker),
         Ok(())
     );
     assert_eq!(
@@ -76,7 +76,7 @@ fn resting_at_resolves_on_touch_for_every_side() {
 #[test]
 fn route_capabilities_resolve_day_and_protection_policy() {
     let simulated = RouteCapabilities::for_route(VenueRoute::Simulated);
-    let broker = RouteCapabilities::for_route(VenueRoute::BrokerDemo);
+    let broker = RouteCapabilities::for_route(VenueRoute::Broker);
     assert_eq!(
         simulated.effective_tif(OrderType::Limit, TimeInForce::Day),
         TimeInForce::Day

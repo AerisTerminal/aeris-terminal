@@ -529,7 +529,7 @@ pub(super) fn environment_badge(
             theme,
         ),
         aeris_trading::AccountEnvironment::Live => pill(
-            tr!(trading::ENV_LIVE_DATA_ONLY),
+            tr!(trading::ENV_LIVE),
             colors.warning_subtle,
             colors.text_warning,
             None,
@@ -584,7 +584,6 @@ fn practice_accounts(
                 account,
                 detail,
                 selected: selected == Some(&account.id),
-                selectable: true,
             },
             theme,
         ));
@@ -614,9 +613,9 @@ fn practice_accounts(
     settings_group(tr!(trading::PRACTICE_ACCOUNTS), rows, theme)
 }
 
-/// Broker accounts registered by the trading owner. They are never deleted here, and a
-/// live account cannot be chosen for orders. Accounts recorded by a venue this build no
-/// longer routes stay in the store for history but are not offered here.
+/// Broker accounts registered by the trading owner, demo and live alike. They are never
+/// deleted here. Accounts recorded by a venue this build no longer routes stay in the store
+/// for history but are not offered here.
 fn broker_accounts(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
@@ -641,7 +640,6 @@ fn broker_accounts(
                     account,
                     detail,
                     selected: selected == Some(&account.id),
-                    selectable: account.environment == aeris_trading::AccountEnvironment::Demo,
                 },
                 theme,
             )
@@ -656,10 +654,12 @@ fn broker_account_visible(account: &aeris_trading::TradingAccount) -> bool {
 }
 
 fn broker_account_detail(account: &aeris_trading::TradingAccount, connected: bool) -> String {
-    match account.environment {
-        aeris_trading::AccountEnvironment::Live => tr!(trading::LIVE_ACCOUNT_DETAIL).to_string(),
-        _ if connected => tr!(trading::BROKER_DEMO_CONNECTED, currency = account.currency),
-        _ => tr!(trading::BROKER_DEMO_DISCONNECTED).to_string(),
+    let live = account.environment == aeris_trading::AccountEnvironment::Live;
+    match (live, connected) {
+        (true, true) => tr!(trading::BROKER_LIVE_CONNECTED, currency = account.currency),
+        (true, false) => tr!(trading::BROKER_LIVE_DISCONNECTED).to_string(),
+        (false, true) => tr!(trading::BROKER_DEMO_CONNECTED, currency = account.currency),
+        (false, false) => tr!(trading::BROKER_DEMO_DISCONNECTED).to_string(),
     }
 }
 
@@ -668,8 +668,6 @@ struct AccountRow<'a> {
     account: &'a aeris_trading::TradingAccount,
     detail: String,
     selected: bool,
-    /// Whether orders may be placed on it; live broker accounts are data-only.
-    selectable: bool,
 }
 
 /// One account: its name and detail on the left; its environment, the Use control and, for
@@ -684,44 +682,41 @@ fn account_row(
         account,
         detail,
         selected,
-        selectable,
     } = row;
     let simulated = account.environment == aeris_trading::AccountEnvironment::Simulated;
     let select = app.clone();
     let account_id = account.id.clone();
-    let use_button = selectable.then(|| {
-        Button::new(("accounts_trading_use", index), theme)
-            .variant(ButtonVariant::Secondary)
-            .selected(selected)
-            .icon(header_icon(if selected {
-                HugeIcon::CheckIcon
-            } else {
-                HugeIcon::User
-            }))
-            .label(if selected {
-                tr!(trading::TRADING_USE_SELECTED)
-            } else {
-                tr!(trading::TRADING_USE)
-            })
-            .aria_label(tr!(
-                trading::TRADE_ON_ACCOUNT,
-                account = account.display_name
-            ))
-            .on_click(move |_, _, cx| {
-                select.update(cx, |surface, surface_cx| {
-                    surface.select_trading_account(account_id.clone(), surface_cx);
-                });
-            })
-            .into_any_element()
-    });
+    let use_button = Button::new(("accounts_trading_use", index), theme)
+        .variant(ButtonVariant::Secondary)
+        .selected(selected)
+        .icon(header_icon(if selected {
+            HugeIcon::CheckIcon
+        } else {
+            HugeIcon::User
+        }))
+        .label(if selected {
+            tr!(trading::TRADING_USE_SELECTED)
+        } else {
+            tr!(trading::TRADING_USE)
+        })
+        .aria_label(tr!(
+            trading::TRADE_ON_ACCOUNT,
+            account = account.display_name
+        ))
+        .on_click(move |_, _, cx| {
+            select.update(cx, |surface, surface_cx| {
+                surface.select_trading_account(account_id.clone(), surface_cx);
+            });
+        })
+        .into_any_element();
     // Only practice accounts can be deleted; broker accounts belong to the broker.
     let delete = simulated.then(|| delete_account_button(app, index, account, theme));
     described_setting_row(
         account.display_name.clone(),
         [SharedString::from(detail)],
         control_strip(
-            std::iter::once(environment_badge(account.environment, theme))
-                .chain(use_button)
+            [environment_badge(account.environment, theme), use_button]
+                .into_iter()
                 .chain(delete),
         ),
         theme,
@@ -948,10 +943,12 @@ mod provider_descriptor_tests {
             "Broker demo server · USD"
         );
         account.environment = aeris_trading::AccountEnvironment::Live;
+        assert!(broker_account_visible(&account));
         assert_eq!(
-            broker_account_detail(&account, true),
-            "Live account · trading is disabled"
+            broker_account_detail(&account, false),
+            "Live account · not connected"
         );
+        assert_eq!(broker_account_detail(&account, true), "Live account · USD");
         account.venue_id = "retired-venue".to_string();
         assert!(!broker_account_visible(&account));
         account.environment = aeris_trading::AccountEnvironment::Simulated;

@@ -28,7 +28,7 @@ impl RouteCapabilities {
                 protection: ProtectionSupport::Managed,
                 tif_policy: TifPolicy::Simulated,
             },
-            VenueRoute::BrokerDemo => Self {
+            VenueRoute::Broker => Self {
                 protection: ProtectionSupport::Native,
                 tif_policy: TifPolicy::Broker,
             },

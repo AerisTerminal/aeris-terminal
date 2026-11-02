@@ -80,7 +80,7 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
         })
         .expect("demo account");
     let (generation, outbound) = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("venue");
     // Attachment starts by requesting reconciliation for existing broker accounts.
     while outbound.try_recv().is_ok() {}
@@ -178,7 +178,7 @@ fn broker_day_entry_keeps_day_in_the_venue_request() {
         })
         .expect("demo account");
     let (generation, outbound) = service
-        .attach_demo_venue(crate::tests::VENUE_CAPABILITIES)
+        .attach_broker_venue(crate::tests::VENUE_CAPABILITIES)
         .expect("venue");
     while outbound.try_recv().is_ok() {}
     crate::tests::settle_reconcile(&service, generation, "fixture-demo");

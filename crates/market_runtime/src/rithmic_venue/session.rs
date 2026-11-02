@@ -49,8 +49,6 @@ const CAPABILITIES: VenueCapabilities = VenueCapabilities {
     bracket_levels: MAXIMUM_BRACKET_LEVELS,
     client_order_id_limit: 64,
 };
-const LIVE_REFUSED: &str = "the saved Rithmic login trades live accounts, and Aeris routes \
-                            orders only to Rithmic Test and paper-trading accounts";
 
 /// Why a session ended, which decides what the supervisor does next.
 pub(super) enum SessionEnd {
@@ -290,7 +288,8 @@ pub(super) fn run(
     end
 }
 
-/// Logs in to both plants with the saved login, refusing a live one.
+/// Logs in to both plants with the saved login and reports whether its accounts are demo
+/// or live.
 fn open(
     shutdown: &Arc<AtomicBool>,
 ) -> Result<
@@ -307,13 +306,6 @@ fn open(
     let credentials = saved
         .credentials()
         .map_err(|_| SessionEnd::Idle("the saved Rithmic login is unreadable".into()))?;
-    // A live login never opens an order plant; the gateway's own report is checked again
-    // after the login.
-    if translate::environment(credentials.gateway, credentials.system_name)
-        == AccountEnvironment::Live
-    {
-        return Err(SessionEnd::Idle(LIVE_REFUSED.into()));
-    }
     let login_failed = |plant: &str, error: RithmicSessionError| {
         if shutdown.load(Ordering::Acquire) || error == RithmicSessionError::Cancelled {
             return SessionEnd::Shutdown;
@@ -333,12 +325,6 @@ fn open(
     .map_err(|error| login_failed("order", error))?;
     let metadata = orders.login_metadata();
     let environment = translate::environment(metadata.gateway, &metadata.system_name);
-    if environment == AccountEnvironment::Live {
-        if let Err(error) = orders.close() {
-            diagnostic!("Aeris broker venue order plant did not log out cleanly: {error}");
-        }
-        return Err(SessionEnd::Idle(LIVE_REFUSED.into()));
-    }
     match RithmicSession::discover_and_login_pnl(
         credentials,
         application(),

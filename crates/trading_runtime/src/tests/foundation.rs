@@ -27,13 +27,13 @@ fn account_routes_and_broker_identity_survive_restart() {
     );
     assert_eq!(
         VenueRoute::from_account(&snapshot.accounts[1]),
-        Ok(VenueRoute::BrokerDemo)
+        Ok(VenueRoute::Broker)
     );
     let mut request = market_order("demo-route", OrderSide::Buy, 1, 1_000);
     request.account_id = snapshot.accounts[1].id.clone();
     assert_eq!(
         service.place_order_caller_priced(request).unwrap_err(),
-        "broker demo venue is not connected"
+        "broker venue is not connected"
     );
     service
         .shutdown_after_owner_exit_for_test()
@@ -85,7 +85,7 @@ fn broker_account_of_a_retired_venue_loads_but_never_routes() {
         "trading account venue is not supported"
     );
     let (_generation, requests) = service
-        .attach_demo_venue(super::VENUE_CAPABILITIES)
+        .attach_broker_venue(super::VENUE_CAPABILITIES)
         .expect("venue");
     assert!(
         requests.try_recv().is_err(),
@@ -128,7 +128,7 @@ fn broker_client_order_id_is_bounded_before_dispatch() {
     let broker = broker_account(AccountEnvironment::Demo);
     service.register_account(broker.clone()).expect("register");
     let (generation, _requests) = service
-        .attach_demo_venue(super::VENUE_CAPABILITIES)
+        .attach_broker_venue(super::VENUE_CAPABILITIES)
         .expect("venue");
     super::settle_reconcile(&service, generation, "fixture-ref");
     let limit = super::VENUE_CAPABILITIES.client_order_id_limit;
@@ -163,8 +163,8 @@ fn broker_client_order_id_is_bounded_before_dispatch() {
 }
 
 #[test]
-fn live_account_rejects_every_trading_command_without_mutation() {
-    let directory = TestDirectory::new("live-reject");
+fn retired_venue_account_rejects_every_trading_command_without_mutation() {
+    let directory = TestDirectory::new("retired-reject");
     let (service, _clock, feed) = live_feed_service(&directory);
     bootstrap_live_feed(&feed, &instrument(), market_feed::route());
     service.status().expect("owner drains verified terms");
@@ -173,13 +173,14 @@ fn live_account_rejects_every_trading_command_without_mutation() {
     service
         .place_order_caller_priced(request.clone())
         .expect("sim order");
-    let mut broker = broker_account(AccountEnvironment::Live);
+    let mut broker = broker_account(AccountEnvironment::Demo);
     broker.id = simulated;
+    broker.venue_id = "retired-venue".into();
     service
         .register_account(broker.clone())
         .expect("replace account");
     request.account_id = broker.id.clone();
-    let expected = "broker live accounts are data-only; trading is disabled";
+    let expected = "trading account venue is not supported";
     assert_eq!(
         service.place_order_caller_priced(request).unwrap_err(),
         expected
@@ -240,8 +241,8 @@ fn live_account_rejects_every_trading_command_without_mutation() {
     assert_eq!(snapshot.risk_locks.len(), 0);
     assert_eq!(snapshot.orders[0].status, OrderStatus::Working);
 
-    // Global commands skip a data-only account instead of failing for every account; here
-    // it is the only account, so they change nothing.
+    // Global commands skip an account Aeris cannot trade instead of failing for every
+    // account; here it is the only account, so they change nothing.
     assert!(
         service
             .flatten(FlattenScope::default())
@@ -340,7 +341,7 @@ fn broker_brackets_are_venue_held_and_managed_rules_reject_without_state() {
     let broker = broker_account(AccountEnvironment::Demo);
     service.register_account(broker.clone()).expect("broker");
     let (generation, _requests) = service
-        .attach_demo_venue(super::VENUE_CAPABILITIES)
+        .attach_broker_venue(super::VENUE_CAPABILITIES)
         .expect("venue");
     super::settle_reconcile(&service, generation, "fixture-ref");
     for (index, feature) in ["bracket", "trailing", "break-even"].iter().enumerate() {

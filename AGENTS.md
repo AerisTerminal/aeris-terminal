@@ -613,10 +613,11 @@ the check.
   its former Accounts-panel, login-form and workspace-surface identity exceptions are removed.
 - Broker orders reach Rithmic only through the venue relay in `market_runtime::rithmic_venue`, started
   once by `MarketService::attach_broker_venue` on its `aeris-broker-venue` worker. It reads the same
-  vault login, routes only demo logins (the Rithmic Test gateway and Rithmic Paper Trading) and refuses a
-  live login before opening an order plant. Each connection attaches a new venue session generation with
-  Rithmic's `VenueCapabilities`, so the owner reconciles every account after a reconnect; the desktop
-  only connects the trading owner's attach and inbox handles to it.
+  vault login and routes demo logins (the Rithmic Test gateway and Rithmic Paper Trading) and live logins
+  alike: every reported account carries the environment its login serves, and the trading owner sends
+  demo and live broker accounts through the one `VenueRoute::Broker`. Each connection attaches a new
+  venue session generation with Rithmic's `VenueCapabilities`, so the owner reconciles every account
+  after a reconnect; the desktop only connects the trading owner's attach and inbox handles to it.
 
 The licensed Rithmic proto kit (the R|Protocol `proto` schema folder) remains outside Git. Its
 canonical local copy is `C:\rithmic_proto_kit\proto`; the repository reaches it through the ignored

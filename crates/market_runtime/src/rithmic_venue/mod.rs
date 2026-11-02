@@ -1,7 +1,7 @@
 //! The Rithmic broker venue relay. One order-plant and one P&L-plant connection under the
 //! saved login translate the trading owner's venue requests and report the broker's orders,
-//! fills, positions and balances back. Only demo logins (Rithmic Test and paper trading)
-//! are routed: a live login is refused before any account is reported.
+//! fills, positions and balances back. Demo logins (Rithmic Test and paper trading) and live
+//! logins are routed alike; every reported account carries the environment its login serves.
 //!
 //! Each connection is one venue session generation attached to the trading owner. A lost
 //! connection drops its request receiver, so the owner refuses orders until the next

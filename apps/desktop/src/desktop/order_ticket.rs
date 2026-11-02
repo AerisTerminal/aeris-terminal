@@ -235,8 +235,9 @@ impl WorkspaceSurface {
     }
 }
 
-/// Which venue holds an account's orders, as the ticket's broker field names it. Live broker
-/// accounts are data-only and never offered.
+/// Which venue holds an account's orders, as the ticket's broker field names it. Demo and
+/// live broker accounts share the broker venue; accounts of a venue this build no longer
+/// routes are never offered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TicketBroker {
     Practice,
@@ -249,7 +250,7 @@ impl TicketBroker {
     pub(super) fn of(account: &aeris_trading::TradingAccount) -> Option<Self> {
         match account.environment {
             aeris_trading::AccountEnvironment::Simulated => Some(Self::Practice),
-            aeris_trading::AccountEnvironment::Demo
+            aeris_trading::AccountEnvironment::Demo | aeris_trading::AccountEnvironment::Live
                 if account.venue_id == aeris_trading::venue::BROKER_VENUE_ID =>
             {
                 Some(Self::Broker)
@@ -1582,13 +1583,21 @@ mod tests {
         assert_eq!(ticket_status(None, 2), "Flat · 2 working orders");
         account.environment = aeris_trading::AccountEnvironment::Demo;
         account.venue_id = aeris_trading::venue::BROKER_VENUE_ID.to_string();
+        let broker_label = aeris_market_runtime::built_in_provider_presentations()
+            .iter()
+            .find(|descriptor| descriptor.broker_venue_id == Some(account.venue_id.as_str()))
+            .map(|descriptor| descriptor.display_name);
         assert_eq!(
             TicketBroker::of(&account).map(TicketBroker::label),
-            aeris_market_runtime::built_in_provider_presentations()
-                .iter()
-                .find(|descriptor| descriptor.broker_venue_id == Some(account.venue_id.as_str()))
-                .map(|descriptor| descriptor.display_name)
+            broker_label
         );
+        account.environment = aeris_trading::AccountEnvironment::Live;
+        assert_eq!(
+            TicketBroker::of(&account).map(TicketBroker::label),
+            broker_label
+        );
+        account.venue_id = "retired-venue".to_string();
+        assert_eq!(TicketBroker::of(&account), None);
     }
 
     #[test]
