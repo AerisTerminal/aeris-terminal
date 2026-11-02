@@ -1,7 +1,7 @@
 //! The workflow scenario: save and arm a price workflow, let the live market cross it, let
-//! a time-of-day workflow close the position while a position workflow watches it open and
-//! close, restart the trading owner and check that nothing fires twice, then delete the
-//! workflows.
+//! a time-of-day workflow close the position, restart the trading owner and check that
+//! nothing fires twice, delete the workflows, then let a position workflow flatten a
+//! position the moment it opens.
 
 use std::{
     path::Path,
@@ -33,10 +33,10 @@ use aeris_trading_runtime::{
     MAXIMUM_WORKFLOW_TRADE_MINUTES, PositionRequirement, PriceDirection, TradingRetention,
     TradingService, TradingServiceConfig, WorkflowAction, WorkflowActionResult, WorkflowCheck,
     WorkflowClockTime, WorkflowCompare, WorkflowCondition, WorkflowDefinition, WorkflowError,
-    WorkflowFiringOutcome, WorkflowJoin, WorkflowLayout, WorkflowLimits, WorkflowNode,
-    WorkflowNodeId, WorkflowNodePosition, WorkflowProtection, WorkflowRepeat, WorkflowState,
-    WorkflowStep, WorkflowStepOutcome, WorkflowTimeZone, WorkflowTrigger, WorkflowView,
-    WorkflowWeekdays, WorkingSet, clock::SystemClock,
+    WorkflowFiring, WorkflowFiringOutcome, WorkflowJoin, WorkflowLayout, WorkflowLimits,
+    WorkflowNode, WorkflowNodeId, WorkflowNodePosition, WorkflowProtection, WorkflowRepeat,
+    WorkflowState, WorkflowStep, WorkflowStepOutcome, WorkflowTimeZone, WorkflowTrigger,
+    WorkflowView, WorkflowWeekdays, WorkingSet, clock::SystemClock,
 };
 use serde_json::json;
 
@@ -52,11 +52,14 @@ const BREAKOUT_ID: &str = "probe-breakout";
 const CLOSE_ID: &str = "probe-timed-close";
 const TIMED_ENTRY_ID: &str = "probe-timed-entry";
 const WATCH_ID: &str = "probe-position-watch";
+const OPENER_ID: &str = "probe-opener";
 /// Each attempt levels the trigger at the current ask; a market that only falls during one
 /// attempt is retried with a new revision at the new ask.
 const CROSS_ATTEMPTS: u32 = 5;
 const CROSS_WAIT: Duration = Duration::from_secs(60);
 const QUOTE_WAIT: Duration = Duration::from_secs(30);
+/// An every-minute trigger is due within one minute.
+const MINUTE_WAIT: Duration = Duration::from_secs(60);
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const NANOS_PER_MINUTE: i64 = 60 * NANOS_PER_SECOND;
 const MINUTES_PER_DAY: i64 = 1_440;
@@ -65,6 +68,24 @@ const TIME_TRIGGER_TOLERANCE: i64 = 5 * NANOS_PER_SECOND;
 
 fn fixed(value: (i64, u8)) -> ProbeResult<FixedPoint> {
     FixedPoint::try_new(value.0, value.1).map_err(|error| ProbeError::Runtime(error.to_string()))
+}
+
+/// Whether `firing` took the `held` branch and then ran one action that `done` accepts.
+fn branch_then_action(
+    firing: &WorkflowFiring,
+    held: bool,
+    done: fn(&WorkflowActionResult) -> bool,
+) -> bool {
+    let WorkflowFiringOutcome::Executed(steps) = &firing.outcome else {
+        return false;
+    };
+    match steps.as_slice() {
+        [branch, action] => {
+            branch.outcome == WorkflowStepOutcome::Branch(held)
+                && matches!(&action.outcome, WorkflowStepOutcome::Action(result) if done(result))
+        }
+        _ => false,
+    }
 }
 
 fn owner<T>(result: Result<T, WorkflowError>) -> ProbeResult<T> {
@@ -324,12 +345,11 @@ fn run_with_market(
         evidence,
     };
     probe.refuses_an_invalid_workflow()?;
-    probe.arm_position_watch()?;
     let entry = probe.breakout_fires_on_a_live_cross()?;
     probe.time_of_day_closes_the_position(&entry)?;
-    probe.position_watch_saw_open_and_close()?;
     probe.restart_fires_nothing_again(market_service, &mut guard, &target, &route, root)?;
     probe.deleted_workflows_are_gone()?;
+    probe.position_watch_flattens_what_opens()?;
     probe.workflow_only_market_entry_fills(market_service, &route)?;
     let (quotes, push_failures) = recorder.statistics();
     probe.evidence.metrics = json!({
@@ -473,9 +493,9 @@ impl Probe<'_> {
         )
     }
 
-    /// Fires when the position opens and when it closes. Its check that the trade has been
-    /// open a whole week never holds, so the flatten after it never runs, but it reads the
-    /// owner's open time and blocks the run if that is unknown.
+    /// Fires when the position opens and when it closes. While a position is open its time
+    /// in trade is within the maximum, so it flattens; once flat the check is false and it
+    /// cancels the working orders. Reading the open time blocks the run if it is unknown.
     fn position_watch(&self) -> ProbeResult<WorkflowDefinition> {
         let mut watch = self.definition(
             WATCH_ID,
@@ -483,18 +503,47 @@ impl Probe<'_> {
             "Probe position watch",
             WorkflowTrigger::PositionOpened,
             WorkflowCondition::single(WorkflowCheck::TimeInTrade {
-                compare: WorkflowCompare::AtLeast,
+                compare: WorkflowCompare::AtMost,
                 minutes: MAXIMUM_WORKFLOW_TRADE_MINUTES,
             }),
             &[WorkflowAction::Flatten],
         )?;
+        let cancel = WorkflowNodeId(3);
+        if let WorkflowStep::If { otherwise, .. } = &mut watch.nodes[0].step {
+            *otherwise = Some(cancel);
+        }
+        watch.nodes.push(WorkflowNode {
+            id: cancel,
+            step: WorkflowStep::Action {
+                action: WorkflowAction::CancelOrders,
+                next: None,
+            },
+        });
         watch.triggers.push(WorkflowTrigger::PositionClosed);
         watch.limits.repeat = WorkflowRepeat::PerSession { maximum: 2 };
         Ok(watch)
     }
 
-    /// Arms the position watch while flat, before the breakout opens the position.
-    fn arm_position_watch(&mut self) -> ProbeResult<()> {
+    /// At the next minute, while flat, buys without protection.
+    fn opener(&self) -> ProbeResult<WorkflowDefinition> {
+        self.definition(
+            OPENER_ID,
+            1,
+            "Probe opener",
+            WorkflowTrigger::Every { minutes: 1 },
+            WorkflowCondition::single(WorkflowCheck::Position(PositionRequirement::Flat)),
+            &[WorkflowAction::Enter {
+                side: OrderSide::Buy,
+                quantity: fixed(QUANTITY)?,
+                protection: None,
+            }],
+        )
+    }
+
+    /// Arms the position watch while flat, then lets the opener buy: the watch fires once
+    /// on the open and flattens, and once on that close and cancels, each reading the
+    /// owner's open time without a blocker. Both workflows are then deleted.
+    fn position_watch_flattens_what_opens(&mut self) -> ProbeResult<()> {
         owner(
             self.trading
                 .register_workflow(self.position_watch()?, WorkflowLayout::default()),
@@ -510,44 +559,52 @@ impl Probe<'_> {
                 "state": format!("{:?}", armed.state),
                 "blockers": format!("{:?}", armed.blockers),
             }),
-        )
-    }
-
-    /// The watch fired once when the breakout's fill opened the position and once when the
-    /// timed close flattened it, each time reading its check without a blocker, then is
-    /// deleted so the restart sees only the two completed workflows.
-    fn position_watch_saw_open_and_close(&mut self) -> ProbeResult<()> {
-        let view = wait_for("position watch firings", QUOTE_WAIT, || {
+        )?;
+        owner(
+            self.trading
+                .register_workflow(self.opener()?, WorkflowLayout::default()),
+        )?;
+        owner(self.trading.arm_workflow(OPENER_ID.to_string(), 1))?;
+        let view = wait_for("position watch firings", MINUTE_WAIT + QUOTE_WAIT, || {
             Ok(self
                 .workflow(WATCH_ID)?
                 .filter(|view| view.total_firings >= 2))
         })?;
-        let read_no = |outcome: &WorkflowFiringOutcome| {
-            matches!(
-                outcome,
-                WorkflowFiringOutcome::Executed(steps)
-                    if matches!(
-                        steps.as_slice(),
-                        [step] if matches!(step.outcome, WorkflowStepOutcome::Branch(false))
-                    )
-            )
-        };
+        let opener = self.workflow(OPENER_ID)?;
+        let flattened = view.recent_firings.iter().filter(|firing| {
+            branch_then_action(firing, true, |result| {
+                matches!(result, WorkflowActionResult::Flattened)
+            })
+        });
+        let cancelled = view.recent_firings.iter().filter(|firing| {
+            branch_then_action(firing, false, |result| {
+                matches!(result, WorkflowActionResult::Cancelled { .. })
+            })
+        });
+        let position = wait_for("flat after the watch", QUOTE_WAIT, || {
+            let units = self.position_units()?;
+            Ok((units == 0).then_some(units))
+        })?;
         self.evidence.check(
             "position_triggers_fired_on_open_and_close",
             view.total_firings == 2
-                && view.recent_firings.len() == 2
-                && view
-                    .recent_firings
-                    .iter()
-                    .all(|firing| read_no(&firing.outcome)),
+                && flattened.count() == 1
+                && cancelled.count() == 1
+                && opener
+                    .as_ref()
+                    .is_some_and(|opener| opener.total_firings == 1)
+                && position == 0,
             json!({
                 "total_firings": view.total_firings,
+                "opener_firings": opener.as_ref().map(|opener| opener.total_firings),
+                "position_units": position,
                 "firings": view.recent_firings.iter().map(|firing| json!({
                     "fired_unix_nanos": firing.fired_unix_nanos,
                     "outcome": format!("{:?}", firing.outcome),
                 })).collect::<Vec<_>>(),
             }),
         )?;
+        owner(self.trading.delete_workflow(OPENER_ID.to_string()))?;
         owner(self.trading.delete_workflow(WATCH_ID.to_string()))
     }
 
