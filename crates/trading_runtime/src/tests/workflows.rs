@@ -42,7 +42,7 @@ fn breakout(workflow_id: &str, level: i64) -> WorkflowDefinition {
         revision: 1,
         name: "Breakout long".into(),
         account_id: account(),
-        instrument_id: instrument().instrument_id,
+        scope: WorkflowScope::Instrument(instrument().instrument_id),
         triggers: vec![WorkflowTrigger::PriceCrosses {
             direction: PriceDirection::Above,
             level: price(level),
@@ -443,7 +443,7 @@ fn a_timed_bracket_entry_on_a_significant_figure_grid_fills_on_the_next_quote() 
             }),
         },
     );
-    definition.instrument_id = eth.instrument_id.clone();
+    definition.scope = WorkflowScope::Instrument(eth.instrument_id.clone());
     definition.triggers = vec![WorkflowTrigger::Every { minutes: 1 }];
     register(&service, definition);
     service.arm_workflow("timed-eth".into(), 1).expect("armed");
@@ -512,7 +512,7 @@ fn a_workflow_rearmed_after_its_quote_interest_lapsed_still_fills() {
             }),
         },
     );
-    definition.instrument_id = eth.instrument_id.clone();
+    definition.scope = WorkflowScope::Instrument(eth.instrument_id.clone());
     definition.triggers = vec![WorkflowTrigger::Every { minutes: 1 }];
     register(&service, definition);
     service
@@ -921,14 +921,37 @@ fn trade(
     service: &TradingService,
     clock: &crate::clock::ManualClock,
     feed: &crate::core::market::feed::MarketFeedInbox,
+    order: (&str, OrderSide, i64),
+    sequence: u64,
+    book: (i64, i64),
+) -> Vec<Fill> {
+    trade_in(service, clock, feed, &instrument(), order, sequence, book)
+}
+
+/// [`trade`] in `instrument`.
+fn trade_in(
+    service: &TradingService,
+    clock: &crate::clock::ManualClock,
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    instrument: &TradingInstrument,
     (client_id, side, quantity): (&str, OrderSide, i64),
     sequence: u64,
     (bid, ask): (i64, i64),
 ) -> Vec<Fill> {
     let mut order = market_order(client_id, side, 1, clock.wall_unix_nanos());
+    order.instrument_id = instrument.instrument_id.clone();
     order.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
     service.place_order(order, false).expect("market order");
-    quote_now(service, clock, feed, sequence, (bid, ask))
+    clock.advance(Duration::from_millis(100));
+    deliver_quote_at(
+        service,
+        feed,
+        instrument,
+        sequence,
+        bid,
+        ask,
+        clock.wall_unix_nanos(),
+    )
 }
 
 /// Delivers a quote received a moment after the clock's current time.
@@ -1246,6 +1269,285 @@ fn deleting_a_practice_account_removes_its_workflows() {
     let (restarted, _feed) =
         reopen_awaiting_quote(&directory, &clock, &instrument, market_feed::route());
     assert_eq!(ids(&restarted), vec!["kept".to_string()]);
+    restarted
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+/// A second fixture symbol, quoted near 80.00.
+fn crude() -> TradingInstrument {
+    let mut crude = instrument();
+    crude.instrument_id =
+        InstrumentId::try_new("instrument:fixture:CME:CLZ6").expect("crude instrument id");
+    crude
+}
+
+fn crude_route() -> aeris_trading::market::MarketRoute {
+    aeris_trading::market::MarketRoute {
+        instrument_id: crude().instrument_id,
+        provider_symbol: "CLZ6".into(),
+        display_symbol: "CLZ6".into(),
+        ..market_feed::route()
+    }
+}
+
+/// The quoted fixture with the second symbol quoted too; both carry ticket demand, as open
+/// charts would hold it.
+fn two_symbol_fixture(
+    directory: &TestDirectory,
+) -> (
+    TradingService,
+    Arc<crate::clock::ManualClock>,
+    Arc<crate::core::market::feed::MarketFeedInbox>,
+) {
+    let (service, clock, feed) = quoted_fixture(
+        directory,
+        &instrument(),
+        market_feed::route(),
+        9_975,
+        10_000,
+    );
+    service
+        .register_instrument(crude())
+        .expect("crude registers");
+    service
+        .set_ticket_interest(vec![market_feed::route(), crude_route()])
+        .expect("ticket interest");
+    bootstrap_live_feed(&feed, &crude(), crude_route());
+    push_live_quote(&feed, &crude(), 1, 7_975, 8_000, 2);
+    service.status().expect("owner drains the crude feed");
+    (service, clock, feed)
+}
+
+/// A resting buy limit in `instrument` far below its quote.
+fn resting_limit_in(instrument: &TradingInstrument, client_id: &str, time: i64) -> PlaceOrder {
+    PlaceOrder {
+        instrument_id: instrument.instrument_id.clone(),
+        limit_price: Some(price(6_000)),
+        ..resting_limit(client_id, time)
+    }
+}
+
+fn net_quantity(service: &TradingService, instrument: &TradingInstrument) -> i64 {
+    working_set(service)
+        .positions
+        .iter()
+        .find(|position| {
+            position.account_id == account() && position.instrument_id == instrument.instrument_id
+        })
+        .map_or(0, |position| position.net_quantity.units())
+}
+
+#[test]
+fn a_workflow_on_any_symbol_cancels_and_flattens_every_symbol() {
+    let directory = TestDirectory::new("workflow-any-symbol-flat");
+    let (service, clock, feed) = two_symbol_fixture(&directory);
+    for (instrument, client_id) in [(instrument(), "rest-es"), (crude(), "rest-cl")] {
+        service
+            .place_order(
+                resting_limit_in(&instrument, client_id, clock.wall_unix_nanos()),
+                false,
+            )
+            .expect("resting order");
+    }
+    trade_in(
+        &service,
+        &clock,
+        &feed,
+        &instrument(),
+        ("es-long", OrderSide::Buy, 1),
+        2,
+        (9_975, 10_000),
+    );
+    trade_in(
+        &service,
+        &clock,
+        &feed,
+        &crude(),
+        ("cl-short", OrderSide::Sell, 2),
+        2,
+        (7_975, 8_000),
+    );
+    assert_eq!(
+        (
+            net_quantity(&service, &instrument()),
+            net_quantity(&service, &crude())
+        ),
+        (1, -2)
+    );
+
+    // Every minute: cancel the working orders, then flatten, on whatever symbol they are.
+    let mut definition = position_watch("flat-everything", WorkflowTrigger::Every { minutes: 1 });
+    definition.scope = WorkflowScope::AnySymbol;
+    definition.nodes = vec![
+        WorkflowNode {
+            id: THEN_NODE,
+            step: WorkflowStep::Action {
+                action: WorkflowAction::CancelOrders,
+                next: Some(ELSE_NODE),
+            },
+        },
+        action_node(ELSE_NODE, WorkflowAction::Flatten),
+    ];
+    register(&service, definition);
+    let armed = service
+        .arm_workflow("flat-everything".into(), 1)
+        .expect("armed");
+    assert!(armed.blockers.is_empty(), "{:?}", armed.blockers);
+
+    // The fixture clock is 00:16:40 UTC; the next minute mark is 00:17.
+    clock.advance(Duration::from_secs(20));
+    service.status().expect("owner runs the due timer");
+    assert_eq!(
+        executed(&workflow(&service, "flat-everything")),
+        vec![
+            WorkflowStepResult {
+                node: THEN_NODE,
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Cancelled { orders: 2 }),
+            },
+            WorkflowStepResult {
+                node: ELSE_NODE,
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Flattened),
+            },
+        ]
+    );
+    assert_eq!(
+        (
+            net_quantity(&service, &instrument()),
+            net_quantity(&service, &crude())
+        ),
+        (0, 0)
+    );
+    assert_eq!(working_set(&service).orders, []);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn a_position_trigger_on_any_symbol_acts_on_the_symbol_that_moved() {
+    let directory = TestDirectory::new("workflow-any-symbol-moved");
+    let (service, clock, feed) = two_symbol_fixture(&directory);
+    for (instrument, client_id) in [(instrument(), "rest-es"), (crude(), "rest-cl")] {
+        service
+            .place_order(
+                resting_limit_in(&instrument, client_id, clock.wall_unix_nanos()),
+                false,
+            )
+            .expect("resting order");
+    }
+    let mut definition = position_watch("cancel-on-open", WorkflowTrigger::PositionOpened);
+    definition.scope = WorkflowScope::AnySymbol;
+    register(&service, definition);
+    service
+        .arm_workflow("cancel-on-open".into(), 1)
+        .expect("armed");
+
+    trade_in(
+        &service,
+        &clock,
+        &feed,
+        &crude(),
+        ("cl-short", OrderSide::Sell, 1),
+        2,
+        (7_975, 8_000),
+    );
+    let view = workflow(&service, "cancel-on-open");
+    assert_eq!(view.total_firings, 1, "opening crude fires the trigger");
+    assert_eq!(
+        executed(&view),
+        vec![WorkflowStepResult {
+            node: THEN_NODE,
+            outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Cancelled { orders: 1 }),
+        }]
+    );
+    let orders = working_set(&service).orders;
+    assert_eq!(orders.len(), 1, "only the symbol that opened is acted on");
+    assert_eq!(orders[0].instrument_id, instrument().instrument_id);
+
+    trade_in(
+        &service,
+        &clock,
+        &feed,
+        &instrument(),
+        ("es-long", OrderSide::Buy, 1),
+        3,
+        (9_975, 10_000),
+    );
+    assert_eq!(workflow(&service, "cancel-on-open").total_firings, 2);
+    assert_eq!(working_set(&service).orders, []);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn an_if_on_any_symbol_narrows_the_run_to_the_positions_that_pass() {
+    let directory = TestDirectory::new("workflow-any-symbol-narrow");
+    let (service, clock, feed) = two_symbol_fixture(&directory);
+    trade_in(
+        &service,
+        &clock,
+        &feed,
+        &instrument(),
+        ("es-long", OrderSide::Buy, 1),
+        2,
+        (9_975, 10_000),
+    );
+    trade_in(
+        &service,
+        &clock,
+        &feed,
+        &crude(),
+        ("cl-short", OrderSide::Sell, 1),
+        2,
+        (7_975, 8_000),
+    );
+    // Every minute: if long, flatten; the short crude position does not pass.
+    let mut definition = probe(
+        "flatten-longs",
+        WorkflowCheck::Position(PositionRequirement::Long),
+    );
+    definition.scope = WorkflowScope::AnySymbol;
+    definition.nodes[1] = action_node(THEN_NODE, WorkflowAction::Flatten);
+    register(&service, definition);
+    service
+        .arm_workflow("flatten-longs".into(), 1)
+        .expect("armed");
+
+    clock.advance(Duration::from_secs(20));
+    service.status().expect("owner runs the due timer");
+    let before = workflow(&service, "flatten-longs");
+    assert_eq!(
+        executed(&before),
+        vec![
+            WorkflowStepResult {
+                node: IF_NODE,
+                outcome: WorkflowStepOutcome::Branch(true),
+            },
+            WorkflowStepResult {
+                node: THEN_NODE,
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Flattened),
+            },
+        ]
+    );
+    assert_eq!(
+        (
+            net_quantity(&service, &instrument()),
+            net_quantity(&service, &crude())
+        ),
+        (0, -1)
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+
+    // A workflow on any symbol is stored without an instrument and reopens unchanged.
+    let (restarted, _feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument(), market_feed::route());
+    let after = workflow(&restarted, "flatten-longs");
+    assert_eq!(after.definition.scope, WorkflowScope::AnySymbol);
+    assert_eq!(after.definition, before.definition);
     restarted
         .shutdown_after_owner_exit_for_test()
         .expect("shutdown");

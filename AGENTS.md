@@ -427,8 +427,14 @@ violations and missing verification explicitly, and never describe them as satis
   command. The desktop Workflows page (a header page beside Terminal and Screener) edits a draft
   board and sends only the definition and layout the user saved. A firing is committed
   before its first action runs, so a stop in between leaves it `Interrupted` and a restart never
-  repeats it. Armed price workflows join the owner's quote interest, and every workflow's
-  instrument is in the working set's registered terms. No model or remote service evaluates
+  repeats it. A workflow runs on one instrument or on any symbol (`WorkflowScope`; the stored
+  definition then names no instrument, and one stored with an instrument keeps opening): on any
+  symbol a run acts on every position of its account, a position trigger acts on the symbols
+  that moved, an If that reads the position narrows the run to the positions that passed, and
+  price triggers, price checks and entries are refused. Armed one-symbol workflows join the
+  owner's quote interest (on any symbol, the account's open positions when a check reads the
+  quote), and every one-symbol workflow's instrument is in the working set's registered
+  terms. No model or remote service evaluates
   or fires a workflow. V32 adds `trade_cycles.opened_unix_nanos`, the owner time a position
   opened, so position opened and closed triggers and the time-in-trade, open-profit and pullback
   checks read the owner's own trade cycle; a pre-group store awaiting conversion reads it as

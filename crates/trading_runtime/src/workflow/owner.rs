@@ -11,18 +11,18 @@ use crate::risk::session::RiskSessionBoundary;
 use crate::service::{Command, WorkflowCommand};
 use crate::workflow::{
     MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS, PriceDirection, WORKFLOW_FIRING_HISTORY,
-    WorkflowAction, WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowDefinition,
-    WorkflowError, WorkflowFiring, WorkflowFiringOutcome, WorkflowInvalid, WorkflowLayout,
-    WorkflowNodeId, WorkflowPathStep, WorkflowProtection, WorkflowRecord, WorkflowRepeat,
-    WorkflowState, WorkflowStepOutcome, WorkflowStepResult, WorkflowTrigger, WorkflowView,
-    time_window_holds, workflow_client_order_id,
+    WorkflowAction, WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowCondition,
+    WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome, WorkflowInvalid,
+    WorkflowLayout, WorkflowNodeId, WorkflowPathStep, WorkflowProtection, WorkflowRecord,
+    WorkflowRepeat, WorkflowScope, WorkflowState, WorkflowStepOutcome, WorkflowStepResult,
+    WorkflowTargets, WorkflowTrigger, WorkflowView, time_window_holds, workflow_client_order_id,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{
     ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingAccountId,
 };
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// A time trigger reached more than this late (the computer slept or the owner stalled) is
 /// skipped instead of firing away from its moment.
@@ -41,11 +41,13 @@ pub(crate) struct WorkflowEntry {
     /// arming was at or past its level; `None` until the first quote, which never fires.
     at_level: [Option<bool>; MAXIMUM_WORKFLOW_TRIGGERS],
     next_due_unix_nanos: Option<i64>,
-    /// The position the last owner step saw, for the position triggers; `None` until the
-    /// first step after arming, loading or accepting, which never fires.
-    position_mark: Option<PositionMark>,
-    /// The best exit price of the open position seen while armed, for pullback checks.
-    best_exit: Option<BestExit>,
+    /// The position in each workflow symbol the last owner step saw, for the position
+    /// triggers; `None` until the first step after arming, loading or accepting, which never
+    /// fires. Bounded by the symbols the account has traded.
+    position_marks: Option<BTreeMap<InstrumentId, PositionMark>>,
+    /// The best exit price of each open position in the workflow's symbols seen while
+    /// armed, for pullback checks; only open positions are kept.
+    best_exits: BTreeMap<InstrumentId, BestExit>,
 }
 
 /// Which trade cycle the account's position is in and when it opened. Every close or
@@ -55,6 +57,14 @@ pub(crate) struct WorkflowEntry {
 struct PositionMark {
     cycle_id: i64,
     opened_unix_nanos: Option<i64>,
+}
+
+impl PositionMark {
+    /// A symbol before its first fill.
+    const UNTRADED: Self = Self {
+        cycle_id: 0,
+        opened_unix_nanos: None,
+    };
 }
 
 /// The most favorable exit price of one position: the highest bid while long, the lowest
@@ -73,8 +83,8 @@ impl WorkflowEntry {
             firings,
             at_level: [None; MAXIMUM_WORKFLOW_TRIGGERS],
             next_due_unix_nanos: None,
-            position_mark: None,
-            best_exit: None,
+            position_marks: None,
+            best_exits: BTreeMap::new(),
         }
     }
 }
@@ -212,17 +222,18 @@ impl TradingCore {
             .accounts
             .get(&definition.account_id)
             .ok_or(WorkflowError::UnknownAccount)?;
-        let instrument = self
-            .state
-            .instruments
-            .get(&definition.instrument_id)
-            .ok_or(WorkflowError::UnknownInstrument)?;
-        check_scales(
-            &definition,
-            instrument.price_scale,
-            instrument.quantity_scale,
-            account.currency_scale,
-        )?;
+        let instrument_scales = match definition.scope.instrument() {
+            Some(instrument_id) => {
+                let instrument = self
+                    .state
+                    .instruments
+                    .get(instrument_id)
+                    .ok_or(WorkflowError::UnknownInstrument)?;
+                Some((instrument.price_scale, instrument.quantity_scale))
+            }
+            None => None,
+        };
+        check_scales(&definition, instrument_scales, account.currency_scale)?;
         match self.workflows.get(&definition.workflow_id) {
             Some(previous) if definition.revision <= previous.record.definition.revision => {
                 return Err(WorkflowError::RevisionMustAdvance {
@@ -337,20 +348,38 @@ impl TradingCore {
             .collect()
     }
 
-    /// Every workflow's instrument, so the working set carries the terms that name and
-    /// price it.
+    /// Every one-symbol workflow's instrument, so the working set carries the terms that
+    /// name and price it.
     pub(super) fn workflow_instruments(&self) -> impl Iterator<Item = &InstrumentId> {
         self.workflows
             .values()
-            .map(|entry| &entry.record.definition.instrument_id)
+            .filter_map(|entry| entry.record.definition.scope.instrument())
     }
 
-    /// Instruments whose quotes an armed workflow needs, for the owner's quote interest.
-    pub(super) fn armed_workflow_instruments(&self) -> impl Iterator<Item = &InstrumentId> {
-        self.workflows
-            .values()
-            .filter(|entry| entry.record.state == WorkflowState::Armed)
-            .map(|entry| &entry.record.definition.instrument_id)
+    /// Instruments whose quotes an armed workflow needs, for the owner's quote interest: a
+    /// one-symbol workflow's instrument, and every open position of the account when a
+    /// workflow on any symbol has a check that reads the quote.
+    pub(super) fn armed_workflow_instruments(&self) -> BTreeSet<InstrumentId> {
+        let mut instruments = BTreeSet::new();
+        for entry in self.workflows.values() {
+            let definition = &entry.record.definition;
+            if entry.record.state != WorkflowState::Armed {
+                continue;
+            }
+            match definition.scope.instrument() {
+                Some(instrument_id) => {
+                    instruments.insert(instrument_id.clone());
+                }
+                None if definition.checks().any(WorkflowCheck::reads_quote) => {
+                    instruments.extend(
+                        open_positions(&self.state.positions, &definition.account_id)
+                            .map(|position| position.instrument_id.clone()),
+                    );
+                }
+                None => {}
+            }
+        }
+        instruments
     }
 
     /// The next timed trigger or expiry of an armed workflow.
@@ -378,22 +407,39 @@ impl TradingCore {
                 continue;
             }
             let definition = &entry.record.definition;
-            let Some(quote) = self.quote_book.observation(&definition.instrument_id) else {
+            let watched = open_positions(&self.state.positions, &definition.account_id)
+                .filter(|position| {
+                    definition
+                        .scope
+                        .instrument()
+                        .is_none_or(|instrument_id| instrument_id == &position.instrument_id)
+                })
+                .collect::<Vec<_>>();
+            entry.best_exits.retain(|instrument_id, _| {
+                watched
+                    .iter()
+                    .any(|position| &position.instrument_id == instrument_id)
+            });
+            for position in watched {
+                let Some(quote) = self.quote_book.observation(&position.instrument_id) else {
+                    continue;
+                };
+                let key = (position.account_id.clone(), position.instrument_id.clone());
+                let mark = position_mark(&self.state.trade_cycles, &key);
+                let kept = entry.best_exits.get(&position.instrument_id).copied();
+                if let Some(best) = best_exit(kept, mark, position, quote.bid, quote.ask) {
+                    entry
+                        .best_exits
+                        .insert(position.instrument_id.clone(), best);
+                }
+            }
+            let Some(quote) = definition
+                .scope
+                .instrument()
+                .and_then(|instrument_id| self.quote_book.observation(instrument_id))
+            else {
                 continue;
             };
-            let key = (
-                definition.account_id.clone(),
-                definition.instrument_id.clone(),
-            );
-            if let Some(position) = self
-                .state
-                .positions
-                .get(&key)
-                .filter(|position| position.net_quantity.units() != 0)
-            {
-                let mark = position_mark(&self.state.trade_cycles, &key);
-                entry.best_exit = best_exit(entry.best_exit, mark, position, quote.bid, quote.ask);
-            }
             let mut crossed = false;
             for (trigger, last) in entry
                 .record
@@ -412,11 +458,11 @@ impl TradingCore {
                 *last = Some(at_level);
             }
             if crossed {
-                fired.push(workflow_id.clone());
+                fired.push((workflow_id.clone(), definition.all_targets()));
             }
         }
-        for workflow_id in fired {
-            self.fire_workflow(&workflow_id);
+        for (workflow_id, targets) in fired {
+            self.fire_workflow(&workflow_id, targets);
         }
     }
 
@@ -448,11 +494,11 @@ impl TradingCore {
             };
             entry.next_due_unix_nanos = entry.record.definition.next_timed_trigger_after(now);
             if now.saturating_sub(due) <= TIME_TRIGGER_GRACE_NANOS {
-                fired.push(workflow_id.clone());
+                fired.push((workflow_id.clone(), entry.record.definition.all_targets()));
             }
         }
-        for workflow_id in fired {
-            self.fire_workflow(&workflow_id);
+        for (workflow_id, targets) in fired {
+            self.fire_workflow(&workflow_id, targets);
         }
     }
 
@@ -466,39 +512,45 @@ impl TradingCore {
                     continue;
                 }
                 let definition = &entry.record.definition;
-                let key = (
-                    definition.account_id.clone(),
-                    definition.instrument_id.clone(),
-                );
-                let mark = position_mark(&self.state.trade_cycles, &key);
-                let Some(previous) = entry.position_mark.replace(mark) else {
+                let marks = workflow_position_marks(&self.state.trade_cycles, definition);
+                let Some(previous) = entry.position_marks.replace(marks.clone()) else {
                     continue;
                 };
-                let open = self
-                    .state
-                    .positions
-                    .get(&key)
-                    .is_some_and(|position| position.net_quantity.units() != 0);
-                let closed = mark.cycle_id != previous.cycle_id;
-                let opened = (mark.opened_unix_nanos.is_some()
-                    && mark.opened_unix_nanos != previous.opened_unix_nanos)
-                    || (closed && open);
-                let triggered = definition.triggers.iter().any(|trigger| match trigger {
-                    WorkflowTrigger::PositionOpened => opened,
-                    WorkflowTrigger::PositionClosed => closed,
-                    WorkflowTrigger::PriceCrosses { .. }
-                    | WorkflowTrigger::TimeOfDay(_)
-                    | WorkflowTrigger::Every { .. } => false,
-                });
-                if triggered {
-                    fired.push(workflow_id.clone());
+                let mut moved = BTreeSet::new();
+                for (instrument_id, mark) in marks {
+                    let before = previous
+                        .get(&instrument_id)
+                        .copied()
+                        .unwrap_or(PositionMark::UNTRADED);
+                    let open = self
+                        .state
+                        .positions
+                        .get(&(definition.account_id.clone(), instrument_id.clone()))
+                        .is_some_and(|position| position.net_quantity.units() != 0);
+                    let closed = mark.cycle_id != before.cycle_id;
+                    let opened = (mark.opened_unix_nanos.is_some()
+                        && mark.opened_unix_nanos != before.opened_unix_nanos)
+                        || (closed && open);
+                    let triggered = definition.triggers.iter().any(|trigger| match trigger {
+                        WorkflowTrigger::PositionOpened => opened,
+                        WorkflowTrigger::PositionClosed => closed,
+                        WorkflowTrigger::PriceCrosses { .. }
+                        | WorkflowTrigger::TimeOfDay(_)
+                        | WorkflowTrigger::Every { .. } => false,
+                    });
+                    if triggered {
+                        moved.insert(instrument_id);
+                    }
+                }
+                if !moved.is_empty() {
+                    fired.push((workflow_id.clone(), WorkflowTargets::Only(moved)));
                 }
             }
             if fired.is_empty() {
                 return;
             }
-            for workflow_id in fired {
-                self.fire_workflow(&workflow_id);
+            for (workflow_id, targets) in fired {
+                self.fire_workflow(&workflow_id, targets);
             }
         }
     }
@@ -530,7 +582,7 @@ impl TradingCore {
             .get_mut(&record.definition.workflow_id)
             .ok_or(WorkflowError::UnknownWorkflow)?;
         entry.at_level = [None; MAXIMUM_WORKFLOW_TRIGGERS];
-        entry.position_mark = None;
+        entry.position_marks = None;
         entry.next_due_unix_nanos = next_due(&record, now);
         entry.record = record;
         self.bump_revision().map_err(WorkflowError::Owner)
@@ -589,7 +641,7 @@ impl TradingCore {
         let enters = path.iter().any(|step| {
             matches!(
                 step,
-                WorkflowPathStep::Action(_, WorkflowAction::Enter { .. })
+                WorkflowPathStep::Action(_, WorkflowAction::Enter { .. }, _)
             )
         });
         self.blockers_for(definition, enters, false)
@@ -606,10 +658,9 @@ impl TradingCore {
         if !self.state.accounts.contains_key(account_id) {
             blockers.push(WorkflowBlocker::AccountMissing);
         }
-        if !self
-            .state
-            .instruments
-            .contains_key(&definition.instrument_id)
+        let instrument_id = definition.scope.instrument();
+        if instrument_id
+            .is_some_and(|instrument_id| !self.state.instruments.contains_key(instrument_id))
         {
             blockers.push(WorkflowBlocker::InstrumentTermsMissing);
         }
@@ -630,28 +681,91 @@ impl TradingCore {
                 .triggers
                 .iter()
                 .any(|trigger| matches!(trigger, WorkflowTrigger::PriceCrosses { .. }));
+        // On any symbol, each position's quote is read when its check is.
         if needs_quote
-            && self
-                .quote_book
-                .observation(&definition.instrument_id)
-                .is_none()
+            && instrument_id
+                .is_some_and(|instrument_id| self.quote_book.observation(instrument_id).is_none())
         {
             blockers.push(WorkflowBlocker::QuoteUnavailable);
         }
         blockers
     }
 
-    /// The branch a firing now takes, every check read from the owner's state before any
-    /// action runs. Fails with what stops a check on the path from being read.
+    /// The branch a firing on `targets` now takes, every check read from the owner's state
+    /// before any action runs. Fails with what stops a check on the path from being read.
     fn resolve_workflow_path(
         &self,
         definition: &WorkflowDefinition,
-        kept_best: Option<BestExit>,
+        targets: WorkflowTargets,
+        kept_best: &BTreeMap<InstrumentId, BestExit>,
     ) -> Result<Vec<WorkflowPathStep>, WorkflowBlocker> {
-        let key = (
-            definition.account_id.clone(),
-            definition.instrument_id.clone(),
-        );
+        definition.resolve_path(targets, |condition, targets| {
+            self.decide_condition(definition, condition, targets, kept_best)
+        })
+    }
+
+    /// One symbol's If reads that symbol. On any symbol, an If with a position check is
+    /// read for each open position the run acts on and holds when any passes, narrowing the
+    /// targets to those that passed; with no such position (or no position check) it is
+    /// read once as flat, leaving the targets as they are.
+    fn decide_condition(
+        &self,
+        definition: &WorkflowDefinition,
+        condition: &WorkflowCondition,
+        targets: &mut WorkflowTargets,
+        kept_best: &BTreeMap<InstrumentId, BestExit>,
+    ) -> Result<bool, WorkflowBlocker> {
+        let account_id = &definition.account_id;
+        let read = |instrument_id: Option<&InstrumentId>| {
+            let reading = self.check_reading(account_id, instrument_id, kept_best);
+            condition.holds(|check| reading.holds(check))
+        };
+        if let WorkflowScope::Instrument(instrument_id) = &definition.scope {
+            return read(Some(instrument_id));
+        }
+        let candidates = if condition.checks().any(WorkflowCheck::reads_position) {
+            open_positions(&self.state.positions, account_id)
+                .map(|position| &position.instrument_id)
+                .filter(|instrument_id| targets.includes(instrument_id))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if candidates.is_empty() {
+            return read(None);
+        }
+        let mut passed = BTreeSet::new();
+        for instrument_id in candidates {
+            if read(Some(instrument_id))? {
+                passed.insert(instrument_id.clone());
+            }
+        }
+        if passed.is_empty() {
+            return Ok(false);
+        }
+        *targets = WorkflowTargets::Only(passed);
+        Ok(true)
+    }
+
+    /// What a check reads about the account's position and quote in one symbol, or about
+    /// the account alone, flat, without one.
+    fn check_reading<'a>(
+        &'a self,
+        account_id: &TradingAccountId,
+        instrument_id: Option<&InstrumentId>,
+        kept_best: &BTreeMap<InstrumentId, BestExit>,
+    ) -> CheckReading<'a> {
+        let Some(instrument_id) = instrument_id else {
+            return CheckReading {
+                now: self.command_now,
+                position: None,
+                opened_unix_nanos: None,
+                quote: None,
+                best_exit: None,
+                instrument: None,
+            };
+        };
+        let key = (account_id.clone(), instrument_id.clone());
         let position = self
             .state
             .positions
@@ -660,23 +774,23 @@ impl TradingCore {
         let mark = position_mark(&self.state.trade_cycles, &key);
         let quote = self
             .quote_book
-            .observation(&definition.instrument_id)
+            .observation(instrument_id)
             .map(|quote| (quote.bid, quote.ask));
-        let reading = CheckReading {
+        CheckReading {
             now: self.command_now,
             position,
             opened_unix_nanos: mark.opened_unix_nanos,
             quote,
             best_exit: position.zip(quote).and_then(|(position, (bid, ask))| {
-                best_exit(kept_best, mark, position, bid, ask).map(|best| best.price)
+                let kept = kept_best.get(instrument_id).copied();
+                best_exit(kept, mark, position, bid, ask).map(|best| best.price)
             }),
-            instrument: self.state.instruments.get(&definition.instrument_id),
-        };
-        definition.resolve_path(|check| reading.holds(check))
+            instrument: self.state.instruments.get(instrument_id),
+        }
     }
 
-    fn fire_workflow(&mut self, workflow_id: &str) {
-        if let Err(error) = self.try_fire_workflow(workflow_id) {
+    fn fire_workflow(&mut self, workflow_id: &str, targets: WorkflowTargets) {
+        if let Err(error) = self.try_fire_workflow(workflow_id, targets) {
             aeris_observability::diagnostic!("workflow firing failed: {error}");
         }
     }
@@ -685,7 +799,11 @@ impl TradingCore {
     /// stop in between leaves it `Interrupted` and a restart never repeats it; each action's
     /// client order id derives from the firing and its node for the same reason. A branch
     /// that reaches no action is not a firing: nothing is recorded or counted.
-    fn try_fire_workflow(&mut self, workflow_id: &str) -> Result<(), WorkflowError> {
+    fn try_fire_workflow(
+        &mut self,
+        workflow_id: &str,
+        targets: WorkflowTargets,
+    ) -> Result<(), WorkflowError> {
         let now = self.command_now;
         let mut record = self
             .workflows
@@ -701,8 +819,9 @@ impl TradingCore {
         let kept_best = self
             .workflows
             .get(workflow_id)
-            .and_then(|entry| entry.best_exit);
-        let path = self.resolve_workflow_path(&definition, kept_best);
+            .map(|entry| entry.best_exits.clone())
+            .unwrap_or_default();
+        let path = self.resolve_workflow_path(&definition, targets, &kept_best);
         let acts = |path: &[WorkflowPathStep]| {
             path.iter()
                 .any(|step| matches!(step, WorkflowPathStep::Action(..)))
@@ -743,13 +862,13 @@ impl TradingCore {
         for step in path {
             let (node, outcome) = match step {
                 WorkflowPathStep::Branch(node, held) => (node, WorkflowStepOutcome::Branch(held)),
-                WorkflowPathStep::Action(node, action) => (
+                WorkflowPathStep::Action(node, action, targets) => (
                     node,
                     WorkflowStepOutcome::Action(self.run_workflow_action(
                         &definition,
-                        sequence,
-                        node,
+                        (sequence, node),
                         action,
+                        &targets,
                     )),
                 ),
             };
@@ -788,15 +907,15 @@ impl TradingCore {
         self.bump_revision().map_err(WorkflowError::Owner)
     }
 
+    /// Runs one action of firing `sequence` at `node` on the symbols the run acts on.
     fn run_workflow_action(
         &mut self,
         definition: &WorkflowDefinition,
-        sequence: u64,
-        node: WorkflowNodeId,
+        (sequence, node): (u64, WorkflowNodeId),
         action: WorkflowAction,
+        targets: &WorkflowTargets,
     ) -> WorkflowActionResult {
         let account_id = &definition.account_id;
-        let instrument_id = &definition.instrument_id;
         match action {
             WorkflowAction::Enter {
                 side,
@@ -819,27 +938,8 @@ impl TradingCore {
                     detail: error.to_string(),
                 },
             },
-            WorkflowAction::Flatten => match self.flatten_scope(&FlattenScope {
-                account: Some(account_id.clone()),
-                instrument: Some(instrument_id.clone()),
-            }) {
-                Ok(outcome) => match outcome.incomplete {
-                    Some(detail) => WorkflowActionResult::Refused { detail },
-                    None if !outcome.unpriced.is_empty() => WorkflowActionResult::Refused {
-                        detail: aeris_trading::RejectReason::QuoteUnavailable.to_string(),
-                    },
-                    None => WorkflowActionResult::Flattened,
-                },
-                Err(detail) => WorkflowActionResult::Refused { detail },
-            },
-            WorkflowAction::CancelOrders => {
-                match self.cancel_open_orders(Some(account_id), Some(instrument_id)) {
-                    Ok((cancelled, None)) => WorkflowActionResult::Cancelled {
-                        orders: cancelled.len(),
-                    },
-                    Ok((_, Some(detail))) | Err(detail) => WorkflowActionResult::Refused { detail },
-                }
-            }
+            WorkflowAction::Flatten => self.flatten_workflow_targets(account_id, targets),
+            WorkflowAction::CancelOrders => self.cancel_workflow_target_orders(account_id, targets),
             WorkflowAction::LockAccount => match self.lock_account(
                 account_id.clone(),
                 RiskLockKind::Manual,
@@ -852,6 +952,62 @@ impl TradingCore {
         }
     }
 
+    /// Closes the account's position in each target, or in every symbol.
+    fn flatten_workflow_targets(
+        &mut self,
+        account_id: &TradingAccountId,
+        targets: &WorkflowTargets,
+    ) -> WorkflowActionResult {
+        let scopes = match targets {
+            WorkflowTargets::Every => vec![None],
+            WorkflowTargets::Only(instruments) => instruments.iter().cloned().map(Some).collect(),
+        };
+        let mut refused = None;
+        for instrument in scopes {
+            let detail = match self.flatten_scope(&FlattenScope {
+                account: Some(account_id.clone()),
+                instrument,
+            }) {
+                Ok(outcome) => match outcome.incomplete {
+                    Some(detail) => Some(detail),
+                    None if !outcome.unpriced.is_empty() => {
+                        Some(aeris_trading::RejectReason::QuoteUnavailable.to_string())
+                    }
+                    None => None,
+                },
+                Err(detail) => Some(detail),
+            };
+            if refused.is_none() {
+                refused = detail;
+            }
+        }
+        refused.map_or(WorkflowActionResult::Flattened, |detail| {
+            WorkflowActionResult::Refused { detail }
+        })
+    }
+
+    /// Cancels the account's working orders in each target, or in every symbol.
+    fn cancel_workflow_target_orders(
+        &mut self,
+        account_id: &TradingAccountId,
+        targets: &WorkflowTargets,
+    ) -> WorkflowActionResult {
+        let scopes = match targets {
+            WorkflowTargets::Every => vec![None],
+            WorkflowTargets::Only(instruments) => instruments.iter().map(Some).collect(),
+        };
+        let mut orders = 0;
+        for instrument_id in scopes {
+            match self.cancel_open_orders(Some(account_id), instrument_id) {
+                Ok((cancelled, None)) => orders += cancelled.len(),
+                Ok((_, Some(detail))) | Err(detail) => {
+                    return WorkflowActionResult::Refused { detail };
+                }
+            }
+        }
+        WorkflowActionResult::Cancelled { orders }
+    }
+
     /// A market entry stamped from the owner's verified quote, bracketed when the workflow
     /// names a stop and a target.
     fn enter_workflow_position(
@@ -862,14 +1018,20 @@ impl TradingCore {
         quantity: FixedPoint,
         protection: Option<WorkflowProtection>,
     ) -> WorkflowActionResult {
-        let quote = match self.market_observation(&definition.instrument_id) {
+        // Validation keeps entries out of workflows on any symbol.
+        let Some(instrument_id) = definition.scope.instrument() else {
+            return WorkflowActionResult::Refused {
+                detail: WorkflowError::Invalid(WorkflowInvalid::Scope).to_string(),
+            };
+        };
+        let quote = match self.market_observation(instrument_id) {
             Ok(quote) => quote,
             Err(detail) => return WorkflowActionResult::Refused { detail },
         };
         let entry = PlaceOrder {
             client_order_id: client_order_id.clone(),
             account_id: definition.account_id.clone(),
-            instrument_id: definition.instrument_id.clone(),
+            instrument_id: instrument_id.clone(),
             side,
             order_type: OrderType::Market,
             time_in_force: TimeInForce::Day,
@@ -1057,16 +1219,53 @@ fn position_mark(
     cycles: &BTreeMap<(TradingAccountId, InstrumentId), TradeCycle>,
     key: &(TradingAccountId, InstrumentId),
 ) -> PositionMark {
-    cycles.get(key).map_or(
-        PositionMark {
-            cycle_id: 0,
-            opened_unix_nanos: None,
-        },
-        |cycle| PositionMark {
+    cycles
+        .get(key)
+        .map_or(PositionMark::UNTRADED, |cycle| PositionMark {
             cycle_id: cycle.cycle_id,
             opened_unix_nanos: cycle.opened_unix_nanos,
-        },
-    )
+        })
+}
+
+/// The position mark of each workflow symbol: the one instrument, or every symbol the
+/// account has traded.
+fn workflow_position_marks(
+    cycles: &BTreeMap<(TradingAccountId, InstrumentId), TradeCycle>,
+    definition: &WorkflowDefinition,
+) -> BTreeMap<InstrumentId, PositionMark> {
+    let account_id = &definition.account_id;
+    match definition.scope.instrument() {
+        Some(instrument_id) => BTreeMap::from([(
+            instrument_id.clone(),
+            position_mark(cycles, &(account_id.clone(), instrument_id.clone())),
+        )]),
+        None => cycles
+            .iter()
+            .filter(|((account, _), _)| account == account_id)
+            .map(|((_, instrument_id), cycle)| {
+                (
+                    instrument_id.clone(),
+                    PositionMark {
+                        cycle_id: cycle.cycle_id,
+                        opened_unix_nanos: cycle.opened_unix_nanos,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+/// The account's open positions.
+fn open_positions<'a>(
+    positions: &'a BTreeMap<(TradingAccountId, InstrumentId), Position>,
+    account_id: &'a TradingAccountId,
+) -> impl Iterator<Item = &'a Position> {
+    positions
+        .iter()
+        .filter(move |((account, _), position)| {
+            account == account_id && position.net_quantity.units() != 0
+        })
+        .map(|(_, position)| position)
 }
 
 /// The most favorable of the kept best exit of this same position, its average entry and
@@ -1138,14 +1337,22 @@ fn is_expired(definition: &WorkflowDefinition, now: i64) -> bool {
         .is_some_and(|expiry| expiry <= now)
 }
 
-/// Levels and quantities must be at the instrument's own scales, and money amounts at the
-/// account currency's.
+/// Levels and quantities must be at the instrument's own `(price, quantity)` scales, and
+/// money amounts at the account currency's. A workflow on any symbol has neither levels
+/// nor quantities.
 fn check_scales(
     definition: &WorkflowDefinition,
-    price_scale: u8,
-    quantity_scale: u8,
+    instrument_scales: Option<(u8, u8)>,
     currency_scale: u8,
 ) -> Result<(), WorkflowError> {
+    if definition.checks().any(|check| {
+        matches!(check, WorkflowCheck::OpenProfit { amount, .. } if amount.scale() != currency_scale)
+    }) {
+        return Err(WorkflowError::Invalid(WorkflowInvalid::Amount));
+    }
+    let Some((price_scale, quantity_scale)) = instrument_scales else {
+        return Ok(());
+    };
     let trigger_off_scale = definition.triggers.iter().any(|trigger| {
         matches!(trigger, WorkflowTrigger::PriceCrosses { level, .. } if level.scale() != price_scale)
     });
@@ -1164,11 +1371,6 @@ fn check_scales(
     });
     if trigger_off_scale || condition_off_scale {
         return Err(WorkflowError::Invalid(WorkflowInvalid::Level));
-    }
-    if definition.checks().any(|check| {
-        matches!(check, WorkflowCheck::OpenProfit { amount, .. } if amount.scale() != currency_scale)
-    }) {
-        return Err(WorkflowError::Invalid(WorkflowInvalid::Amount));
     }
     if definition.actions().any(|action| {
         matches!(action, WorkflowAction::Enter { quantity, .. } if quantity.scale() != quantity_scale)

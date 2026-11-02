@@ -307,7 +307,7 @@ impl TradingCore {
                 ids.insert(group.instrument_id.clone());
             }
         }
-        ids.extend(self.armed_workflow_instruments().cloned());
+        ids.extend(self.armed_workflow_instruments());
         ids
     }
 

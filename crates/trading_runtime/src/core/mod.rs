@@ -74,9 +74,9 @@ pub use crate::workflow::{
     WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowClockTime, WorkflowCompare,
     WorkflowCondition, WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome,
     WorkflowInvalid, WorkflowJoin, WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId,
-    WorkflowNodePosition, WorkflowProtection, WorkflowRepeat, WorkflowState, WorkflowStep,
-    WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger, WorkflowView,
-    WorkflowWeekdays,
+    WorkflowNodePosition, WorkflowProtection, WorkflowRepeat, WorkflowScope, WorkflowState,
+    WorkflowStep, WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger,
+    WorkflowView, WorkflowWeekdays,
 };
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};

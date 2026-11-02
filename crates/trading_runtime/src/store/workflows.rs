@@ -7,9 +7,9 @@ use crate::workflow::{
     WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowClockTime, WorkflowCompare,
     WorkflowCondition, WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome,
     WorkflowJoin, WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId,
-    WorkflowNodePosition, WorkflowProtection, WorkflowRecord, WorkflowRepeat, WorkflowState,
-    WorkflowStep, WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger,
-    WorkflowWeekdays,
+    WorkflowNodePosition, WorkflowProtection, WorkflowRecord, WorkflowRepeat, WorkflowScope,
+    WorkflowState, WorkflowStep, WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone,
+    WorkflowTrigger, WorkflowWeekdays,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{ClientOrderId, FixedPoint, OrderSide, TradingAccountId};
@@ -267,11 +267,14 @@ impl TradingStore {
     }
 }
 
-/// The stored shape of a definition; its identity, revision and account are columns.
+/// The stored shape of a definition; its identity, revision and account are columns. A
+/// workflow on any symbol stores no instrument; every one stored before that scope existed
+/// names one.
 #[derive(Deserialize, Serialize)]
 struct StoredDefinition {
     name: String,
-    instrument_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instrument_id: Option<String>,
     triggers: Vec<StoredTrigger>,
     start: u16,
     nodes: Vec<StoredNode>,
@@ -792,7 +795,10 @@ impl StoredDefinition {
     fn from_definition(definition: &WorkflowDefinition) -> Self {
         Self {
             name: definition.name.clone(),
-            instrument_id: definition.instrument_id.as_str().to_string(),
+            instrument_id: definition
+                .scope
+                .instrument()
+                .map(|instrument_id| instrument_id.as_str().to_string()),
             triggers: definition
                 .triggers
                 .iter()
@@ -830,7 +836,12 @@ impl StoredDefinition {
             revision,
             name: self.name,
             account_id: TradingAccountId::try_new(account_id).map_err(corrupt)?,
-            instrument_id: InstrumentId::try_new(self.instrument_id).map_err(corrupt)?,
+            scope: match self.instrument_id {
+                Some(instrument_id) => WorkflowScope::Instrument(
+                    InstrumentId::try_new(instrument_id).map_err(corrupt)?,
+                ),
+                None => WorkflowScope::AnySymbol,
+            },
             triggers,
             start: WorkflowNodeId(self.start),
             nodes,

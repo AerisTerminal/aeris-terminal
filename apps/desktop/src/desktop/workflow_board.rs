@@ -13,8 +13,8 @@ use aeris_trading_runtime::{
     MINUTES_PER_DAY, PositionRequirement, PriceDirection, WorkflowAction, WorkflowCheck,
     WorkflowClockTime, WorkflowCompare, WorkflowCondition, WorkflowDefinition, WorkflowJoin,
     WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId, WorkflowNodePosition,
-    WorkflowProtection, WorkflowRepeat, WorkflowStep, WorkflowTimeZone, WorkflowTrigger,
-    WorkflowView, WorkflowWeekdays,
+    WorkflowProtection, WorkflowRepeat, WorkflowScope, WorkflowStep, WorkflowTimeZone,
+    WorkflowTrigger, WorkflowView, WorkflowWeekdays,
 };
 use num_traits::ToPrimitive;
 use std::collections::{BTreeMap, BTreeSet};
@@ -401,12 +401,19 @@ impl CheckDraft {
         }
     }
 
+    /// `scales` are the workflow symbol's; a workflow on any symbol has none, so a price
+    /// check there needs one symbol.
     fn parse(
         &self,
         node: WorkflowNodeId,
-        scales: InstrumentScales,
+        scales: Option<InstrumentScales>,
         currency_scale: Option<u8>,
     ) -> Result<WorkflowCheck, DraftProblem> {
+        let price_scale = || {
+            scales
+                .map(|scales| scales.price)
+                .ok_or(DraftProblem::NeedsSymbol(node))
+        };
         Ok(match self {
             Self::Position(requirement) => WorkflowCheck::Position(*requirement),
             Self::TimeInTrade { compare, minutes } => WorkflowCheck::TimeInTrade {
@@ -441,21 +448,20 @@ impl CheckDraft {
                     end_minute,
                 }
             }
-            Self::Price { direction, level } => WorkflowCheck::Price {
-                direction: *direction,
-                level: parse_level(level, scales.price).ok_or(DraftProblem::Level {
-                    node,
-                    decimals: scales.price,
-                })?,
-            },
+            Self::Price { direction, level } => {
+                let decimals = price_scale()?;
+                WorkflowCheck::Price {
+                    direction: *direction,
+                    level: parse_level(level, decimals)
+                        .ok_or(DraftProblem::Level { node, decimals })?,
+                }
+            }
             Self::PriceRange { low, high } => {
-                let (low, high) = parse_level(low, scales.price)
-                    .zip(parse_level(high, scales.price))
+                let decimals = price_scale()?;
+                let (low, high) = parse_level(low, decimals)
+                    .zip(parse_level(high, decimals))
                     .filter(|(low, high)| high.units() > low.units())
-                    .ok_or(DraftProblem::Range {
-                        node,
-                        decimals: scales.price,
-                    })?;
+                    .ok_or(DraftProblem::Range { node, decimals })?;
                 WorkflowCheck::PriceRange { low, high }
             }
             Self::Weekday { zone, days } => WorkflowCheck::Weekday {
@@ -633,7 +639,8 @@ impl WorkflowExample {
         Self::ExitAndLock,
     ];
 
-    /// The example as a draft on `account_id` and `instrument_id`, laid out by depth.
+    /// The example as a draft on `account_id` and `instrument_id`, or on any symbol when
+    /// it covers every position, laid out by depth.
     pub(super) fn draft(
         self,
         name: String,
@@ -642,6 +649,9 @@ impl WorkflowExample {
     ) -> WorkflowDraft {
         let (trigger, blocks, repeat) = self.blocks();
         let mut draft = WorkflowDraft::new(name, account_id, instrument_id);
+        if self == Self::FlatBeforeClose {
+            draft.scope = Some(WorkflowScope::AnySymbol);
+        }
         draft.triggers = vec![trigger];
         draft.repeat = repeat;
         if repeat == RepeatDraft::PerSession {
@@ -804,6 +814,10 @@ pub(super) enum DraftProblem {
     Name,
     Account,
     Symbol,
+    /// A price trigger in a workflow on any symbol.
+    TriggerNeedsSymbol,
+    /// A price check or an entry in a workflow on any symbol.
+    NeedsSymbol(WorkflowNodeId),
     /// No trigger, or more than [`MAXIMUM_WORKFLOW_TRIGGERS`].
     Triggers,
     TriggerLevel {
@@ -846,8 +860,10 @@ impl DraftProblem {
             | Self::TriggerLevel { .. }
             | Self::TriggerTime
             | Self::TriggerMinutes
+            | Self::TriggerNeedsSymbol
             | Self::NoStart => Some(BoardItem::Trigger),
             Self::Unconnected(node)
+            | Self::NeedsSymbol(node)
             | Self::Checks(node)
             | Self::Level { node, .. }
             | Self::Window(node)
@@ -949,7 +965,8 @@ pub(super) struct WorkflowDraft {
     pub(super) saved: Option<SavedRevision>,
     pub(super) name: String,
     pub(super) account_id: Option<TradingAccountId>,
-    pub(super) instrument_id: Option<InstrumentId>,
+    /// One symbol or any symbol; `None` until one is chosen.
+    pub(super) scope: Option<WorkflowScope>,
     /// The last market picked by search; it stays offered after another symbol is chosen.
     pub(super) searched: Option<SearchedMarket>,
     /// One to [`MAXIMUM_WORKFLOW_TRIGGERS`] triggers, drawn as one block.
@@ -973,7 +990,7 @@ impl WorkflowDraft {
             saved: None,
             name,
             account_id,
-            instrument_id,
+            scope: instrument_id.map(WorkflowScope::Instrument),
             searched: None,
             triggers: vec![TriggerDraft::of_kind(TriggerKind::Rises)],
             trigger_at: BoardPoint::default(),
@@ -1013,7 +1030,7 @@ impl WorkflowDraft {
             }),
             name: definition.name.clone(),
             account_id: Some(definition.account_id.clone()),
-            instrument_id: Some(definition.instrument_id.clone()),
+            scope: Some(definition.scope.clone()),
             searched: None,
             triggers: definition
                 .triggers
@@ -1040,9 +1057,14 @@ impl WorkflowDraft {
         draft
     }
 
+    /// The one symbol the draft is on, if it is on one.
+    pub(super) fn instrument_id(&self) -> Option<&InstrumentId> {
+        self.scope.as_ref().and_then(WorkflowScope::instrument)
+    }
+
     /// Puts the draft on a market picked by search.
     pub(super) fn choose_searched(&mut self, market: SearchedMarket) {
-        self.instrument_id = Some(market.instrument_id.clone());
+        self.scope = Some(WorkflowScope::Instrument(market.instrument_id.clone()));
         self.searched = Some(market);
     }
 
@@ -1050,7 +1072,7 @@ impl WorkflowDraft {
     pub(super) fn searched_market(&self) -> Option<&SearchedMarket> {
         self.searched
             .as_ref()
-            .filter(|market| self.instrument_id.as_ref() == Some(&market.instrument_id))
+            .filter(|market| self.instrument_id() == Some(&market.instrument_id))
     }
 
     /// Places every item at its saved position, and each one without a position in a
@@ -1593,11 +1615,11 @@ impl WorkflowDraft {
             return Err(DraftProblem::Name);
         }
         let account_id = self.account_id.clone().ok_or(DraftProblem::Account)?;
-        let (instrument_id, scales) = self
-            .instrument_id
-            .clone()
-            .zip(scales)
-            .ok_or(DraftProblem::Symbol)?;
+        let scope = self.scope.clone().ok_or(DraftProblem::Symbol)?;
+        let scales = match scope {
+            WorkflowScope::Instrument(_) => Some(scales.ok_or(DraftProblem::Symbol)?),
+            WorkflowScope::AnySymbol => None,
+        };
         if self.triggers.is_empty() || self.triggers.len() > MAXIMUM_WORKFLOW_TRIGGERS {
             return Err(DraftProblem::Triggers);
         }
@@ -1632,7 +1654,7 @@ impl WorkflowDraft {
             revision,
             name: name.to_string(),
             account_id,
-            instrument_id,
+            scope,
             triggers,
             start,
             nodes,
@@ -1670,14 +1692,18 @@ impl WorkflowDraft {
 }
 
 impl TriggerDraft {
-    fn parse(&self, scales: InstrumentScales) -> Result<WorkflowTrigger, DraftProblem> {
+    fn parse(&self, scales: Option<InstrumentScales>) -> Result<WorkflowTrigger, DraftProblem> {
         Ok(match self {
-            Self::Price { direction, level } => WorkflowTrigger::PriceCrosses {
-                direction: *direction,
-                level: parse_level(level, scales.price).ok_or(DraftProblem::TriggerLevel {
-                    decimals: scales.price,
-                })?,
-            },
+            Self::Price { direction, level } => {
+                let decimals = scales
+                    .map(|scales| scales.price)
+                    .ok_or(DraftProblem::TriggerNeedsSymbol)?;
+                WorkflowTrigger::PriceCrosses {
+                    direction: *direction,
+                    level: parse_level(level, decimals)
+                        .ok_or(DraftProblem::TriggerLevel { decimals })?,
+                }
+            }
             Self::Time { zone, time } => WorkflowTrigger::TimeOfDay(WorkflowClockTime {
                 zone: *zone,
                 minute_of_day: parse_clock(time).ok_or(DraftProblem::TriggerTime)?,
@@ -1796,7 +1822,7 @@ impl NodeDraft {
 
     fn step(
         &self,
-        scales: InstrumentScales,
+        scales: Option<InstrumentScales>,
         currency_scale: Option<u8>,
     ) -> Result<WorkflowStep, DraftProblem> {
         Ok(match &self.block {
@@ -1821,7 +1847,7 @@ impl ConditionDraft {
     fn parse(
         &self,
         node: WorkflowNodeId,
-        scales: InstrumentScales,
+        scales: Option<InstrumentScales>,
         currency_scale: Option<u8>,
     ) -> Result<WorkflowCondition, DraftProblem> {
         let checks = self
@@ -1837,7 +1863,7 @@ impl ActionDraft {
     fn parse(
         &self,
         node: WorkflowNodeId,
-        scales: InstrumentScales,
+        scales: Option<InstrumentScales>,
     ) -> Result<WorkflowAction, DraftProblem> {
         Ok(match self {
             Self::Enter {
@@ -1845,13 +1871,16 @@ impl ActionDraft {
                 quantity,
                 stop,
                 target,
-            } => WorkflowAction::Enter {
-                side: *side,
-                quantity: OrderQuantity::parse(quantity)
-                    .and_then(|quantity| quantity.fixed_point(scales.quantity))
-                    .ok_or(DraftProblem::Quantity(node))?,
-                protection: parse_protection(stop, target, node)?,
-            },
+            } => {
+                let scales = scales.ok_or(DraftProblem::NeedsSymbol(node))?;
+                WorkflowAction::Enter {
+                    side: *side,
+                    quantity: OrderQuantity::parse(quantity)
+                        .and_then(|quantity| quantity.fixed_point(scales.quantity))
+                        .ok_or(DraftProblem::Quantity(node))?,
+                    protection: parse_protection(stop, target, node)?,
+                }
+            }
             Self::Flatten => WorkflowAction::Flatten,
             Self::CancelOrders => WorkflowAction::CancelOrders,
             Self::LockAccount => WorkflowAction::LockAccount,
@@ -2417,7 +2446,7 @@ mod tests {
             scales: SCALES,
         };
         draft.choose_searched(searched.clone());
-        assert_eq!(draft.instrument_id.as_ref(), Some(&searched.instrument_id));
+        assert_eq!(draft.instrument_id(), Some(&searched.instrument_id));
         assert_eq!(draft_scales(None, &draft), Some(SCALES));
         assert_eq!(draft_symbol(None, &draft), "NQZ6");
         assert_ne!(
@@ -2428,7 +2457,7 @@ mod tests {
         );
 
         let other = InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("instrument");
-        draft.instrument_id = Some(other);
+        draft.scope = Some(WorkflowScope::Instrument(other));
         assert_eq!(draft.searched_market(), None);
         assert_eq!(
             draft
@@ -2589,6 +2618,11 @@ mod tests {
                 .unwrap_or_else(|problem| panic!("{example:?}: {problem:?}"));
             assert_eq!(definition.validate(), Ok(()), "{example:?}");
             assert_eq!(layout.validate(&definition), Ok(()), "{example:?}");
+            assert_eq!(
+                definition.scope == WorkflowScope::AnySymbol,
+                example == WorkflowExample::FlatBeforeClose,
+                "only flat before the close covers every symbol"
+            );
             let spots = layout
                 .positions
                 .iter()
@@ -2596,6 +2630,32 @@ mod tests {
                 .collect::<BTreeSet<_>>();
             assert_eq!(spots.len(), layout.positions.len(), "{example:?} overlaps");
         }
+    }
+
+    #[test]
+    fn a_draft_on_any_symbol_needs_no_scales_and_refuses_blocks_that_need_one() {
+        let (mut draft, _, buy, _) = branching();
+        draft.scope = Some(WorkflowScope::AnySymbol);
+        assert_eq!(draft.instrument_id(), None);
+        assert_eq!(
+            draft.build("wf-1".to_string(), 1, None, Some(2)).err(),
+            Some(DraftProblem::TriggerNeedsSymbol)
+        );
+        draft.triggers = vec![TriggerDraft::of_kind(TriggerKind::Every)];
+        assert_eq!(
+            draft.build("wf-1".to_string(), 1, None, Some(2)).err(),
+            Some(DraftProblem::NeedsSymbol(buy))
+        );
+        assert_eq!(
+            DraftProblem::NeedsSymbol(buy).item(),
+            Some(BoardItem::Node(buy))
+        );
+        draft.remove_node(buy);
+        let (definition, _) = draft
+            .build("wf-1".to_string(), 1, None, Some(2))
+            .expect("closing positions needs no one symbol");
+        assert_eq!(definition.scope, WorkflowScope::AnySymbol);
+        assert_eq!(definition.validate(), Ok(()));
     }
 
     #[test]

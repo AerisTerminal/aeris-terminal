@@ -19,8 +19,9 @@ use aeris_trading_runtime::{
     MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_PROTECTION_TICKS,
     MAXIMUM_WORKFLOW_TRADE_MINUTES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS, MINUTES_PER_DAY,
     PositionRequirement, PriceDirection, TradingInstrument, TradingService, WorkflowActionResult,
-    WorkflowBlocker, WorkflowCompare, WorkflowError, WorkflowFiringOutcome, WorkflowState,
-    WorkflowStepOutcome, WorkflowTimeZone, WorkflowView, WorkflowWeekdays, WorkingSet,
+    WorkflowBlocker, WorkflowCompare, WorkflowError, WorkflowFiringOutcome, WorkflowScope,
+    WorkflowState, WorkflowStepOutcome, WorkflowTimeZone, WorkflowView, WorkflowWeekdays,
+    WorkingSet,
 };
 
 const ZOOM_STEP: f32 = 1.2;
@@ -202,14 +203,15 @@ pub(super) fn instrument_scales(
     })
 }
 
-pub(super) fn symbol_text(
-    set: Option<&WorkingSet>,
-    instrument_id: Option<&aeris_instruments::InstrumentId>,
-) -> String {
-    match (instrument(set, instrument_id), instrument_id) {
-        (Some(instrument), _) => instrument.contract.provenance.display_symbol.clone(),
-        (None, Some(instrument_id)) => instrument_id.as_str().to_string(),
-        (None, None) => tr!(workflows::SYMBOL_UNSET).to_string(),
+pub(super) fn symbol_text(set: Option<&WorkingSet>, scope: Option<&WorkflowScope>) -> String {
+    match scope {
+        None => tr!(workflows::SYMBOL_UNSET).to_string(),
+        Some(WorkflowScope::AnySymbol) => tr!(workflows::SYMBOL_ANY).to_string(),
+        Some(WorkflowScope::Instrument(instrument_id)) => instrument(set, Some(instrument_id))
+            .map_or_else(
+                || instrument_id.as_str().to_string(),
+                |instrument| instrument.contract.provenance.display_symbol.clone(),
+            ),
     }
 }
 
@@ -218,7 +220,7 @@ pub(super) fn draft_scales(
     set: Option<&WorkingSet>,
     draft: &WorkflowDraft,
 ) -> Option<InstrumentScales> {
-    instrument_scales(instrument(set, draft.instrument_id.as_ref()))
+    instrument_scales(instrument(set, draft.instrument_id()))
         .or_else(|| draft.searched_market().map(|market| market.scales))
 }
 
@@ -233,11 +235,11 @@ pub(super) fn draft_currency_scale(set: Option<&WorkingSet>, draft: &WorkflowDra
 
 pub(super) fn draft_symbol(set: Option<&WorkingSet>, draft: &WorkflowDraft) -> String {
     match (
-        instrument(set, draft.instrument_id.as_ref()),
+        instrument(set, draft.instrument_id()),
         draft.searched_market(),
     ) {
         (None, Some(market)) => market.display_symbol.clone(),
-        _ => symbol_text(set, draft.instrument_id.as_ref()),
+        _ => symbol_text(set, draft.scope.as_ref()),
     }
 }
 
@@ -327,6 +329,9 @@ pub(super) fn problem_text(problem: DraftProblem) -> String {
         DraftProblem::Name => tr!(workflows::PROBLEM_NAME).to_string(),
         DraftProblem::Account => tr!(workflows::PROBLEM_ACCOUNT).to_string(),
         DraftProblem::Symbol => tr!(workflows::PROBLEM_SYMBOL).to_string(),
+        DraftProblem::TriggerNeedsSymbol | DraftProblem::NeedsSymbol(_) => {
+            tr!(workflows::PROBLEM_NEEDS_SYMBOL).to_string()
+        }
         DraftProblem::TriggerLevel { decimals } | DraftProblem::Level { decimals, .. } => {
             tr!(workflows::PROBLEM_LEVEL, decimals = decimals)
         }

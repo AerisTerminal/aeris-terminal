@@ -23,7 +23,7 @@ use aeris_trading::AccountEnvironment;
 use aeris_trading_runtime::{
     MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS,
     PositionRequirement, PriceDirection, WorkflowCompare, WorkflowJoin, WorkflowNodeId,
-    WorkflowState, WorkflowTimeZone, WorkflowView, WorkflowWeekdays, WorkingSet,
+    WorkflowScope, WorkflowState, WorkflowTimeZone, WorkflowView, WorkflowWeekdays, WorkingSet,
 };
 use gpui::{
     Bounds, ClickEvent, DispatchPhase, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
@@ -448,7 +448,7 @@ fn list_row(ui: Page<'_>, index: usize, view: &WorkflowView, shown: bool) -> Sta
     let workflow_id = definition.workflow_id.clone();
     let detail = format!(
         "{} · {}",
-        symbol_text(ui.set, Some(&definition.instrument_id)),
+        symbol_text(ui.set, Some(&definition.scope)),
         account_text(ui.set, &definition.account_id)
     );
     div()
@@ -838,7 +838,7 @@ fn account_menu(ui: Page<'_>, open: &OpenWorkflow) -> MenuAnchor {
 /// other market.
 fn symbol_menu(ui: Page<'_>, open: &OpenWorkflow) -> MenuAnchor {
     let theme = ui.theme;
-    let missing = open.draft.instrument_id.is_none();
+    let missing = open.draft.scope.is_none();
     let label = if missing {
         tr!(workflows::CHOOSE_SYMBOL).to_string()
     } else {
@@ -852,16 +852,25 @@ fn symbol_menu(ui: Page<'_>, open: &OpenWorkflow) -> MenuAnchor {
         missing,
     );
     let menu = (open.header_menu == Some(HeaderMenu::Symbol)).then(|| {
-        let mut menu = header_menu_panel("workflow_symbol_menu", theme);
+        let mut menu = header_menu_panel("workflow_symbol_menu", theme)
+            .child(
+                MenuRow::compact("workflow_symbol_any", tr!(workflows::SYMBOL_ANY), theme)
+                    .checked(open.draft.scope == Some(WorkflowScope::AnySymbol))
+                    .on_click(edit(ui.terminal, |open| {
+                        open.draft.scope = Some(WorkflowScope::AnySymbol);
+                        open.header_menu = None;
+                    })),
+            )
+            .separator();
         let options = symbol_options(ui, open);
         let any = !options.is_empty();
         for (index, (instrument_id, symbol)) in options.into_iter().enumerate() {
-            let checked = open.draft.instrument_id.as_ref() == Some(&instrument_id);
+            let checked = open.draft.instrument_id() == Some(&instrument_id);
             menu = menu.child(
                 MenuRow::compact(("workflow_symbol_choice", index), symbol, theme)
                     .checked(checked)
                     .on_click(edit(ui.terminal, move |open| {
-                        open.draft.instrument_id = Some(instrument_id.clone());
+                        open.draft.scope = Some(WorkflowScope::Instrument(instrument_id.clone()));
                         open.header_menu = None;
                     })),
             );

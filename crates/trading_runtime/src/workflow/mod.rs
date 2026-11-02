@@ -43,7 +43,7 @@ pub struct WorkflowDefinition {
     pub revision: u32,
     pub name: String,
     pub account_id: TradingAccountId,
-    pub instrument_id: InstrumentId,
+    pub scope: WorkflowScope,
     /// One to [`MAXIMUM_WORKFLOW_TRIGGERS`] triggers; any of them fires the workflow, and
     /// triggers due in the same owner step fire it once.
     pub triggers: Vec<WorkflowTrigger>,
@@ -53,6 +53,46 @@ pub struct WorkflowDefinition {
     /// on one run because the graph has no cycle.
     pub nodes: Vec<WorkflowNode>,
     pub limits: WorkflowLimits,
+}
+
+/// The symbols a workflow watches and acts on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkflowScope {
+    /// One instrument: every trigger, check and action reads or trades it.
+    Instrument(InstrumentId),
+    /// Every symbol the account holds. A run starts on every position (or, fired by a
+    /// position trigger, on the symbols whose position opened or closed); an If whose
+    /// checks read the position holds when any of those positions passes, and its `then`
+    /// branch goes on with only the positions that passed. Price triggers, price checks and
+    /// entries need one symbol and are refused.
+    AnySymbol,
+}
+
+impl WorkflowScope {
+    #[must_use]
+    pub const fn instrument(&self) -> Option<&InstrumentId> {
+        match self {
+            Self::Instrument(instrument_id) => Some(instrument_id),
+            Self::AnySymbol => None,
+        }
+    }
+}
+
+/// The symbols one run acts on, narrowed by the position checks it passes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum WorkflowTargets {
+    /// Every symbol of the account.
+    Every,
+    Only(BTreeSet<InstrumentId>),
+}
+
+impl WorkflowTargets {
+    pub(crate) fn includes(&self, instrument_id: &InstrumentId) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Only(instruments) => instruments.contains(instrument_id),
+        }
+    }
 }
 
 /// A node's identity within its workflow; the trigger is always [`WorkflowNodeId::TRIGGER`].
@@ -100,11 +140,11 @@ pub enum WorkflowTrigger {
     /// Fires at UTC midnight and every `minutes` after it, so every 15 minutes fires at
     /// :00, :15, :30 and :45. A moment that passes while Aeris is closed does not fire later.
     Every { minutes: u16 },
-    /// Fires when the account's position in the workflow instrument opens from flat or
-    /// reverses into its other side. Arming or a restart only records the current position.
+    /// Fires when the account's position in a workflow symbol opens from flat or reverses
+    /// into its other side. Arming or a restart only records the current positions.
     PositionOpened,
-    /// Fires when the account's position in the workflow instrument closes to flat or
-    /// reverses. Arming or a restart only records the current position.
+    /// Fires when the account's position in a workflow symbol closes to flat or reverses.
+    /// Arming or a restart only records the current positions.
     PositionClosed,
 }
 
@@ -147,7 +187,7 @@ pub enum WorkflowJoin {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkflowCheck {
-    /// The account's position in the workflow instrument.
+    /// The account's position in the symbol it is read for.
     Position(PositionRequirement),
     /// The local time is at or after `start` and before `end`; a window whose end is
     /// earlier than its start spans midnight.
@@ -229,9 +269,9 @@ pub enum WorkflowAction {
         quantity: FixedPoint,
         protection: Option<WorkflowProtection>,
     },
-    /// Closes the account's position in the workflow instrument.
+    /// Closes the account's position in each symbol the run acts on.
     Flatten,
-    /// Cancels the account's working orders in the workflow instrument.
+    /// Cancels the account's working orders in each symbol the run acts on.
     CancelOrders,
     /// Locks the account against new orders until the user unlocks it.
     LockAccount,
@@ -485,13 +525,16 @@ pub enum WorkflowInvalid {
     Cooldown,
     Expiry,
     Layout,
+    /// A price trigger, price check or entry in a workflow on any symbol.
+    Scope,
 }
 
 /// One node a run passes, decided before any action runs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum WorkflowPathStep {
     Branch(WorkflowNodeId, bool),
-    Action(WorkflowNodeId, WorkflowAction),
+    /// An action with the symbols it acts on.
+    Action(WorkflowNodeId, WorkflowAction, WorkflowTargets),
 }
 
 impl WorkflowStep {
@@ -530,6 +573,29 @@ impl WorkflowDefinition {
                 WorkflowStep::Action { .. } => None,
             })
             .flat_map(WorkflowCondition::checks)
+    }
+
+    /// Whether a block reads one symbol's price or trades it: a price trigger, a price check
+    /// or an entry, which a workflow on any symbol cannot have.
+    #[must_use]
+    pub fn needs_one_symbol(&self) -> bool {
+        self.triggers
+            .iter()
+            .any(|trigger| matches!(trigger, WorkflowTrigger::PriceCrosses { .. }))
+            || self.checks().any(WorkflowCheck::reads_one_symbol_price)
+            || self
+                .actions()
+                .any(|action| matches!(action, WorkflowAction::Enter { .. }))
+    }
+
+    /// The symbols a run fired by a price or time trigger starts on.
+    pub(crate) fn all_targets(&self) -> WorkflowTargets {
+        match &self.scope {
+            WorkflowScope::Instrument(instrument_id) => {
+                WorkflowTargets::Only(BTreeSet::from([instrument_id.clone()]))
+            }
+            WorkflowScope::AnySymbol => WorkflowTargets::Every,
+        }
     }
 
     /// The earliest moment strictly after `unix_nanos` at which a timed trigger fires.
@@ -581,6 +647,9 @@ impl WorkflowDefinition {
             }
         }
         self.validate_graph()?;
+        if self.scope == WorkflowScope::AnySymbol && self.needs_one_symbol() {
+            return Err(WorkflowInvalid::Scope);
+        }
         for node in &self.nodes {
             match node.step {
                 WorkflowStep::If { condition, .. } => {
@@ -670,12 +739,16 @@ impl WorkflowDefinition {
         Ok(())
     }
 
-    /// The nodes one run passes from `start`, deciding every check with `holds`. Fails
-    /// with what stops a check on the path from being read (a price check without a
-    /// current quote).
+    /// The nodes one run passes from `start` on `targets`, deciding every If with `decide`,
+    /// which may narrow the targets its `then` branch goes on with. Fails with what stops a
+    /// check on the path from being read (a price check without a current quote).
     pub(crate) fn resolve_path(
         &self,
-        mut holds: impl FnMut(WorkflowCheck) -> Result<bool, WorkflowBlocker>,
+        mut targets: WorkflowTargets,
+        mut decide: impl FnMut(
+            &WorkflowCondition,
+            &mut WorkflowTargets,
+        ) -> Result<bool, WorkflowBlocker>,
     ) -> Result<Vec<WorkflowPathStep>, WorkflowBlocker> {
         let mut path = Vec::new();
         let mut next = Some(self.start);
@@ -693,7 +766,7 @@ impl WorkflowDefinition {
                     then,
                     otherwise,
                 } => {
-                    let held = condition.holds(&mut holds)?;
+                    let held = decide(&condition, &mut targets)?;
                     path.push(WorkflowPathStep::Branch(id, held));
                     next = if held { then } else { otherwise };
                 }
@@ -701,7 +774,7 @@ impl WorkflowDefinition {
                     action,
                     next: after,
                 } => {
-                    path.push(WorkflowPathStep::Action(id, action));
+                    path.push(WorkflowPathStep::Action(id, action, targets.clone()));
                     next = after;
                 }
             }
@@ -860,6 +933,26 @@ impl WorkflowCondition {
 }
 
 impl WorkflowCheck {
+    /// Whether the check reads the account's position, so on any symbol it is read for each
+    /// position the run acts on.
+    #[must_use]
+    pub const fn reads_position(self) -> bool {
+        matches!(
+            self,
+            Self::Position(_)
+                | Self::TimeInTrade { .. }
+                | Self::OpenProfitTicks { .. }
+                | Self::OpenProfit { .. }
+                | Self::Pullback { .. }
+        )
+    }
+
+    /// Whether the check compares one symbol's price with a level.
+    #[must_use]
+    pub const fn reads_one_symbol_price(self) -> bool {
+        matches!(self, Self::Price { .. } | Self::PriceRange { .. })
+    }
+
     /// Whether the check reads the owner's quote.
     #[must_use]
     pub const fn reads_quote(self) -> bool {
@@ -1136,7 +1229,9 @@ mod tests {
             revision: 1,
             name: "Breakout".into(),
             account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
-            instrument_id: InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("id"),
+            scope: WorkflowScope::Instrument(
+                InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("id"),
+            ),
             triggers: vec![WorkflowTrigger::PriceCrosses {
                 direction: PriceDirection::Above,
                 level: FixedPoint::try_new(500_000, 2).expect("level"),
@@ -1443,24 +1538,86 @@ mod tests {
     #[test]
     fn a_run_follows_the_branch_its_condition_decides() {
         let definition = definition();
+        let targets = definition.all_targets();
         assert_eq!(
-            definition.resolve_path(|_| Ok(true)),
+            definition.resolve_path(targets.clone(), |_, _| Ok(true)),
             Ok(vec![
                 WorkflowPathStep::Branch(IF_FLAT, true),
-                WorkflowPathStep::Action(BUY, enter()),
+                WorkflowPathStep::Action(BUY, enter(), targets.clone()),
             ])
         );
         assert_eq!(
-            definition.resolve_path(|_| Ok(false)),
+            definition.resolve_path(targets.clone(), |_, _| Ok(false)),
             Ok(vec![
                 WorkflowPathStep::Branch(IF_FLAT, false),
-                WorkflowPathStep::Action(FLATTEN, WorkflowAction::Flatten),
+                WorkflowPathStep::Action(FLATTEN, WorkflowAction::Flatten, targets.clone()),
             ])
         );
         assert_eq!(
-            definition.resolve_path(|_| Err(WorkflowBlocker::QuoteUnavailable)),
+            definition.resolve_path(targets, |_, _| Err(WorkflowBlocker::QuoteUnavailable)),
             Err(WorkflowBlocker::QuoteUnavailable)
         );
+    }
+
+    #[test]
+    fn a_then_branch_goes_on_with_the_targets_its_if_narrowed() {
+        let mut definition = definition();
+        definition.scope = WorkflowScope::AnySymbol;
+        set_step(
+            &mut definition,
+            BUY,
+            WorkflowStep::Action {
+                action: WorkflowAction::CancelOrders,
+                next: None,
+            },
+        );
+        let passed = WorkflowTargets::Only(BTreeSet::from([InstrumentId::try_new(
+            "instrument:fixture:CME:NQZ6",
+        )
+        .expect("id")]));
+        let narrowed = passed.clone();
+        assert_eq!(
+            definition.resolve_path(WorkflowTargets::Every, move |_, targets| {
+                *targets = narrowed.clone();
+                Ok(true)
+            }),
+            Ok(vec![
+                WorkflowPathStep::Branch(IF_FLAT, true),
+                WorkflowPathStep::Action(BUY, WorkflowAction::CancelOrders, passed),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_workflow_on_any_symbol_refuses_blocks_that_need_one() {
+        let mut any = definition();
+        any.scope = WorkflowScope::AnySymbol;
+        // The price trigger and the entry each need one symbol.
+        assert_eq!(any.validate(), Err(WorkflowInvalid::Scope));
+        any.triggers = vec![WorkflowTrigger::Every { minutes: 5 }];
+        assert_eq!(any.validate(), Err(WorkflowInvalid::Scope));
+        set_step(
+            &mut any,
+            BUY,
+            WorkflowStep::Action {
+                action: WorkflowAction::CancelOrders,
+                next: None,
+            },
+        );
+        assert_eq!(any.validate(), Ok(()));
+        set_step(
+            &mut any,
+            IF_FLAT,
+            WorkflowStep::If {
+                condition: WorkflowCondition::single(WorkflowCheck::Price {
+                    direction: PriceDirection::Above,
+                    level: FixedPoint::try_new(500_000, 2).expect("level"),
+                }),
+                then: Some(BUY),
+                otherwise: Some(FLATTEN),
+            },
+        );
+        assert_eq!(any.validate(), Err(WorkflowInvalid::Scope));
     }
 
     #[test]

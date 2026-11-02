@@ -18,8 +18,8 @@ Status as of 2026-11-02.
   admission, risk and venue paths as a manual order. Nothing remote evaluates or fires a workflow.
 - **No AI.** The user builds every workflow from the closed set of blocks. Indicators are engine
   calculations on the owner's own market data, never a model's output.
-- **Venue-neutral.** Blocks name an account and an instrument, never a provider. A workflow that
-  works on a practice account works unchanged on a broker account.
+- **Venue-neutral.** Blocks name an account and an instrument (or any symbol), never a provider.
+  A workflow that works on a practice account works unchanged on a broker account.
 - **Bounded.** At most 64 workflows, 32 blocks each, four triggers each, four checks per If, 50
   firings a session, and a bounded firing history per workflow.
 
@@ -107,6 +107,11 @@ AI authoring, the former W3, is dropped: workflows are built only from blocks.
 
 - [x] Time in trade, profit in ticks or currency, pullback from the best price.
 - [x] Position opened and position closed triggers.
+- [x] Any symbol: a workflow may run on every symbol of its account instead of one. A run acts
+      on every position (a position trigger on the symbols that opened or closed), an If that
+      reads the position goes on with only the positions that passed, and price triggers, price
+      checks and entries need one symbol. "Flat before the close" opens on any symbol; the
+      header symbol menu offers Any symbol first.
 - [ ] Move stop and partial exit actions; break-even and trailing-stop rules on entries.
 - [ ] Quantity by fixed size or by risk; repeat without a limit, with re-arming.
 - [ ] Trade prints into the trading owner through a bounded queue; delta and volume conditions

@@ -35,8 +35,8 @@ use aeris_trading_runtime::{
     WorkflowClockTime, WorkflowCompare, WorkflowCondition, WorkflowDefinition, WorkflowError,
     WorkflowFiring, WorkflowFiringOutcome, WorkflowJoin, WorkflowLayout, WorkflowLimits,
     WorkflowNode, WorkflowNodeId, WorkflowNodePosition, WorkflowProtection, WorkflowRepeat,
-    WorkflowState, WorkflowStep, WorkflowStepOutcome, WorkflowTimeZone, WorkflowTrigger,
-    WorkflowView, WorkflowWeekdays, WorkingSet, clock::SystemClock,
+    WorkflowScope, WorkflowState, WorkflowStep, WorkflowStepOutcome, WorkflowTimeZone,
+    WorkflowTrigger, WorkflowView, WorkflowWeekdays, WorkingSet, clock::SystemClock,
 };
 use serde_json::json;
 
@@ -460,7 +460,7 @@ impl Probe<'_> {
             revision,
             name: name.to_string(),
             account_id: self.account.id.clone(),
-            instrument_id: self.instrument.clone(),
+            scope: WorkflowScope::Instrument(self.instrument.clone()),
             triggers: vec![trigger],
             start: node(0)?,
             nodes,
@@ -1116,7 +1116,7 @@ impl Probe<'_> {
                 }),
             }],
         )?;
-        definition.instrument_id = eth_route.instrument_id.clone();
+        definition.scope = WorkflowScope::Instrument(eth_route.instrument_id.clone());
         let into_minute = unix_nanos_now().rem_euclid(NANOS_PER_MINUTE);
         if into_minute > 20 * NANOS_PER_SECOND {
             thread::sleep(Duration::from_nanos(
