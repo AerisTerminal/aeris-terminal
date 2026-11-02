@@ -63,6 +63,23 @@ too_many_blocks = Un flujo admite como máximo {maximum} bloques
 link_loop = Ese enlace permitiría que el flujo ejecutara un bloque dos veces
 value_unset = sin definir
 
+# Examples
+examples_title = Ejemplos
+example_open = Abrir ejemplo
+example_open_aria = Abrir el ejemplo {name}
+example_breakout = Compra en ruptura
+example_breakout_body = Cuando el precio sube a través de tu nivel y no tienes posición, compra 1 con un stop de 20 ticks y un objetivo de 40 ticks. Se ejecuta una vez.
+example_session_dip = Compra en caída matinal
+example_session_dip_body = Cuando el precio baja a tu nivel entre las 08:30 y las 11:00 hora de Chicago y no tienes posición, compra 1 con un stop de 16 ticks y un objetivo de 32 ticks. Como máximo una vez por sesión.
+example_flat_before_close = Sin posición antes del cierre
+example_flat_before_close_body = Cada día a las 15:55 hora de Chicago, si hay una posición abierta, la cierra y cancela las órdenes activas.
+example_exit_and_lock = Salir y bloquear
+example_exit_and_lock_body = Cuando el precio baja a tu nivel: si estás largo, cierra la posición y bloquea la cuenta; si no, cancela las órdenes activas. Se ejecuta una vez.
+tab_check = Comprobación
+tab_action = Acción
+detail_no_bracket = Sin stop ni objetivo
+detail_bracket = Stop {stop} · objetivo {target} ticks
+
 # Inspector
 inspector_workflow = Flujo
 field_name = Nombre
@@ -105,9 +122,6 @@ lock_hint = No se ejecuta nada después de bloquear la cuenta.
 remove_block = Quitar bloque
 
 # Lectura de los bloques de un flujo
-trigger_price_above = {symbol} sube a {price}
-trigger_price_below = {symbol} baja a {price}
-trigger_time = Cada día a las {time} {zone}
 zone_chicago = hora de Chicago
 zone_utc = UTC
 condition_flat = Sin posición

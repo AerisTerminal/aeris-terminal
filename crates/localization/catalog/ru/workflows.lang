@@ -64,6 +64,23 @@ too_many_blocks = Сценарий содержит не более {maximum} б
 link_loop = Эта связь позволила бы сценарию выполнить блок дважды
 value_unset = не задано
 
+# Examples
+examples_title = Примеры
+example_open = Открыть пример
+example_open_aria = Открыть пример «{name}»
+example_breakout = Покупка на пробое
+example_breakout_body = Когда цена пробивает ваш уровень вверх, а позиции нет, покупает 1 со стопом 20 тиков и целью 40 тиков. Срабатывает один раз.
+example_session_dip = Покупка утреннего отката
+example_session_dip_body = Когда цена опускается до вашего уровня с 08:30 до 11:00 по чикагскому времени, а позиции нет, покупает 1 со стопом 16 тиков и целью 32 тика. Не чаще одного раза за сессию.
+example_flat_before_close = Без позиции к закрытию
+example_flat_before_close_body = Каждый день в 15:55 по чикагскому времени, если позиция открыта, закрывает её и отменяет активные заявки.
+example_exit_and_lock = Выйти и заблокировать
+example_exit_and_lock_body = Когда цена опускается до вашего уровня: при длинной позиции закрывает её и блокирует счёт, иначе отменяет активные заявки. Срабатывает один раз.
+tab_check = Проверка
+tab_action = Действие
+detail_no_bracket = Без стопа и цели
+detail_bracket = Стоп {stop} · цель {target} тиков
+
 # Инспектор
 inspector_workflow = Сценарий
 field_name = Название
@@ -106,9 +123,6 @@ lock_hint = После блокировки счёта ничего не вып�
 remove_block = Удалить блок
 
 # Описание блоков сценария
-trigger_price_above = {symbol} поднимается до {price}
-trigger_price_below = {symbol} опускается до {price}
-trigger_time = Каждый день в {time} {zone}
 zone_chicago = по чикагскому времени
 zone_utc = UTC
 condition_flat = Позиции нет

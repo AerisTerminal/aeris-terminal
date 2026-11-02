@@ -63,6 +63,23 @@ too_many_blocks = Ein Workflow enthält höchstens {maximum} Blöcke
 link_loop = Diese Verbindung würde den Workflow einen Block zweimal ausführen lassen
 value_unset = nicht festgelegt
 
+# Examples
+examples_title = Beispiele
+example_open = Beispiel öffnen
+example_open_aria = Beispiel {name} öffnen
+example_breakout = Ausbruch kaufen
+example_breakout_body = Steigt der Kurs durch Ihr Niveau und Sie haben keine Position, wird 1 mit 20 Ticks Stop und 40 Ticks Ziel gekauft. Läuft einmal.
+example_session_dip = Morgen-Dip kaufen
+example_session_dip_body = Fällt der Kurs zwischen 08:30 und 11:00 Uhr Chicagoer Zeit auf Ihr Niveau und Sie haben keine Position, wird 1 mit 16 Ticks Stop und 32 Ticks Ziel gekauft. Höchstens einmal pro Sitzung.
+example_flat_before_close = Flat vor Handelsschluss
+example_flat_before_close_body = Täglich um 15:55 Uhr Chicagoer Zeit: Ist eine Position offen, wird sie geschlossen und die offenen Orders werden storniert.
+example_exit_and_lock = Ausstieg und Sperre
+example_exit_and_lock_body = Fällt der Kurs auf Ihr Niveau: Sind Sie long, wird die Position geschlossen und das Konto gesperrt, sonst werden die offenen Orders storniert. Läuft einmal.
+tab_check = Prüfung
+tab_action = Aktion
+detail_no_bracket = Ohne Stop und Ziel
+detail_bracket = Stop {stop} · Ziel {target} Ticks
+
 # Inspektor
 inspector_workflow = Workflow
 field_name = Name
@@ -105,9 +122,6 @@ lock_hint = Nach dem Sperren des Kontos läuft nichts mehr.
 remove_block = Block entfernen
 
 # Wiedergabe der Workflow-Blöcke
-trigger_price_above = {symbol} steigt auf {price}
-trigger_price_below = {symbol} fällt auf {price}
-trigger_time = Täglich um {time} {zone}
 zone_chicago = Chicagoer Zeit
 zone_utc = UTC
 condition_flat = Keine Position

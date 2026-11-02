@@ -61,6 +61,23 @@ too_many_blocks = ワークフローに含められるブロックは最大 {max
 link_loop = このリンクでは、ワークフローが同じブロックを 2 回実行してしまいます
 value_unset = 未設定
 
+# Examples
+examples_title = 例
+example_open = 例を開く
+example_open_aria = 例「{name}」を開く
+example_breakout = ブレイクアウト買い
+example_breakout_body = 価格があなたの水準を上抜け、ポジションがないとき、ストップ 20 ティック・ターゲット 40 ティックで 1 枚買います。1 回だけ実行します。
+example_session_dip = 朝の押し目買い
+example_session_dip_body = シカゴ時間 08:30〜11:00 に価格があなたの水準まで下がり、ポジションがないとき、ストップ 16 ティック・ターゲット 32 ティックで 1 枚買います。セッションごとに最大 1 回です。
+example_flat_before_close = 引け前に手仕舞い
+example_flat_before_close_body = 毎日シカゴ時間 15:55 に、ポジションがあれば決済し、有効な注文を取り消します。
+example_exit_and_lock = 決済してロック
+example_exit_and_lock_body = 価格があなたの水準まで下がったとき、買いポジションがあれば決済して口座をロックし、なければ有効な注文を取り消します。1 回だけ実行します。
+tab_check = チェック
+tab_action = アクション
+detail_no_bracket = ストップ・ターゲットなし
+detail_bracket = ストップ {stop} · ターゲット {target} ティック
+
 # インスペクター
 inspector_workflow = ワークフロー
 field_name = 名前
@@ -103,9 +120,6 @@ lock_hint = 口座をロックした後は何も実行されません。
 remove_block = ブロックを削除
 
 # ワークフローのブロックの読み上げ
-trigger_price_above = {symbol} が {price} まで上昇
-trigger_price_below = {symbol} が {price} まで下落
-trigger_time = 毎日 {zone} {time}
 zone_chicago = シカゴ時間
 zone_utc = UTC
 condition_flat = ポジションなし

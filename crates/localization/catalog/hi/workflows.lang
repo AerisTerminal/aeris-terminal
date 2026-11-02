@@ -62,6 +62,23 @@ too_many_blocks = एक वर्कफ़्लो में अधिकत�
 link_loop = इस लिंक से वर्कफ़्लो एक ब्लॉक को दो बार चला सकता है
 value_unset = सेट नहीं
 
+# Examples
+examples_title = उदाहरण
+example_open = उदाहरण खोलें
+example_open_aria = {name} उदाहरण खोलें
+example_breakout = ब्रेकआउट पर ख़रीद
+example_breakout_body = जब कीमत आपके स्तर को ऊपर की ओर पार करे और कोई पोज़िशन न हो, तो 20 टिक स्टॉप और 40 टिक टारगेट के साथ 1 ख़रीदता है। एक बार चलता है।
+example_session_dip = सुबह की गिरावट पर ख़रीद
+example_session_dip_body = जब शिकागो समय 08:30 से 11:00 के बीच कीमत आपके स्तर तक गिरे और कोई पोज़िशन न हो, तो 16 टिक स्टॉप और 32 टिक टारगेट के साथ 1 ख़रीदता है। हर सत्र में अधिकतम एक बार।
+example_flat_before_close = बंद होने से पहले पोज़िशन ख़त्म
+example_flat_before_close_body = हर दिन शिकागो समय 15:55 पर, अगर कोई पोज़िशन खुली हो, तो उसे बंद करता है और चालू ऑर्डर रद्द करता है।
+example_exit_and_lock = बाहर निकलें और लॉक करें
+example_exit_and_lock_body = जब कीमत आपके स्तर तक गिरे: लॉन्ग होने पर पोज़िशन बंद करके खाता लॉक करता है, नहीं तो चालू ऑर्डर रद्द करता है। एक बार चलता है।
+tab_check = जाँच
+tab_action = कार्रवाई
+detail_no_bracket = कोई स्टॉप या टारगेट नहीं
+detail_bracket = स्टॉप {stop} · टारगेट {target} टिक
+
 # इंस्पेक्टर
 inspector_workflow = वर्कफ़्लो
 field_name = नाम
@@ -104,9 +121,6 @@ lock_hint = खाता लॉक होने के बाद कुछ न�
 remove_block = ब्लॉक हटाएँ
 
 # वर्कफ़्लो के ब्लॉक का विवरण
-trigger_price_above = {symbol} बढ़कर {price} पर पहुँचे
-trigger_price_below = {symbol} गिरकर {price} पर पहुँचे
-trigger_time = हर दिन {time} {zone}
 zone_chicago = शिकागो समय
 zone_utc = UTC
 condition_flat = कोई पोज़िशन नहीं है

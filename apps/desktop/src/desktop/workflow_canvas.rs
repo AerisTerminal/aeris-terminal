@@ -3,15 +3,17 @@
 //! open draft through `TerminalApp`; nothing here talks to the trading owner.
 
 use super::market_screener::AppView;
+use super::workflow_board::BoardCamera;
 use super::workflow_board::{
     ActionDraft, BlockDraft, BlockKind, BoardItem, BoardPoint, ConditionDraft, DraftField,
-    DraftProblem, NODE_HEIGHT, NODE_WIDTH, NodeDraft, OutputPort, RepeatDraft, TriggerKind,
+    DraftProblem, NODE_HEIGHT, NODE_TAB_HEIGHT, NODE_WIDTH, NodeDraft, OutputPort, RepeatDraft,
+    TriggerDraft, TriggerKind, WorkflowExample,
 };
 use super::workflows_page::{
     BoardGesture, DraftStatus, OpenWorkflow, PageStatus, WorkflowsPage, account_environment,
-    account_text, block_summary, draft_status, environment_text, firing_time_text, instrument,
-    instrument_scales, outcome_text, problem_text, state_color, state_text, symbol_text,
-    trigger_summary,
+    account_text, block_summary, draft_status, environment_text, example_description, example_name,
+    firing_time_text, instrument, instrument_scales, outcome_text, problem_text, state_color,
+    state_text, symbol_text, zone_text,
 };
 use super::*;
 use aeris_localization::{tr, tr_count, workflows};
@@ -21,28 +23,53 @@ use aeris_trading_runtime::{
     WorkflowState, WorkflowTimeZone, WorkflowView, WorkingSet,
 };
 use gpui::{
-    ClickEvent, DispatchPhase, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Point,
-    ScrollWheelEvent,
+    Bounds, ClickEvent, DispatchPhase, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
+    Point, ScrollWheelEvent, fill, size,
 };
 
 const SIDEBAR_WIDTH: f32 = 264.0;
-const PALETTE_WIDTH: f32 = 184.0;
-const INSPECTOR_WIDTH: f32 = 320.0;
+const INSPECTOR_WIDTH: f32 = 296.0;
 const EMPTY_STATE_WIDTH: f32 = 440.0;
 const OUTPUT_PORT_SIZE: f32 = 12.0;
 const INPUT_PORT_SIZE: f32 = 8.0;
 const PORT_LABEL_WIDTH: f32 = 36.0;
 const PORT_LABEL_SIZE: f32 = 10.0;
+const PORT_LABEL_GAP: f32 = 4.0;
+/// The room the zoom buttons take in the board's bottom-right corner, kept clear of the hint.
+const ZOOM_CONTROLS_WIDTH: f32 = 176.0;
 const WIRE_WIDTH: f32 = 2.0;
 const WIRE_MINIMUM_BEND: f32 = 48.0;
-const BLOCK_ACCENT_WIDTH: f32 = 4.0;
-const BLOCK_TITLE_SIZE: f32 = 11.0;
-const BLOCK_TEXT_SIZE: f32 = 12.0;
-const BLOCK_LINE_HEIGHT: f32 = 16.0;
-const BLOCK_PADDING_X: f32 = 10.0;
-const BLOCK_PADDING_Y: f32 = 8.0;
-const BLOCK_GAP: f32 = 4.0;
-const PALETTE_DOT_SIZE: f32 = 8.0;
+/// The folder tab's width, and how far its right edge leans.
+const CARD_TAB_WIDTH: f32 = 116.0;
+const CARD_TAB_SLANT: f32 = 14.0;
+const CARD_TAB_RADIUS: f32 = 8.0;
+const CARD_RADIUS: f32 = 12.0;
+/// How far a slanted corner's rounding reaches along each edge.
+const CARD_SLANT_ROUNDING: f32 = 6.0;
+/// The accent tab on the top edge, which carries the block's color.
+const CARD_ACCENT_WIDTH: f32 = 44.0;
+const CARD_ACCENT_HEIGHT: f32 = 12.0;
+const CARD_ACCENT_RISE: f32 = 7.0;
+const CARD_ACCENT_INSET: f32 = 16.0;
+const CARD_ICON_SIZE: f32 = 13.0;
+const CARD_TAB_TEXT_SIZE: f32 = 12.0;
+const CARD_TITLE_SIZE: f32 = 15.0;
+const CARD_LABEL_SIZE: f32 = 12.0;
+const CARD_VALUE_SIZE: f32 = 22.0;
+const CARD_DETAIL_SIZE: f32 = 11.0;
+const CARD_PADDING: f32 = 12.0;
+const CARD_INSET_PADDING: f32 = 8.0;
+const CARD_GAP: f32 = 8.0;
+/// Board units between grid dots, and the fewest screen pixels kept between them.
+const GRID_SPACING: f32 = 24.0;
+const GRID_MINIMUM_SPACING: f32 = 14.0;
+const GRID_DOT_SIZE: f32 = 2.0;
+/// The most grid dots painted in one frame; past it the spacing doubles.
+const GRID_MAXIMUM_DOTS: f32 = 6_000.0;
+const PALETTE_ICON_SIZE: f32 = 14.0;
+/// The width and height around the board that the page's side panels, header and toolbar
+/// take, for sizing the board before it first paints.
+pub(super) const BOARD_CHROME: BoardPoint = BoardPoint::new(SIDEBAR_WIDTH + INSPECTOR_WIDTH, 152.0);
 const RECENT_FIRINGS_SHOWN: usize = 8;
 #[cfg(target_os = "macos")]
 const ZOOM_KEY: &str = "⌘";
@@ -183,6 +210,18 @@ fn kind_label(kind: BlockKind) -> &'static str {
     }
 }
 
+fn kind_icon(kind: BlockKind) -> HugeIcon {
+    match kind {
+        BlockKind::IfPosition => HugeIcon::DataPanel,
+        BlockKind::IfTime => HugeIcon::TimeSales,
+        BlockKind::IfPrice => HugeIcon::Chart,
+        BlockKind::Buy | BlockKind::Sell => HugeIcon::OrderEntry,
+        BlockKind::Flatten => HugeIcon::CloseBold,
+        BlockKind::CancelOrders => HugeIcon::CancelCircle,
+        BlockKind::LockAccount => HugeIcon::Lock,
+    }
+}
+
 /// The accent of a block, or of the trigger for `None`.
 fn kind_accent(kind: Option<BlockKind>, theme: &AerisTheme) -> Hsla {
     let colors = theme.colors;
@@ -278,6 +317,54 @@ fn sidebar(ui: Page<'_>, page: &WorkflowsPage) -> Div {
                     )
                 })
                 .children(rows),
+        )
+        .children(page.open.as_ref().map(|open| palette(ui, open)))
+}
+
+fn example_icon(example: WorkflowExample) -> HugeIcon {
+    match example {
+        WorkflowExample::Breakout => HugeIcon::OrderEntry,
+        WorkflowExample::SessionDip => HugeIcon::TimeSales,
+        WorkflowExample::FlatBeforeClose => HugeIcon::CloseBold,
+        WorkflowExample::ExitAndLock => HugeIcon::Lock,
+    }
+}
+
+/// An example in the empty page: what it does, opened by its button.
+fn example_card(ui: Page<'_>, index: usize, example: WorkflowExample) -> Div {
+    let open = ui.terminal.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .rounded(radius(1.0))
+        .border(border_width(ui.theme))
+        .border_color(gpui_color(ui.theme.colors.border_secondary))
+        .bg(gpui_color(ui.theme.colors.surface))
+        .text_left()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .child(example_name(example)),
+        )
+        .child(secondary_text(example_description(example), ui.theme).flex_1())
+        .child(
+            Button::new(("workflow_example_open", index), ui.theme)
+                .variant(ButtonVariant::Outline)
+                .button_size(ButtonSize::Sm)
+                .icon(header_icon(example_icon(example)))
+                .label(tr!(workflows::EXAMPLE_OPEN))
+                .aria_label(tr!(
+                    workflows::EXAMPLE_OPEN_ARIA,
+                    name = example_name(example)
+                ))
+                .on_click(move |_, window, cx| {
+                    open.update(cx, |terminal, terminal_cx| {
+                        terminal.open_workflow_example(example, window, terminal_cx);
+                    });
+                }),
         )
 }
 
@@ -393,7 +480,22 @@ fn empty_state(ui: Page<'_>) -> Div {
                         .text_color(gpui_color(theme.colors.text_secondary))
                         .child(tr!(workflows::EMPTY_BODY)),
                 )
-                .child(new_workflow_button(ui, "workflow_new_empty", full)),
+                .child(new_workflow_button(ui, "workflow_new_empty", full))
+                .child(
+                    div()
+                        .pt_4()
+                        .text_sm()
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
+                        .child(tr!(workflows::EXAMPLES_TITLE)),
+                )
+                .child(
+                    div().w_full().grid().grid_cols(2).gap_3().children(
+                        WorkflowExample::ALL
+                            .iter()
+                            .enumerate()
+                            .map(|(index, example)| example_card(ui, index, *example)),
+                    ),
+                ),
         )
 }
 
@@ -413,8 +515,13 @@ fn editor(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div {
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .child(palette(ui, open))
-                .child(board(ui, open, problem.and_then(DraftProblem::item)))
+                .child(board(
+                    ui,
+                    page,
+                    open,
+                    problem.and_then(DraftProblem::item),
+                    trigger_badge(status, view.as_ref(), ui.theme),
+                ))
                 .child(inspector(ui, page, open, view.as_ref())),
         )
 }
@@ -653,14 +760,14 @@ fn palette(ui: Page<'_>, open: &OpenWorkflow) -> Div {
             )
     };
     div()
-        .w(px(PALETTE_WIDTH))
         .flex_none()
-        .h_full()
         .flex()
         .flex_col()
-        .gap_4()
-        .p_3()
-        .border_r(border_width(theme))
+        .gap_3()
+        .px_4()
+        .pt_3()
+        .pb_4()
+        .border_t(border_width(theme))
         .border_color(gpui_color(theme.colors.border_secondary))
         .child(
             div()
@@ -685,14 +792,14 @@ fn palette(ui: Page<'_>, open: &OpenWorkflow) -> Div {
 fn palette_button(ui: Page<'_>, id: (&'static str, usize), kind: BlockKind, full: bool) -> Button {
     let add = ui.terminal.clone();
     Button::new(id, ui.theme)
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .full_width()
+        .justify_start()
         .leading(
-            div()
-                .size(px(PALETTE_DOT_SIZE))
-                .rounded_full()
-                .bg(kind_accent(Some(kind), ui.theme)),
+            Icon::new(kind_icon(kind).path())
+                .with_size(px(PALETTE_ICON_SIZE))
+                .color(kind_accent(Some(kind), ui.theme)),
         )
         .label(kind_label(kind))
         .disabled(full)
@@ -809,19 +916,61 @@ fn capture_pointer(window: &mut Window, origin: Point<Pixels>, terminal: &Entity
     });
 }
 
-fn board(ui: Page<'_>, open: &OpenWorkflow, problem: Option<BoardItem>) -> Stateful<Div> {
+fn board(
+    ui: Page<'_>,
+    page: &WorkflowsPage,
+    open: &OpenWorkflow,
+    problem: Option<BoardItem>,
+    badge: Badge,
+) -> Stateful<Div> {
     let theme = ui.theme;
     let camera = open.camera;
     let origin = Rc::new(Cell::new(Point::<Pixels>::default()));
     let wires = board_wires(open, theme);
+    let faces = blocks(ui, open, badge);
+    let cards = faces
+        .iter()
+        .map(|(item, at, face)| Card {
+            at: camera.to_screen(*at),
+            accent: face.accent,
+            edge: gpui_color(if open.selected == Some(*item) {
+                theme.colors.ring_primary
+            } else if problem == Some(*item) {
+                theme.colors.text_danger
+            } else {
+                theme.colors.border
+            }),
+        })
+        .collect::<Vec<_>>();
+    let card_fill = gpui_color(theme.colors.surface);
+    let grid_color = gpui_color(theme.colors.border);
+    let edge_width = border_width(theme);
     let capture = open.gesture.is_some();
     let paint_terminal = ui.terminal.clone();
     let prepaint_origin = Rc::clone(&origin);
+    let board_size = Rc::clone(&page.board_size);
     let links = canvas(
-        move |bounds, _, _| prepaint_origin.set(bounds.origin),
+        move |bounds, _, _| {
+            prepaint_origin.set(bounds.origin);
+            board_size.set(BoardPoint::new(
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            ));
+        },
         move |bounds, (), window, _| {
+            paint_grid(window, bounds, camera, grid_color);
             for wire in &wires {
                 paint_wire(window, bounds.origin, *wire, camera.zoom);
+            }
+            for card in &cards {
+                paint_card(
+                    window,
+                    bounds.origin,
+                    card,
+                    camera.zoom,
+                    card_fill,
+                    edge_width,
+                );
             }
             if capture {
                 capture_pointer(window, bounds.origin, &paint_terminal);
@@ -842,17 +991,13 @@ fn board(ui: Page<'_>, open: &OpenWorkflow, problem: Option<BoardItem>) -> State
         .overflow_hidden()
         .bg(gpui_color(theme.colors.surface_secondary))
         .child(links)
-        .children(blocks(ui, open, problem))
-        .children(ports(open, theme))
-        .child(
-            div()
-                .absolute()
-                .bottom_3()
-                .left_3()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
-                .child(tr!(workflows::BOARD_HINT, key = ZOOM_KEY)),
+        .children(
+            faces
+                .into_iter()
+                .map(|(_, at, face)| block_element(camera.to_screen(at), camera.zoom, face, theme)),
         )
+        .children(ports(open, theme))
+        .child(board_hint(theme))
         .child(zoom_controls(ui, camera.zoom))
         .on_mouse_down(
             MouseButton::Left,
@@ -872,6 +1017,119 @@ fn board(ui: Page<'_>, open: &OpenWorkflow, problem: Option<BoardItem>) -> State
                 terminal.workflow_wheel(at, delta, zoom, terminal_cx);
             });
         })
+}
+
+/// How to work the board, along its bottom edge clear of the zoom buttons.
+fn board_hint(theme: &AerisTheme) -> Div {
+    div()
+        .absolute()
+        .bottom_3()
+        .left_3()
+        .right(px(ZOOM_CONTROLS_WIDTH))
+        .text_xs()
+        .text_color(gpui_color(theme.colors.text_muted))
+        .child(tr!(workflows::BOARD_HINT, key = ZOOM_KEY))
+}
+
+/// The dots behind the blocks, spaced by the zoom and thinned out so a frame paints a
+/// bounded number of them.
+fn paint_grid(window: &mut Window, bounds: Bounds<Pixels>, camera: BoardCamera, color: Hsla) {
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let mut spacing = GRID_SPACING * camera.zoom;
+    while spacing < GRID_MINIMUM_SPACING
+        || (width / spacing) * (height / spacing) > GRID_MAXIMUM_DOTS
+    {
+        spacing *= 2.0;
+    }
+    let first = |pan: f32| pan.rem_euclid(spacing);
+    let mut y = first(camera.pan.y);
+    while y < height {
+        let mut x = first(camera.pan.x);
+        while x < width {
+            let corner = point(
+                bounds.origin.x + px(x - GRID_DOT_SIZE / 2.0),
+                bounds.origin.y + px(y - GRID_DOT_SIZE / 2.0),
+            );
+            window.paint_quad(
+                fill(
+                    Bounds::new(corner, size(px(GRID_DOT_SIZE), px(GRID_DOT_SIZE))),
+                    color,
+                )
+                .corner_radii(px(GRID_DOT_SIZE / 2.0)),
+            );
+            x += spacing;
+        }
+        y += spacing;
+    }
+}
+
+/// Where one block's card is painted, in board-local screen pixels.
+struct Card {
+    at: BoardPoint,
+    accent: Hsla,
+    edge: Hsla,
+}
+
+/// The card behind a block: a body with a folder tab on its top-left whose right edge
+/// leans out, and the block's accent tab tucked behind the top edge on the right.
+fn paint_card(
+    window: &mut Window,
+    origin: Point<Pixels>,
+    card: &Card,
+    zoom: f32,
+    fill_color: Hsla,
+    edge_width: Pixels,
+) {
+    let left = f32::from(origin.x) + card.at.x;
+    let top = f32::from(origin.y) + card.at.y;
+    let accent = Bounds::new(
+        point(
+            px(left + (NODE_WIDTH - CARD_ACCENT_INSET - CARD_ACCENT_WIDTH) * zoom),
+            px(top + (NODE_TAB_HEIGHT - CARD_ACCENT_RISE) * zoom),
+        ),
+        size(px(CARD_ACCENT_WIDTH * zoom), px(CARD_ACCENT_HEIGHT * zoom)),
+    );
+    window.paint_quad(fill(accent, card.accent).corner_radii(radius(zoom / 2.0)));
+    let mut body = PathBuilder::fill();
+    card_outline(&mut body, left, top, zoom);
+    if let Ok(path) = body.build() {
+        window.paint_path(path, fill_color);
+    }
+    let mut edge = PathBuilder::stroke(edge_width);
+    card_outline(&mut edge, left, top, zoom);
+    if let Ok(path) = edge.build() {
+        window.paint_path(path, card.edge);
+    }
+}
+
+fn card_outline(path: &mut PathBuilder, left: f32, top: f32, zoom: f32) {
+    let at = |x: f32, y: f32| point(px(left + x * zoom), px(top + y * zoom));
+    let (width, height, tab) = (NODE_WIDTH, NODE_HEIGHT, NODE_TAB_HEIGHT);
+    let (radius, tab_radius) = (CARD_RADIUS, CARD_TAB_RADIUS);
+    let lean_start = CARD_TAB_WIDTH - CARD_TAB_SLANT;
+    let length = CARD_TAB_SLANT.hypot(tab);
+    let (along_x, along_y) = (
+        CARD_SLANT_ROUNDING * CARD_TAB_SLANT / length,
+        CARD_SLANT_ROUNDING * tab / length,
+    );
+    path.move_to(at(0.0, height - radius));
+    path.line_to(at(0.0, tab_radius));
+    path.curve_to(at(tab_radius, 0.0), at(0.0, 0.0));
+    path.line_to(at(lean_start - CARD_SLANT_ROUNDING, 0.0));
+    path.curve_to(at(lean_start + along_x, along_y), at(lean_start, 0.0));
+    path.line_to(at(CARD_TAB_WIDTH - along_x, tab - along_y));
+    path.curve_to(
+        at(CARD_TAB_WIDTH + CARD_SLANT_ROUNDING, tab),
+        at(CARD_TAB_WIDTH, tab),
+    );
+    path.line_to(at(width - radius, tab));
+    path.curve_to(at(width, tab + radius), at(width, tab));
+    path.line_to(at(width, height - radius));
+    path.curve_to(at(width - radius, height), at(width, height));
+    path.line_to(at(radius, height));
+    path.curve_to(at(0.0, height - radius), at(0.0, height));
+    path.close();
 }
 
 fn zoom_controls(ui: Page<'_>, zoom: f32) -> Div {
@@ -910,8 +1168,10 @@ fn zoom_controls(ui: Page<'_>, zoom: f32) -> Div {
                 .tabular_numerals()
                 .label(format!("{:.0}%", zoom * 100.0))
                 .aria_label(tr!(workflows::ZOOM_RESET_ARIA))
-                .on_click(move |_, _, cx| {
-                    reset.update(cx, TerminalApp::reset_workflow_board_view);
+                .on_click(move |_, window, cx| {
+                    reset.update(cx, |terminal, terminal_cx| {
+                        terminal.fit_workflow_board(window, terminal_cx);
+                    });
                 }),
         )
         .child(zoom_button(
@@ -922,110 +1182,347 @@ fn zoom_controls(ui: Page<'_>, zoom: f32) -> Div {
         ))
 }
 
-/// The look of one block on the board.
-struct BlockLook {
-    title: &'static str,
-    summary: String,
-    accent: Hsla,
-    /// An If keeps room on its right for the Yes and No labels.
-    branches: bool,
+/// A small colored label on a block, such as the workflow's state on the trigger.
+#[derive(Clone)]
+struct Badge {
+    text: SharedString,
+    foreground: Hsla,
+    background: Hsla,
 }
 
-fn blocks(ui: Page<'_>, open: &OpenWorkflow, problem: Option<BoardItem>) -> Vec<Div> {
+/// The trigger's badge: whether the draft is saved, and the saved workflow's state.
+fn trigger_badge(status: DraftStatus, view: Option<&WorkflowView>, theme: &AerisTheme) -> Badge {
+    let colors = theme.colors;
+    let badge = |text: SharedString, foreground, background| Badge {
+        text,
+        foreground: gpui_color(foreground),
+        background: gpui_color(background),
+    };
+    match (status, view) {
+        (DraftStatus::New, _) | (_, None) => badge(
+            tr!(workflows::STATUS_NEW).into(),
+            colors.text_warning,
+            colors.warning_subtle,
+        ),
+        (DraftStatus::Changed, Some(_)) => badge(
+            tr!(workflows::STATUS_CHANGED).into(),
+            colors.text_warning,
+            colors.warning_subtle,
+        ),
+        (DraftStatus::Saved, Some(view)) => match view.state {
+            WorkflowState::Armed => badge(
+                tr!(workflows::STATE_ARMED).into(),
+                colors.text_positive,
+                colors.positive_subtle,
+            ),
+            WorkflowState::Paused => badge(
+                tr!(workflows::STATE_PAUSED).into(),
+                colors.text_secondary,
+                colors.hover_bg,
+            ),
+            WorkflowState::Completed => badge(
+                tr!(workflows::STATE_COMPLETED).into(),
+                colors.text_muted,
+                colors.hover_bg,
+            ),
+            WorkflowState::Expired => badge(
+                tr!(workflows::STATE_EXPIRED).into(),
+                colors.text_muted,
+                colors.hover_bg,
+            ),
+        },
+    }
+}
+
+/// What one block shows: its tab, its title, and the panel inside it with the value it
+/// is set to.
+struct BlockFace {
+    icon: HugeIcon,
+    category: &'static str,
+    title: &'static str,
+    label: SharedString,
+    badge: Option<Badge>,
+    value: Option<SharedString>,
+    detail: Option<SharedString>,
+    accent: Hsla,
+}
+
+fn text_or_unset(text: &str) -> SharedString {
+    let text = text.trim();
+    if text.is_empty() {
+        tr!(workflows::VALUE_UNSET).into()
+    } else {
+        text.to_string().into()
+    }
+}
+
+fn trigger_face(
+    trigger: &TriggerDraft,
+    symbol: &str,
+    badge: Badge,
+    theme: &AerisTheme,
+) -> BlockFace {
+    let (icon, title, label, value) = match trigger {
+        TriggerDraft::Price { direction, level } => (
+            HugeIcon::Chart,
+            match direction {
+                PriceDirection::Above => tr!(workflows::TRIGGER_CHOICE_ABOVE),
+                PriceDirection::Below => tr!(workflows::TRIGGER_CHOICE_BELOW),
+            },
+            symbol.to_string().into(),
+            text_or_unset(level),
+        ),
+        TriggerDraft::Time { zone, time } => (
+            HugeIcon::TimeSales,
+            tr!(workflows::TRIGGER_CHOICE_TIME),
+            zone_text(*zone).into(),
+            text_or_unset(time),
+        ),
+    };
+    BlockFace {
+        icon,
+        category: tr!(workflows::BLOCK_TRIGGER),
+        title,
+        label,
+        badge: Some(badge),
+        value: Some(value),
+        detail: None,
+        accent: kind_accent(None, theme),
+    }
+}
+
+/// `symbol` and `account` name what the workflow trades, for the blocks that act on them.
+fn node_face(block: &BlockDraft, symbol: &str, account: &str, theme: &AerisTheme) -> BlockFace {
+    let kind = block.kind();
+    let (label, value, detail): (SharedString, Option<SharedString>, Option<SharedString>) =
+        match block {
+            BlockDraft::If { condition, .. } => match condition {
+                ConditionDraft::Position(requirement) => (
+                    tr!(workflows::FIELD_POSITION).into(),
+                    Some(position_choice(*requirement).into()),
+                    None,
+                ),
+                ConditionDraft::Between { zone, start, end } => (
+                    zone_text(*zone).into(),
+                    Some(format!("{}–{}", text_or_unset(start), text_or_unset(end)).into()),
+                    None,
+                ),
+                ConditionDraft::Price { direction, level } => (
+                    match direction {
+                        PriceDirection::Above => tr!(workflows::CHOICE_ABOVE),
+                        PriceDirection::Below => tr!(workflows::CHOICE_BELOW),
+                    }
+                    .into(),
+                    Some(text_or_unset(level)),
+                    None,
+                ),
+            },
+            BlockDraft::Action { action, .. } => match action {
+                ActionDraft::Enter {
+                    quantity,
+                    stop,
+                    target,
+                    ..
+                } => (
+                    tr!(workflows::FIELD_QUANTITY).into(),
+                    Some(text_or_unset(quantity)),
+                    Some(if stop.trim().is_empty() && target.trim().is_empty() {
+                        tr!(workflows::DETAIL_NO_BRACKET).into()
+                    } else {
+                        tr!(
+                            workflows::DETAIL_BRACKET,
+                            stop = stop.trim(),
+                            target = target.trim()
+                        )
+                        .into()
+                    }),
+                ),
+                ActionDraft::Flatten | ActionDraft::CancelOrders => (
+                    tr!(workflows::FIELD_SYMBOL).into(),
+                    Some(symbol.to_string().into()),
+                    Some(block_summary(block).into()),
+                ),
+                ActionDraft::LockAccount => (
+                    tr!(workflows::FIELD_ACCOUNT).into(),
+                    Some(account.to_string().into()),
+                    Some(block_summary(block).into()),
+                ),
+            },
+        };
+    BlockFace {
+        icon: kind_icon(kind),
+        category: match block {
+            BlockDraft::If { .. } => tr!(workflows::TAB_CHECK),
+            BlockDraft::Action { .. } => tr!(workflows::TAB_ACTION),
+        },
+        title: kind_label(kind),
+        label,
+        badge: None,
+        value,
+        detail,
+        accent: kind_accent(Some(kind), theme),
+    }
+}
+
+/// The short answer an If on the position looks for.
+fn position_choice(requirement: PositionRequirement) -> &'static str {
+    match requirement {
+        PositionRequirement::Flat => tr!(workflows::CHOICE_FLAT),
+        PositionRequirement::Long => tr!(workflows::CHOICE_LONG),
+        PositionRequirement::Short => tr!(workflows::CHOICE_SHORT),
+        PositionRequirement::Open => tr!(workflows::CHOICE_OPEN),
+    }
+}
+
+/// Every block in drawing order, the trigger first, with where it sits on the board.
+fn blocks(
+    ui: Page<'_>,
+    open: &OpenWorkflow,
+    badge: Badge,
+) -> Vec<(BoardItem, BoardPoint, BlockFace)> {
     let draft = &open.draft;
     let symbol = symbol_text(ui.set, draft.instrument_id.as_ref());
-    let trigger = BlockLook {
-        title: tr!(workflows::BLOCK_TRIGGER),
-        summary: trigger_summary(&draft.trigger, &symbol),
-        accent: kind_accent(None, ui.theme),
-        branches: false,
-    };
-    std::iter::once((BoardItem::Trigger, draft.trigger_at, trigger))
-        .chain(draft.nodes.iter().map(|node| {
-            let kind = node.block.kind();
-            let look = BlockLook {
-                title: kind_label(kind),
-                summary: block_summary(&node.block),
-                accent: kind_accent(Some(kind), ui.theme),
-                branches: matches!(node.block, BlockDraft::If { .. }),
-            };
-            (BoardItem::Node(node.id), node.at, look)
-        }))
-        .map(|(item, at, look)| {
-            block_element(open, item, at, look, problem == Some(item), ui.theme)
-        })
-        .collect()
+    let account = draft.account_id.as_ref().map_or_else(
+        || tr!(workflows::VALUE_UNSET).to_string(),
+        |account_id| account_text(ui.set, account_id),
+    );
+    std::iter::once((
+        BoardItem::Trigger,
+        draft.trigger_at,
+        trigger_face(&draft.trigger, &symbol, badge, ui.theme),
+    ))
+    .chain(draft.nodes.iter().map(|node| {
+        (
+            BoardItem::Node(node.id),
+            node.at,
+            node_face(&node.block, &symbol, &account, ui.theme),
+        )
+    }))
+    .collect()
 }
 
-fn block_element(
-    open: &OpenWorkflow,
-    item: BoardItem,
-    at: BoardPoint,
-    look: BlockLook,
-    problem: bool,
-    theme: &AerisTheme,
-) -> Div {
+/// A block's content over its painted card, scaled with the board.
+fn block_element(at: BoardPoint, zoom: f32, face: BlockFace, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
-    let zoom = open.camera.zoom;
-    let screen = open.camera.to_screen(at);
-    let border = if open.selected == Some(item) {
-        colors.ring_primary
-    } else if problem {
-        colors.text_danger
-    } else {
-        colors.border_secondary
-    };
-    let right_padding = if look.branches {
-        PORT_LABEL_WIDTH + OUTPUT_PORT_SIZE
-    } else {
-        BLOCK_PADDING_X
-    };
+    let scaled = |value: f32| px(value * zoom);
+    let title = face.title;
     div()
         .absolute()
-        .left(px(screen.x))
-        .top(px(screen.y))
-        .w(px(NODE_WIDTH * zoom))
-        .h(px(NODE_HEIGHT * zoom))
+        .left(px(at.x))
+        .top(px(at.y))
+        .w(scaled(NODE_WIDTH))
+        .h(scaled(NODE_HEIGHT))
         .flex()
-        .overflow_hidden()
-        .rounded(radius(zoom))
-        .border(border_width(theme))
-        .border_color(gpui_color(border))
-        .bg(gpui_color(colors.surface))
-        .child(
-            div()
-                .flex_none()
-                .w(px(BLOCK_ACCENT_WIDTH * zoom))
-                .h_full()
-                .bg(look.accent),
-        )
+        .flex_col()
+        .child(card_tab(&face, zoom, theme))
         .child(
             div()
                 .flex_1()
-                .min_w_0()
+                .min_h_0()
                 .flex()
                 .flex_col()
-                .gap(px(BLOCK_GAP * zoom))
-                .pl(px(BLOCK_PADDING_X * zoom))
-                .pr(px(right_padding * zoom))
-                .py(px(BLOCK_PADDING_Y * zoom))
+                .gap(scaled(CARD_GAP))
+                .px(scaled(CARD_PADDING))
+                .pt(scaled(CARD_GAP))
+                .pb(scaled(CARD_PADDING))
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(BLOCK_TITLE_SIZE * zoom))
+                        .text_size(scaled(CARD_TITLE_SIZE))
                         .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(look.accent)
-                        .child(look.title),
-                )
-                .child(
-                    div()
-                        .overflow_hidden()
-                        .text_size(px(BLOCK_TEXT_SIZE * zoom))
-                        .line_height(px(BLOCK_LINE_HEIGHT * zoom))
                         .text_color(gpui_color(colors.text_default))
-                        .child(look.summary),
-                ),
+                        .child(title),
+                )
+                .child(card_inset(face, zoom, theme)),
         )
+}
+
+/// The folder tab's icon and category.
+fn card_tab(face: &BlockFace, zoom: f32, theme: &AerisTheme) -> Div {
+    let scaled = |value: f32| px(value * zoom);
+    div()
+        .flex_none()
+        .w(scaled(CARD_TAB_WIDTH - CARD_TAB_SLANT))
+        .h(scaled(NODE_TAB_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(scaled(CARD_GAP * 0.75))
+        .pl(scaled(CARD_PADDING * 0.85))
+        .child(
+            Icon::new(face.icon.path())
+                .with_size(scaled(CARD_ICON_SIZE))
+                .color(face.accent),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(scaled(CARD_TAB_TEXT_SIZE))
+                .text_color(gpui_color(theme.colors.text_secondary))
+                .child(face.category),
+        )
+}
+
+/// The panel inside a card: the label and badge over the block's value and detail.
+fn card_inset(face: BlockFace, zoom: f32, theme: &AerisTheme) -> Div {
+    let colors = theme.colors;
+    let scaled = |value: f32| px(value * zoom);
+    let heading = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(scaled(CARD_GAP))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(scaled(CARD_LABEL_SIZE))
+                .text_color(gpui_color(colors.text_secondary))
+                .child(face.label),
+        )
+        .when_some(face.badge, |heading, badge| {
+            heading.child(
+                div()
+                    .flex_none()
+                    .px(scaled(CARD_INSET_PADDING * 0.75))
+                    .rounded(px(f32::from(RadiusToken::Sm.logical_pixels()) * zoom))
+                    .bg(badge.background)
+                    .text_size(scaled(CARD_DETAIL_SIZE))
+                    .text_color(badge.foreground)
+                    .child(badge.text),
+            )
+        });
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .gap(scaled(CARD_GAP / 4.0))
+        .px(scaled(CARD_INSET_PADDING + 2.0))
+        .py(scaled(CARD_INSET_PADDING))
+        .rounded(radius(zoom))
+        .bg(gpui_color(colors.surface_secondary))
+        .overflow_hidden()
+        .child(heading)
+        .when_some(face.value, |inset, value| {
+            inset.child(
+                div()
+                    .truncate()
+                    .text_size(scaled(CARD_VALUE_SIZE))
+                    .line_height(scaled(CARD_VALUE_SIZE * 1.3))
+                    .text_color(gpui_color(colors.text_default))
+                    .child(value),
+            )
+        })
+        .when_some(face.detail, |inset, detail| {
+            inset.child(
+                div()
+                    .truncate()
+                    .text_size(scaled(CARD_DETAIL_SIZE))
+                    .text_color(gpui_color(colors.text_muted))
+                    .child(detail),
+            )
+        })
 }
 
 fn dot(center: BoardPoint, size: f32, fill: Hsla, edge: Hsla, theme: &AerisTheme) -> Div {
@@ -1060,20 +1557,21 @@ fn ports(open: &OpenWorkflow, theme: &AerisTheme) -> Vec<Div> {
             surface
         };
         elements.push(dot(center, OUTPUT_PORT_SIZE * zoom, fill, color, theme));
+        // The label sits outside the card, above the link it names.
         if let Some(label) = port_label(port) {
             let height = PORT_LABEL_SIZE * 1.4 * zoom;
             elements.push(
                 div()
                     .absolute()
                     .left(px(
-                        center.x - (PORT_LABEL_WIDTH + OUTPUT_PORT_SIZE / 2.0) * zoom
+                        center.x + (OUTPUT_PORT_SIZE / 2.0 + PORT_LABEL_GAP) * zoom
                     ))
-                    .top(px(center.y - height / 2.0))
+                    .top(px(center.y - height - OUTPUT_PORT_SIZE / 2.0 * zoom))
                     .w(px(PORT_LABEL_WIDTH * zoom))
                     .h(px(height))
                     .flex()
                     .items_center()
-                    .justify_end()
+                    .justify_start()
                     .text_size(px(PORT_LABEL_SIZE * zoom))
                     .text_color(color)
                     .child(label),
@@ -1339,7 +1837,7 @@ fn trigger_settings(ui: Page<'_>, open: &OpenWorkflow) -> Vec<AnyElement> {
         .into_any_element(),
     ];
     match trigger {
-        super::workflow_board::TriggerDraft::Price { .. } => {
+        TriggerDraft::Price { .. } => {
             sections.extend(
                 input_field(
                     ui,
@@ -1352,7 +1850,7 @@ fn trigger_settings(ui: Page<'_>, open: &OpenWorkflow) -> Vec<AnyElement> {
             sections
                 .push(secondary_text(tr!(workflows::TRIGGER_PRICE_HINT), theme).into_any_element());
         }
-        super::workflow_board::TriggerDraft::Time { zone, .. } => {
+        TriggerDraft::Time { zone, .. } => {
             sections.extend(
                 input_field(
                     ui,
@@ -1364,9 +1862,7 @@ fn trigger_settings(ui: Page<'_>, open: &OpenWorkflow) -> Vec<AnyElement> {
             );
             sections.push(
                 zone_choices(ui, "workflow_trigger_zone", *zone, |open, zone| {
-                    if let super::workflow_board::TriggerDraft::Time { zone: current, .. } =
-                        &mut open.draft.trigger
-                    {
+                    if let TriggerDraft::Time { zone: current, .. } = &mut open.draft.trigger {
                         *current = zone;
                     }
                 })

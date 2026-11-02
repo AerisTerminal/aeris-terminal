@@ -61,6 +61,23 @@ too_many_blocks = 一个工作流最多包含 {maximum} 个模块
 link_loop = 该连线会让工作流将同一模块执行两次
 value_unset = 未设置
 
+# Examples
+examples_title = 示例
+example_open = 打开示例
+example_open_aria = 打开示例“{name}”
+example_breakout = 突破买入
+example_breakout_body = 当价格向上突破您的价位且无持仓时，买入 1 手，止损 20 跳、止盈 40 跳。只运行一次。
+example_session_dip = 早盘回调买入
+example_session_dip_body = 当价格在芝加哥时间 08:30 至 11:00 之间跌至您的价位且无持仓时，买入 1 手，止损 16 跳、止盈 32 跳。每个交易时段最多一次。
+example_flat_before_close = 收盘前平仓
+example_flat_before_close_body = 每天芝加哥时间 15:55，如有持仓，则平仓并撤销挂单。
+example_exit_and_lock = 离场并锁定
+example_exit_and_lock_body = 当价格跌至您的价位时：如持有多头，则平仓并锁定账户；否则撤销挂单。只运行一次。
+tab_check = 检查
+tab_action = 操作
+detail_no_bracket = 无止损和止盈
+detail_bracket = 止损 {stop} · 止盈 {target} 跳
+
 # 检查器
 inspector_workflow = 工作流
 field_name = 名称
@@ -103,9 +120,6 @@ lock_hint = 账户锁定后不再执行任何操作。
 remove_block = 移除模块
 
 # 工作流模块的复述
-trigger_price_above = {symbol} 上涨至 {price}
-trigger_price_below = {symbol} 下跌至 {price}
-trigger_time = 每天 {zone} {time}
 zone_chicago = 芝加哥时间
 zone_utc = UTC
 condition_flat = 无持仓

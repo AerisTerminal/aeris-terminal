@@ -17,11 +17,15 @@ use aeris_trading_runtime::{
 use num_traits::ToPrimitive;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) const NODE_WIDTH: f32 = 216.0;
-pub(super) const NODE_HEIGHT: f32 = 76.0;
+pub(super) const NODE_WIDTH: f32 = 232.0;
+pub(super) const NODE_HEIGHT: f32 = 156.0;
+/// The folder tab above a block's body, which names what the block is.
+pub(super) const NODE_TAB_HEIGHT: f32 = 26.0;
 const PORT_HIT_RADIUS: f32 = 12.0;
-const COLUMN_SPACING: f32 = 288.0;
-const ROW_SPACING: f32 = 112.0;
+const COLUMN_SPACING: f32 = 296.0;
+const ROW_SPACING: f32 = 188.0;
+/// The empty board kept around the blocks when the view fits them.
+const FIT_MARGIN: f32 = 48.0;
 pub(super) const MINIMUM_ZOOM: f32 = 0.5;
 pub(super) const MAXIMUM_ZOOM: f32 = 1.5;
 const DEFAULT_SESSION_MAXIMUM: &str = "3";
@@ -66,13 +70,15 @@ impl OutputPort {
         }
     }
 
-    /// Where the port sits down the right edge of its block.
+    /// Where the port sits down the right edge of its block's body.
     pub(super) fn offset_y(self) -> f32 {
-        match self {
-            Self::Trigger | Self::Next(_) => NODE_HEIGHT / 2.0,
-            Self::Then(_) => NODE_HEIGHT * 0.34,
-            Self::Otherwise(_) => NODE_HEIGHT * 0.72,
-        }
+        let body = NODE_HEIGHT - NODE_TAB_HEIGHT;
+        NODE_TAB_HEIGHT
+            + match self {
+                Self::Trigger | Self::Next(_) => body / 2.0,
+                Self::Then(_) => body * 0.36,
+                Self::Otherwise(_) => body * 0.72,
+            }
     }
 }
 
@@ -263,6 +269,146 @@ impl BlockKind {
     }
 }
 
+/// The example workflows the page offers to start from. Each opens as an unsaved draft
+/// whose prices are left for the user to set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorkflowExample {
+    /// Buy with a bracket when the price breaks up through a level, unless already in.
+    Breakout,
+    /// Buy a drop to a level only in the morning session, once per session.
+    SessionDip,
+    /// Close everything shortly before the futures close, every session.
+    FlatBeforeClose,
+    /// On a break down, close a long and lock the account; otherwise cancel working orders.
+    ExitAndLock,
+}
+
+impl WorkflowExample {
+    pub(super) const ALL: [Self; 4] = [
+        Self::Breakout,
+        Self::SessionDip,
+        Self::FlatBeforeClose,
+        Self::ExitAndLock,
+    ];
+
+    /// The example as a draft on `account_id` and `instrument_id`, laid out by depth.
+    pub(super) fn draft(
+        self,
+        name: String,
+        account_id: Option<TradingAccountId>,
+        instrument_id: Option<InstrumentId>,
+    ) -> WorkflowDraft {
+        let (trigger, blocks, repeat) = self.blocks();
+        let mut draft = WorkflowDraft::new(name, account_id, instrument_id);
+        draft.trigger = trigger;
+        draft.repeat = repeat;
+        if repeat == RepeatDraft::PerSession {
+            draft.session_maximum = "1".to_string();
+        }
+        draft.start = Some(WorkflowNodeId(1));
+        draft.nodes = (1..)
+            .zip(blocks)
+            .map(|(number, block)| NodeDraft {
+                id: WorkflowNodeId(number),
+                at: BoardPoint::default(),
+                block,
+            })
+            .collect();
+        draft.arrange(&BTreeMap::new());
+        draft
+    }
+
+    /// The example's trigger, its blocks numbered from 1 in order with the start first,
+    /// and how often it repeats.
+    fn blocks(self) -> (TriggerDraft, Vec<BlockDraft>, RepeatDraft) {
+        let id = WorkflowNodeId;
+        let check = |condition, then: Option<u16>, otherwise: Option<u16>| BlockDraft::If {
+            condition,
+            then: then.map(id),
+            otherwise: otherwise.map(id),
+        };
+        let act = |action, next: Option<u16>| BlockDraft::Action {
+            action,
+            next: next.map(id),
+        };
+        let buy = |stop: &str, target: &str| ActionDraft::Enter {
+            side: OrderSide::Buy,
+            quantity: DEFAULT_QUANTITY.to_string(),
+            stop: stop.to_string(),
+            target: target.to_string(),
+        };
+        let price = |direction| TriggerDraft::Price {
+            direction,
+            level: String::new(),
+        };
+        match self {
+            Self::Breakout => (
+                price(PriceDirection::Above),
+                vec![
+                    check(
+                        ConditionDraft::Position(PositionRequirement::Flat),
+                        Some(2),
+                        None,
+                    ),
+                    act(buy("20", "40"), None),
+                ],
+                RepeatDraft::Once,
+            ),
+            Self::SessionDip => (
+                price(PriceDirection::Below),
+                vec![
+                    check(
+                        ConditionDraft::Between {
+                            zone: WorkflowTimeZone::Chicago,
+                            start: "08:30".to_string(),
+                            end: "11:00".to_string(),
+                        },
+                        Some(2),
+                        None,
+                    ),
+                    check(
+                        ConditionDraft::Position(PositionRequirement::Flat),
+                        Some(3),
+                        None,
+                    ),
+                    act(buy("16", "32"), None),
+                ],
+                RepeatDraft::PerSession,
+            ),
+            Self::FlatBeforeClose => (
+                TriggerDraft::Time {
+                    zone: WorkflowTimeZone::Chicago,
+                    time: "15:55".to_string(),
+                },
+                vec![
+                    check(
+                        ConditionDraft::Position(PositionRequirement::Open),
+                        Some(2),
+                        None,
+                    ),
+                    act(ActionDraft::Flatten, Some(3)),
+                    act(ActionDraft::CancelOrders, None),
+                ],
+                RepeatDraft::PerSession,
+            ),
+            Self::ExitAndLock => (
+                price(PriceDirection::Below),
+                vec![
+                    check(
+                        ConditionDraft::Position(PositionRequirement::Long),
+                        Some(2),
+                        Some(4),
+                    ),
+                    act(ActionDraft::Flatten, Some(3)),
+                    act(ActionDraft::LockAccount, None),
+                    act(ActionDraft::CancelOrders, None),
+                ],
+                RepeatDraft::Once,
+            ),
+        }
+    }
+}
+
 /// A text field of the draft, which an inspector input edits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DraftField {
@@ -384,6 +530,27 @@ impl BoardCamera {
 
     pub(super) fn pan_by(&mut self, dx: f32, dy: f32) {
         self.pan = BoardPoint::new(self.pan.x + dx, self.pan.y + dy);
+    }
+
+    /// The view that shows the board region `extent` whole and centered in a board of
+    /// `size` pixels, never enlarged past 100%; a region too large even at the smallest zoom
+    /// keeps its top-left corner in view.
+    pub(super) fn fitting(extent: (BoardPoint, BoardPoint), size: BoardPoint) -> Self {
+        let (low, high) = extent;
+        let width = (high.x - low.x).max(1.0);
+        let height = (high.y - low.y).max(1.0);
+        let zoom = ((size.x - 2.0 * FIT_MARGIN) / width)
+            .min((size.y - 2.0 * FIT_MARGIN) / height)
+            .clamp(MINIMUM_ZOOM, 1.0);
+        let offset =
+            |available: f32, length: f32| ((available - length * zoom) / 2.0).max(FIT_MARGIN);
+        Self {
+            pan: BoardPoint::new(
+                offset(size.x, width) - low.x * zoom,
+                offset(size.y, height) - low.y * zoom,
+            ),
+            zoom,
+        }
     }
 }
 
@@ -823,7 +990,27 @@ impl WorkflowDraft {
 
     pub(super) fn input_anchor(&self, id: WorkflowNodeId) -> Option<BoardPoint> {
         let at = self.node(id)?.at;
-        Some(BoardPoint::new(at.x, at.y + NODE_HEIGHT / 2.0))
+        Some(BoardPoint::new(
+            at.x,
+            at.y + NODE_TAB_HEIGHT + (NODE_HEIGHT - NODE_TAB_HEIGHT) / 2.0,
+        ))
+    }
+
+    /// The top-left and bottom-right corners around every block.
+    pub(super) fn extent(&self) -> (BoardPoint, BoardPoint) {
+        let (low, high) = self.nodes.iter().map(|node| node.at).fold(
+            (self.trigger_at, self.trigger_at),
+            |(low, high), at| {
+                (
+                    BoardPoint::new(low.x.min(at.x), low.y.min(at.y)),
+                    BoardPoint::new(high.x.max(at.x), high.y.max(at.y)),
+                )
+            },
+        );
+        (
+            low,
+            BoardPoint::new(high.x + NODE_WIDTH, high.y + NODE_HEIGHT),
+        )
     }
 
     /// What is under a board point: an output port first, then the topmost block.
@@ -1648,6 +1835,53 @@ mod tests {
             Some(BoardHit::Output(OutputPort::Then(check)))
         );
         assert_eq!(draft.hit(BoardPoint::new(-500.0, -500.0)), None);
+    }
+
+    #[test]
+    fn every_example_builds_once_its_prices_are_set() {
+        for example in WorkflowExample::ALL {
+            let mut draft = example.draft(
+                "Example".to_string(),
+                Some(TradingAccountId::try_new("practice-1").expect("account")),
+                Some(InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("instrument")),
+            );
+            let unset = draft.build("wf-1".to_string(), 1, Some(SCALES));
+            if matches!(draft.trigger, TriggerDraft::Price { .. }) {
+                assert_eq!(
+                    unset.err(),
+                    Some(DraftProblem::TriggerLevel { decimals: 2 }),
+                    "{example:?}"
+                );
+                assert!(draft.set_field(DraftField::TriggerLevel, "6012.25".to_string()));
+            }
+            let (definition, layout) = draft
+                .build("wf-1".to_string(), 1, Some(SCALES))
+                .unwrap_or_else(|problem| panic!("{example:?}: {problem:?}"));
+            assert_eq!(definition.validate(), Ok(()), "{example:?}");
+            assert_eq!(layout.validate(&definition), Ok(()), "{example:?}");
+            let spots = layout
+                .positions
+                .iter()
+                .map(|position| (position.x, position.y))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(spots.len(), layout.positions.len(), "{example:?} overlaps");
+        }
+    }
+
+    #[test]
+    fn the_fitted_view_shows_every_block() {
+        let draft = WorkflowExample::ExitAndLock.draft("Example".to_string(), None, None);
+        let size = BoardPoint::new(1200.0, 800.0);
+        let camera = BoardCamera::fitting(draft.extent(), size);
+        assert!(camera.zoom <= 1.0);
+        let (low, high) = draft.extent();
+        let (low, high) = (camera.to_screen(low), camera.to_screen(high));
+        assert!(low.x >= 0.0 && low.y >= 0.0, "{low:?}");
+        assert!(high.x <= size.x && high.y <= size.y, "{high:?}");
+        // A board too small for the blocks keeps their top-left corner in view.
+        let cramped = BoardCamera::fitting(draft.extent(), BoardPoint::new(300.0, 200.0));
+        assert!((cramped.zoom - MINIMUM_ZOOM).abs() < f32::EPSILON);
+        assert!(cramped.to_screen(draft.extent().0).x >= 0.0);
     }
 
     #[test]

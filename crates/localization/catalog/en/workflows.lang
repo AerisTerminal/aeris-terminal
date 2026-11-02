@@ -63,6 +63,23 @@ too_many_blocks = A workflow holds at most {maximum} blocks
 link_loop = That link would let the workflow run a block twice
 value_unset = not set
 
+# Examples
+examples_title = Examples
+example_open = Open example
+example_open_aria = Open the {name} example
+example_breakout = Breakout buy
+example_breakout_body = When the price rises through your level and you are flat, buy 1 with a 20-tick stop and a 40-tick target. Runs once.
+example_session_dip = Morning dip buy
+example_session_dip_body = When the price falls to your level between 08:30 and 11:00 Chicago time and you are flat, buy 1 with a 16-tick stop and a 32-tick target. At most once per session.
+example_flat_before_close = Flat before the close
+example_flat_before_close_body = Every day at 15:55 Chicago time, if a position is open, close it and cancel the working orders.
+example_exit_and_lock = Exit and lock
+example_exit_and_lock_body = When the price falls to your level: if you are long, close the position and lock the account; otherwise cancel the working orders. Runs once.
+tab_check = Check
+tab_action = Action
+detail_no_bracket = No stop or target
+detail_bracket = Stop {stop} · target {target} ticks
+
 # Inspector
 inspector_workflow = Workflow
 field_name = Name
@@ -105,9 +122,6 @@ lock_hint = Nothing runs after the account is locked.
 remove_block = Remove block
 
 # Readback of a workflow's blocks
-trigger_price_above = {symbol} rises to {price}
-trigger_price_below = {symbol} falls to {price}
-trigger_time = Every day at {time} {zone}
 zone_chicago = Chicago time
 zone_utc = UTC
 condition_flat = Position is flat

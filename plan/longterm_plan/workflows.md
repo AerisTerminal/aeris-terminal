@@ -67,6 +67,11 @@ Status as of 2026-11-02.
       palette of checks and actions; list of workflows with state and firing counts.
 - [x] Save, arm, pause and two-step delete; moved blocks save their layout alone.
 - [x] Gates green: fmt, workspace clippy `-D warnings`, workspace tests and the naming check.
+- [x] Blocks drawn as folder-tab cards (category tab, accent tab, title, inset value panel) on a
+      dotted board; the block palette sits under the workflow list; opening a workflow fits
+      every block in view.
+- [x] Four example workflows open as unsaved drafts with prices left to set: breakout buy,
+      morning dip buy, flat before the close, exit and lock.
 - [ ] The page exercised by hand on the running app with a Hyperliquid practice account.
 - [x] `workflow_probe` updated to the graph API, with a check that moving blocks keeps the armed
       revision; run live on the Hyperliquid BTC practice feed (below).
@@ -110,3 +115,4 @@ the user saves and arms the new revision.
 | 2026-11-02 | W2 | Workflows page with board, inspector and list replaces the bottom-panel tab | fmt, workspace clippy, 3,153 workspace tests, naming check |
 | 2026-11-02 | W2 | `workflow_probe` on the graph API, live Hyperliquid BTC practice | All 10 behavior checks passed (breakout fired on a live cross and filled at the owner ask with an active bracket; layout move kept revision 1 armed; timed close flattened 2 ms after the minute; restart did not refire; delete); `source_clean` failed on the uncommitted tree |
 | 2026-11-02 | W2 | `workflow_probe` rerun on `2b5ee13f` | All 11 checks passed with a clean source tree; entry filled at the owner ask with an active bracket, timed close 1 ms after the minute |
+| 2026-11-02 | W2 | Card-style blocks, dotted board, fit-to-view, palette in the sidebar, four examples | Examples opened and inspected on the running app; fmt, workspace clippy, naming check, workspace tests |

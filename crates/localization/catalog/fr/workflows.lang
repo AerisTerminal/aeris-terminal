@@ -63,6 +63,23 @@ too_many_blocks = Un workflow contient au plus {maximum} blocs
 link_loop = Ce lien permettrait au workflow d'exécuter un bloc deux fois
 value_unset = non défini
 
+# Examples
+examples_title = Exemples
+example_open = Ouvrir l'exemple
+example_open_aria = Ouvrir l'exemple {name}
+example_breakout = Achat sur cassure
+example_breakout_body = Quand le prix franchit votre niveau à la hausse et que vous êtes sans position, achète 1 avec un stop de 20 ticks et un objectif de 40 ticks. S'exécute une fois.
+example_session_dip = Achat du repli matinal
+example_session_dip_body = Quand le prix descend à votre niveau entre 08:30 et 11:00, heure de Chicago, et que vous êtes sans position, achète 1 avec un stop de 16 ticks et un objectif de 32 ticks. Au plus une fois par séance.
+example_flat_before_close = Sans position avant la clôture
+example_flat_before_close_body = Chaque jour à 15:55, heure de Chicago, si une position est ouverte, la clôture et annule les ordres actifs.
+example_exit_and_lock = Sortir et verrouiller
+example_exit_and_lock_body = Quand le prix descend à votre niveau : si vous êtes long, clôture la position et verrouille le compte ; sinon, annule les ordres actifs. S'exécute une fois.
+tab_check = Vérification
+tab_action = Action
+detail_no_bracket = Sans stop ni objectif
+detail_bracket = Stop {stop} · objectif {target} ticks
+
 # Inspecteur
 inspector_workflow = Workflow
 field_name = Nom
@@ -105,9 +122,6 @@ lock_hint = Rien ne s'exécute après le verrouillage du compte.
 remove_block = Supprimer le bloc
 
 # Relecture des blocs d'un workflow
-trigger_price_above = {symbol} monte à {price}
-trigger_price_below = {symbol} descend à {price}
-trigger_time = Chaque jour à {time} {zone}
 zone_chicago = heure de Chicago
 zone_utc = UTC
 condition_flat = Aucune position

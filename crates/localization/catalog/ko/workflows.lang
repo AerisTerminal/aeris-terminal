@@ -61,6 +61,23 @@ too_many_blocks = 워크플로에는 블록을 최대 {maximum}개까지 넣을 
 link_loop = 이 연결을 사용하면 워크플로가 블록을 두 번 실행할 수 있습니다
 value_unset = 설정 안 됨
 
+# Examples
+examples_title = 예시
+example_open = 예시 열기
+example_open_aria = {name} 예시 열기
+example_breakout = 돌파 매수
+example_breakout_body = 가격이 설정한 수준을 상향 돌파하고 포지션이 없으면 스톱 20틱, 목표 40틱으로 1계약 매수합니다. 한 번만 실행됩니다.
+example_session_dip = 오전 눌림 매수
+example_session_dip_body = 시카고 시간 08:30~11:00 사이에 가격이 설정한 수준까지 내려오고 포지션이 없으면 스톱 16틱, 목표 32틱으로 1계약 매수합니다. 세션당 최대 한 번입니다.
+example_flat_before_close = 장 마감 전 청산
+example_flat_before_close_body = 매일 시카고 시간 15:55에 포지션이 있으면 청산하고 대기 주문을 취소합니다.
+example_exit_and_lock = 청산 후 잠금
+example_exit_and_lock_body = 가격이 설정한 수준까지 내려오면 매수 포지션일 때 청산하고 계좌를 잠그며, 아니면 대기 주문을 취소합니다. 한 번만 실행됩니다.
+tab_check = 검사
+tab_action = 동작
+detail_no_bracket = 스톱·목표 없음
+detail_bracket = 스톱 {stop} · 목표 {target}틱
+
 # 인스펙터
 inspector_workflow = 워크플로
 field_name = 이름
@@ -103,9 +120,6 @@ lock_hint = 계좌가 잠기면 이후에는 아무것도 실행되지 않습니
 remove_block = 블록 삭제
 
 # 워크플로 블록 읽기
-trigger_price_above = {symbol}이(가) {price}까지 상승
-trigger_price_below = {symbol}이(가) {price}까지 하락
-trigger_time = 매일 {zone} {time}
 zone_chicago = 시카고 시간
 zone_utc = UTC
 condition_flat = 포지션 없음

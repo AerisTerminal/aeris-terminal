@@ -8,8 +8,9 @@ use super::market_screener::{AppView, capture_time_label};
 use super::workflow_board::{
     ActionDraft, BlockDraft, BoardCamera, BoardHit, BoardItem, BoardPoint, ConditionDraft,
     DraftField, DraftProblem, InstrumentScales, LinkRefusal, OutputPort, RepeatDraft,
-    SavedRevision, TriggerDraft, WorkflowDraft,
+    SavedRevision, TriggerDraft, WorkflowDraft, WorkflowExample,
 };
+use super::workflow_canvas::BOARD_CHROME;
 use super::*;
 use aeris_localization::{tr, workflows};
 use aeris_trading::{AccountEnvironment, OrderSide, TradingAccountId};
@@ -31,6 +32,8 @@ pub(super) struct WorkflowsPage {
     next_command: u64,
     pub(super) list_scroll: ScrollHandle,
     pub(super) inspector_scroll: ScrollHandle,
+    /// The board's size in pixels when it last painted; zero before it first did.
+    pub(super) board_size: Rc<Cell<BoardPoint>>,
 }
 
 /// What the page shows from a publication; one that changes none of it leaves the page as
@@ -421,6 +424,65 @@ impl TerminalApp {
 
     /// Opens a new draft on the active chart's symbol and the first practice account.
     pub(super) fn open_new_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (account_id, instrument_id) = self.new_workflow_target(cx);
+        let draft = WorkflowDraft::new(
+            tr!(workflows::UNTITLED).to_string(),
+            account_id,
+            instrument_id,
+        );
+        self.open_workflow_draft(draft, None, window, cx);
+    }
+
+    /// Opens an example as an unsaved draft, with its trigger selected so the price it
+    /// still needs is the first field shown.
+    pub(super) fn open_workflow_example(
+        &mut self,
+        example: WorkflowExample,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (account_id, instrument_id) = self.new_workflow_target(cx);
+        let draft = example.draft(example_name(example).to_string(), account_id, instrument_id);
+        self.open_workflow_draft(draft, Some(BoardItem::Trigger), window, cx);
+    }
+
+    fn open_workflow_draft(
+        &mut self,
+        draft: WorkflowDraft,
+        selected: Option<BoardItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut open = OpenWorkflow::new(draft);
+        open.selected = selected;
+        open.camera = BoardCamera::fitting(open.draft.extent(), self.workflow_board_size(window));
+        self.pages.workflows.open = Some(open);
+        self.refresh_workflow_inputs(window, cx);
+        cx.notify();
+    }
+
+    /// The board's last painted size, or the window less the page's side panels before the
+    /// board has painted.
+    fn workflow_board_size(&self, window: &Window) -> BoardPoint {
+        let painted = self.pages.workflows.board_size.get();
+        if painted.x > 0.0 && painted.y > 0.0 {
+            return painted;
+        }
+        let viewport = window.viewport_size();
+        BoardPoint::new(
+            f32::from(viewport.width) - BOARD_CHROME.x,
+            f32::from(viewport.height) - BOARD_CHROME.y,
+        )
+    }
+
+    /// The account and symbol a new draft starts on.
+    fn new_workflow_target(
+        &self,
+        cx: &App,
+    ) -> (
+        Option<TradingAccountId>,
+        Option<aeris_instruments::InstrumentId>,
+    ) {
         let product = self
             .active_surface()
             .read(cx)
@@ -442,14 +504,7 @@ impl TerminalApp {
                 .or_else(|| set.instruments.first())
                 .map(|instrument| instrument.instrument_id.clone())
         });
-        let draft = WorkflowDraft::new(
-            tr!(workflows::UNTITLED).to_string(),
-            account_id,
-            instrument_id,
-        );
-        self.pages.workflows.open = Some(OpenWorkflow::new(draft));
-        self.refresh_workflow_inputs(window, cx);
-        cx.notify();
+        (account_id, instrument_id)
     }
 
     pub(super) fn open_saved_workflow(
@@ -470,9 +525,7 @@ impl TerminalApp {
             })
             .map(WorkflowDraft::from_view);
         if let Some(draft) = draft {
-            self.pages.workflows.open = Some(OpenWorkflow::new(draft));
-            self.refresh_workflow_inputs(window, cx);
-            cx.notify();
+            self.open_workflow_draft(draft, None, window, cx);
         }
     }
 
@@ -573,9 +626,11 @@ impl TerminalApp {
         }
     }
 
-    pub(super) fn reset_workflow_board_view(&mut self, cx: &mut Context<Self>) {
+    /// Fits every block in view.
+    pub(super) fn fit_workflow_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let size = self.workflow_board_size(window);
         if let Some(open) = self.pages.workflows.open.as_mut() {
-            open.camera = BoardCamera::default();
+            open.camera = BoardCamera::fitting(open.draft.extent(), size);
             cx.notify();
         }
     }
@@ -949,6 +1004,24 @@ impl TerminalApp {
     }
 }
 
+pub(super) fn example_name(example: WorkflowExample) -> &'static str {
+    match example {
+        WorkflowExample::Breakout => tr!(workflows::EXAMPLE_BREAKOUT),
+        WorkflowExample::SessionDip => tr!(workflows::EXAMPLE_SESSION_DIP),
+        WorkflowExample::FlatBeforeClose => tr!(workflows::EXAMPLE_FLAT_BEFORE_CLOSE),
+        WorkflowExample::ExitAndLock => tr!(workflows::EXAMPLE_EXIT_AND_LOCK),
+    }
+}
+
+pub(super) fn example_description(example: WorkflowExample) -> &'static str {
+    match example {
+        WorkflowExample::Breakout => tr!(workflows::EXAMPLE_BREAKOUT_BODY),
+        WorkflowExample::SessionDip => tr!(workflows::EXAMPLE_SESSION_DIP_BODY),
+        WorkflowExample::FlatBeforeClose => tr!(workflows::EXAMPLE_FLAT_BEFORE_CLOSE_BODY),
+        WorkflowExample::ExitAndLock => tr!(workflows::EXAMPLE_EXIT_AND_LOCK_BODY),
+    }
+}
+
 /// The text a draft block shows on the board under its title.
 pub(super) fn block_summary(block: &BlockDraft) -> String {
     let unset = || tr!(workflows::VALUE_UNSET).to_string();
@@ -1004,39 +1077,5 @@ pub(super) fn block_summary(block: &BlockDraft) -> String {
             ActionDraft::CancelOrders => tr!(workflows::ACTION_CANCEL_ORDERS).to_string(),
             ActionDraft::LockAccount => tr!(workflows::ACTION_LOCK).to_string(),
         },
-    }
-}
-
-/// The trigger's summary on the board.
-pub(super) fn trigger_summary(trigger: &TriggerDraft, symbol: &str) -> String {
-    match trigger {
-        TriggerDraft::Price { direction, level } => {
-            let price = if level.trim().is_empty() {
-                tr!(workflows::VALUE_UNSET).to_string()
-            } else {
-                level.trim().to_string()
-            };
-            match direction {
-                PriceDirection::Above => {
-                    tr!(
-                        workflows::TRIGGER_PRICE_ABOVE,
-                        symbol = symbol,
-                        price = price
-                    )
-                }
-                PriceDirection::Below => {
-                    tr!(
-                        workflows::TRIGGER_PRICE_BELOW,
-                        symbol = symbol,
-                        price = price
-                    )
-                }
-            }
-        }
-        TriggerDraft::Time { zone, time } => tr!(
-            workflows::TRIGGER_TIME,
-            time = time.trim(),
-            zone = zone_text(*zone)
-        ),
     }
 }
