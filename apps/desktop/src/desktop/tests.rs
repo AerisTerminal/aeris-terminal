@@ -3060,8 +3060,8 @@ mod timeframe_input {
         assert!(!cx.update(|window, cx| terminal.read(cx).workspace_keyboard_focused(window, cx)));
 
         let first = cx.read(|cx| terminal.read(cx).tabs[0].id);
-        update_terminal(&terminal, cx, |terminal, _, cx| {
-            terminal.select_workspace_id(first, cx);
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.select_workspace_id(first, window, cx);
         });
         assert_eq!(
             page(cx),
@@ -3105,6 +3105,51 @@ mod timeframe_input {
             tab_count(cx),
             2,
             "closing the placeholder closes no workspace"
+        );
+    }
+
+    #[gpui::test]
+    fn each_workspace_tab_returns_to_the_page_it_was_left_on(cx: &mut TestAppContext) {
+        use super::super::market_screener::AppView;
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        update_terminal(&terminal, cx, TerminalApp::open_start_page);
+        update_terminal(&terminal, cx, TerminalApp::create_layout_from_start_page);
+        let (first, second) = cx.read(|cx| {
+            let tabs = &terminal.read(cx).tabs;
+            assert_eq!(tabs.len(), 2);
+            (tabs[0].id, tabs[1].id)
+        });
+        let shown = |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).pages.view);
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.show_app_view(AppView::Workflows, window, cx);
+        });
+        assert_eq!(shown(cx), AppView::Workflows);
+
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.select_workspace_id(first, window, cx);
+        });
+        assert_eq!(
+            shown(cx),
+            AppView::Terminal,
+            "a tab never shown on another page opens the terminal"
+        );
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.select_workspace_id(second, window, cx);
+        });
+        assert_eq!(
+            shown(cx),
+            AppView::Workflows,
+            "the tab left on Workflows returns to Workflows"
+        );
+
+        update_terminal(&terminal, cx, TerminalApp::open_start_page);
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.select_workspace_id(second, window, cx);
+        });
+        assert_eq!(
+            shown(cx),
+            AppView::Workflows,
+            "leaving the start page restores the tab's page"
         );
     }
 

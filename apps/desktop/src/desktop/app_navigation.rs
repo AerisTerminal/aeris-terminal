@@ -159,6 +159,22 @@ impl TerminalApp {
         if self.pages.view == view {
             return;
         }
+        self.switch_page(view, window, cx);
+        if view != AppView::Screener {
+            self.window.chrome_focus().focus(window, cx);
+        }
+    }
+
+    /// Shows `view` without moving focus; showing the page already shown does nothing.
+    pub(super) fn switch_page(
+        &mut self,
+        view: AppView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pages.view == view {
+            return;
+        }
         match view {
             AppView::Screener => {
                 self.pages.view = view;
@@ -168,15 +184,15 @@ impl TerminalApp {
                 self.activate_market_screener(window, cx);
                 cx.notify();
             }
-            AppView::Workflows => {
-                self.show_workflows_page(cx);
-                self.window.chrome_focus().focus(window, cx);
-            }
-            AppView::Terminal => {
-                self.show_terminal_view(cx);
-                self.window.chrome_focus().focus(window, cx);
-            }
+            AppView::Workflows => self.show_workflows_page(cx),
+            AppView::Terminal => self.show_terminal_view(cx),
         }
+    }
+
+    /// Leaves the active tab on the page it shows, so selecting the tab again returns there.
+    pub(super) fn remember_active_tab_page(&mut self) {
+        let page = self.pages.view;
+        self.tabs.active_mut().page = page;
     }
 
     /// Returns to the terminal page without moving focus, for workspace actions that focus

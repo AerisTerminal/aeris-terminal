@@ -1069,7 +1069,7 @@ fn handle_workspace_tab_key(
             let last = terminal.tabs.len().saturating_sub(1);
             terminal.select_and_focus_workspace(last, window, cx);
         }
-        "enter" | "space" => terminal.select_workspace_id(tab_id, cx),
+        "enter" | "space" => terminal.select_workspace_id(tab_id, window, cx),
         "delete" => terminal.close_workspace(tab_id, window, cx),
         _ => {}
     });
@@ -1093,15 +1093,19 @@ fn workspace_add_button(
         })
 }
 
-/// A tab shows its active chart's exchange mark, instrument and daily change, marked while
-/// its layout has unsaved changes.
+/// A tab on the terminal shows its active chart's exchange mark, instrument and daily change;
+/// a tab on another page shows that page. Either is marked while its layout has unsaved changes.
 fn workspace_tab_content(
     workspace: &WorkspaceTab,
+    page: super::market_screener::AppView,
     unsaved: bool,
     market_summaries: &BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     theme: &AerisTheme,
     cx: &App,
 ) -> (String, String, Div, Option<String>) {
+    if page != super::market_screener::AppView::Terminal {
+        return workspace_tab_page_content(page, unsaved, theme);
+    }
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);
     let label = terminal_instrument_label(surface);
     let summary = (!surface.showing_superseded_series())
@@ -1153,6 +1157,37 @@ fn workspace_tab_content(
                 .child(change)
         }));
     (label, aria_label, content, change_label)
+}
+
+fn workspace_tab_page_content(
+    page: super::market_screener::AppView,
+    unsaved: bool,
+    theme: &AerisTheme,
+) -> (String, String, Div, Option<String>) {
+    let label = page.label().to_string();
+    let aria_label = workspace_tab_aria_label(&label, unsaved, None);
+    let content = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(
+            header_icon(page.icon())
+                .with_size(px(WORKSPACE_TAB_EXCHANGE_GLYPH))
+                .color(gpui_color(theme.colors.icon)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label.clone()),
+        )
+        .children(unsaved.then(|| layouts_view::unsaved_layout_dot(theme)));
+    (label, aria_label, content, None)
 }
 
 fn workspace_tab_width(
@@ -1292,7 +1327,7 @@ fn workspace_tab(
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             mouse_focus.focus(window, cx);
             select_terminal.update(cx, |terminal, cx| {
-                terminal.select_workspace_id(tab_id, cx);
+                terminal.select_workspace_id(tab_id, window, cx);
             });
         })
         .on_aux_click(move |event, window, cx| {
@@ -1342,7 +1377,12 @@ pub(super) fn workspace_tab_strip(
         .enumerate()
         .map(|(index, workspace)| {
             let unsaved = state.unsaved.get(index).copied().unwrap_or(false);
-            workspace_tab_content(workspace, unsaved, state.market_summaries, &theme, cx)
+            let page = if index == state.active && state.start_page != Some(true) {
+                state.app_view
+            } else {
+                workspace.page
+            };
+            workspace_tab_content(workspace, page, unsaved, state.market_summaries, &theme, cx)
         })
         .collect();
     let tab_widths = workspace_tab_widths(&visuals, state.unsaved, close_drag_enabled, window);
@@ -1523,6 +1563,7 @@ pub(super) fn terminal_root(
                     .expect("startup pane identity 1 is a valid chart workspace root"),
                 maximized_pane: None,
                 swallow_pane_mouse_up: false,
+                page: market_screener::AppView::Terminal,
                 generation: 1,
                 focus: cx.focus_handle(),
             }],
@@ -1704,6 +1745,7 @@ pub(super) fn restored_workspace_tab(
         layout,
         maximized_pane: None,
         swallow_pane_mouse_up: false,
+        page: market_screener::AppView::Terminal,
         generation: tab.generation,
         focus: cx.focus_handle(),
     })
@@ -1753,8 +1795,8 @@ mod tests {
 
     use super::{
         MarketSummaryValues, WORKSPACE_TAB_MAX_WIDTH, workspace_tab_aria_label,
-        workspace_tab_change_label, workspace_tab_close_drag_enabled, workspace_tab_surface_colors,
-        workspace_tab_width_from_measurements,
+        workspace_tab_change_label, workspace_tab_close_drag_enabled, workspace_tab_page_content,
+        workspace_tab_surface_colors, workspace_tab_width_from_measurements,
     };
 
     #[test]
@@ -1794,6 +1836,21 @@ mod tests {
             workspace_tab_aria_label("Scalping", true, None),
             "Scalping, unsaved changes"
         );
+    }
+
+    #[test]
+    fn a_tab_on_another_page_names_that_page_without_a_change() {
+        use super::super::market_screener::AppView;
+        let theme = AerisTheme::dark();
+        for page in [AppView::Workflows, AppView::Screener] {
+            let (label, aria_label, _, change) = workspace_tab_page_content(page, true, &theme);
+            assert_eq!(label, page.label());
+            assert_eq!(
+                aria_label,
+                workspace_tab_aria_label(page.label(), true, None)
+            );
+            assert_eq!(change, None);
+        }
     }
 
     #[test]

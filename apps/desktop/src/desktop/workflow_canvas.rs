@@ -11,15 +11,15 @@ use super::workflow_board::{
     OutputPort, RepeatDraft, TriggerDraft, TriggerKind, WorkflowExample,
 };
 use super::workflows_page::{
-    BoardGesture, DraftStatus, OpenWorkflow, PageStatus, WorkflowsPage, account_environment,
-    account_text, action_summary, check_summary, day_label, days_text, draft_currency_scale,
-    draft_scales, draft_status, draft_symbol, environment_text, example_description, example_name,
-    firing_time_text, outcome_text, problem_text, state_color, state_text, symbol_text,
-    trigger_summary, zone_text,
+    BoardGesture, DraftStatus, HeaderMenu, OpenWorkflow, PageStatus, WorkflowsPage,
+    account_environment, account_text, action_summary, check_summary, day_label, days_text,
+    draft_currency_scale, draft_scales, draft_status, draft_symbol, environment_text,
+    example_description, example_name, firing_time_text, outcome_text, problem_text, state_color,
+    state_text, symbol_text, trigger_summary, zone_text,
 };
 use super::*;
 use aeris_localization::{tr, tr_count, workflows};
-use aeris_trading::{AccountEnvironment, TradingAccountId};
+use aeris_trading::AccountEnvironment;
 use aeris_trading_runtime::{
     MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS,
     PositionRequirement, PriceDirection, WorkflowCompare, WorkflowJoin, WorkflowNodeId,
@@ -73,7 +73,14 @@ const GRID_DOT_SIZE: f32 = 2.0;
 const GRID_MAXIMUM_DOTS: f32 = 6_000.0;
 const PALETTE_ICON_SIZE: f32 = 14.0;
 /// The page's header and the workflow toolbar above the board.
-const BOARD_CHROME_HEIGHT: f32 = 152.0;
+const BOARD_CHROME_HEIGHT: f32 = 104.0;
+const TOOLBAR_HEIGHT: f32 = 44.0;
+const TOOLBAR_DIVIDER_HEIGHT: f32 = 20.0;
+/// The name keeps this much room before the account and symbol menus crowd it out.
+const TOOLBAR_NAME_MINIMUM_WIDTH: f32 = 72.0;
+const MISSING_DOT_SIZE: f32 = 6.0;
+const HEADER_MENU_WIDTH: f32 = 280.0;
+const HEADER_MENU_MAX_HEIGHT: f32 = 360.0;
 const RECENT_FIRINGS_SHOWN: usize = 8;
 /// Market search rows the inspector lists; typing more narrows them.
 const MARKET_RESULTS_SHOWN: usize = 24;
@@ -391,7 +398,7 @@ fn example_card(ui: Page<'_>, index: usize, example: WorkflowExample) -> Div {
         .rounded(radius(1.0))
         .border(border_width(ui.theme))
         .border_color(gpui_color(ui.theme.colors.border_secondary))
-        .bg(gpui_color(ui.theme.colors.surface))
+        .bg(gpui_color(ui.theme.colors.surface_secondary))
         .text_left()
         .child(
             div()
@@ -402,7 +409,7 @@ fn example_card(ui: Page<'_>, index: usize, example: WorkflowExample) -> Div {
         .child(secondary_text(example_description(example), ui.theme).flex_1())
         .child(
             Button::new(("workflow_example_open", index), ui.theme)
-                .variant(ButtonVariant::Outline)
+                .variant(ButtonVariant::Secondary)
                 .button_size(ButtonSize::Sm)
                 .icon(header_icon(example_icon(example)))
                 .label(tr!(workflows::EXAMPLE_OPEN))
@@ -632,6 +639,8 @@ fn panel_toggle(
         .on_click(move |_, _, cx| terminal.update(cx, toggle))
 }
 
+/// One row over the board: the workflow's name and state, the account and symbol it trades
+/// with their menus, a note only when something needs attention, and its commands.
 fn toolbar(
     ui: Page<'_>,
     page: &WorkflowsPage,
@@ -643,13 +652,6 @@ fn toolbar(
     let theme = ui.theme;
     let colors = theme.colors;
     let draft = &open.draft;
-    let mut detail = vec![draft_symbol(ui.set, draft)];
-    detail.extend(
-        draft
-            .account_id
-            .as_ref()
-            .map(|account_id| account_text(ui.set, account_id)),
-    );
     let (status_text, status_color) = match (status, view) {
         (DraftStatus::Saved, Some(view)) => (state_text(view), state_color(view, theme)),
         (DraftStatus::Changed, _) => (
@@ -661,11 +663,13 @@ fn toolbar(
             gpui_color(colors.text_secondary),
         ),
     };
-    let (readiness, readiness_color) = match (&open.status, problem) {
-        (Some(PageStatus::Problem(text)), _) => (text.clone(), colors.text_danger),
-        (Some(PageStatus::Note(text)), _) => (text.clone(), colors.text_positive),
-        (None, Some(problem)) => (problem_text(problem), colors.text_warning),
-        (None, None) => (tr!(workflows::READY).to_string(), colors.text_secondary),
+    // A missing account or symbol is said by its own menu button, so only other problems
+    // and command replies need a note.
+    let note = match (&open.status, problem) {
+        (Some(PageStatus::Problem(text)), _) => Some((text.clone(), colors.text_danger)),
+        (Some(PageStatus::Note(text)), _) => Some((text.clone(), colors.text_positive)),
+        (None, Some(DraftProblem::Account | DraftProblem::Symbol) | None) => None,
+        (None, Some(problem)) => Some((problem_text(problem), colors.text_warning)),
     };
     let name = draft.name.trim();
     let name = if name.is_empty() {
@@ -678,57 +682,209 @@ fn toolbar(
     div()
         .flex_none()
         .w_full()
+        .h(px(TOOLBAR_HEIGHT))
         .flex()
         .items_center()
-        .gap_3()
-        .px_4()
-        .py_3()
+        .gap_2()
+        .px_3()
         .border_b(border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .child(list_toggle)
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_lg()
-                                .font_weight(platform_font_weight(TypographyRole::Strong))
-                                .child(name),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(status_color)
-                                .child(status_text),
-                        )
-                        .children(
-                            environment.map(|environment| environment_badge(environment, theme)),
-                        ),
-                )
-                .child(secondary_text(detail.join(" · "), theme).truncate())
-                .child(
-                    div()
-                        .text_xs()
-                        .truncate()
-                        .text_color(gpui_color(readiness_color))
-                        .child(readiness),
-                ),
+                .min_w(px(TOOLBAR_NAME_MINIMUM_WIDTH))
+                .truncate()
+                .text_sm()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .child(name),
         )
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(status_color)
+                .child(status_text),
+        )
+        .child(toolbar_divider(theme))
+        .child(account_menu(ui, open))
+        .children(environment.map(|environment| environment_badge(environment, theme)))
+        .child(symbol_menu(ui, open))
+        .child(div().flex_1().min_w_0().truncate().text_xs().children(
+            note.map(|(text, color)| div().text_color(gpui_color(color)).truncate().child(text)),
+        ))
         .child(command_buttons(ui, open, status, view))
         .child(inspector_toggle)
+}
+
+fn toolbar_divider(theme: &AerisTheme) -> Div {
+    div()
+        .flex_none()
+        .w(border_width(theme))
+        .h(px(TOOLBAR_DIVIDER_HEIGHT))
+        .bg(gpui_color(theme.colors.border_secondary))
+}
+
+/// A header button that opens one of the workflow's menus, with a warning dot while the
+/// workflow still needs that choice.
+fn menu_button(
+    ui: Page<'_>,
+    open: &OpenWorkflow,
+    (id, menu): (&'static str, HeaderMenu),
+    (icon, label, aria): (HugeIcon, String, &'static str),
+    missing: bool,
+) -> Button {
+    let toggle = ui.terminal.clone();
+    let button = Button::new(id, ui.theme)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Sm)
+        .open(open.header_menu == Some(menu))
+        .aria_label(aria)
+        .label(label)
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_press(move |_, _, cx| {
+            toggle.update(cx, |terminal, terminal_cx| {
+                terminal.toggle_workflow_header_menu(menu, terminal_cx);
+            });
+        });
+    if missing {
+        button.leading(
+            div()
+                .size(px(MISSING_DOT_SIZE))
+                .rounded_full()
+                .bg(gpui_color(ui.theme.colors.text_warning)),
+        )
+    } else {
+        button.icon(header_icon(icon))
+    }
+}
+
+fn header_menu_panel(id: &'static str, theme: &AerisTheme) -> MenuPanel {
+    MenuPanel::new(
+        id,
+        MenuPlacement::Anchored {
+            side: MenuSide::Below,
+            align: MenuAlign::Start,
+        },
+        theme,
+    )
+    .width(px(HEADER_MENU_WIDTH))
+    .max_height(px(HEADER_MENU_MAX_HEIGHT))
+}
+
+fn header_menu_anchor(
+    ui: Page<'_>,
+    id: &'static str,
+    trigger: Button,
+    menu: Option<MenuPanel>,
+) -> MenuAnchor {
+    let dismiss = ui.terminal.clone();
+    MenuAnchor::new(id, trigger)
+        .menu(menu)
+        .on_dismiss(move |_, cx| {
+            dismiss.update(cx, TerminalApp::close_workflow_header_menu);
+        })
+}
+
+/// The account the workflow trades, and a menu of every trading account.
+fn account_menu(ui: Page<'_>, open: &OpenWorkflow) -> MenuAnchor {
+    let theme = ui.theme;
+    let accounts = ui.set.map_or(&[][..], |set| set.accounts.as_slice());
+    let label = open.draft.account_id.as_ref().map_or_else(
+        || tr!(workflows::CHOOSE_ACCOUNT).to_string(),
+        |account_id| account_text(ui.set, account_id),
+    );
+    let trigger = menu_button(
+        ui,
+        open,
+        ("workflow_account_menu_button", HeaderMenu::Account),
+        (HugeIcon::User, label, tr!(workflows::ACCOUNT_MENU_ARIA)),
+        open.draft.account_id.is_none(),
+    );
+    let menu = (open.header_menu == Some(HeaderMenu::Account)).then(|| {
+        let mut menu = header_menu_panel("workflow_account_menu", theme);
+        if accounts.is_empty() {
+            return menu.child(
+                MenuRow::compact(
+                    "workflow_account_none",
+                    tr!(workflows::NO_ACCOUNTS_TITLE),
+                    theme,
+                )
+                .description(tr!(workflows::NO_ACCOUNTS_DETAIL))
+                .disabled(true),
+            );
+        }
+        for (index, account) in accounts.iter().enumerate() {
+            let account_id = account.id.clone();
+            menu = menu.child(
+                MenuRow::compact(
+                    ("workflow_account_choice", index),
+                    account.display_name.clone(),
+                    theme,
+                )
+                .detail(environment_text(account.environment))
+                .checked(open.draft.account_id.as_ref() == Some(&account.id))
+                .on_click(edit(ui.terminal, move |open| {
+                    open.draft.account_id = Some(account_id.clone());
+                    open.header_menu = None;
+                })),
+            );
+        }
+        menu
+    });
+    header_menu_anchor(ui, "workflow_account_menu_anchor", trigger, menu)
+}
+
+/// The symbol the workflow trades, a menu of the symbols in use and a way to search for any
+/// other market.
+fn symbol_menu(ui: Page<'_>, open: &OpenWorkflow) -> MenuAnchor {
+    let theme = ui.theme;
+    let missing = open.draft.instrument_id.is_none();
+    let label = if missing {
+        tr!(workflows::CHOOSE_SYMBOL).to_string()
+    } else {
+        draft_symbol(ui.set, &open.draft)
+    };
+    let trigger = menu_button(
+        ui,
+        open,
+        ("workflow_symbol_menu_button", HeaderMenu::Symbol),
+        (HugeIcon::Chart, label, tr!(workflows::SYMBOL_MENU_ARIA)),
+        missing,
+    );
+    let menu = (open.header_menu == Some(HeaderMenu::Symbol)).then(|| {
+        let mut menu = header_menu_panel("workflow_symbol_menu", theme);
+        let options = symbol_options(ui, open);
+        let any = !options.is_empty();
+        for (index, (instrument_id, symbol)) in options.into_iter().enumerate() {
+            let checked = open.draft.instrument_id.as_ref() == Some(&instrument_id);
+            menu = menu.child(
+                MenuRow::compact(("workflow_symbol_choice", index), symbol, theme)
+                    .checked(checked)
+                    .on_click(edit(ui.terminal, move |open| {
+                        open.draft.instrument_id = Some(instrument_id.clone());
+                        open.header_menu = None;
+                    })),
+            );
+        }
+        if any {
+            menu = menu.separator();
+        }
+        let search = ui.terminal.clone();
+        menu.child(
+            MenuRow::compact(
+                "workflow_symbol_search",
+                tr!(workflows::SEARCH_ALL_MARKETS),
+                theme,
+            )
+            .leading_icon(header_icon(HugeIcon::Search))
+            .on_click(move |_, window, cx| {
+                search.update(cx, |terminal, terminal_cx| {
+                    terminal.search_workflow_markets(window, terminal_cx);
+                });
+            }),
+        )
+    });
+    header_menu_anchor(ui, "workflow_symbol_menu_anchor", trigger, menu)
 }
 
 /// Practice and demo accounts are named quietly; a live account is called out, because its
@@ -1059,13 +1215,17 @@ fn board(
     let paint_terminal = ui.terminal.clone();
     let prepaint_origin = Rc::clone(&origin);
     let board_size = Rc::clone(&page.board_size);
+    let fit = open.fit_pending.then(|| ui.terminal.clone());
     let links = canvas(
-        move |bounds, _, _| {
+        move |bounds, _, cx| {
             prepaint_origin.set(bounds.origin);
-            board_size.set(BoardPoint::new(
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height),
-            ));
+            let size = BoardPoint::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+            board_size.set(size);
+            if let Some(terminal) = fit {
+                terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.finish_workflow_fit(size, terminal_cx);
+                });
+            }
         },
         move |bounds, (), window, _| {
             paint_grid(window, bounds, camera, grid_color);
@@ -1826,51 +1986,18 @@ fn workflow_settings(
         input_field(ui, open, DraftField::Name, tr!(workflows::FIELD_NAME))
             .map(IntoElement::into_any_element),
     );
-    sections.push(account_picker(ui, open).into_any_element());
-    sections.push(symbol_picker(ui, page, open).into_any_element());
+    sections.push(market_search(ui, page).into_any_element());
     sections.push(repeat_settings(ui, open).into_any_element());
     sections.extend(view.map(|view| firings(view, theme).into_any_element()));
     sections.push(secondary_text(tr!(workflows::SAVED_NOTE), theme).into_any_element());
     sections
 }
 
-fn account_picker(ui: Page<'_>, open: &OpenWorkflow) -> Div {
-    let accounts = ui.set.map_or(&[][..], |set| set.accounts.as_slice());
-    if accounts.is_empty() {
-        return field(
-            tr!(workflows::FIELD_ACCOUNT),
-            secondary_text(tr!(workflows::NO_ACCOUNTS), ui.theme),
-            ui.theme,
-        );
-    }
-    let options = accounts
-        .iter()
-        .map(|account| {
-            (
-                account.id.clone(),
-                SharedString::from(format!(
-                    "{} · {}",
-                    account.display_name,
-                    environment_text(account.environment)
-                )),
-            )
-        })
-        .collect();
-    field(
-        tr!(workflows::FIELD_ACCOUNT),
-        choices(
-            ui,
-            "workflow_account",
-            options,
-            open.draft.account_id.as_ref(),
-            |open, account_id: TradingAccountId| open.draft.account_id = Some(account_id),
-        ),
-        ui.theme,
-    )
-}
-
-/// The symbols in use, the market last picked by search, and the search for any other.
-fn symbol_picker(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div {
+/// The symbols in use and the market last picked by search, for the header's symbol menu.
+fn symbol_options(
+    ui: Page<'_>,
+    open: &OpenWorkflow,
+) -> Vec<(aeris_instruments::InstrumentId, SharedString)> {
     let instruments = ui.set.map_or(&[][..], |set| set.instruments.as_slice());
     let mut options = instruments
         .iter()
@@ -1889,23 +2016,18 @@ fn symbol_picker(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div
             market.display_symbol.clone().into(),
         ));
     }
+    options
+}
+
+/// The search for any market; a pick becomes the workflow's symbol.
+fn market_search(ui: Page<'_>, page: &WorkflowsPage) -> Div {
     let search = &page.markets;
     let results = search.entries();
     div()
         .flex()
         .flex_col()
         .gap_2()
-        .child(field(
-            tr!(workflows::FIELD_SYMBOL),
-            choices(
-                ui,
-                "workflow_symbol",
-                options,
-                open.draft.instrument_id.as_ref(),
-                |open, instrument_id| open.draft.instrument_id = Some(instrument_id),
-            ),
-            ui.theme,
-        ))
+        .child(secondary_text(tr!(workflows::FIELD_SYMBOL), ui.theme))
         .children(
             search
                 .input()
@@ -1917,7 +2039,6 @@ fn symbol_picker(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div
                 .map(|status| secondary_text(status, ui.theme)),
         )
         .children((!results.is_empty()).then(|| market_results(ui, results)))
-        .child(secondary_text(tr!(workflows::SYMBOL_HINT), ui.theme))
 }
 
 fn market_results(ui: Page<'_>, entries: Vec<InstrumentMenuEntry>) -> Div {

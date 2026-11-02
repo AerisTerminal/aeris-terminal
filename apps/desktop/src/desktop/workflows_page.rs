@@ -71,12 +71,23 @@ impl ObservedWorkflows {
     }
 }
 
+/// The menus the open workflow's header opens beside its name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HeaderMenu {
+    Account,
+    Symbol,
+}
+
 pub(super) struct OpenWorkflow {
     pub(super) draft: WorkflowDraft,
     pub(super) selected: Option<BoardItem>,
+    pub(super) header_menu: Option<HeaderMenu>,
     /// The inspector's text inputs, one per field of the selection.
     pub(super) inputs: Vec<(DraftField, Entity<InputState>)>,
     pub(super) camera: BoardCamera,
+    /// The camera was fitted to a board size guessed from the window; the board's first
+    /// paint fits it again to the size it measured.
+    pub(super) fit_pending: bool,
     pub(super) gesture: Option<BoardGesture>,
     pub(super) status: Option<PageStatus>,
     /// The user command in flight; its reply is the only one that updates the draft.
@@ -89,8 +100,10 @@ impl OpenWorkflow {
         Self {
             draft,
             selected: None,
+            header_menu: None,
             inputs: Vec::new(),
             camera: BoardCamera::default(),
+            fit_pending: true,
             gesture: None,
             status: None,
             pending: None,
@@ -650,6 +663,38 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Opens `menu`, or closes it when it is the one already open.
+    pub(super) fn toggle_workflow_header_menu(&mut self, menu: HeaderMenu, cx: &mut Context<Self>) {
+        if let Some(open) = self.pages.workflows.open.as_mut() {
+            open.header_menu = (open.header_menu != Some(menu)).then_some(menu);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn close_workflow_header_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(open) = self.pages.workflows.open.as_mut()
+            && open.header_menu.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    /// Shows the workflow's settings in the inspector with the cursor in its market search.
+    pub(super) fn search_workflow_markets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let page = &mut self.pages.workflows;
+        let Some(open) = page.open.as_mut() else {
+            return;
+        };
+        open.header_menu = None;
+        open.selected = None;
+        page.inspector_hidden = false;
+        self.refresh_workflow_inputs(window, cx);
+        if let Some(input) = self.pages.workflows.markets.input().cloned() {
+            input.update(cx, |input, input_cx| input.focus(window, input_cx));
+        }
+        cx.notify();
+    }
+
     /// The account and symbol a new draft starts on.
     fn new_workflow_target(
         &self,
@@ -806,7 +851,22 @@ impl TerminalApp {
         let size = self.workflow_board_size(window);
         if let Some(open) = self.pages.workflows.open.as_mut() {
             open.camera = BoardCamera::fitting(open.draft.extent(), size);
+            open.fit_pending = false;
             cx.notify();
+        }
+    }
+
+    /// Fits a newly opened workflow to the board size its first paint measured.
+    pub(super) fn finish_workflow_fit(&mut self, size: BoardPoint, cx: &mut Context<Self>) {
+        if let Some(open) = self.pages.workflows.open.as_mut()
+            && open.fit_pending
+        {
+            open.fit_pending = false;
+            let camera = BoardCamera::fitting(open.draft.extent(), size);
+            if camera != open.camera {
+                open.camera = camera;
+                cx.notify();
+            }
         }
     }
 

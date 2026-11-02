@@ -2681,12 +2681,24 @@ impl TerminalApp {
         }
     }
 
-    fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
-        if next < self.tabs.len() {
-            self.show_terminal_view(cx);
-            self.hide_start_page(cx);
+    /// Selects the tab at `next` and shows the page it was left on. Choosing the tab already
+    /// selected keeps the page, unless it leaves the start page.
+    fn select_workspace(&mut self, next: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if next >= self.tabs.len() {
+            return;
         }
-        let Some((previous, next)) = self.tabs.select(next) else {
+        let leaving = next != self.tabs.active_index();
+        if leaving {
+            self.remember_active_tab_page();
+        }
+        let start_page_shown = self.start_page_shown();
+        self.hide_start_page(cx);
+        let switched = self.tabs.select(next);
+        if leaving || start_page_shown {
+            let page = self.tabs.active().page;
+            self.switch_page(page, window, cx);
+        }
+        let Some((previous, next)) = switched else {
             return;
         };
         self.set_workspace_resource_class(previous, ConsumerResourceClass::Background, cx);
@@ -2696,9 +2708,14 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn select_workspace_id(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+    pub(super) fn select_workspace_id(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(index) = self.tabs.position(tab_id) {
-            self.select_workspace(index, cx);
+            self.select_workspace(index, window, cx);
         }
     }
 
@@ -2711,7 +2728,7 @@ impl TerminalApp {
         if next >= self.tabs.len() {
             return;
         }
-        self.select_workspace(next, cx);
+        self.select_workspace(next, window, cx);
         self.tabs[next].focus.focus(window, cx);
     }
 
@@ -2731,7 +2748,7 @@ impl TerminalApp {
     /// lands in the selected workspace, not on its tab, which a frameless window may not show.
     fn cycle_workspace(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(next) = self.tabs.wrapped_index(self.tabs.active_index(), direction) {
-            self.select_workspace(next, cx);
+            self.select_workspace(next, window, cx);
             self.focus_workspace(window, cx);
         }
     }
@@ -2994,6 +3011,7 @@ impl TerminalApp {
             layout,
             maximized_pane: None,
             swallow_pane_mouse_up: false,
+            page: market_screener::AppView::Terminal,
             generation: 1,
             focus: cx.focus_handle(),
         };
@@ -3011,6 +3029,7 @@ impl TerminalApp {
             cx.notify();
         })
         .detach();
+        self.remember_active_tab_page();
         self.show_terminal_view(cx);
         self.set_workspace_resource_class(
             self.tabs.active_index(),

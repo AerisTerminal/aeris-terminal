@@ -591,6 +591,7 @@ impl TerminalApp {
             .layout_drawings_mut()
             .entry(layout_id)
             .or_insert_with(|| LayoutDrawings::from_saved(&saved_drawings));
+        self.remember_active_tab_page();
         self.show_terminal_view(cx);
         self.set_workspace_resource_class(
             self.tabs.active_index(),

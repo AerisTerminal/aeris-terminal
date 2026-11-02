@@ -5040,6 +5040,9 @@ struct WorkspaceTab {
     swallow_pane_mouse_up: bool,
     generation: u64,
     focus: FocusHandle,
+    /// The page the tab showed when it was last left; selecting the tab shows it again.
+    /// Not persisted: every tab starts on the terminal page.
+    page: market_screener::AppView,
 }
 
 /// The color a newly set watchlist flag starts with, as the hex value the flag stores.

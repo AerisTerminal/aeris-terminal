@@ -188,6 +188,7 @@ impl TerminalApp {
     pub(super) fn open_start_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pages.layouts.layout_menu_open = false;
         self.pages.layouts.card_menu = None;
+        self.remember_active_tab_page();
         self.show_terminal_view(cx);
         if self.pages.layouts.start_page.is_none() {
             let search = cx.new(|input_cx| {
@@ -220,6 +221,14 @@ impl TerminalApp {
         }
         self.notices.clear_workspace_error();
         cx.notify();
+    }
+
+    pub(super) fn start_page_shown(&self) -> bool {
+        self.pages
+            .layouts
+            .start_page
+            .as_ref()
+            .is_some_and(|page| page.shown)
     }
 
     /// Leaves the placeholder in the tab strip and shows the active workspace again.

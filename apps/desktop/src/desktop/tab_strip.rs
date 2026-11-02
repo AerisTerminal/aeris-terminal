@@ -405,6 +405,7 @@ mod tests {
             layout: AerisChartWorkspace::new(id, CHART_PANE_CAPACITY).expect("tab layout root"),
             maximized_pane: None,
             swallow_pane_mouse_up: false,
+            page: super::super::market_screener::AppView::Terminal,
             generation: 1,
             focus: cx.focus_handle(),
         }
