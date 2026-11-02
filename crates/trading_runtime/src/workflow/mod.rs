@@ -15,6 +15,10 @@ use std::fmt;
 pub const MAXIMUM_WORKFLOWS: usize = 64;
 /// If and action nodes in one workflow, besides its trigger.
 pub const MAXIMUM_WORKFLOW_NODES: usize = 32;
+/// Triggers one workflow may have; any of them fires it.
+pub const MAXIMUM_WORKFLOW_TRIGGERS: usize = 4;
+/// Checks one If may join.
+pub const MAXIMUM_WORKFLOW_CHECKS: usize = 4;
 /// The most firings one workflow may make in one risk session.
 pub const MAXIMUM_WORKFLOW_SESSION_FIRINGS: u32 = 50;
 pub const MAXIMUM_WORKFLOW_COOLDOWN_SECONDS: u32 = 86_400;
@@ -38,8 +42,10 @@ pub struct WorkflowDefinition {
     pub name: String,
     pub account_id: TradingAccountId,
     pub instrument_id: InstrumentId,
-    pub trigger: WorkflowTrigger,
-    /// The node the trigger leads to.
+    /// One to [`MAXIMUM_WORKFLOW_TRIGGERS`] triggers; any of them fires the workflow, and
+    /// triggers due in the same owner step fire it once.
+    pub triggers: Vec<WorkflowTrigger>,
+    /// The node the triggers lead to.
     pub start: WorkflowNodeId,
     /// Every If and action node; each is reachable from `start` and none is reached twice
     /// on one run because the graph has no cycle.
@@ -89,6 +95,9 @@ pub enum WorkflowTrigger {
     /// Fires once a day at a local time. A time that passes while Aeris is closed does not
     /// fire later.
     TimeOfDay(WorkflowClockTime),
+    /// Fires at UTC midnight and every `minutes` after it, so every 15 minutes fires at
+    /// :00, :15, :30 and :45. A moment that passes while Aeris is closed does not fire later.
+    Every { minutes: u16 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,10 +120,25 @@ pub enum WorkflowTimeZone {
     Chicago,
 }
 
-/// Every condition is read from the owner's state at the moment the trigger fires, before
-/// any action of that run, so an order a run places never changes which branch it took.
+/// An If's test: one to [`MAXIMUM_WORKFLOW_CHECKS`] checks that must all hold or of which
+/// any must hold. Every check is read from the owner's state at the moment the trigger
+/// fires, before any action of that run, so an order a run places never changes which
+/// branch it took.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkflowCondition {
+pub struct WorkflowCondition {
+    join: WorkflowJoin,
+    /// Packed from the front; the first slot is always filled.
+    checks: [Option<WorkflowCheck>; MAXIMUM_WORKFLOW_CHECKS],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkflowJoin {
+    All,
+    Any,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkflowCheck {
     /// The account's position in the workflow instrument.
     Position(PositionRequirement),
     /// The local time is at or after `start` and before `end`; a window whose end is
@@ -130,7 +154,18 @@ pub enum WorkflowCondition {
         direction: PriceDirection,
         level: FixedPoint,
     },
+    /// Holds while the bid is at or above `low` and the ask at or below `high`.
+    PriceRange { low: FixedPoint, high: FixedPoint },
+    /// Holds on the named local days of the week.
+    Weekday {
+        zone: WorkflowTimeZone,
+        days: WorkflowWeekdays,
+    },
 }
+
+/// A non-empty set of days of the week; bit 0 is Monday and bit 6 Sunday.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkflowWeekdays(u8);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PositionRequirement {
@@ -380,6 +415,8 @@ pub enum WorkflowInvalid {
     Name,
     Level,
     Time,
+    /// No trigger or too many.
+    Triggers,
     /// No node, too many, a repeated identity or the trigger's identity on a node.
     Nodes,
     /// A link to a node that does not exist or to the node itself.
@@ -431,12 +468,24 @@ impl WorkflowDefinition {
         })
     }
 
-    /// Every condition anywhere in the graph.
-    pub fn conditions(&self) -> impl Iterator<Item = WorkflowCondition> + '_ {
-        self.nodes.iter().filter_map(|node| match node.step {
-            WorkflowStep::If { condition, .. } => Some(condition),
-            WorkflowStep::Action { .. } => None,
-        })
+    /// Every check of every If anywhere in the graph.
+    pub fn checks(&self) -> impl Iterator<Item = WorkflowCheck> + '_ {
+        self.nodes
+            .iter()
+            .filter_map(|node| match &node.step {
+                WorkflowStep::If { condition, .. } => Some(condition),
+                WorkflowStep::Action { .. } => None,
+            })
+            .flat_map(WorkflowCondition::checks)
+    }
+
+    /// The earliest moment strictly after `unix_nanos` at which a timed trigger fires.
+    #[must_use]
+    pub fn next_timed_trigger_after(&self, unix_nanos: i64) -> Option<i64> {
+        self.triggers
+            .iter()
+            .filter_map(|trigger| trigger.next_after(unix_nanos))
+            .min()
     }
 
     /// Validates the definition on its own; the owner also checks it against the
@@ -463,14 +512,26 @@ impl WorkflowDefinition {
         {
             return Err(WorkflowInvalid::Name);
         }
-        match self.trigger {
-            WorkflowTrigger::PriceCrosses { level, .. } => validate_level(level)?,
-            WorkflowTrigger::TimeOfDay(time) => validate_minute(time.minute_of_day)?,
+        if self.triggers.is_empty() || self.triggers.len() > MAXIMUM_WORKFLOW_TRIGGERS {
+            return Err(WorkflowInvalid::Triggers);
+        }
+        for trigger in &self.triggers {
+            match *trigger {
+                WorkflowTrigger::PriceCrosses { level, .. } => validate_level(level)?,
+                WorkflowTrigger::TimeOfDay(time) => validate_minute(time.minute_of_day)?,
+                WorkflowTrigger::Every { minutes } => {
+                    if minutes == 0 || minutes > MINUTES_PER_DAY {
+                        return Err(WorkflowInvalid::Time);
+                    }
+                }
+            }
         }
         self.validate_graph()?;
         for node in &self.nodes {
             match node.step {
-                WorkflowStep::If { condition, .. } => validate_condition(condition)?,
+                WorkflowStep::If { condition, .. } => {
+                    condition.checks().try_for_each(validate_check)?;
+                }
                 WorkflowStep::Action { action, next } => validate_action(action, next)?,
             }
         }
@@ -555,11 +616,11 @@ impl WorkflowDefinition {
         Ok(())
     }
 
-    /// The nodes one run passes from `start`, deciding every If with `holds`. `None` when a
-    /// condition cannot be read (a price condition without a current quote).
+    /// The nodes one run passes from `start`, deciding every check with `holds`. `None`
+    /// when a check on the path cannot be read (a price check without a current quote).
     pub(crate) fn resolve_path(
         &self,
-        mut holds: impl FnMut(WorkflowCondition) -> Option<bool>,
+        mut holds: impl FnMut(WorkflowCheck) -> Option<bool>,
     ) -> Option<Vec<WorkflowPathStep>> {
         let mut path = Vec::new();
         let mut next = Some(self.start);
@@ -575,7 +636,7 @@ impl WorkflowDefinition {
                     then,
                     otherwise,
                 } => {
-                    let held = holds(condition)?;
+                    let held = condition.holds(&mut holds)?;
                     path.push(WorkflowPathStep::Branch(id, held));
                     next = if held { then } else { otherwise };
                 }
@@ -632,10 +693,10 @@ const fn validate_minute(minute: u16) -> Result<(), WorkflowInvalid> {
     }
 }
 
-fn validate_condition(condition: WorkflowCondition) -> Result<(), WorkflowInvalid> {
-    match condition {
-        WorkflowCondition::Position(_) => Ok(()),
-        WorkflowCondition::Between {
+fn validate_check(check: WorkflowCheck) -> Result<(), WorkflowInvalid> {
+    match check {
+        WorkflowCheck::Position(_) | WorkflowCheck::Weekday { .. } => Ok(()),
+        WorkflowCheck::Between {
             start_minute,
             end_minute,
             ..
@@ -647,7 +708,125 @@ fn validate_condition(condition: WorkflowCondition) -> Result<(), WorkflowInvali
             }
             Ok(())
         }
-        WorkflowCondition::Price { level, .. } => validate_level(level),
+        WorkflowCheck::Price { level, .. } => validate_level(level),
+        WorkflowCheck::PriceRange { low, high } => {
+            validate_level(low)?;
+            if low.scale() != high.scale() || high.units() <= low.units() {
+                return Err(WorkflowInvalid::Level);
+            }
+            Ok(())
+        }
+    }
+}
+
+impl WorkflowCondition {
+    /// A test of one check.
+    #[must_use]
+    pub const fn single(check: WorkflowCheck) -> Self {
+        let mut checks = [None; MAXIMUM_WORKFLOW_CHECKS];
+        checks[0] = Some(check);
+        Self {
+            join: WorkflowJoin::All,
+            checks,
+        }
+    }
+
+    /// `None` for no checks or more than [`MAXIMUM_WORKFLOW_CHECKS`].
+    #[must_use]
+    pub fn joined(join: WorkflowJoin, checks: &[WorkflowCheck]) -> Option<Self> {
+        if checks.is_empty() || checks.len() > MAXIMUM_WORKFLOW_CHECKS {
+            return None;
+        }
+        let mut slots = [None; MAXIMUM_WORKFLOW_CHECKS];
+        for (slot, check) in slots.iter_mut().zip(checks) {
+            *slot = Some(*check);
+        }
+        Some(Self {
+            join,
+            checks: slots,
+        })
+    }
+
+    #[must_use]
+    pub const fn join(&self) -> WorkflowJoin {
+        self.join
+    }
+
+    pub fn checks(&self) -> impl Iterator<Item = WorkflowCheck> + '_ {
+        self.checks.iter().flatten().copied()
+    }
+
+    /// Reads every check, so a test never holds on a check it could not read. `None` when
+    /// any check cannot be read.
+    pub(crate) fn holds(
+        &self,
+        mut holds: impl FnMut(WorkflowCheck) -> Option<bool>,
+    ) -> Option<bool> {
+        let mut all = true;
+        let mut any = false;
+        for check in self.checks() {
+            let held = holds(check)?;
+            all &= held;
+            any |= held;
+        }
+        Some(match self.join {
+            WorkflowJoin::All => all,
+            WorkflowJoin::Any => any,
+        })
+    }
+}
+
+impl WorkflowCheck {
+    /// Whether the check reads the owner's quote.
+    #[must_use]
+    pub const fn reads_quote(self) -> bool {
+        matches!(self, Self::Price { .. } | Self::PriceRange { .. })
+    }
+}
+
+impl WorkflowWeekdays {
+    /// Monday to Friday.
+    pub const WEEKDAYS: Self = Self(0b001_1111);
+
+    /// `None` for an empty set or a bit past Sunday.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        if bits == 0 || bits >= 1 << 7 {
+            None
+        } else {
+            Some(Self(bits))
+        }
+    }
+
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// `day` counts from Monday as 0.
+    #[must_use]
+    pub const fn contains(self, day: u8) -> bool {
+        day < 7 && self.0 & (1 << day) != 0
+    }
+}
+
+impl WorkflowTrigger {
+    /// The first moment strictly after `unix_nanos` at which a timed trigger fires.
+    #[must_use]
+    pub fn next_after(self, unix_nanos: i64) -> Option<i64> {
+        match self {
+            Self::PriceCrosses { .. } => None,
+            Self::TimeOfDay(time) => Some(time.next_after(unix_nanos)),
+            Self::Every { minutes } => {
+                let period = i64::from(minutes) * 60 * NANOS_PER_SECOND;
+                let day = DAY_SECONDS * NANOS_PER_SECOND;
+                let day_start = unix_nanos.div_euclid(day) * day;
+                let next =
+                    day_start + (unix_nanos - day_start).div_euclid(period) * period + period;
+                // A period that does not divide the day restarts at the next midnight.
+                Some(next.min(day_start + day))
+            }
+        }
     }
 }
 
@@ -693,6 +872,16 @@ impl WorkflowTimeZone {
             Self::Utc => local_seconds,
             Self::Chicago => chicago_local_to_unix_seconds(local_seconds),
         }
+    }
+
+    /// The local day of the week at `unix_nanos`, Monday as 0.
+    #[must_use]
+    pub fn weekday(self, unix_nanos: i64) -> u8 {
+        let day = self
+            .local_seconds(unix_nanos.div_euclid(NANOS_PER_SECOND))
+            .div_euclid(DAY_SECONDS);
+        // 1970-01-01 was a Thursday.
+        u8::try_from((day + 3).rem_euclid(7)).unwrap_or(0)
     }
 
     /// The local minute of the day at `unix_nanos`.
@@ -859,16 +1048,18 @@ mod tests {
             name: "Breakout".into(),
             account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
             instrument_id: InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("id"),
-            trigger: WorkflowTrigger::PriceCrosses {
+            triggers: vec![WorkflowTrigger::PriceCrosses {
                 direction: PriceDirection::Above,
                 level: FixedPoint::try_new(500_000, 2).expect("level"),
-            },
+            }],
             start: IF_FLAT,
             nodes: vec![
                 WorkflowNode {
                     id: IF_FLAT,
                     step: WorkflowStep::If {
-                        condition: WorkflowCondition::Position(PositionRequirement::Flat),
+                        condition: WorkflowCondition::single(WorkflowCheck::Position(
+                            PositionRequirement::Flat,
+                        )),
                         then: Some(BUY),
                         otherwise: Some(FLATTEN),
                     },
@@ -915,11 +1106,20 @@ mod tests {
         bad.limits.repeat = WorkflowRepeat::PerSession { maximum: 51 };
         assert_eq!(bad.validate(), Err(WorkflowInvalid::Repeat));
         let mut bad = definition();
-        bad.trigger = WorkflowTrigger::TimeOfDay(WorkflowClockTime {
+        bad.triggers = vec![WorkflowTrigger::TimeOfDay(WorkflowClockTime {
             zone: WorkflowTimeZone::Utc,
             minute_of_day: MINUTES_PER_DAY,
-        });
+        })];
         assert_eq!(bad.validate(), Err(WorkflowInvalid::Time));
+        let mut bad = definition();
+        bad.triggers = vec![WorkflowTrigger::Every { minutes: 0 }];
+        assert_eq!(bad.validate(), Err(WorkflowInvalid::Time));
+        let mut bad = definition();
+        bad.triggers.clear();
+        assert_eq!(bad.validate(), Err(WorkflowInvalid::Triggers));
+        let mut bad = definition();
+        bad.triggers = vec![WorkflowTrigger::Every { minutes: 5 }; MAXIMUM_WORKFLOW_TRIGGERS + 1];
+        assert_eq!(bad.validate(), Err(WorkflowInvalid::Triggers));
         let mut bad = definition();
         set_step(
             &mut bad,
@@ -935,15 +1135,100 @@ mod tests {
             &mut bad,
             IF_FLAT,
             WorkflowStep::If {
-                condition: WorkflowCondition::Price {
+                condition: WorkflowCondition::single(WorkflowCheck::Price {
                     direction: PriceDirection::Below,
                     level: FixedPoint::try_new(0, 2).expect("level"),
-                },
+                }),
                 then: Some(BUY),
                 otherwise: Some(FLATTEN),
             },
         );
         assert_eq!(bad.validate(), Err(WorkflowInvalid::Level));
+        let range = |low, high| {
+            let mut bad = definition();
+            set_step(
+                &mut bad,
+                IF_FLAT,
+                WorkflowStep::If {
+                    condition: WorkflowCondition::single(WorkflowCheck::PriceRange {
+                        low: FixedPoint::try_new(low, 2).expect("low"),
+                        high: FixedPoint::try_new(high, 2).expect("high"),
+                    }),
+                    then: Some(BUY),
+                    otherwise: Some(FLATTEN),
+                },
+            );
+            bad.validate()
+        };
+        assert_eq!(range(100, 200), Ok(()));
+        assert_eq!(range(200, 200), Err(WorkflowInvalid::Level));
+        assert_eq!(range(0, 200), Err(WorkflowInvalid::Level));
+    }
+
+    #[test]
+    fn a_condition_joins_its_checks_by_all_or_any() {
+        let flat = WorkflowCheck::Position(PositionRequirement::Flat);
+        let long = WorkflowCheck::Position(PositionRequirement::Long);
+        let holds = |check| Some(check == flat);
+        let all = WorkflowCondition::joined(WorkflowJoin::All, &[flat, long]).expect("all");
+        let any = WorkflowCondition::joined(WorkflowJoin::Any, &[flat, long]).expect("any");
+        assert_eq!(all.holds(holds), Some(false));
+        assert_eq!(any.holds(holds), Some(true));
+        assert_eq!(all.checks().collect::<Vec<_>>(), vec![flat, long]);
+        // A check it cannot read leaves the whole test unread.
+        assert_eq!(any.holds(|check| (check == long).then_some(true)), None);
+        assert_eq!(WorkflowCondition::joined(WorkflowJoin::All, &[]), None);
+        assert_eq!(
+            WorkflowCondition::joined(WorkflowJoin::Any, &[flat; 5]),
+            None
+        );
+        assert_eq!(
+            WorkflowCondition::joined(WorkflowJoin::All, &[flat]),
+            Some(WorkflowCondition::single(flat))
+        );
+    }
+
+    #[test]
+    fn weekdays_follow_the_zone() {
+        assert_eq!(WorkflowWeekdays::from_bits(0), None);
+        assert_eq!(WorkflowWeekdays::from_bits(0x80), None);
+        let weekdays = WorkflowWeekdays::WEEKDAYS;
+        assert!(weekdays.contains(0) && weekdays.contains(4) && !weekdays.contains(5));
+        // 2026-07-04 01:00 UTC is a Saturday in UTC and still Friday evening in Chicago.
+        let at = nanos("2026-07-04T01:00:00Z");
+        assert_eq!(WorkflowTimeZone::Utc.weekday(at), 5);
+        assert_eq!(WorkflowTimeZone::Chicago.weekday(at), 4);
+    }
+
+    #[test]
+    fn an_interval_trigger_counts_from_utc_midnight() {
+        let every = |minutes| WorkflowTrigger::Every { minutes };
+        assert_eq!(
+            every(15).next_after(nanos("2026-07-01T09:07:30Z")),
+            Some(nanos("2026-07-01T09:15:00Z"))
+        );
+        assert_eq!(
+            every(15).next_after(nanos("2026-07-01T09:15:00Z")),
+            Some(nanos("2026-07-01T09:30:00Z"))
+        );
+        // 7 does not divide the day, so the last period before midnight is shorter.
+        assert_eq!(
+            every(7).next_after(nanos("2026-07-01T23:58:00Z")),
+            Some(nanos("2026-07-02T00:00:00Z"))
+        );
+        let mut definition = definition();
+        definition.triggers.push(every(60));
+        definition
+            .triggers
+            .push(WorkflowTrigger::TimeOfDay(WorkflowClockTime {
+                zone: WorkflowTimeZone::Utc,
+                minute_of_day: 9 * 60 + 30,
+            }));
+        assert_eq!(definition.validate(), Ok(()));
+        assert_eq!(
+            definition.next_timed_trigger_after(nanos("2026-07-01T09:07:00Z")),
+            Some(nanos("2026-07-01T09:30:00Z"))
+        );
     }
 
     #[test]
@@ -990,7 +1275,9 @@ mod tests {
             &mut only_ifs,
             IF_FLAT,
             WorkflowStep::If {
-                condition: WorkflowCondition::Position(PositionRequirement::Flat),
+                condition: WorkflowCondition::single(WorkflowCheck::Position(
+                    PositionRequirement::Flat,
+                )),
                 then: None,
                 otherwise: None,
             },

@@ -9,12 +9,12 @@ use super::{
 use crate::risk::session::RiskSessionBoundary;
 use crate::service::{Command, WorkflowCommand};
 use crate::workflow::{
-    MAXIMUM_WORKFLOWS, PriceDirection, WORKFLOW_FIRING_HISTORY, WorkflowAction,
-    WorkflowActionResult, WorkflowBlocker, WorkflowCondition, WorkflowDefinition, WorkflowError,
-    WorkflowFiring, WorkflowFiringOutcome, WorkflowInvalid, WorkflowLayout, WorkflowNodeId,
-    WorkflowPathStep, WorkflowProtection, WorkflowRecord, WorkflowRepeat, WorkflowState,
-    WorkflowStepOutcome, WorkflowStepResult, WorkflowTrigger, WorkflowView, time_window_holds,
-    workflow_client_order_id,
+    MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS, PriceDirection, WORKFLOW_FIRING_HISTORY,
+    WorkflowAction, WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowDefinition,
+    WorkflowError, WorkflowFiring, WorkflowFiringOutcome, WorkflowInvalid, WorkflowLayout,
+    WorkflowNodeId, WorkflowPathStep, WorkflowProtection, WorkflowRecord, WorkflowRepeat,
+    WorkflowState, WorkflowStepOutcome, WorkflowStepResult, WorkflowTrigger, WorkflowView,
+    time_window_holds, workflow_client_order_id,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{
@@ -31,9 +31,9 @@ pub(crate) struct WorkflowEntry {
     record: WorkflowRecord,
     /// The newest firings, oldest first.
     firings: VecDeque<WorkflowFiring>,
-    /// Whether the last quote since arming was at or past the trigger level; `None` until
-    /// the first quote, which never fires.
-    at_level: Option<bool>,
+    /// Per price trigger, by its position in the definition: whether the last quote since
+    /// arming was at or past its level; `None` until the first quote, which never fires.
+    at_level: [Option<bool>; MAXIMUM_WORKFLOW_TRIGGERS],
     next_due_unix_nanos: Option<i64>,
 }
 
@@ -153,7 +153,7 @@ impl TradingCore {
                 WorkflowEntry {
                     record,
                     firings: firings.into(),
-                    at_level: None,
+                    at_level: [None; MAXIMUM_WORKFLOW_TRIGGERS],
                     next_due_unix_nanos,
                 },
             );
@@ -211,7 +211,7 @@ impl TradingCore {
             WorkflowEntry {
                 record,
                 firings,
-                at_level: None,
+                at_level: [None; MAXIMUM_WORKFLOW_TRIGGERS],
                 next_due_unix_nanos: None,
             },
         );
@@ -320,7 +320,7 @@ impl TradingCore {
             .map(|entry| &entry.record.definition.instrument_id)
     }
 
-    /// The next time-of-day trigger or expiry of an armed workflow.
+    /// The next timed trigger or expiry of an armed workflow.
     pub(crate) fn next_workflow_deadline_unix_nanos(&self) -> Option<i64> {
         self.workflows
             .values()
@@ -334,40 +334,41 @@ impl TradingCore {
             .min()
     }
 
-    /// Fires every armed price workflow whose market moved across its level since the
-    /// previous quote. Runs after a market batch, outside quote planning.
+    /// Fires every armed workflow with a price trigger whose market moved across its level
+    /// since the previous quote; several crossings in one batch fire it once. Runs after a
+    /// market batch, outside quote planning.
     pub(super) fn evaluate_price_workflows(&mut self) {
         let mut fired = Vec::new();
         for (workflow_id, entry) in &mut self.workflows {
             if entry.record.state != WorkflowState::Armed {
                 continue;
             }
-            let WorkflowTrigger::PriceCrosses { direction, level } =
-                entry.record.definition.trigger
-            else {
-                continue;
-            };
             let Some(quote) = self
                 .quote_book
                 .observation(&entry.record.definition.instrument_id)
             else {
                 continue;
             };
-            let touch = match direction {
-                PriceDirection::Above => quote.bid,
-                PriceDirection::Below => quote.ask,
-            };
-            if touch.scale() != level.scale() {
-                continue;
+            let mut crossed = false;
+            for (trigger, last) in entry
+                .record
+                .definition
+                .triggers
+                .iter()
+                .zip(&mut entry.at_level)
+            {
+                let WorkflowTrigger::PriceCrosses { direction, level } = *trigger else {
+                    continue;
+                };
+                let Some(at_level) = price_holds(direction, level, quote.bid, quote.ask) else {
+                    continue;
+                };
+                crossed |= *last == Some(false) && at_level;
+                *last = Some(at_level);
             }
-            let at_level = match direction {
-                PriceDirection::Above => touch.units() >= level.units(),
-                PriceDirection::Below => touch.units() <= level.units(),
-            };
-            if entry.at_level == Some(false) && at_level {
+            if crossed {
                 fired.push(workflow_id.clone());
             }
-            entry.at_level = Some(at_level);
         }
         for workflow_id in fired {
             self.fire_workflow(&workflow_id);
@@ -397,13 +398,10 @@ impl TradingCore {
             if entry.record.state != WorkflowState::Armed {
                 continue;
             }
-            let WorkflowTrigger::TimeOfDay(time) = entry.record.definition.trigger else {
-                continue;
-            };
             let Some(due) = entry.next_due_unix_nanos.filter(|due| *due <= now) else {
                 continue;
             };
-            entry.next_due_unix_nanos = Some(time.next_after(now));
+            entry.next_due_unix_nanos = entry.record.definition.next_timed_trigger_after(now);
             if now.saturating_sub(due) <= TIME_TRIGGER_GRACE_NANOS {
                 fired.push(workflow_id.clone());
             }
@@ -439,7 +437,7 @@ impl TradingCore {
             .workflows
             .get_mut(&record.definition.workflow_id)
             .ok_or(WorkflowError::UnknownWorkflow)?;
-        entry.at_level = None;
+        entry.at_level = [None; MAXIMUM_WORKFLOW_TRIGGERS];
         entry.next_due_unix_nanos = next_due(&record, now);
         entry.record = record;
         self.bump_revision().map_err(WorkflowError::Owner)
@@ -485,9 +483,7 @@ impl TradingCore {
         let enters = definition
             .actions()
             .any(|action| matches!(action, WorkflowAction::Enter { .. }));
-        let prices = definition
-            .conditions()
-            .any(|condition| matches!(condition, WorkflowCondition::Price { .. }));
+        let prices = definition.checks().any(WorkflowCheck::reads_quote);
         self.blockers_for(definition, enters, prices)
     }
 
@@ -537,7 +533,10 @@ impl TradingCore {
         }
         let needs_quote = enters
             || reads_price
-            || matches!(definition.trigger, WorkflowTrigger::PriceCrosses { .. });
+            || definition
+                .triggers
+                .iter()
+                .any(|trigger| matches!(trigger, WorkflowTrigger::PriceCrosses { .. }));
         if needs_quote
             && self
                 .quote_book
@@ -549,8 +548,8 @@ impl TradingCore {
         blockers
     }
 
-    /// The branch a firing now takes, every condition read from the owner's state before
-    /// any action runs. `None` when a price condition has no current quote at its scale.
+    /// The branch a firing now takes, every check read from the owner's state before any
+    /// action runs. `None` when a price check has no current quote at its scale.
     fn resolve_workflow_path(
         &self,
         definition: &WorkflowDefinition,
@@ -564,9 +563,9 @@ impl TradingCore {
             ))
             .map_or(0, |position| position.net_quantity.units());
         let quote = self.quote_book.observation(&definition.instrument_id);
-        definition.resolve_path(|condition| match condition {
-            WorkflowCondition::Position(requirement) => Some(requirement.holds(position_units)),
-            WorkflowCondition::Between {
+        definition.resolve_path(|check| match check {
+            WorkflowCheck::Position(requirement) => Some(requirement.holds(position_units)),
+            WorkflowCheck::Between {
                 zone,
                 start_minute,
                 end_minute,
@@ -576,16 +575,19 @@ impl TradingCore {
                 end_minute,
                 self.command_now,
             )),
-            WorkflowCondition::Price { direction, level } => {
+            WorkflowCheck::Weekday { zone, days } => {
+                Some(days.contains(zone.weekday(self.command_now)))
+            }
+            WorkflowCheck::Price { direction, level } => {
                 let quote = quote.as_ref()?;
-                let touch = match direction {
-                    PriceDirection::Above => quote.bid,
-                    PriceDirection::Below => quote.ask,
-                };
-                (touch.scale() == level.scale()).then(|| match direction {
-                    PriceDirection::Above => touch.units() >= level.units(),
-                    PriceDirection::Below => touch.units() <= level.units(),
-                })
+                price_holds(direction, level, quote.bid, quote.ask)
+            }
+            WorkflowCheck::PriceRange { low, high } => {
+                let quote = quote.as_ref()?;
+                Some(
+                    price_holds(PriceDirection::Above, low, quote.bid, quote.ask)?
+                        && price_holds(PriceDirection::Below, high, quote.bid, quote.ask)?,
+                )
             }
         })
     }
@@ -819,10 +821,27 @@ impl TradingCore {
 }
 
 fn next_due(record: &WorkflowRecord, now: i64) -> Option<i64> {
-    match (record.state, record.definition.trigger) {
-        (WorkflowState::Armed, WorkflowTrigger::TimeOfDay(time)) => Some(time.next_after(now)),
-        _ => None,
-    }
+    (record.state == WorkflowState::Armed)
+        .then(|| record.definition.next_timed_trigger_after(now))
+        .flatten()
+}
+
+/// `Above` holds while the bid is at or above `level`, `Below` while the ask is at or
+/// below it; `None` when the quote is at another scale.
+fn price_holds(
+    direction: PriceDirection,
+    level: FixedPoint,
+    bid: FixedPoint,
+    ask: FixedPoint,
+) -> Option<bool> {
+    let touch = match direction {
+        PriceDirection::Above => bid,
+        PriceDirection::Below => ask,
+    };
+    (touch.scale() == level.scale()).then(|| match direction {
+        PriceDirection::Above => touch.units() >= level.units(),
+        PriceDirection::Below => touch.units() <= level.units(),
+    })
 }
 
 fn is_expired(definition: &WorkflowDefinition, now: i64) -> bool {
@@ -838,12 +857,17 @@ fn check_scales(
     price_scale: u8,
     quantity_scale: u8,
 ) -> Result<(), WorkflowError> {
-    let trigger_off_scale = matches!(
-        definition.trigger,
-        WorkflowTrigger::PriceCrosses { level, .. } if level.scale() != price_scale
-    );
-    let condition_off_scale = definition.conditions().any(|condition| {
-        matches!(condition, WorkflowCondition::Price { level, .. } if level.scale() != price_scale)
+    let trigger_off_scale = definition.triggers.iter().any(|trigger| {
+        matches!(trigger, WorkflowTrigger::PriceCrosses { level, .. } if level.scale() != price_scale)
+    });
+    let condition_off_scale = definition.checks().any(|check| match check {
+        WorkflowCheck::Price { level, .. } => level.scale() != price_scale,
+        WorkflowCheck::PriceRange { low, high } => {
+            low.scale() != price_scale || high.scale() != price_scale
+        }
+        WorkflowCheck::Position(_)
+        | WorkflowCheck::Between { .. }
+        | WorkflowCheck::Weekday { .. } => false,
     });
     if trigger_off_scale || condition_off_scale {
         return Err(WorkflowError::Invalid(WorkflowInvalid::Level));

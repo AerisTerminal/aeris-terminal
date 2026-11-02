@@ -4,11 +4,11 @@
 use super::{StepTx, TradingStore, database_error, params};
 use crate::workflow::{
     PositionRequirement, PriceDirection, WORKFLOW_FIRING_HISTORY, WorkflowAction,
-    WorkflowActionResult, WorkflowBlocker, WorkflowClockTime, WorkflowCondition,
-    WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome, WorkflowLayout,
-    WorkflowLimits, WorkflowNode, WorkflowNodeId, WorkflowNodePosition, WorkflowProtection,
-    WorkflowRecord, WorkflowRepeat, WorkflowState, WorkflowStep, WorkflowStepOutcome,
-    WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger,
+    WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowClockTime, WorkflowCondition,
+    WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome, WorkflowJoin,
+    WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId, WorkflowNodePosition,
+    WorkflowProtection, WorkflowRecord, WorkflowRepeat, WorkflowState, WorkflowStep,
+    WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger, WorkflowWeekdays,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{ClientOrderId, FixedPoint, OrderSide, TradingAccountId};
@@ -271,7 +271,7 @@ impl TradingStore {
 struct StoredDefinition {
     name: String,
     instrument_id: String,
-    trigger: StoredTrigger,
+    triggers: Vec<StoredTrigger>,
     start: u16,
     nodes: Vec<StoredNode>,
     repeat: StoredRepeat,
@@ -295,6 +295,9 @@ enum StoredTrigger {
     TimeOfDay {
         zone: StoredZone,
         minute_of_day: u16,
+    },
+    Every {
+        minutes: u16,
     },
 }
 
@@ -333,8 +336,21 @@ enum StoredStep {
 }
 
 #[derive(Deserialize, Serialize)]
+struct StoredCondition {
+    join: StoredJoin,
+    checks: Vec<StoredCheck>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredJoin {
+    All,
+    Any,
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum StoredCondition {
+enum StoredCheck {
     Position {
         requirement: StoredRequirement,
     },
@@ -346,6 +362,14 @@ enum StoredCondition {
     Price {
         direction: StoredDirection,
         level: StoredFixed,
+    },
+    PriceRange {
+        low: StoredFixed,
+        high: StoredFixed,
+    },
+    Weekday {
+        zone: StoredZone,
+        days: u8,
     },
 }
 
@@ -507,9 +531,34 @@ impl StoredNodePosition {
 }
 
 impl StoredCondition {
-    const fn from_condition(condition: WorkflowCondition) -> Self {
-        match condition {
-            WorkflowCondition::Position(requirement) => Self::Position {
+    fn from_condition(condition: WorkflowCondition) -> Self {
+        Self {
+            join: match condition.join() {
+                WorkflowJoin::All => StoredJoin::All,
+                WorkflowJoin::Any => StoredJoin::Any,
+            },
+            checks: condition.checks().map(StoredCheck::from_check).collect(),
+        }
+    }
+
+    fn into_condition(self) -> Result<WorkflowCondition, WorkflowError> {
+        let join = match self.join {
+            StoredJoin::All => WorkflowJoin::All,
+            StoredJoin::Any => WorkflowJoin::Any,
+        };
+        let checks = self
+            .checks
+            .into_iter()
+            .map(StoredCheck::into_check)
+            .collect::<Result<Vec<_>, WorkflowError>>()?;
+        WorkflowCondition::joined(join, &checks).ok_or_else(|| corrupt("condition checks"))
+    }
+}
+
+impl StoredCheck {
+    const fn from_check(check: WorkflowCheck) -> Self {
+        match check {
+            WorkflowCheck::Position(requirement) => Self::Position {
                 requirement: match requirement {
                     PositionRequirement::Flat => StoredRequirement::Flat,
                     PositionRequirement::Long => StoredRequirement::Long,
@@ -517,7 +566,7 @@ impl StoredCondition {
                     PositionRequirement::Open => StoredRequirement::Open,
                 },
             },
-            WorkflowCondition::Between {
+            WorkflowCheck::Between {
                 zone,
                 start_minute,
                 end_minute,
@@ -526,16 +575,24 @@ impl StoredCondition {
                 start_minute,
                 end_minute,
             },
-            WorkflowCondition::Price { direction, level } => Self::Price {
+            WorkflowCheck::Price { direction, level } => Self::Price {
                 direction: StoredDirection::from_direction(direction),
                 level: StoredFixed::from_fixed(level),
+            },
+            WorkflowCheck::PriceRange { low, high } => Self::PriceRange {
+                low: StoredFixed::from_fixed(low),
+                high: StoredFixed::from_fixed(high),
+            },
+            WorkflowCheck::Weekday { zone, days } => Self::Weekday {
+                zone: StoredZone::from_zone(zone),
+                days: days.bits(),
             },
         }
     }
 
-    fn into_condition(self) -> Result<WorkflowCondition, WorkflowError> {
+    fn into_check(self) -> Result<WorkflowCheck, WorkflowError> {
         Ok(match self {
-            Self::Position { requirement } => WorkflowCondition::Position(match requirement {
+            Self::Position { requirement } => WorkflowCheck::Position(match requirement {
                 StoredRequirement::Flat => PositionRequirement::Flat,
                 StoredRequirement::Long => PositionRequirement::Long,
                 StoredRequirement::Short => PositionRequirement::Short,
@@ -545,14 +602,22 @@ impl StoredCondition {
                 zone,
                 start_minute,
                 end_minute,
-            } => WorkflowCondition::Between {
+            } => WorkflowCheck::Between {
                 zone: zone.into_zone(),
                 start_minute,
                 end_minute,
             },
-            Self::Price { direction, level } => WorkflowCondition::Price {
+            Self::Price { direction, level } => WorkflowCheck::Price {
                 direction: direction.into_direction(),
                 level: level.into_fixed()?,
+            },
+            Self::PriceRange { low, high } => WorkflowCheck::PriceRange {
+                low: low.into_fixed()?,
+                high: high.into_fixed()?,
+            },
+            Self::Weekday { zone, days } => WorkflowCheck::Weekday {
+                zone: zone.into_zone(),
+                days: WorkflowWeekdays::from_bits(days).ok_or_else(|| corrupt("weekdays"))?,
             },
         })
     }
@@ -660,16 +725,11 @@ impl StoredDefinition {
         Self {
             name: definition.name.clone(),
             instrument_id: definition.instrument_id.as_str().to_string(),
-            trigger: match definition.trigger {
-                WorkflowTrigger::PriceCrosses { direction, level } => StoredTrigger::PriceCrosses {
-                    direction: StoredDirection::from_direction(direction),
-                    level: StoredFixed::from_fixed(level),
-                },
-                WorkflowTrigger::TimeOfDay(time) => StoredTrigger::TimeOfDay {
-                    zone: StoredZone::from_zone(time.zone),
-                    minute_of_day: time.minute_of_day,
-                },
-            },
+            triggers: definition
+                .triggers
+                .iter()
+                .map(|trigger| StoredTrigger::from_trigger(*trigger))
+                .collect(),
             start: definition.start.0,
             nodes: definition.nodes.iter().map(StoredNode::from_node).collect(),
             repeat: match definition.limits.repeat {
@@ -687,19 +747,11 @@ impl StoredDefinition {
         revision: u32,
         account_id: String,
     ) -> Result<WorkflowDefinition, WorkflowError> {
-        let trigger = match self.trigger {
-            StoredTrigger::PriceCrosses { direction, level } => WorkflowTrigger::PriceCrosses {
-                direction: direction.into_direction(),
-                level: level.into_fixed()?,
-            },
-            StoredTrigger::TimeOfDay {
-                zone,
-                minute_of_day,
-            } => WorkflowTrigger::TimeOfDay(WorkflowClockTime {
-                zone: zone.into_zone(),
-                minute_of_day,
-            }),
-        };
+        let triggers = self
+            .triggers
+            .into_iter()
+            .map(StoredTrigger::into_trigger)
+            .collect::<Result<Vec<_>, WorkflowError>>()?;
         let nodes = self
             .nodes
             .into_iter()
@@ -711,7 +763,7 @@ impl StoredDefinition {
             name: self.name,
             account_id: TradingAccountId::try_new(account_id).map_err(corrupt)?,
             instrument_id: InstrumentId::try_new(self.instrument_id).map_err(corrupt)?,
-            trigger,
+            triggers,
             start: WorkflowNodeId(self.start),
             nodes,
             limits: WorkflowLimits {
@@ -722,6 +774,39 @@ impl StoredDefinition {
                 cooldown_seconds: self.cooldown_seconds,
                 expires_unix_nanos: self.expires_unix_nanos,
             },
+        })
+    }
+}
+
+impl StoredTrigger {
+    const fn from_trigger(trigger: WorkflowTrigger) -> Self {
+        match trigger {
+            WorkflowTrigger::PriceCrosses { direction, level } => Self::PriceCrosses {
+                direction: StoredDirection::from_direction(direction),
+                level: StoredFixed::from_fixed(level),
+            },
+            WorkflowTrigger::TimeOfDay(time) => Self::TimeOfDay {
+                zone: StoredZone::from_zone(time.zone),
+                minute_of_day: time.minute_of_day,
+            },
+            WorkflowTrigger::Every { minutes } => Self::Every { minutes },
+        }
+    }
+
+    fn into_trigger(self) -> Result<WorkflowTrigger, WorkflowError> {
+        Ok(match self {
+            Self::PriceCrosses { direction, level } => WorkflowTrigger::PriceCrosses {
+                direction: direction.into_direction(),
+                level: level.into_fixed()?,
+            },
+            Self::TimeOfDay {
+                zone,
+                minute_of_day,
+            } => WorkflowTrigger::TimeOfDay(WorkflowClockTime {
+                zone: zone.into_zone(),
+                minute_of_day,
+            }),
+            Self::Every { minutes } => WorkflowTrigger::Every { minutes },
         })
     }
 }

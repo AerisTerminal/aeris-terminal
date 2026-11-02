@@ -5,22 +5,24 @@
 use super::market_screener::AppView;
 use super::workflow_board::BoardCamera;
 use super::workflow_board::{
-    ActionDraft, BlockDraft, BlockKind, BoardItem, BoardPoint, ConditionDraft, DraftField,
-    DraftProblem, NODE_HEIGHT, NODE_TAB_HEIGHT, NODE_WIDTH, NodeDraft, OutputPort, RepeatDraft,
-    TriggerDraft, TriggerKind, WorkflowExample,
+    ActionDraft, BlockDraft, BlockKind, BoardItem, BoardPoint, CheckDraft, CheckKind, CheckRef,
+    ConditionDraft, DraftField, DraftProblem, NODE_HEIGHT, NODE_TAB_HEIGHT, NODE_WIDTH, NodeDraft,
+    OutputPort, RepeatDraft, TriggerDraft, TriggerKind, WorkflowExample,
 };
 use super::workflows_page::{
     BoardGesture, DraftStatus, OpenWorkflow, PageStatus, WorkflowsPage, account_environment,
-    account_text, block_summary, draft_status, environment_text, example_description, example_name,
-    firing_time_text, instrument, instrument_scales, outcome_text, problem_text, state_color,
-    state_text, symbol_text, zone_text,
+    account_text, action_summary, check_summary, day_label, days_text, draft_status,
+    environment_text, example_description, example_name, firing_time_text, instrument,
+    instrument_scales, outcome_text, problem_text, state_color, state_text, symbol_text,
+    trigger_summary, zone_text,
 };
 use super::*;
 use aeris_localization::{tr, tr_count, workflows};
 use aeris_trading::{AccountEnvironment, TradingAccountId};
 use aeris_trading_runtime::{
-    MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOWS, PositionRequirement, PriceDirection, WorkflowNodeId,
-    WorkflowState, WorkflowTimeZone, WorkflowView, WorkingSet,
+    MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS,
+    PositionRequirement, PriceDirection, WorkflowJoin, WorkflowNodeId, WorkflowState,
+    WorkflowTimeZone, WorkflowView, WorkflowWeekdays, WorkingSet,
 };
 use gpui::{
     Bounds, ClickEvent, DispatchPhase, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
@@ -57,6 +59,8 @@ const CARD_TITLE_SIZE: f32 = 15.0;
 const CARD_LABEL_SIZE: f32 = 12.0;
 const CARD_VALUE_SIZE: f32 = 22.0;
 const CARD_DETAIL_SIZE: f32 = 11.0;
+/// A card's detail wraps to this many lines, enough to list four triggers or checks.
+const DETAIL_LINES: usize = 3;
 const CARD_PADDING: f32 = 12.0;
 const CARD_INSET_PADDING: f32 = 8.0;
 const CARD_GAP: f32 = 8.0;
@@ -67,9 +71,8 @@ const GRID_DOT_SIZE: f32 = 2.0;
 /// The most grid dots painted in one frame; past it the spacing doubles.
 const GRID_MAXIMUM_DOTS: f32 = 6_000.0;
 const PALETTE_ICON_SIZE: f32 = 14.0;
-/// The width and height around the board that the page's side panels, header and toolbar
-/// take, for sizing the board before it first paints.
-pub(super) const BOARD_CHROME: BoardPoint = BoardPoint::new(SIDEBAR_WIDTH + INSPECTOR_WIDTH, 152.0);
+/// The page's header and the workflow toolbar above the board.
+const BOARD_CHROME_HEIGHT: f32 = 152.0;
 const RECENT_FIRINGS_SHOWN: usize = 8;
 #[cfg(target_os = "macos")]
 const ZOOM_KEY: &str = "⌘";
@@ -82,6 +85,16 @@ struct Page<'a> {
     terminal: &'a Entity<TerminalApp>,
     set: Option<&'a WorkingSet>,
     theme: &'a AerisTheme,
+}
+
+/// The width and height around the board that the shown side panels, the header and the
+/// toolbar take, for sizing the board before it first paints.
+pub(super) fn board_chrome(list_shown: bool, inspector_shown: bool) -> BoardPoint {
+    let width = |shown: bool, width: f32| if shown { width } else { 0.0 };
+    BoardPoint::new(
+        width(list_shown, SIDEBAR_WIDTH) + width(inspector_shown, INSPECTOR_WIDTH),
+        BOARD_CHROME_HEIGHT,
+    )
 }
 
 /// The page body under the title bar: the workflow list beside the open workflow.
@@ -107,7 +120,7 @@ pub(super) fn workflows_page(
         .w_full()
         .flex()
         .bg(gpui_color(theme.colors.surface))
-        .child(sidebar(ui, page))
+        .children((page.open.is_none() || !page.list_hidden).then(|| sidebar(ui, page)))
         .child(body)
         .into_any_element()
 }
@@ -197,11 +210,35 @@ fn input_field(
     Some(field(label, Input::new(input).platform(ui.theme), ui.theme))
 }
 
+fn check_label(kind: CheckKind) -> &'static str {
+    match kind {
+        CheckKind::Position => tr!(workflows::BLOCK_IF_POSITION),
+        CheckKind::Time => tr!(workflows::BLOCK_IF_TIME),
+        CheckKind::Price => tr!(workflows::BLOCK_IF_PRICE),
+        CheckKind::PriceRange => tr!(workflows::BLOCK_IF_PRICE_RANGE),
+        CheckKind::Weekday => tr!(workflows::BLOCK_IF_WEEKDAY),
+    }
+}
+
+/// An If is named by its check, or by how its checks join when it has several.
+fn if_title(condition: &ConditionDraft) -> &'static str {
+    match (condition.checks.as_slice(), condition.join) {
+        ([check], _) => check_label(check.kind()),
+        (_, WorkflowJoin::All) => tr!(workflows::BLOCK_IF_ALL),
+        (_, WorkflowJoin::Any) => tr!(workflows::BLOCK_IF_ANY),
+    }
+}
+
+fn block_title(block: &BlockDraft) -> &'static str {
+    match block {
+        BlockDraft::If { condition, .. } => if_title(condition),
+        BlockDraft::Action { .. } => kind_label(block.kind()),
+    }
+}
+
 fn kind_label(kind: BlockKind) -> &'static str {
     match kind {
-        BlockKind::IfPosition => tr!(workflows::BLOCK_IF_POSITION),
-        BlockKind::IfTime => tr!(workflows::BLOCK_IF_TIME),
-        BlockKind::IfPrice => tr!(workflows::BLOCK_IF_PRICE),
+        BlockKind::If(check) => check_label(check),
         BlockKind::Buy => tr!(workflows::BLOCK_BUY),
         BlockKind::Sell => tr!(workflows::BLOCK_SELL),
         BlockKind::Flatten => tr!(workflows::BLOCK_FLATTEN),
@@ -212,9 +249,11 @@ fn kind_label(kind: BlockKind) -> &'static str {
 
 fn kind_icon(kind: BlockKind) -> HugeIcon {
     match kind {
-        BlockKind::IfPosition => HugeIcon::DataPanel,
-        BlockKind::IfTime => HugeIcon::TimeSales,
-        BlockKind::IfPrice => HugeIcon::Chart,
+        BlockKind::If(CheckKind::Position) => HugeIcon::DataPanel,
+        BlockKind::If(CheckKind::Time) => HugeIcon::TimeSales,
+        BlockKind::If(CheckKind::Price) => HugeIcon::Chart,
+        BlockKind::If(CheckKind::PriceRange) => HugeIcon::OrderBook,
+        BlockKind::If(CheckKind::Weekday) => HugeIcon::Template,
         BlockKind::Buy | BlockKind::Sell => HugeIcon::OrderEntry,
         BlockKind::Flatten => HugeIcon::CloseBold,
         BlockKind::CancelOrders => HugeIcon::CancelCircle,
@@ -227,7 +266,7 @@ fn kind_accent(kind: Option<BlockKind>, theme: &AerisTheme) -> Hsla {
     let colors = theme.colors;
     gpui_color(match kind {
         None => colors.primary,
-        Some(BlockKind::IfPosition | BlockKind::IfTime | BlockKind::IfPrice) => colors.warning,
+        Some(BlockKind::If(_)) => colors.warning,
         Some(BlockKind::Buy) => colors.buy,
         Some(BlockKind::Sell) => colors.sell,
         Some(BlockKind::Flatten | BlockKind::CancelOrders) => colors.indigo,
@@ -509,7 +548,7 @@ fn editor(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div {
         .h_full()
         .flex()
         .flex_col()
-        .child(toolbar(ui, open, status, view.as_ref(), problem))
+        .child(toolbar(ui, page, open, status, view.as_ref(), problem))
         .child(
             div()
                 .flex_1()
@@ -522,12 +561,65 @@ fn editor(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div {
                     problem.and_then(DraftProblem::item),
                     trigger_badge(status, view.as_ref(), ui.theme),
                 ))
-                .child(inspector(ui, page, open, view.as_ref())),
+                .children(
+                    (!page.inspector_hidden).then(|| inspector(ui, page, open, view.as_ref())),
+                ),
         )
+}
+
+/// The toolbar's buttons for the workflow list, at its start, and the inspector, at its end.
+fn panel_toggles(ui: Page<'_>, page: &WorkflowsPage) -> (Button, Button) {
+    (
+        panel_toggle(
+            ui,
+            "workflow_list_toggle",
+            HugeIcon::SidebarLeft,
+            !page.list_hidden,
+            (
+                tr!(workflows::SHOW_LIST_ARIA),
+                tr!(workflows::HIDE_LIST_ARIA),
+            ),
+            TerminalApp::toggle_workflow_list,
+        ),
+        panel_toggle(
+            ui,
+            "workflow_inspector_toggle",
+            HugeIcon::Settings,
+            !page.inspector_hidden,
+            (
+                tr!(workflows::SHOW_INSPECTOR_ARIA),
+                tr!(workflows::HIDE_INSPECTOR_ARIA),
+            ),
+            TerminalApp::toggle_workflow_inspector,
+        ),
+    )
+}
+
+/// A toolbar button that shows or hides one of the page's side panels; it reads as pressed
+/// while the panel is shown.
+fn panel_toggle(
+    ui: Page<'_>,
+    id: &'static str,
+    icon: HugeIcon,
+    shown: bool,
+    (show, hide): (&'static str, &'static str),
+    toggle: fn(&mut TerminalApp, &mut Context<TerminalApp>),
+) -> Button {
+    let terminal = ui.terminal.clone();
+    let label = if shown { hide } else { show };
+    Button::new(id, ui.theme)
+        .variant(ButtonVariant::Ghost)
+        .button_size(ButtonSize::Sm)
+        .selected(shown)
+        .icon(header_icon(icon))
+        .aria_label(label)
+        .tooltip(TooltipSpec::new(label, ui.theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .on_click(move |_, _, cx| terminal.update(cx, toggle))
 }
 
 fn toolbar(
     ui: Page<'_>,
+    page: &WorkflowsPage,
     open: &OpenWorkflow,
     status: DraftStatus,
     view: Option<&WorkflowView>,
@@ -567,19 +659,21 @@ fn toolbar(
         name.to_string()
     };
     let environment = account_environment(ui.set, draft.account_id.as_ref());
+    let (list_toggle, inspector_toggle) = panel_toggles(ui, page);
     div()
         .flex_none()
         .w_full()
         .flex()
         .items_center()
-        .justify_between()
-        .gap_4()
+        .gap_3()
         .px_4()
         .py_3()
         .border_b(border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
+        .child(list_toggle)
         .child(
             div()
+                .flex_1()
                 .min_w_0()
                 .flex()
                 .flex_col()
@@ -619,6 +713,7 @@ fn toolbar(
                 ),
         )
         .child(command_buttons(ui, open, status, view))
+        .child(inspector_toggle)
 }
 
 /// Practice and demo accounts are named quietly; a live account is called out, because its
@@ -1239,7 +1334,7 @@ fn trigger_badge(status: DraftStatus, view: Option<&WorkflowView>, theme: &Aeris
 struct BlockFace {
     icon: HugeIcon,
     category: &'static str,
-    title: &'static str,
+    title: SharedString,
     label: SharedString,
     badge: Option<Badge>,
     value: Option<SharedString>,
@@ -1256,38 +1351,94 @@ fn text_or_unset(text: &str) -> SharedString {
     }
 }
 
+const fn trigger_icon(trigger: &TriggerDraft) -> HugeIcon {
+    match trigger {
+        TriggerDraft::Price { .. } => HugeIcon::Chart,
+        TriggerDraft::Time { .. } => HugeIcon::TimeSales,
+        TriggerDraft::Every { .. } => HugeIcon::RefreshV2,
+    }
+}
+
+fn trigger_kind_label(kind: TriggerKind) -> &'static str {
+    match kind {
+        TriggerKind::Rises => tr!(workflows::TRIGGER_CHOICE_ABOVE),
+        TriggerKind::Falls => tr!(workflows::TRIGGER_CHOICE_BELOW),
+        TriggerKind::Time => tr!(workflows::TRIGGER_CHOICE_TIME),
+        TriggerKind::Every => tr!(workflows::TRIGGER_CHOICE_EVERY),
+    }
+}
+
+/// One trigger shows what it waits for; several list each one under "Any trigger".
 fn trigger_face(
-    trigger: &TriggerDraft,
+    triggers: &[TriggerDraft],
     symbol: &str,
     badge: Badge,
     theme: &AerisTheme,
 ) -> BlockFace {
-    let (icon, title, label, value) = match trigger {
-        TriggerDraft::Price { direction, level } => (
-            HugeIcon::Chart,
-            match direction {
-                PriceDirection::Above => tr!(workflows::TRIGGER_CHOICE_ABOVE),
-                PriceDirection::Below => tr!(workflows::TRIGGER_CHOICE_BELOW),
-            },
+    let (title, label, value, detail): (_, SharedString, _, _) = match triggers {
+        [trigger] => {
+            let (label, value) = match trigger {
+                TriggerDraft::Price { level, .. } => (symbol.to_string().into(), level),
+                TriggerDraft::Time { zone, time } => (zone_text(*zone).into(), time),
+                TriggerDraft::Every { minutes } => (tr!(workflows::FIELD_MINUTES).into(), minutes),
+            };
+            (
+                trigger_kind_label(trigger.kind()),
+                label,
+                Some(text_or_unset(value)),
+                None,
+            )
+        }
+        triggers => (
+            tr!(workflows::TRIGGER_ANY),
             symbol.to_string().into(),
-            text_or_unset(level),
-        ),
-        TriggerDraft::Time { zone, time } => (
-            HugeIcon::TimeSales,
-            tr!(workflows::TRIGGER_CHOICE_TIME),
-            zone_text(*zone).into(),
-            text_or_unset(time),
+            None,
+            Some(
+                triggers
+                    .iter()
+                    .map(trigger_summary)
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+                    .into(),
+            ),
         ),
     };
     BlockFace {
-        icon,
+        icon: triggers.first().map_or(HugeIcon::Chart, trigger_icon),
         category: tr!(workflows::BLOCK_TRIGGER),
-        title,
+        title: title.into(),
         label,
         badge: Some(badge),
-        value: Some(value),
-        detail: None,
+        value,
+        detail,
         accent: kind_accent(None, theme),
+    }
+}
+
+/// The label and value a single check shows on its If block.
+fn check_face(check: &CheckDraft, symbol: &str) -> (SharedString, SharedString) {
+    match check {
+        CheckDraft::Position(requirement) => (
+            tr!(workflows::FIELD_POSITION).into(),
+            position_choice(*requirement).into(),
+        ),
+        CheckDraft::Between { zone, start, end } => (
+            zone_text(*zone).into(),
+            format!("{}–{}", text_or_unset(start), text_or_unset(end)).into(),
+        ),
+        CheckDraft::Price { direction, level } => (
+            match direction {
+                PriceDirection::Above => tr!(workflows::CHOICE_ABOVE),
+                PriceDirection::Below => tr!(workflows::CHOICE_BELOW),
+            }
+            .into(),
+            text_or_unset(level),
+        ),
+        CheckDraft::PriceRange { low, high } => (
+            symbol.to_string().into(),
+            format!("{}–{}", text_or_unset(low), text_or_unset(high)).into(),
+        ),
+        CheckDraft::Weekday { zone, days } => (zone_text(*zone).into(), days_text(*days).into()),
     }
 }
 
@@ -1296,25 +1447,22 @@ fn node_face(block: &BlockDraft, symbol: &str, account: &str, theme: &AerisTheme
     let kind = block.kind();
     let (label, value, detail): (SharedString, Option<SharedString>, Option<SharedString>) =
         match block {
-            BlockDraft::If { condition, .. } => match condition {
-                ConditionDraft::Position(requirement) => (
-                    tr!(workflows::FIELD_POSITION).into(),
-                    Some(position_choice(*requirement).into()),
+            BlockDraft::If { condition, .. } => match condition.checks.as_slice() {
+                [check] => {
+                    let (label, value) = check_face(check, symbol);
+                    (label, Some(value), None)
+                }
+                checks => (
+                    tr!(workflows::FIELD_CHECKS).into(),
                     None,
-                ),
-                ConditionDraft::Between { zone, start, end } => (
-                    zone_text(*zone).into(),
-                    Some(format!("{}–{}", text_or_unset(start), text_or_unset(end)).into()),
-                    None,
-                ),
-                ConditionDraft::Price { direction, level } => (
-                    match direction {
-                        PriceDirection::Above => tr!(workflows::CHOICE_ABOVE),
-                        PriceDirection::Below => tr!(workflows::CHOICE_BELOW),
-                    }
-                    .into(),
-                    Some(text_or_unset(level)),
-                    None,
+                    Some(
+                        checks
+                            .iter()
+                            .map(check_summary)
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                            .into(),
+                    ),
                 ),
             },
             BlockDraft::Action { action, .. } => match action {
@@ -1340,12 +1488,12 @@ fn node_face(block: &BlockDraft, symbol: &str, account: &str, theme: &AerisTheme
                 ActionDraft::Flatten | ActionDraft::CancelOrders => (
                     tr!(workflows::FIELD_SYMBOL).into(),
                     Some(symbol.to_string().into()),
-                    Some(block_summary(block).into()),
+                    Some(action_summary(action).into()),
                 ),
                 ActionDraft::LockAccount => (
                     tr!(workflows::FIELD_ACCOUNT).into(),
                     Some(account.to_string().into()),
-                    Some(block_summary(block).into()),
+                    Some(action_summary(action).into()),
                 ),
             },
         };
@@ -1355,7 +1503,7 @@ fn node_face(block: &BlockDraft, symbol: &str, account: &str, theme: &AerisTheme
             BlockDraft::If { .. } => tr!(workflows::TAB_CHECK),
             BlockDraft::Action { .. } => tr!(workflows::TAB_ACTION),
         },
-        title: kind_label(kind),
+        title: block_title(block).into(),
         label,
         badge: None,
         value,
@@ -1389,7 +1537,7 @@ fn blocks(
     std::iter::once((
         BoardItem::Trigger,
         draft.trigger_at,
-        trigger_face(&draft.trigger, &symbol, badge, ui.theme),
+        trigger_face(&draft.triggers, &symbol, badge, ui.theme),
     ))
     .chain(draft.nodes.iter().map(|node| {
         (
@@ -1405,7 +1553,7 @@ fn blocks(
 fn block_element(at: BoardPoint, zoom: f32, face: BlockFace, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
     let scaled = |value: f32| px(value * zoom);
-    let title = face.title;
+    let title = face.title.clone();
     div()
         .absolute()
         .left(px(at.x))
@@ -1517,7 +1665,7 @@ fn card_inset(face: BlockFace, zoom: f32, theme: &AerisTheme) -> Div {
         .when_some(face.detail, |inset, detail| {
             inset.child(
                 div()
-                    .truncate()
+                    .line_clamp(DETAIL_LINES)
                     .text_size(scaled(CARD_DETAIL_SIZE))
                     .text_color(gpui_color(colors.text_muted))
                     .child(detail),
@@ -1804,75 +1952,156 @@ fn zone_choices(
     )
 }
 
+/// A button that adds a trigger or a check, disabled once the block holds the most.
+fn add_button(
+    ui: Page<'_>,
+    id: &'static str,
+    label: &'static str,
+    full: bool,
+    add: impl Fn(&mut OpenWorkflow) + 'static,
+) -> Button {
+    Button::new(id, ui.theme)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Sm)
+        .icon(header_icon(HugeIcon::Add))
+        .label(label)
+        .disabled(full)
+        .on_click(edit(ui.terminal, add))
+}
+
+/// The settings of one of a block's triggers or checks. While there are several, each is
+/// headed by its number and can be removed; the section's identity keeps its controls apart
+/// from those of its siblings.
+fn numbered_section(
+    ui: Page<'_>,
+    id: (&'static str, usize),
+    title: Option<String>,
+    remove: impl Fn(&mut OpenWorkflow) + 'static,
+) -> Stateful<Div> {
+    let theme = ui.theme;
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap_2()
+        .when_some(title, |section, title| {
+            section
+                .pt_3()
+                .border_t(border_width(theme))
+                .border_color(gpui_color(theme.colors.border_secondary))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(heading(title, theme))
+                        .child(
+                            Button::new("workflow_remove_part", theme)
+                                .variant(ButtonVariant::Ghost)
+                                .button_size(ButtonSize::Sm)
+                                .danger_on_hover()
+                                .icon(header_icon(HugeIcon::Trash))
+                                .label(tr!(workflows::REMOVE))
+                                .on_click(edit(ui.terminal, remove)),
+                        ),
+                )
+        })
+}
+
 fn trigger_settings(ui: Page<'_>, open: &OpenWorkflow) -> Vec<AnyElement> {
     let theme = ui.theme;
-    let trigger = &open.draft.trigger;
-    let options = vec![
-        (
-            TriggerKind::Rises,
-            tr!(workflows::TRIGGER_CHOICE_ABOVE).into(),
-        ),
-        (
-            TriggerKind::Falls,
-            tr!(workflows::TRIGGER_CHOICE_BELOW).into(),
-        ),
-        (
-            TriggerKind::Time,
-            tr!(workflows::TRIGGER_CHOICE_TIME).into(),
-        ),
-    ];
-    let mut sections = vec![
-        heading(tr!(workflows::BLOCK_TRIGGER), theme).into_any_element(),
-        field(
-            tr!(workflows::FIELD_TRIGGER),
-            choices(
-                ui,
-                "workflow_trigger",
-                options,
-                Some(&trigger.kind()),
-                |open, kind| open.draft.set_trigger_kind(kind),
+    let triggers = &open.draft.triggers;
+    let several = triggers.len() > 1;
+    let mut sections = vec![heading(tr!(workflows::BLOCK_TRIGGER), theme).into_any_element()];
+    sections.extend(triggers.iter().enumerate().map(|(index, trigger)| {
+        trigger_section(ui, open, index, trigger, several).into_any_element()
+    }));
+    sections.push(
+        add_button(
+            ui,
+            "workflow_add_trigger",
+            tr!(workflows::ADD_TRIGGER),
+            triggers.len() >= MAXIMUM_WORKFLOW_TRIGGERS,
+            |open| {
+                open.draft.add_trigger();
+            },
+        )
+        .into_any_element(),
+    );
+    sections.push(
+        secondary_text(
+            tr!(
+                workflows::TRIGGERS_HINT,
+                maximum = MAXIMUM_WORKFLOW_TRIGGERS
             ),
             theme,
         )
         .into_any_element(),
-    ];
-    match trigger {
-        TriggerDraft::Price { .. } => {
-            sections.extend(
-                input_field(
-                    ui,
-                    open,
-                    DraftField::TriggerLevel,
-                    tr!(workflows::FIELD_LEVEL),
-                )
-                .map(IntoElement::into_any_element),
-            );
-            sections
-                .push(secondary_text(tr!(workflows::TRIGGER_PRICE_HINT), theme).into_any_element());
-        }
-        TriggerDraft::Time { zone, .. } => {
-            sections.extend(
-                input_field(
-                    ui,
-                    open,
-                    DraftField::TriggerTime,
-                    tr!(workflows::FIELD_TIME),
-                )
-                .map(IntoElement::into_any_element),
-            );
-            sections.push(
-                zone_choices(ui, "workflow_trigger_zone", *zone, |open, zone| {
-                    if let TriggerDraft::Time { zone: current, .. } = &mut open.draft.trigger {
-                        *current = zone;
-                    }
-                })
-                .into_any_element(),
-            );
-            sections
-                .push(secondary_text(tr!(workflows::TRIGGER_TIME_HINT), theme).into_any_element());
-        }
-    }
+    );
     sections
+}
+
+fn trigger_section(
+    ui: Page<'_>,
+    open: &OpenWorkflow,
+    index: usize,
+    trigger: &TriggerDraft,
+    several: bool,
+) -> Stateful<Div> {
+    let theme = ui.theme;
+    let options = TriggerKind::ALL
+        .iter()
+        .map(|kind| (*kind, SharedString::from(trigger_kind_label(*kind))))
+        .collect();
+    let (label, hint) = match trigger {
+        TriggerDraft::Price { .. } => (
+            tr!(workflows::FIELD_LEVEL),
+            tr!(workflows::TRIGGER_PRICE_HINT),
+        ),
+        TriggerDraft::Time { .. } => (
+            tr!(workflows::FIELD_TIME),
+            tr!(workflows::TRIGGER_TIME_HINT),
+        ),
+        TriggerDraft::Every { .. } => (
+            tr!(workflows::FIELD_MINUTES),
+            tr!(workflows::TRIGGER_EVERY_HINT),
+        ),
+    };
+    numbered_section(
+        ui,
+        ("workflow_trigger_section", index),
+        several.then(|| tr!(workflows::TRIGGER_NUMBER, number = index + 1)),
+        move |open| open.draft.remove_trigger(index),
+    )
+    .child(field(
+        tr!(workflows::FIELD_TRIGGER),
+        choices(
+            ui,
+            "workflow_trigger",
+            options,
+            Some(&trigger.kind()),
+            move |open, kind| open.draft.set_trigger_kind(index, kind),
+        ),
+        theme,
+    ))
+    .children(input_field(ui, open, trigger.field(index), label))
+    .children(match trigger {
+        TriggerDraft::Time { zone, .. } => Some(zone_choices(
+            ui,
+            "workflow_trigger_zone",
+            *zone,
+            move |open, zone| {
+                if let Some(TriggerDraft::Time { zone: current, .. }) =
+                    open.draft.trigger_mut(index)
+                {
+                    *current = zone;
+                }
+            },
+        )),
+        TriggerDraft::Price { .. } | TriggerDraft::Every { .. } => None,
+    })
+    .child(secondary_text(hint, theme))
 }
 
 fn kind_choices(
@@ -1898,17 +2127,9 @@ fn node_settings(ui: Page<'_>, open: &OpenWorkflow, node: &NodeDraft) -> Vec<Any
     let theme = ui.theme;
     let id = node.id;
     let kind = node.block.kind();
-    let mut sections = vec![heading(kind_label(kind), theme).into_any_element()];
+    let mut sections = vec![heading(block_title(&node.block), theme).into_any_element()];
     match &node.block {
         BlockDraft::If { condition, .. } => {
-            sections.push(
-                field(
-                    tr!(workflows::FIELD_CHECK),
-                    kind_choices(ui, "workflow_check", &BlockKind::CHECKS, kind, id),
-                    theme,
-                )
-                .into_any_element(),
-            );
             sections.extend(condition_settings(ui, open, id, condition));
             sections.push(secondary_text(tr!(workflows::IF_HINT), theme).into_any_element());
         }
@@ -1940,51 +2161,192 @@ fn node_settings(ui: Page<'_>, open: &OpenWorkflow, node: &NodeDraft) -> Vec<Any
     sections
 }
 
+/// Every check of an If, how they join while there are several, and the button that adds
+/// one.
 fn condition_settings(
     ui: Page<'_>,
     open: &OpenWorkflow,
-    id: WorkflowNodeId,
+    node: WorkflowNodeId,
     condition: &ConditionDraft,
 ) -> Vec<AnyElement> {
-    match condition {
-        ConditionDraft::Position(requirement) => position_settings(ui, id, *requirement),
-        ConditionDraft::Between { zone, .. } => [
+    let several = condition.checks.len() > 1;
+    let mut sections = condition
+        .checks
+        .iter()
+        .enumerate()
+        .map(|(index, check)| {
+            check_section(ui, open, CheckRef { node, index }, check, several).into_any_element()
+        })
+        .collect::<Vec<_>>();
+    if several {
+        let options = vec![
+            (WorkflowJoin::All, tr!(workflows::JOIN_ALL).into()),
+            (WorkflowJoin::Any, tr!(workflows::JOIN_ANY).into()),
+        ];
+        sections.push(
+            field(
+                tr!(workflows::FIELD_JOIN),
+                choices(
+                    ui,
+                    "workflow_join",
+                    options,
+                    Some(&condition.join),
+                    move |open, join| {
+                        if let Some(condition) = open.draft.condition_mut(node) {
+                            condition.join = join;
+                        }
+                    },
+                ),
+                ui.theme,
+            )
+            .into_any_element(),
+        );
+    }
+    sections.push(
+        add_button(
+            ui,
+            "workflow_add_check",
+            tr!(workflows::ADD_CHECK),
+            condition.checks.len() >= MAXIMUM_WORKFLOW_CHECKS,
+            move |open| {
+                open.draft.add_check(node);
+            },
+        )
+        .into_any_element(),
+    );
+    sections
+}
+
+fn check_section(
+    ui: Page<'_>,
+    open: &OpenWorkflow,
+    check: CheckRef,
+    draft: &CheckDraft,
+    several: bool,
+) -> Stateful<Div> {
+    let options = CheckKind::ALL
+        .iter()
+        .map(|kind| (*kind, SharedString::from(check_label(*kind))))
+        .collect();
+    numbered_section(
+        ui,
+        ("workflow_check_section", check.index),
+        several.then(|| tr!(workflows::CHECK_NUMBER, number = check.index + 1)),
+        move |open| open.draft.remove_check(check),
+    )
+    .child(field(
+        tr!(workflows::FIELD_CHECK),
+        choices(
+            ui,
+            "workflow_check",
+            options,
+            Some(&draft.kind()),
+            move |open, kind| open.draft.set_check_kind(check, kind),
+        ),
+        ui.theme,
+    ))
+    .children(check_settings(ui, open, check, draft))
+}
+
+fn check_settings(
+    ui: Page<'_>,
+    open: &OpenWorkflow,
+    check: CheckRef,
+    draft: &CheckDraft,
+) -> Vec<AnyElement> {
+    let set_zone = move |open: &mut OpenWorkflow, zone| {
+        if let Some(
+            CheckDraft::Between { zone: current, .. } | CheckDraft::Weekday { zone: current, .. },
+        ) = open.draft.check_mut(check)
+        {
+            *current = zone;
+        }
+    };
+    match draft {
+        CheckDraft::Position(requirement) => position_settings(ui, check, *requirement),
+        CheckDraft::Between { zone, .. } => [
             input_field(
                 ui,
                 open,
-                DraftField::WindowStart(id),
+                DraftField::WindowStart(check),
                 tr!(workflows::FIELD_START),
             ),
             input_field(
                 ui,
                 open,
-                DraftField::WindowEnd(id),
+                DraftField::WindowEnd(check),
                 tr!(workflows::FIELD_END),
             ),
-            Some(zone_choices(
-                ui,
-                "workflow_window_zone",
-                *zone,
-                move |open, zone| {
-                    if let Some(ConditionDraft::Between { zone: current, .. }) =
-                        open.draft.condition_mut(id)
-                    {
-                        *current = zone;
-                    }
-                },
-            )),
+            Some(zone_choices(ui, "workflow_window_zone", *zone, set_zone)),
         ]
         .into_iter()
         .flatten()
         .map(IntoElement::into_any_element)
         .collect(),
-        ConditionDraft::Price { direction, .. } => price_settings(ui, open, id, *direction),
+        CheckDraft::Price { direction, .. } => price_settings(ui, open, check, *direction),
+        CheckDraft::PriceRange { .. } => {
+            let inputs = [
+                input_field(
+                    ui,
+                    open,
+                    DraftField::RangeLow(check),
+                    tr!(workflows::FIELD_LOW),
+                ),
+                input_field(
+                    ui,
+                    open,
+                    DraftField::RangeHigh(check),
+                    tr!(workflows::FIELD_HIGH),
+                ),
+            ];
+            vec![
+                div()
+                    .flex()
+                    .gap_2()
+                    .children(
+                        inputs
+                            .into_iter()
+                            .flatten()
+                            .map(|input| input.flex_1().min_w_0()),
+                    )
+                    .into_any_element(),
+                secondary_text(tr!(workflows::RANGE_HINT), ui.theme).into_any_element(),
+            ]
+        }
+        CheckDraft::Weekday { zone, days } => vec![
+            day_choices(ui, check, *days).into_any_element(),
+            zone_choices(ui, "workflow_weekday_zone", *zone, set_zone).into_any_element(),
+        ],
     }
+}
+
+/// One toggle per day of the week; the last chosen day cannot be turned off.
+fn day_choices(ui: Page<'_>, check: CheckRef, days: WorkflowWeekdays) -> Div {
+    field(
+        tr!(workflows::FIELD_DAYS),
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children((0..7_u8).map(|day| {
+                Button::new(("workflow_day", usize::from(day)), ui.theme)
+                    .variant(ButtonVariant::Outline)
+                    .button_size(ButtonSize::Sm)
+                    .selected(days.contains(day))
+                    .label(day_label(day))
+                    .on_click(edit(ui.terminal, move |open| {
+                        if let Some(check) = open.draft.check_mut(check) {
+                            check.toggle_day(day);
+                        }
+                    }))
+            })),
+        ui.theme,
+    )
 }
 
 fn position_settings(
     ui: Page<'_>,
-    id: WorkflowNodeId,
+    check: CheckRef,
     requirement: PositionRequirement,
 ) -> Vec<AnyElement> {
     let options = vec![
@@ -2014,7 +2376,7 @@ fn position_settings(
                 options,
                 Some(&requirement),
                 move |open, requirement| {
-                    if let Some(ConditionDraft::Position(current)) = open.draft.condition_mut(id) {
+                    if let Some(CheckDraft::Position(current)) = open.draft.check_mut(check) {
                         *current = requirement;
                     }
                 },
@@ -2028,7 +2390,7 @@ fn position_settings(
 fn price_settings(
     ui: Page<'_>,
     open: &OpenWorkflow,
-    id: WorkflowNodeId,
+    check: CheckRef,
     direction: PriceDirection,
 ) -> Vec<AnyElement> {
     let options = vec![
@@ -2044,9 +2406,9 @@ fn price_settings(
                 options,
                 Some(&direction),
                 move |open, direction| {
-                    if let Some(ConditionDraft::Price {
+                    if let Some(CheckDraft::Price {
                         direction: current, ..
-                    }) = open.draft.condition_mut(id)
+                    }) = open.draft.check_mut(check)
                     {
                         *current = direction;
                     }
@@ -2054,7 +2416,12 @@ fn price_settings(
             ),
             ui.theme,
         )),
-        input_field(ui, open, DraftField::Level(id), tr!(workflows::FIELD_LEVEL)),
+        input_field(
+            ui,
+            open,
+            DraftField::Level(check),
+            tr!(workflows::FIELD_LEVEL),
+        ),
     ]
     .into_iter()
     .flatten()

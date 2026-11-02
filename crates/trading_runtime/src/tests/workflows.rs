@@ -43,16 +43,18 @@ fn breakout(workflow_id: &str, level: i64) -> WorkflowDefinition {
         name: "Breakout long".into(),
         account_id: account(),
         instrument_id: instrument().instrument_id,
-        trigger: WorkflowTrigger::PriceCrosses {
+        triggers: vec![WorkflowTrigger::PriceCrosses {
             direction: PriceDirection::Above,
             level: price(level),
-        },
+        }],
         start: IF_NODE,
         nodes: vec![
             WorkflowNode {
                 id: IF_NODE,
                 step: WorkflowStep::If {
-                    condition: WorkflowCondition::Position(PositionRequirement::Flat),
+                    condition: WorkflowCondition::single(WorkflowCheck::Position(
+                        PositionRequirement::Flat,
+                    )),
                     then: Some(THEN_NODE),
                     otherwise: None,
                 },
@@ -191,7 +193,9 @@ fn the_false_branch_runs_its_own_actions() {
         WorkflowNode {
             id: IF_NODE,
             step: WorkflowStep::If {
-                condition: WorkflowCondition::Position(PositionRequirement::Long),
+                condition: WorkflowCondition::single(WorkflowCheck::Position(
+                    PositionRequirement::Long,
+                )),
                 then: Some(THEN_NODE),
                 otherwise: Some(ELSE_NODE),
             },
@@ -234,10 +238,10 @@ fn a_branch_without_an_action_is_not_a_firing() {
     // Only while the bid is at or above 101.00, which it is not at the first cross.
     let mut definition = breakout("dip-only", 10_050);
     definition.nodes[0].step = WorkflowStep::If {
-        condition: WorkflowCondition::Price {
+        condition: WorkflowCondition::single(WorkflowCheck::Price {
             direction: PriceDirection::Above,
             level: price(10_100),
-        },
+        }),
         then: Some(THEN_NODE),
         otherwise: None,
     };
@@ -285,10 +289,10 @@ fn a_time_trigger_cancels_working_orders_and_reschedules() {
     // The fixture clock is 00:16:40 UTC; the trigger is due at 00:17.
     let due = 17 * 60 * 1_000_000_000;
     let mut definition = single("cancel-at-1700", 10_050, WorkflowAction::CancelOrders);
-    definition.trigger = WorkflowTrigger::TimeOfDay(WorkflowClockTime {
+    definition.triggers = vec![WorkflowTrigger::TimeOfDay(WorkflowClockTime {
         zone: WorkflowTimeZone::Utc,
         minute_of_day: 17,
-    });
+    })];
     definition.limits.repeat = WorkflowRepeat::PerSession { maximum: 3 };
     register(&service, definition);
     let armed = service
@@ -309,6 +313,105 @@ fn a_time_trigger_cancels_working_orders_and_reschedules() {
     );
     assert_eq!(view.next_due_unix_nanos, Some(due + 86_400_000_000_000));
     assert_eq!(working_set(&service).orders, []);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn any_trigger_fires_and_an_interval_trigger_repeats() {
+    let directory = TestDirectory::new("workflow-any-trigger");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let mut definition = single("cross-or-every", 10_050, WorkflowAction::CancelOrders);
+    definition
+        .triggers
+        .push(WorkflowTrigger::Every { minutes: 5 });
+    definition.limits.repeat = WorkflowRepeat::PerSession { maximum: 5 };
+    register(&service, definition);
+    // The fixture clock is 00:16:40 UTC; the next five-minute mark is 00:20.
+    let mark = 20 * 60 * 1_000_000_000;
+    let armed = service
+        .arm_workflow("cross-or-every".into(), 1)
+        .expect("armed");
+    assert_eq!(armed.next_due_unix_nanos, Some(mark));
+
+    deliver_quote(&service, &feed, &instrument, 2, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 3, 10_050, 10_075);
+    assert_eq!(workflow(&service, "cross-or-every").total_firings, 1);
+
+    clock.advance(Duration::from_secs(200));
+    service.status().expect("owner runs the due timer");
+    let view = workflow(&service, "cross-or-every");
+    assert_eq!(view.total_firings, 2, "the interval fires as well");
+    assert_eq!(
+        view.next_due_unix_nanos,
+        Some(mark + 5 * 60 * 1_000_000_000)
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn joined_checks_read_the_quote_range_and_the_weekday() {
+    let directory = TestDirectory::new("workflow-joined-checks");
+    let instrument = instrument();
+    let (service, _clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let in_range = WorkflowCheck::PriceRange {
+        low: price(10_000),
+        high: price(10_100),
+    };
+    let on = |day: u8| WorkflowCheck::Weekday {
+        zone: WorkflowTimeZone::Utc,
+        days: WorkflowWeekdays::from_bits(1 << day).expect("day"),
+    };
+    // The fixture clock is on 1970-01-01, a Thursday (3, counting Monday as 0).
+    for (workflow_id, condition) in [
+        (
+            "thursday-in-range",
+            WorkflowCondition::joined(WorkflowJoin::All, &[in_range, on(3)]),
+        ),
+        (
+            "friday-in-range",
+            WorkflowCondition::joined(WorkflowJoin::All, &[in_range, on(4)]),
+        ),
+        (
+            "friday-or-in-range",
+            WorkflowCondition::joined(WorkflowJoin::Any, &[on(4), in_range]),
+        ),
+    ] {
+        let mut definition = breakout(workflow_id, 10_050);
+        definition.nodes = vec![
+            WorkflowNode {
+                id: IF_NODE,
+                step: WorkflowStep::If {
+                    condition: condition.expect("condition"),
+                    then: Some(THEN_NODE),
+                    otherwise: Some(ELSE_NODE),
+                },
+            },
+            action_node(THEN_NODE, WorkflowAction::CancelOrders),
+            action_node(ELSE_NODE, WorkflowAction::CancelOrders),
+        ];
+        register(&service, definition);
+        service.arm_workflow(workflow_id.into(), 1).expect("armed");
+    }
+    deliver_quote(&service, &feed, &instrument, 2, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 3, 10_050, 10_075);
+    for (workflow_id, held) in [
+        ("thursday-in-range", true),
+        ("friday-in-range", false),
+        ("friday-or-in-range", true),
+    ] {
+        assert_eq!(
+            executed(&workflow(&service, workflow_id))[0].outcome,
+            WorkflowStepOutcome::Branch(held),
+            "{workflow_id}"
+        );
+    }
     service
         .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
@@ -399,10 +502,10 @@ fn revisions_are_fenced_and_every_new_revision_starts_paused() {
     );
     let mut off_scale = breakout("off-scale", 10_050);
     off_scale.nodes[0].step = WorkflowStep::If {
-        condition: WorkflowCondition::Price {
+        condition: WorkflowCondition::single(WorkflowCheck::Price {
             direction: PriceDirection::Above,
             level: FixedPoint::try_new(100_500, 3).expect("level"),
-        },
+        }),
         then: Some(THEN_NODE),
         otherwise: None,
     };
@@ -492,7 +595,35 @@ fn workflows_and_their_firings_survive_a_restart() {
     let instrument = instrument();
     let (service, clock, feed) =
         quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
-    let mut definition = single("durable", 10_050, WorkflowAction::CancelOrders);
+    // Every stored kind of trigger and check comes back exactly.
+    let mut definition = breakout("durable", 10_050);
+    definition
+        .triggers
+        .push(WorkflowTrigger::Every { minutes: 720 });
+    definition.nodes = vec![
+        WorkflowNode {
+            id: IF_NODE,
+            step: WorkflowStep::If {
+                condition: WorkflowCondition::joined(
+                    WorkflowJoin::Any,
+                    &[
+                        WorkflowCheck::PriceRange {
+                            low: price(9_000),
+                            high: price(20_000),
+                        },
+                        WorkflowCheck::Weekday {
+                            zone: WorkflowTimeZone::Chicago,
+                            days: WorkflowWeekdays::WEEKDAYS,
+                        },
+                    ],
+                )
+                .expect("condition"),
+                then: Some(THEN_NODE),
+                otherwise: None,
+            },
+        },
+        action_node(THEN_NODE, WorkflowAction::CancelOrders),
+    ];
     definition.limits.repeat = WorkflowRepeat::PerSession { maximum: 5 };
     register(&service, definition);
     service.arm_workflow("durable".into(), 1).expect("armed");
@@ -507,6 +638,7 @@ fn workflows_and_their_firings_survive_a_restart() {
     let (restarted, feed) =
         reopen_awaiting_quote(&directory, &clock, &instrument, market_feed::route());
     let after = workflow(&restarted, "durable");
+    assert_eq!(after.definition, before.definition);
     assert_eq!(after.state, WorkflowState::Armed);
     assert_eq!(after.recent_firings, before.recent_firings);
     assert_eq!(after.session_firings, 1);

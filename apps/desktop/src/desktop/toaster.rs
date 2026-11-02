@@ -14,15 +14,17 @@
 //!   way meets friction, a short one springs back, and a click dismisses.
 //!
 //! Chart status toasts stay while their condition holds. Fill toasts announce new executions
-//! and order toasts announce broker orders the broker ended on its own, with its reason; the
-//! trading owner stays authoritative for both, and this module only remembers what it has
-//! already announced.
+//! and order toasts announce broker orders the broker ended on its own, with its reason;
+//! workflow toasts announce each workflow firing with what it did. The trading owner stays
+//! authoritative for all of them, and this module only remembers what it has already
+//! announced.
 
 use super::notification_center::{
     NoticeAction, NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, UserNotice,
 };
 use super::*;
-use aeris_localization::{panels, tr};
+use aeris_localization::{panels, tr, workflows};
+use aeris_trading_runtime::{WorkflowActionResult, WorkflowFiringOutcome, WorkflowStepOutcome};
 use gpui::{DispatchPhase, EntityId, MouseMoveEvent, MouseUpEvent};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -894,6 +896,26 @@ impl Toaster {
                         );
                     }
                 }
+                trading_store::TradingAnnouncement::Workflow { name, firing } => {
+                    if now_unix_nanos.saturating_sub(firing.fired_unix_nanos) > NEWS_FRESHNESS_NANOS
+                    {
+                        continue;
+                    }
+                    self.push(
+                        host,
+                        ToastContent {
+                            kind: ToastKind::Notice,
+                            notice_key: None,
+                            tone: workflow_firing_tone(&firing.outcome),
+                            title: tr!(workflows::TOAST_FIRED, name = name).into(),
+                            description: Some(
+                                super::workflows_page::outcome_text(&firing.outcome).into(),
+                            ),
+                            lifetime: Some(ORDER_END_LIFETIME),
+                        },
+                        now,
+                    );
+                }
             }
             posted = true;
         }
@@ -1068,6 +1090,27 @@ impl Toaster {
         if self.wake == Some(deadline) {
             self.wake = None;
         }
+    }
+}
+
+/// A firing that sent nothing warns, one with a refused action reads as a loss, and one
+/// that ran is a quiet notice beside the fill toasts its orders bring.
+fn workflow_firing_tone(outcome: &WorkflowFiringOutcome) -> ToastTone {
+    match outcome {
+        WorkflowFiringOutcome::Blocked(_) | WorkflowFiringOutcome::Interrupted => {
+            ToastTone::Warning
+        }
+        WorkflowFiringOutcome::Executed(steps)
+            if steps.iter().any(|step| {
+                matches!(
+                    step.outcome,
+                    WorkflowStepOutcome::Action(WorkflowActionResult::Refused { .. })
+                )
+            }) =>
+        {
+            ToastTone::Loss
+        }
+        WorkflowFiringOutcome::Executed(_) => ToastTone::Muted,
     }
 }
 

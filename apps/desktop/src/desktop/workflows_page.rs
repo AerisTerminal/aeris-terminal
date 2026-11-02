@@ -6,19 +6,19 @@
 
 use super::market_screener::{AppView, capture_time_label};
 use super::workflow_board::{
-    ActionDraft, BlockDraft, BoardCamera, BoardHit, BoardItem, BoardPoint, ConditionDraft,
-    DraftField, DraftProblem, InstrumentScales, LinkRefusal, OutputPort, RepeatDraft,
-    SavedRevision, TriggerDraft, WorkflowDraft, WorkflowExample,
+    ActionDraft, BoardCamera, BoardHit, BoardItem, BoardPoint, CheckDraft, DraftField,
+    DraftProblem, InstrumentScales, LinkRefusal, OutputPort, RepeatDraft, SavedRevision,
+    TriggerDraft, WorkflowDraft, WorkflowExample,
 };
-use super::workflow_canvas::BOARD_CHROME;
+use super::workflow_canvas::board_chrome;
 use super::*;
 use aeris_localization::{tr, workflows};
 use aeris_trading::{AccountEnvironment, OrderSide, TradingAccountId};
 use aeris_trading_runtime::{
-    MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOWS, PositionRequirement, PriceDirection,
-    TradingInstrument, TradingService, WorkflowActionResult, WorkflowBlocker, WorkflowError,
-    WorkflowFiringOutcome, WorkflowState, WorkflowStepOutcome, WorkflowTimeZone, WorkflowView,
-    WorkingSet,
+    MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS,
+    MINUTES_PER_DAY, PositionRequirement, PriceDirection, TradingInstrument, TradingService,
+    WorkflowActionResult, WorkflowBlocker, WorkflowError, WorkflowFiringOutcome, WorkflowState,
+    WorkflowStepOutcome, WorkflowTimeZone, WorkflowView, WorkflowWeekdays, WorkingSet,
 };
 
 const ZOOM_STEP: f32 = 1.2;
@@ -32,6 +32,10 @@ pub(super) struct WorkflowsPage {
     next_command: u64,
     pub(super) list_scroll: ScrollHandle,
     pub(super) inspector_scroll: ScrollHandle,
+    /// The workflow list and the inspector fold away to give the board the width; the list
+    /// still shows while no workflow is open, since it is then the whole page.
+    pub(super) list_hidden: bool,
+    pub(super) inspector_hidden: bool,
     /// The board's size in pixels when it last painted; zero before it first did.
     pub(super) board_size: Rc<Cell<BoardPoint>>,
 }
@@ -106,10 +110,13 @@ impl OpenWorkflow {
                 }
                 fields
             }
-            Some(BoardItem::Trigger) => match self.draft.trigger {
-                TriggerDraft::Price { .. } => vec![DraftField::TriggerLevel],
-                TriggerDraft::Time { .. } => vec![DraftField::TriggerTime],
-            },
+            Some(BoardItem::Trigger) => self
+                .draft
+                .triggers
+                .iter()
+                .enumerate()
+                .map(|(index, trigger)| trigger.field(index))
+                .collect(),
             Some(BoardItem::Node(id)) => self
                 .draft
                 .node(id)
@@ -272,8 +279,19 @@ pub(super) fn problem_text(problem: DraftProblem) -> String {
         DraftProblem::TriggerLevel { decimals } | DraftProblem::Level { decimals, .. } => {
             tr!(workflows::PROBLEM_LEVEL, decimals = decimals)
         }
+        DraftProblem::Triggers => {
+            tr!(
+                workflows::PROBLEM_TRIGGERS,
+                maximum = MAXIMUM_WORKFLOW_TRIGGERS
+            )
+        }
         DraftProblem::TriggerTime => tr!(workflows::PROBLEM_TIME).to_string(),
+        DraftProblem::TriggerMinutes => tr!(workflows::PROBLEM_MINUTES, maximum = MINUTES_PER_DAY),
+        DraftProblem::Checks(_) => {
+            tr!(workflows::PROBLEM_CHECKS, maximum = MAXIMUM_WORKFLOW_CHECKS)
+        }
         DraftProblem::Window(_) => tr!(workflows::PROBLEM_WINDOW).to_string(),
+        DraftProblem::Range { decimals, .. } => tr!(workflows::PROBLEM_RANGE, decimals = decimals),
         DraftProblem::NoStart => tr!(workflows::PROBLEM_NO_START).to_string(),
         DraftProblem::Unconnected(_) => tr!(workflows::PROBLEM_UNCONNECTED).to_string(),
         DraftProblem::NoAction => tr!(workflows::PROBLEM_NO_ACTION).to_string(),
@@ -469,10 +487,24 @@ impl TerminalApp {
             return painted;
         }
         let viewport = window.viewport_size();
+        let page = &self.pages.workflows;
+        let chrome = board_chrome(!page.list_hidden, !page.inspector_hidden);
         BoardPoint::new(
-            f32::from(viewport.width) - BOARD_CHROME.x,
-            f32::from(viewport.height) - BOARD_CHROME.y,
+            f32::from(viewport.width) - chrome.x,
+            f32::from(viewport.height) - chrome.y,
         )
+    }
+
+    pub(super) fn toggle_workflow_list(&mut self, cx: &mut Context<Self>) {
+        let page = &mut self.pages.workflows;
+        page.list_hidden = !page.list_hidden;
+        cx.notify();
+    }
+
+    pub(super) fn toggle_workflow_inspector(&mut self, cx: &mut Context<Self>) {
+        let page = &mut self.pages.workflows;
+        page.inspector_hidden = !page.inspector_hidden;
+        cx.notify();
     }
 
     /// The account and symbol a new draft starts on.
@@ -1022,60 +1054,138 @@ pub(super) fn example_description(example: WorkflowExample) -> &'static str {
     }
 }
 
-/// The text a draft block shows on the board under its title.
-pub(super) fn block_summary(block: &BlockDraft) -> String {
-    let unset = || tr!(workflows::VALUE_UNSET).to_string();
-    match block {
-        BlockDraft::If { condition, .. } => match condition {
-            ConditionDraft::Position(requirement) => position_text(*requirement).to_string(),
-            ConditionDraft::Between { zone, start, end } => tr!(
-                workflows::CONDITION_BETWEEN,
-                start = start.trim(),
-                end = end.trim(),
-                zone = zone_text(*zone)
-            ),
-            ConditionDraft::Price { direction, level } => {
-                let price = if level.trim().is_empty() {
-                    unset()
-                } else {
-                    level.trim().to_string()
-                };
-                match direction {
-                    PriceDirection::Above => {
-                        tr!(workflows::CONDITION_PRICE_ABOVE, price = price)
-                    }
-                    PriceDirection::Below => {
-                        tr!(workflows::CONDITION_PRICE_BELOW, price = price)
-                    }
-                }
+/// Trimmed text, or the unset placeholder for none.
+fn value_or_unset(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        tr!(workflows::VALUE_UNSET).to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// One trigger as a short phrase, for a block with several.
+pub(super) fn trigger_summary(trigger: &TriggerDraft) -> String {
+    match trigger {
+        TriggerDraft::Price {
+            direction: PriceDirection::Above,
+            level,
+        } => tr!(workflows::SUMMARY_RISES, price = value_or_unset(level)),
+        TriggerDraft::Price {
+            direction: PriceDirection::Below,
+            level,
+        } => tr!(workflows::SUMMARY_FALLS, price = value_or_unset(level)),
+        TriggerDraft::Time { zone, time } => tr!(
+            workflows::SUMMARY_TIME,
+            time = value_or_unset(time),
+            zone = zone_text(*zone)
+        ),
+        TriggerDraft::Every { minutes } => {
+            tr!(workflows::SUMMARY_EVERY, minutes = value_or_unset(minutes))
+        }
+    }
+}
+
+/// One check as a sentence, for an If with several.
+pub(super) fn check_summary(check: &CheckDraft) -> String {
+    match check {
+        CheckDraft::Position(requirement) => position_text(*requirement).to_string(),
+        CheckDraft::Between { zone, start, end } => tr!(
+            workflows::CONDITION_BETWEEN,
+            start = value_or_unset(start),
+            end = value_or_unset(end),
+            zone = zone_text(*zone)
+        ),
+        CheckDraft::Price {
+            direction: PriceDirection::Above,
+            level,
+        } => tr!(
+            workflows::CONDITION_PRICE_ABOVE,
+            price = value_or_unset(level)
+        ),
+        CheckDraft::Price {
+            direction: PriceDirection::Below,
+            level,
+        } => tr!(
+            workflows::CONDITION_PRICE_BELOW,
+            price = value_or_unset(level)
+        ),
+        CheckDraft::PriceRange { low, high } => tr!(
+            workflows::CONDITION_RANGE,
+            low = value_or_unset(low),
+            high = value_or_unset(high)
+        ),
+        CheckDraft::Weekday { zone, days } => tr!(
+            workflows::CONDITION_WEEKDAY,
+            days = days_text(*days),
+            zone = zone_text(*zone)
+        ),
+    }
+}
+
+/// A day's short name; 0 is Monday.
+pub(super) fn day_label(day: u8) -> &'static str {
+    match day {
+        0 => tr!(workflows::DAY_MON),
+        1 => tr!(workflows::DAY_TUE),
+        2 => tr!(workflows::DAY_WED),
+        3 => tr!(workflows::DAY_THU),
+        4 => tr!(workflows::DAY_FRI),
+        5 => tr!(workflows::DAY_SAT),
+        _ => tr!(workflows::DAY_SUN),
+    }
+}
+
+/// The named days, with a run of three or more days written as a span.
+pub(super) fn days_text(days: WorkflowWeekdays) -> String {
+    let mut parts = Vec::new();
+    let mut day = 0;
+    while day < 7 {
+        if !days.contains(day) {
+            day += 1;
+            continue;
+        }
+        let first = day;
+        while day + 1 < 7 && days.contains(day + 1) {
+            day += 1;
+        }
+        if day - first >= 2 {
+            parts.push(format!("{}–{}", day_label(first), day_label(day)));
+        } else {
+            parts.extend((first..=day).map(|day| day_label(day).to_string()));
+        }
+        day += 1;
+    }
+    parts.join(", ")
+}
+
+/// The sentence an action block shows on the board.
+pub(super) fn action_summary(action: &ActionDraft) -> String {
+    match action {
+        ActionDraft::Enter {
+            side,
+            quantity,
+            stop,
+            target,
+        } => {
+            let quantity = quantity.trim();
+            let entry = match side {
+                OrderSide::Buy => tr!(workflows::ACTION_BUY, quantity = quantity),
+                OrderSide::Sell => tr!(workflows::ACTION_SELL, quantity = quantity),
+            };
+            if stop.trim().is_empty() && target.trim().is_empty() {
+                entry
+            } else {
+                tr!(
+                    workflows::ACTION_PROTECTION,
+                    entry = entry,
+                    stop = stop.trim(),
+                    target = target.trim()
+                )
             }
-        },
-        BlockDraft::Action { action, .. } => match action {
-            ActionDraft::Enter {
-                side,
-                quantity,
-                stop,
-                target,
-            } => {
-                let quantity = quantity.trim();
-                let entry = match side {
-                    OrderSide::Buy => tr!(workflows::ACTION_BUY, quantity = quantity),
-                    OrderSide::Sell => tr!(workflows::ACTION_SELL, quantity = quantity),
-                };
-                if stop.trim().is_empty() && target.trim().is_empty() {
-                    entry
-                } else {
-                    tr!(
-                        workflows::ACTION_PROTECTION,
-                        entry = entry,
-                        stop = stop.trim(),
-                        target = target.trim()
-                    )
-                }
-            }
-            ActionDraft::Flatten => tr!(workflows::ACTION_FLATTEN).to_string(),
-            ActionDraft::CancelOrders => tr!(workflows::ACTION_CANCEL_ORDERS).to_string(),
-            ActionDraft::LockAccount => tr!(workflows::ACTION_LOCK).to_string(),
-        },
+        }
+        ActionDraft::Flatten => tr!(workflows::ACTION_FLATTEN).to_string(),
+        ActionDraft::CancelOrders => tr!(workflows::ACTION_CANCEL_ORDERS).to_string(),
+        ActionDraft::LockAccount => tr!(workflows::ACTION_LOCK).to_string(),
     }
 }

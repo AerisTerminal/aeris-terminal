@@ -7,12 +7,13 @@ use aeris_desktop::trading::OrderQuantity;
 use aeris_instruments::InstrumentId;
 use aeris_trading::{FixedPoint, OrderSide, TradingAccountId};
 use aeris_trading_runtime::{
-    MAXIMUM_WORKFLOW_COOLDOWN_SECONDS, MAXIMUM_WORKFLOW_LAYOUT_COORDINATE,
+    MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_COOLDOWN_SECONDS, MAXIMUM_WORKFLOW_LAYOUT_COORDINATE,
     MAXIMUM_WORKFLOW_NAME_CHARS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_PROTECTION_TICKS,
-    MAXIMUM_WORKFLOW_SESSION_FIRINGS, PositionRequirement, PriceDirection, WorkflowAction,
-    WorkflowClockTime, WorkflowCondition, WorkflowDefinition, WorkflowLayout, WorkflowLimits,
+    MAXIMUM_WORKFLOW_SESSION_FIRINGS, MAXIMUM_WORKFLOW_TRIGGERS, MINUTES_PER_DAY,
+    PositionRequirement, PriceDirection, WorkflowAction, WorkflowCheck, WorkflowClockTime,
+    WorkflowCondition, WorkflowDefinition, WorkflowJoin, WorkflowLayout, WorkflowLimits,
     WorkflowNode, WorkflowNodeId, WorkflowNodePosition, WorkflowProtection, WorkflowRepeat,
-    WorkflowStep, WorkflowTimeZone, WorkflowTrigger, WorkflowView,
+    WorkflowStep, WorkflowTimeZone, WorkflowTrigger, WorkflowView, WorkflowWeekdays,
 };
 use num_traits::ToPrimitive;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +33,7 @@ const DEFAULT_SESSION_MAXIMUM: &str = "3";
 const DEFAULT_COOLDOWN_SECONDS: &str = "60";
 pub(super) const DEFAULT_QUANTITY: &str = "1";
 const DEFAULT_TRIGGER_TIME: &str = "08:30";
+const DEFAULT_TRIGGER_MINUTES: &str = "5";
 
 /// A point in board coordinates, or in board-local screen pixels for [`BoardCamera`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -98,6 +100,9 @@ pub(super) enum TriggerDraft {
         zone: WorkflowTimeZone,
         time: String,
     },
+    Every {
+        minutes: String,
+    },
 }
 
 /// The trigger kinds the inspector offers.
@@ -106,6 +111,11 @@ pub(super) enum TriggerKind {
     Rises,
     Falls,
     Time,
+    Every,
+}
+
+impl TriggerKind {
+    pub(super) const ALL: [Self; 4] = [Self::Rises, Self::Falls, Self::Time, Self::Every];
 }
 
 impl TriggerDraft {
@@ -120,12 +130,61 @@ impl TriggerDraft {
                 ..
             } => TriggerKind::Falls,
             Self::Time { .. } => TriggerKind::Time,
+            Self::Every { .. } => TriggerKind::Every,
+        }
+    }
+
+    fn of_kind(kind: TriggerKind) -> Self {
+        match kind {
+            TriggerKind::Rises => Self::Price {
+                direction: PriceDirection::Above,
+                level: String::new(),
+            },
+            TriggerKind::Falls => Self::Price {
+                direction: PriceDirection::Below,
+                level: String::new(),
+            },
+            TriggerKind::Time => Self::Time {
+                zone: WorkflowTimeZone::Chicago,
+                time: DEFAULT_TRIGGER_TIME.to_string(),
+            },
+            TriggerKind::Every => Self::Every {
+                minutes: DEFAULT_TRIGGER_MINUTES.to_string(),
+            },
+        }
+    }
+
+    /// The one text field each trigger has.
+    fn text(&self) -> &String {
+        match self {
+            Self::Price { level, .. } => level,
+            Self::Time { time, .. } => time,
+            Self::Every { minutes } => minutes,
+        }
+    }
+
+    fn text_mut(&mut self) -> &mut String {
+        match self {
+            Self::Price { level, .. } => level,
+            Self::Time { time, .. } => time,
+            Self::Every { minutes } => minutes,
+        }
+    }
+
+    /// The field of the trigger at `index`; each kind names its own, so an input never
+    /// carries a level into a time.
+    pub(super) const fn field(&self, index: usize) -> DraftField {
+        match self {
+            Self::Price { .. } => DraftField::TriggerLevel(index),
+            Self::Time { .. } => DraftField::TriggerTime(index),
+            Self::Every { .. } => DraftField::TriggerMinutes(index),
         }
     }
 }
 
+/// One check of an If.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum ConditionDraft {
+pub(super) enum CheckDraft {
     Position(PositionRequirement),
     Between {
         zone: WorkflowTimeZone,
@@ -136,6 +195,182 @@ pub(super) enum ConditionDraft {
         direction: PriceDirection,
         level: String,
     },
+    PriceRange {
+        low: String,
+        high: String,
+    },
+    Weekday {
+        zone: WorkflowTimeZone,
+        days: WorkflowWeekdays,
+    },
+}
+
+/// The check kinds an If offers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CheckKind {
+    Position,
+    Time,
+    Price,
+    PriceRange,
+    Weekday,
+}
+
+impl CheckKind {
+    pub(super) const ALL: [Self; 5] = [
+        Self::Position,
+        Self::Time,
+        Self::Price,
+        Self::PriceRange,
+        Self::Weekday,
+    ];
+
+    fn check(self) -> CheckDraft {
+        match self {
+            Self::Position => CheckDraft::Position(PositionRequirement::Flat),
+            Self::Time => CheckDraft::Between {
+                zone: WorkflowTimeZone::Chicago,
+                start: "08:30".to_string(),
+                end: "15:00".to_string(),
+            },
+            Self::Price => CheckDraft::Price {
+                direction: PriceDirection::Above,
+                level: String::new(),
+            },
+            Self::PriceRange => CheckDraft::PriceRange {
+                low: String::new(),
+                high: String::new(),
+            },
+            Self::Weekday => CheckDraft::Weekday {
+                zone: WorkflowTimeZone::Chicago,
+                days: WorkflowWeekdays::WEEKDAYS,
+            },
+        }
+    }
+}
+
+impl CheckDraft {
+    pub(super) const fn kind(&self) -> CheckKind {
+        match self {
+            Self::Position(_) => CheckKind::Position,
+            Self::Between { .. } => CheckKind::Time,
+            Self::Price { .. } => CheckKind::Price,
+            Self::PriceRange { .. } => CheckKind::PriceRange,
+            Self::Weekday { .. } => CheckKind::Weekday,
+        }
+    }
+
+    /// The text fields of the check `check` names.
+    pub(super) fn fields(&self, check: CheckRef) -> Vec<DraftField> {
+        match self {
+            Self::Price { .. } => vec![DraftField::Level(check)],
+            Self::Between { .. } => {
+                vec![DraftField::WindowStart(check), DraftField::WindowEnd(check)]
+            }
+            Self::PriceRange { .. } => {
+                vec![DraftField::RangeLow(check), DraftField::RangeHigh(check)]
+            }
+            Self::Position(_) | Self::Weekday { .. } => Vec::new(),
+        }
+    }
+
+    fn text(&self, field: DraftField) -> Option<&str> {
+        let text = match (self, field) {
+            (Self::Price { level, .. }, DraftField::Level(_)) => level,
+            (Self::Between { start, .. }, DraftField::WindowStart(_)) => start,
+            (Self::Between { end, .. }, DraftField::WindowEnd(_)) => end,
+            (Self::PriceRange { low, .. }, DraftField::RangeLow(_)) => low,
+            (Self::PriceRange { high, .. }, DraftField::RangeHigh(_)) => high,
+            _ => return None,
+        };
+        Some(text)
+    }
+
+    fn text_mut(&mut self, field: DraftField) -> Option<&mut String> {
+        match (self, field) {
+            (Self::Price { level, .. }, DraftField::Level(_)) => Some(level),
+            (Self::Between { start, .. }, DraftField::WindowStart(_)) => Some(start),
+            (Self::Between { end, .. }, DraftField::WindowEnd(_)) => Some(end),
+            (Self::PriceRange { low, .. }, DraftField::RangeLow(_)) => Some(low),
+            (Self::PriceRange { high, .. }, DraftField::RangeHigh(_)) => Some(high),
+            _ => None,
+        }
+    }
+
+    /// Adds or removes one day of a weekday check (0 is Monday), keeping at least one day.
+    pub(super) fn toggle_day(&mut self, day: u8) {
+        if let Self::Weekday { days, .. } = self
+            && day < 7
+            && let Some(toggled) = WorkflowWeekdays::from_bits(days.bits() ^ (1 << day))
+        {
+            *days = toggled;
+        }
+    }
+
+    fn parse(
+        &self,
+        node: WorkflowNodeId,
+        scales: InstrumentScales,
+    ) -> Result<WorkflowCheck, DraftProblem> {
+        Ok(match self {
+            Self::Position(requirement) => WorkflowCheck::Position(*requirement),
+            Self::Between { zone, start, end } => {
+                let (start_minute, end_minute) = parse_clock(start)
+                    .zip(parse_clock(end))
+                    .filter(|(start, end)| start != end)
+                    .ok_or(DraftProblem::Window(node))?;
+                WorkflowCheck::Between {
+                    zone: *zone,
+                    start_minute,
+                    end_minute,
+                }
+            }
+            Self::Price { direction, level } => WorkflowCheck::Price {
+                direction: *direction,
+                level: parse_level(level, scales.price).ok_or(DraftProblem::Level {
+                    node,
+                    decimals: scales.price,
+                })?,
+            },
+            Self::PriceRange { low, high } => {
+                let (low, high) = parse_level(low, scales.price)
+                    .zip(parse_level(high, scales.price))
+                    .filter(|(low, high)| high.units() > low.units())
+                    .ok_or(DraftProblem::Range {
+                        node,
+                        decimals: scales.price,
+                    })?;
+                WorkflowCheck::PriceRange { low, high }
+            }
+            Self::Weekday { zone, days } => WorkflowCheck::Weekday {
+                zone: *zone,
+                days: *days,
+            },
+        })
+    }
+}
+
+/// An If's checks, of which all or any must hold.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ConditionDraft {
+    pub(super) join: WorkflowJoin,
+    /// One to [`MAXIMUM_WORKFLOW_CHECKS`] checks.
+    pub(super) checks: Vec<CheckDraft>,
+}
+
+impl ConditionDraft {
+    fn single(check: CheckDraft) -> Self {
+        Self {
+            join: WorkflowJoin::All,
+            checks: vec![check],
+        }
+    }
+}
+
+/// One check of one If block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CheckRef {
+    pub(super) node: WorkflowNodeId,
+    pub(super) index: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,13 +400,15 @@ pub(super) enum BlockDraft {
 }
 
 impl BlockDraft {
-    pub(super) const fn kind(&self) -> BlockKind {
+    /// An If is named by its first check.
+    pub(super) fn kind(&self) -> BlockKind {
         match self {
-            Self::If { condition, .. } => match condition {
-                ConditionDraft::Position(_) => BlockKind::IfPosition,
-                ConditionDraft::Between { .. } => BlockKind::IfTime,
-                ConditionDraft::Price { .. } => BlockKind::IfPrice,
-            },
+            Self::If { condition, .. } => BlockKind::If(
+                condition
+                    .checks
+                    .first()
+                    .map_or(CheckKind::Position, CheckDraft::kind),
+            ),
             Self::Action { action, .. } => match action {
                 ActionDraft::Enter {
                     side: OrderSide::Buy,
@@ -202,12 +439,10 @@ pub(super) enum RepeatDraft {
     PerSession,
 }
 
-/// The blocks the palette adds.
+/// The blocks the palette adds; an If starts with one check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BlockKind {
-    IfPosition,
-    IfTime,
-    IfPrice,
+    If(CheckKind),
     Buy,
     Sell,
     Flatten,
@@ -216,19 +451,14 @@ pub(super) enum BlockKind {
 }
 
 impl BlockKind {
-    pub(super) const CHECKS: [Self; 3] = [Self::IfPosition, Self::IfTime, Self::IfPrice];
-    pub(super) const ACTIONS: [Self; 5] = [
-        Self::Buy,
-        Self::Sell,
-        Self::Flatten,
-        Self::CancelOrders,
-        Self::LockAccount,
+    pub(super) const CHECKS: [Self; 5] = [
+        Self::If(CheckKind::Position),
+        Self::If(CheckKind::Time),
+        Self::If(CheckKind::Price),
+        Self::If(CheckKind::PriceRange),
+        Self::If(CheckKind::Weekday),
     ];
-    #[cfg(test)]
-    const ALL: [Self; 8] = [
-        Self::IfPosition,
-        Self::IfTime,
-        Self::IfPrice,
+    pub(super) const ACTIONS: [Self; 5] = [
         Self::Buy,
         Self::Sell,
         Self::Flatten,
@@ -237,8 +467,8 @@ impl BlockKind {
     ];
 
     fn block(self) -> BlockDraft {
-        let condition = |condition| BlockDraft::If {
-            condition,
+        let condition = |check: CheckKind| BlockDraft::If {
+            condition: ConditionDraft::single(check.check()),
             then: None,
             otherwise: None,
         };
@@ -250,16 +480,7 @@ impl BlockKind {
             target: String::new(),
         };
         match self {
-            Self::IfPosition => condition(ConditionDraft::Position(PositionRequirement::Flat)),
-            Self::IfTime => condition(ConditionDraft::Between {
-                zone: WorkflowTimeZone::Chicago,
-                start: "08:30".to_string(),
-                end: "15:00".to_string(),
-            }),
-            Self::IfPrice => condition(ConditionDraft::Price {
-                direction: PriceDirection::Above,
-                level: String::new(),
-            }),
+            Self::If(check) => condition(check),
             Self::Buy => action(enter(OrderSide::Buy)),
             Self::Sell => action(enter(OrderSide::Sell)),
             Self::Flatten => action(ActionDraft::Flatten),
@@ -300,7 +521,7 @@ impl WorkflowExample {
     ) -> WorkflowDraft {
         let (trigger, blocks, repeat) = self.blocks();
         let mut draft = WorkflowDraft::new(name, account_id, instrument_id);
-        draft.trigger = trigger;
+        draft.triggers = vec![trigger];
         draft.repeat = repeat;
         if repeat == RepeatDraft::PerSession {
             draft.session_maximum = "1".to_string();
@@ -322,8 +543,8 @@ impl WorkflowExample {
     /// and how often it repeats.
     fn blocks(self) -> (TriggerDraft, Vec<BlockDraft>, RepeatDraft) {
         let id = WorkflowNodeId;
-        let check = |condition, then: Option<u16>, otherwise: Option<u16>| BlockDraft::If {
-            condition,
+        let check = |check, then: Option<u16>, otherwise: Option<u16>| BlockDraft::If {
+            condition: ConditionDraft::single(check),
             then: then.map(id),
             otherwise: otherwise.map(id),
         };
@@ -346,7 +567,7 @@ impl WorkflowExample {
                 price(PriceDirection::Above),
                 vec![
                     check(
-                        ConditionDraft::Position(PositionRequirement::Flat),
+                        CheckDraft::Position(PositionRequirement::Flat),
                         Some(2),
                         None,
                     ),
@@ -358,7 +579,7 @@ impl WorkflowExample {
                 price(PriceDirection::Below),
                 vec![
                     check(
-                        ConditionDraft::Between {
+                        CheckDraft::Between {
                             zone: WorkflowTimeZone::Chicago,
                             start: "08:30".to_string(),
                             end: "11:00".to_string(),
@@ -367,7 +588,7 @@ impl WorkflowExample {
                         None,
                     ),
                     check(
-                        ConditionDraft::Position(PositionRequirement::Flat),
+                        CheckDraft::Position(PositionRequirement::Flat),
                         Some(3),
                         None,
                     ),
@@ -382,7 +603,7 @@ impl WorkflowExample {
                 },
                 vec![
                     check(
-                        ConditionDraft::Position(PositionRequirement::Open),
+                        CheckDraft::Position(PositionRequirement::Open),
                         Some(2),
                         None,
                     ),
@@ -395,7 +616,7 @@ impl WorkflowExample {
                 price(PriceDirection::Below),
                 vec![
                     check(
-                        ConditionDraft::Position(PositionRequirement::Long),
+                        CheckDraft::Position(PositionRequirement::Long),
                         Some(2),
                         Some(4),
                     ),
@@ -413,13 +634,17 @@ impl WorkflowExample {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DraftField {
     Name,
-    TriggerLevel,
-    TriggerTime,
+    /// The level of the price trigger at this index.
+    TriggerLevel(usize),
+    TriggerTime(usize),
+    TriggerMinutes(usize),
     SessionMaximum,
     Cooldown,
-    Level(WorkflowNodeId),
-    WindowStart(WorkflowNodeId),
-    WindowEnd(WorkflowNodeId),
+    Level(CheckRef),
+    WindowStart(CheckRef),
+    WindowEnd(CheckRef),
+    RangeLow(CheckRef),
+    RangeHigh(CheckRef),
     Quantity(WorkflowNodeId),
     StopTicks(WorkflowNodeId),
     TargetTicks(WorkflowNodeId),
@@ -444,13 +669,27 @@ pub(super) enum DraftProblem {
     Name,
     Account,
     Symbol,
-    TriggerLevel { decimals: u8 },
+    /// No trigger, or more than [`MAXIMUM_WORKFLOW_TRIGGERS`].
+    Triggers,
+    TriggerLevel {
+        decimals: u8,
+    },
     TriggerTime,
+    TriggerMinutes,
     NoStart,
     Unconnected(WorkflowNodeId),
     NoAction,
-    Level { node: WorkflowNodeId, decimals: u8 },
+    /// An If without a check, or with more than [`MAXIMUM_WORKFLOW_CHECKS`].
+    Checks(WorkflowNodeId),
+    Level {
+        node: WorkflowNodeId,
+        decimals: u8,
+    },
     Window(WorkflowNodeId),
+    Range {
+        node: WorkflowNodeId,
+        decimals: u8,
+    },
     Quantity(WorkflowNodeId),
     Protection(WorkflowNodeId),
     SessionMaximum,
@@ -461,12 +700,16 @@ impl DraftProblem {
     /// The block the problem belongs to, for the board to mark.
     pub(super) const fn item(self) -> Option<BoardItem> {
         match self {
-            Self::TriggerLevel { .. } | Self::TriggerTime | Self::NoStart => {
-                Some(BoardItem::Trigger)
-            }
+            Self::Triggers
+            | Self::TriggerLevel { .. }
+            | Self::TriggerTime
+            | Self::TriggerMinutes
+            | Self::NoStart => Some(BoardItem::Trigger),
             Self::Unconnected(node)
+            | Self::Checks(node)
             | Self::Level { node, .. }
             | Self::Window(node)
+            | Self::Range { node, .. }
             | Self::Quantity(node)
             | Self::Protection(node) => Some(BoardItem::Node(node)),
             Self::Name
@@ -561,7 +804,8 @@ pub(super) struct WorkflowDraft {
     pub(super) name: String,
     pub(super) account_id: Option<TradingAccountId>,
     pub(super) instrument_id: Option<InstrumentId>,
-    pub(super) trigger: TriggerDraft,
+    /// One to [`MAXIMUM_WORKFLOW_TRIGGERS`] triggers, drawn as one block.
+    pub(super) triggers: Vec<TriggerDraft>,
     pub(super) trigger_at: BoardPoint,
     pub(super) start: Option<WorkflowNodeId>,
     pub(super) nodes: Vec<NodeDraft>,
@@ -582,10 +826,7 @@ impl WorkflowDraft {
             name,
             account_id,
             instrument_id,
-            trigger: TriggerDraft::Price {
-                direction: PriceDirection::Above,
-                level: String::new(),
-            },
+            triggers: vec![TriggerDraft::of_kind(TriggerKind::Rises)],
             trigger_at: BoardPoint::default(),
             start: None,
             nodes: Vec::new(),
@@ -624,7 +865,12 @@ impl WorkflowDraft {
             name: definition.name.clone(),
             account_id: Some(definition.account_id.clone()),
             instrument_id: Some(definition.instrument_id.clone()),
-            trigger: trigger_draft(definition.trigger),
+            triggers: definition
+                .triggers
+                .iter()
+                .copied()
+                .map(trigger_draft)
+                .collect(),
             trigger_at: BoardPoint::default(),
             start: Some(definition.start),
             nodes: definition
@@ -702,7 +948,7 @@ impl WorkflowDraft {
         }
     }
 
-    /// The check of an If block, for the inspector to edit.
+    /// The checks of an If block, for the inspector to edit.
     pub(super) fn condition_mut(&mut self, id: WorkflowNodeId) -> Option<&mut ConditionDraft> {
         match &mut self.node_mut(id)?.block {
             BlockDraft::If { condition, .. } => Some(condition),
@@ -710,32 +956,84 @@ impl WorkflowDraft {
         }
     }
 
-    /// Switches the trigger between a price crossing up, down, and a time of day; a crossing
-    /// that only changes direction keeps its level.
-    pub(super) fn set_trigger_kind(&mut self, kind: TriggerKind) {
-        let direction = match kind {
-            TriggerKind::Rises => PriceDirection::Above,
-            TriggerKind::Falls => PriceDirection::Below,
-            TriggerKind::Time => {
-                if matches!(self.trigger, TriggerDraft::Price { .. }) {
-                    self.trigger = TriggerDraft::Time {
-                        zone: WorkflowTimeZone::Chicago,
-                        time: DEFAULT_TRIGGER_TIME.to_string(),
-                    };
-                }
-                return;
+    fn check(&self, check: CheckRef) -> Option<&CheckDraft> {
+        match &self.node(check.node)?.block {
+            BlockDraft::If { condition, .. } => condition.checks.get(check.index),
+            BlockDraft::Action { .. } => None,
+        }
+    }
+
+    pub(super) fn check_mut(&mut self, check: CheckRef) -> Option<&mut CheckDraft> {
+        self.condition_mut(check.node)?.checks.get_mut(check.index)
+    }
+
+    /// Adds a position check to an If; `false` when it already has the most checks.
+    pub(super) fn add_check(&mut self, node: WorkflowNodeId) -> bool {
+        match self.condition_mut(node) {
+            Some(condition) if condition.checks.len() < MAXIMUM_WORKFLOW_CHECKS => {
+                condition.checks.push(CheckKind::Position.check());
+                true
             }
+            _ => false,
+        }
+    }
+
+    /// Removes a check; an If keeps its last one.
+    pub(super) fn remove_check(&mut self, check: CheckRef) {
+        if let Some(condition) = self.condition_mut(check.node)
+            && condition.checks.len() > 1
+            && check.index < condition.checks.len()
+        {
+            condition.checks.remove(check.index);
+        }
+    }
+
+    pub(super) fn set_check_kind(&mut self, check: CheckRef, kind: CheckKind) {
+        if let Some(current) = self.check_mut(check)
+            && current.kind() != kind
+        {
+            *current = kind.check();
+        }
+    }
+
+    pub(super) fn trigger_mut(&mut self, index: usize) -> Option<&mut TriggerDraft> {
+        self.triggers.get_mut(index)
+    }
+
+    /// Adds a price trigger; `false` when the workflow already has the most triggers.
+    pub(super) fn add_trigger(&mut self) -> bool {
+        if self.triggers.len() >= MAXIMUM_WORKFLOW_TRIGGERS {
+            return false;
+        }
+        self.triggers
+            .push(TriggerDraft::of_kind(TriggerKind::Rises));
+        true
+    }
+
+    /// Removes a trigger; a workflow keeps its last one.
+    pub(super) fn remove_trigger(&mut self, index: usize) {
+        if self.triggers.len() > 1 && index < self.triggers.len() {
+            self.triggers.remove(index);
+        }
+    }
+
+    /// Changes what one trigger waits for; a crossing that only changes direction keeps its
+    /// level.
+    pub(super) fn set_trigger_kind(&mut self, index: usize, kind: TriggerKind) {
+        let Some(trigger) = self.triggers.get_mut(index) else {
+            return;
         };
-        match &mut self.trigger {
-            TriggerDraft::Price {
-                direction: current, ..
-            } => *current = direction,
-            TriggerDraft::Time { .. } => {
-                self.trigger = TriggerDraft::Price {
-                    direction,
-                    level: String::new(),
-                };
+        if trigger.kind() == kind {
+            return;
+        }
+        match (trigger, kind) {
+            (TriggerDraft::Price { direction, .. }, TriggerKind::Rises) => {
+                *direction = PriceDirection::Above;
             }
+            (TriggerDraft::Price { direction, .. }, TriggerKind::Falls) => {
+                *direction = PriceDirection::Below;
+            }
+            (trigger, kind) => *trigger = TriggerDraft::of_kind(kind),
         }
     }
 
@@ -919,8 +1217,9 @@ impl WorkflowDraft {
     }
 
     /// Changes what a block checks or does, keeping its links: an If stays an If and an
-    /// action an action. A buy turned into a sell keeps its quantity and bracket, and a lock
-    /// drops its next link because nothing runs after it.
+    /// action an action. An If changes its first check and keeps the others, a buy turned
+    /// into a sell keeps its quantity and bracket, and a lock drops its next link because
+    /// nothing runs after it.
     pub(super) fn change_block(&mut self, id: WorkflowNodeId, kind: BlockKind) {
         let Some(node) = self.node_mut(id) else {
             return;
@@ -935,7 +1234,14 @@ impl WorkflowDraft {
                     condition: replacement,
                     ..
                 },
-            ) => *condition = replacement,
+            ) => {
+                if let (Some(first), Some(check)) = (
+                    condition.checks.first_mut(),
+                    replacement.checks.into_iter().next(),
+                ) {
+                    *first = check;
+                }
+            }
             (
                 BlockDraft::Action { action, next },
                 BlockDraft::Action {
@@ -1039,22 +1345,23 @@ impl WorkflowDraft {
     pub(super) fn field(&self, field: DraftField) -> Option<&str> {
         let text = match field {
             DraftField::Name => &self.name,
-            DraftField::TriggerLevel => match &self.trigger {
-                TriggerDraft::Price { level, .. } => level,
-                TriggerDraft::Time { .. } => return None,
-            },
-            DraftField::TriggerTime => match &self.trigger {
-                TriggerDraft::Time { time, .. } => time,
-                TriggerDraft::Price { .. } => return None,
-            },
+            DraftField::TriggerLevel(index)
+            | DraftField::TriggerTime(index)
+            | DraftField::TriggerMinutes(index) => self
+                .triggers
+                .get(index)
+                .filter(|trigger| trigger.field(index) == field)?
+                .text(),
             DraftField::SessionMaximum => &self.session_maximum,
             DraftField::Cooldown => &self.cooldown,
-            DraftField::Level(id)
-            | DraftField::WindowStart(id)
-            | DraftField::WindowEnd(id)
-            | DraftField::Quantity(id)
-            | DraftField::StopTicks(id)
-            | DraftField::TargetTicks(id) => return self.node(id)?.field(field),
+            DraftField::Level(check)
+            | DraftField::WindowStart(check)
+            | DraftField::WindowEnd(check)
+            | DraftField::RangeLow(check)
+            | DraftField::RangeHigh(check) => return self.check(check)?.text(field),
+            DraftField::Quantity(id) | DraftField::StopTicks(id) | DraftField::TargetTicks(id) => {
+                return self.node(id)?.field(field);
+            }
         };
         Some(text)
     }
@@ -1063,22 +1370,23 @@ impl WorkflowDraft {
     pub(super) fn set_field(&mut self, field: DraftField, value: String) -> bool {
         let slot = match field {
             DraftField::Name => Some(&mut self.name),
-            DraftField::TriggerLevel => match &mut self.trigger {
-                TriggerDraft::Price { level, .. } => Some(level),
-                TriggerDraft::Time { .. } => None,
-            },
-            DraftField::TriggerTime => match &mut self.trigger {
-                TriggerDraft::Time { time, .. } => Some(time),
-                TriggerDraft::Price { .. } => None,
-            },
+            DraftField::TriggerLevel(index)
+            | DraftField::TriggerTime(index)
+            | DraftField::TriggerMinutes(index) => self
+                .triggers
+                .get_mut(index)
+                .filter(|trigger| trigger.field(index) == field)
+                .map(TriggerDraft::text_mut),
             DraftField::SessionMaximum => Some(&mut self.session_maximum),
             DraftField::Cooldown => Some(&mut self.cooldown),
-            DraftField::Level(id)
-            | DraftField::WindowStart(id)
-            | DraftField::WindowEnd(id)
-            | DraftField::Quantity(id)
-            | DraftField::StopTicks(id)
-            | DraftField::TargetTicks(id) => {
+            DraftField::Level(check)
+            | DraftField::WindowStart(check)
+            | DraftField::WindowEnd(check)
+            | DraftField::RangeLow(check)
+            | DraftField::RangeHigh(check) => self
+                .check_mut(check)
+                .and_then(|check| check.text_mut(field)),
+            DraftField::Quantity(id) | DraftField::StopTicks(id) | DraftField::TargetTicks(id) => {
                 self.node_mut(id).and_then(|node| node.field_mut(field))
             }
         };
@@ -1119,7 +1427,14 @@ impl WorkflowDraft {
             .clone()
             .zip(scales)
             .ok_or(DraftProblem::Symbol)?;
-        let trigger = self.trigger.parse(scales)?;
+        if self.triggers.is_empty() || self.triggers.len() > MAXIMUM_WORKFLOW_TRIGGERS {
+            return Err(DraftProblem::Triggers);
+        }
+        let triggers = self
+            .triggers
+            .iter()
+            .map(|trigger| trigger.parse(scales))
+            .collect::<Result<Vec<_>, DraftProblem>>()?;
         let start = self.start.ok_or(DraftProblem::NoStart)?;
         let reachable = self.reachable_from(start);
         if let Some(node) = self.nodes.iter().find(|node| !reachable.contains(&node.id)) {
@@ -1147,7 +1462,7 @@ impl WorkflowDraft {
             name: name.to_string(),
             account_id,
             instrument_id,
-            trigger,
+            triggers,
             start,
             nodes,
             limits: self.limits()?,
@@ -1196,6 +1511,11 @@ impl TriggerDraft {
                 zone: *zone,
                 minute_of_day: parse_clock(time).ok_or(DraftProblem::TriggerTime)?,
             }),
+            Self::Every { minutes } => WorkflowTrigger::Every {
+                minutes: parse_bounded(minutes, 1, u32::from(MINUTES_PER_DAY))
+                    .and_then(|minutes| u16::try_from(minutes).ok())
+                    .ok_or(DraftProblem::TriggerMinutes)?,
+            },
         })
     }
 }
@@ -1229,17 +1549,17 @@ impl NodeDraft {
     /// The text fields this block shows in the inspector.
     pub(super) fn fields(&self) -> Vec<DraftField> {
         match &self.block {
-            BlockDraft::If {
-                condition: ConditionDraft::Price { .. },
-                ..
-            } => vec![DraftField::Level(self.id)],
-            BlockDraft::If {
-                condition: ConditionDraft::Between { .. },
-                ..
-            } => vec![
-                DraftField::WindowStart(self.id),
-                DraftField::WindowEnd(self.id),
-            ],
+            BlockDraft::If { condition, .. } => condition
+                .checks
+                .iter()
+                .enumerate()
+                .flat_map(|(index, check)| {
+                    check.fields(CheckRef {
+                        node: self.id,
+                        index,
+                    })
+                })
+                .collect(),
             BlockDraft::Action {
                 action: ActionDraft::Enter { .. },
                 ..
@@ -1248,33 +1568,13 @@ impl NodeDraft {
                 DraftField::StopTicks(self.id),
                 DraftField::TargetTicks(self.id),
             ],
-            BlockDraft::If { .. } | BlockDraft::Action { .. } => Vec::new(),
+            BlockDraft::Action { .. } => Vec::new(),
         }
     }
 
+    /// An entry's quantity and bracket text.
     fn field(&self, field: DraftField) -> Option<&str> {
         let text = match (&self.block, field) {
-            (
-                BlockDraft::If {
-                    condition: ConditionDraft::Price { level, .. },
-                    ..
-                },
-                DraftField::Level(_),
-            ) => level,
-            (
-                BlockDraft::If {
-                    condition: ConditionDraft::Between { start, .. },
-                    ..
-                },
-                DraftField::WindowStart(_),
-            ) => start,
-            (
-                BlockDraft::If {
-                    condition: ConditionDraft::Between { end, .. },
-                    ..
-                },
-                DraftField::WindowEnd(_),
-            ) => end,
             (
                 BlockDraft::Action {
                     action:
@@ -1300,24 +1600,6 @@ impl NodeDraft {
 
     fn field_mut(&mut self, field: DraftField) -> Option<&mut String> {
         match (&mut self.block, field) {
-            (
-                BlockDraft::If {
-                    condition: ConditionDraft::Price { level, .. },
-                    ..
-                },
-                DraftField::Level(_),
-            ) => Some(level),
-            (
-                BlockDraft::If {
-                    condition: ConditionDraft::Between { start, end, .. },
-                    ..
-                },
-                DraftField::WindowStart(_) | DraftField::WindowEnd(_),
-            ) => Some(if matches!(field, DraftField::WindowStart(_)) {
-                start
-            } else {
-                end
-            }),
             (
                 BlockDraft::Action {
                     action:
@@ -1364,27 +1646,12 @@ impl ConditionDraft {
         node: WorkflowNodeId,
         scales: InstrumentScales,
     ) -> Result<WorkflowCondition, DraftProblem> {
-        Ok(match self {
-            Self::Position(requirement) => WorkflowCondition::Position(*requirement),
-            Self::Between { zone, start, end } => {
-                let (start_minute, end_minute) = parse_clock(start)
-                    .zip(parse_clock(end))
-                    .filter(|(start, end)| start != end)
-                    .ok_or(DraftProblem::Window(node))?;
-                WorkflowCondition::Between {
-                    zone: *zone,
-                    start_minute,
-                    end_minute,
-                }
-            }
-            Self::Price { direction, level } => WorkflowCondition::Price {
-                direction: *direction,
-                level: parse_level(level, scales.price).ok_or(DraftProblem::Level {
-                    node,
-                    decimals: scales.price,
-                })?,
-            },
-        })
+        let checks = self
+            .checks
+            .iter()
+            .map(|check| check.parse(node, scales))
+            .collect::<Result<Vec<_>, DraftProblem>>()?;
+        WorkflowCondition::joined(self.join, &checks).ok_or(DraftProblem::Checks(node))
     }
 }
 
@@ -1424,6 +1691,33 @@ fn trigger_draft(trigger: WorkflowTrigger) -> TriggerDraft {
             zone: time.zone,
             time: clock_text(time.minute_of_day),
         },
+        WorkflowTrigger::Every { minutes } => TriggerDraft::Every {
+            minutes: minutes.to_string(),
+        },
+    }
+}
+
+fn check_draft(check: WorkflowCheck) -> CheckDraft {
+    match check {
+        WorkflowCheck::Position(requirement) => CheckDraft::Position(requirement),
+        WorkflowCheck::Between {
+            zone,
+            start_minute,
+            end_minute,
+        } => CheckDraft::Between {
+            zone,
+            start: clock_text(start_minute),
+            end: clock_text(end_minute),
+        },
+        WorkflowCheck::Price { direction, level } => CheckDraft::Price {
+            direction,
+            level: decimal_text(level),
+        },
+        WorkflowCheck::PriceRange { low, high } => CheckDraft::PriceRange {
+            low: decimal_text(low),
+            high: decimal_text(high),
+        },
+        WorkflowCheck::Weekday { zone, days } => CheckDraft::Weekday { zone, days },
     }
 }
 
@@ -1434,21 +1728,9 @@ fn block_draft(step: WorkflowStep) -> BlockDraft {
             then,
             otherwise,
         } => BlockDraft::If {
-            condition: match condition {
-                WorkflowCondition::Position(requirement) => ConditionDraft::Position(requirement),
-                WorkflowCondition::Between {
-                    zone,
-                    start_minute,
-                    end_minute,
-                } => ConditionDraft::Between {
-                    zone,
-                    start: clock_text(start_minute),
-                    end: clock_text(end_minute),
-                },
-                WorkflowCondition::Price { direction, level } => ConditionDraft::Price {
-                    direction,
-                    level: decimal_text(level),
-                },
+            condition: ConditionDraft {
+                join: condition.join(),
+                checks: condition.checks().map(check_draft).collect(),
             },
             then,
             otherwise,
@@ -1564,7 +1846,7 @@ mod tests {
             Some(TradingAccountId::try_new("practice-1").expect("account")),
             Some(InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("instrument")),
         );
-        assert!(draft.set_field(DraftField::TriggerLevel, "6012.25".to_string()));
+        assert!(draft.set_field(DraftField::TriggerLevel(0), "6012.25".to_string()));
         draft
     }
 
@@ -1577,7 +1859,7 @@ mod tests {
     ) {
         let mut draft = draft();
         let check = draft
-            .add_block(BlockKind::IfPosition, Some(BoardItem::Trigger))
+            .add_block(BlockKind::If(CheckKind::Position), Some(BoardItem::Trigger))
             .expect("if");
         let buy = draft
             .add_block(BlockKind::Buy, Some(BoardItem::Node(check)))
@@ -1604,11 +1886,11 @@ mod tests {
         assert_eq!(definition.name, "ES breakout");
         assert_eq!(definition.start, check);
         assert_eq!(
-            definition.trigger,
-            WorkflowTrigger::PriceCrosses {
+            definition.triggers,
+            vec![WorkflowTrigger::PriceCrosses {
                 direction: PriceDirection::Above,
                 level: FixedPoint::try_new(601_225, 2).expect("level"),
-            }
+            }]
         );
         assert_eq!(
             definition.nodes,
@@ -1616,7 +1898,9 @@ mod tests {
                 WorkflowNode {
                     id: check,
                     step: WorkflowStep::If {
-                        condition: WorkflowCondition::Position(PositionRequirement::Flat),
+                        condition: WorkflowCondition::single(WorkflowCheck::Position(
+                            PositionRequirement::Flat,
+                        )),
                         then: Some(buy),
                         otherwise: Some(close),
                     },
@@ -1692,21 +1976,123 @@ mod tests {
         draft.change_block(buy, BlockKind::Sell);
         assert_eq!(draft.node(buy).expect("sell").block.kind(), BlockKind::Sell);
         assert_eq!(draft.field(DraftField::StopTicks(buy)), Some("8"));
-        draft.change_block(check, BlockKind::IfTime);
+        draft.change_block(check, BlockKind::If(CheckKind::Time));
         assert_eq!(draft.link(OutputPort::Then(check)), Some(buy));
         assert_eq!(draft.link(OutputPort::Otherwise(check)), Some(close));
         // An If never becomes an action.
         draft.change_block(check, BlockKind::Flatten);
         assert_eq!(
             draft.node(check).expect("if").block.kind(),
-            BlockKind::IfTime
+            BlockKind::If(CheckKind::Time)
         );
         assert_eq!(draft.connect(OutputPort::Next(close), buy), Ok(()));
         draft.change_block(close, BlockKind::LockAccount);
         assert_eq!(draft.link(OutputPort::Next(close)), None);
-        for kind in BlockKind::ALL {
+        for kind in BlockKind::CHECKS.into_iter().chain(BlockKind::ACTIONS) {
             assert_eq!(kind.block().kind(), kind);
         }
+    }
+
+    #[test]
+    fn several_triggers_and_joined_checks_build_and_reopen() {
+        let (mut draft, check, _, _) = branching();
+        assert!(draft.add_trigger());
+        draft.set_trigger_kind(1, TriggerKind::Every);
+        assert_eq!(draft.field(DraftField::TriggerMinutes(1)), Some("5"));
+        assert_eq!(draft.field(DraftField::TriggerLevel(1)), None);
+        assert!(draft.add_trigger());
+        draft.set_trigger_kind(2, TriggerKind::Time);
+        assert!(draft.add_trigger());
+        assert!(!draft.add_trigger(), "at most four triggers");
+        draft.remove_trigger(3);
+        assert!(draft.set_field(DraftField::TriggerMinutes(1), "15".to_string()));
+        let range = CheckRef {
+            node: check,
+            index: 1,
+        };
+        let weekday = CheckRef {
+            node: check,
+            index: 2,
+        };
+        assert!(draft.add_check(check));
+        draft.set_check_kind(range, CheckKind::PriceRange);
+        assert!(draft.add_check(check));
+        draft.set_check_kind(weekday, CheckKind::Weekday);
+        if let Some(condition) = draft.condition_mut(check) {
+            condition.join = WorkflowJoin::Any;
+        }
+        assert_eq!(
+            draft.build("wf-1".to_string(), 1, Some(SCALES)).err(),
+            Some(DraftProblem::Range {
+                node: check,
+                decimals: 2
+            })
+        );
+        assert!(draft.set_field(DraftField::RangeLow(range), "6000".to_string()));
+        assert!(draft.set_field(DraftField::RangeHigh(range), "5990".to_string()));
+        assert!(
+            draft.build("wf-1".to_string(), 1, Some(SCALES)).is_err(),
+            "the high must be above the low"
+        );
+        assert!(draft.set_field(DraftField::RangeHigh(range), "6010.5".to_string()));
+        if let Some(check) = draft.check_mut(weekday) {
+            check.toggle_day(4);
+            for day in 0..4 {
+                check.toggle_day(day);
+            }
+        }
+        // The last day stays: a weekday check never names no day.
+        assert_eq!(
+            draft.check_mut(weekday).cloned(),
+            Some(CheckDraft::Weekday {
+                zone: WorkflowTimeZone::Chicago,
+                days: WorkflowWeekdays::from_bits(0b1000).expect("thursday"),
+            })
+        );
+        let (definition, layout) = draft
+            .build("wf-1".to_string(), 2, Some(SCALES))
+            .expect("valid");
+        assert_eq!(definition.validate(), Ok(()));
+        assert_eq!(definition.triggers.len(), 3);
+        assert_eq!(
+            definition.triggers[1],
+            WorkflowTrigger::Every { minutes: 15 }
+        );
+        let condition = match definition.node(check).map(|node| node.step) {
+            Some(WorkflowStep::If { condition, .. }) => condition,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(condition.join(), WorkflowJoin::Any);
+        assert_eq!(
+            condition.checks().nth(1),
+            Some(WorkflowCheck::PriceRange {
+                low: FixedPoint::try_new(600_000, 2).expect("low"),
+                high: FixedPoint::try_new(601_050, 2).expect("high"),
+            })
+        );
+        draft.remove_check(range);
+        assert_eq!(
+            draft.node(check).expect("if").fields(),
+            Vec::<DraftField>::new(),
+            "the range's fields leave with it"
+        );
+        let view = WorkflowView {
+            definition: definition.clone(),
+            layout,
+            state: WorkflowState::Paused,
+            session_firings: 0,
+            total_firings: 0,
+            last_attempt_unix_nanos: None,
+            next_due_unix_nanos: None,
+            blockers: Vec::new(),
+            recent_firings: Vec::new(),
+        };
+        assert_eq!(
+            WorkflowDraft::from_view(&view)
+                .build("wf-1".to_string(), 2, Some(SCALES))
+                .map(|(definition, _)| definition),
+            Ok(definition)
+        );
     }
 
     #[test]
@@ -1742,7 +2128,7 @@ mod tests {
         );
         assert_eq!(
             problem(&|draft| {
-                draft.set_field(DraftField::TriggerLevel, "6012.255".to_string());
+                draft.set_field(DraftField::TriggerLevel(0), "6012.255".to_string());
             }),
             DraftProblem::TriggerLevel { decimals: 2 }
         );
@@ -1846,13 +2232,13 @@ mod tests {
                 Some(InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("instrument")),
             );
             let unset = draft.build("wf-1".to_string(), 1, Some(SCALES));
-            if matches!(draft.trigger, TriggerDraft::Price { .. }) {
+            if matches!(draft.triggers[0], TriggerDraft::Price { .. }) {
                 assert_eq!(
                     unset.err(),
                     Some(DraftProblem::TriggerLevel { decimals: 2 }),
                     "{example:?}"
                 );
-                assert!(draft.set_field(DraftField::TriggerLevel, "6012.25".to_string()));
+                assert!(draft.set_field(DraftField::TriggerLevel(0), "6012.25".to_string()));
             }
             let (definition, layout) = draft
                 .build("wf-1".to_string(), 1, Some(SCALES))

@@ -8,7 +8,7 @@ use aeris_trading::{
     Fill, Order, OrderEvent, OrderEventKind, OrderEventReason, OrderId, TradingAccountId,
 };
 use aeris_trading_runtime::{
-    SubscriptionUpdate, TradingInstrument, TradingSubscription, WorkingSet,
+    SubscriptionUpdate, TradingInstrument, TradingSubscription, WorkflowFiring, WorkingSet,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +26,11 @@ pub(super) enum TradingAnnouncement {
         /// The event's order, taken from the previous view when the event ended it and it
         /// left the published open orders.
         order: Option<Box<AnnouncedOrder>>,
+    },
+    /// A workflow firing the owner recorded, under the workflow's name.
+    Workflow {
+        name: String,
+        firing: Box<WorkflowFiring>,
     },
 }
 
@@ -529,6 +534,18 @@ impl TradingStore {
                 });
             }
         }
+        for workflow in &next.workflows {
+            let definition = &workflow.definition;
+            for firing in workflow.recent_firings.iter().rev() {
+                let id = format!("workflow:{}:{}", definition.workflow_id, firing.sequence);
+                if self.remember_announcement(id) && had_current {
+                    self.announcements.push(TradingAnnouncement::Workflow {
+                        name: definition.name.clone(),
+                        firing: Box::new(firing.clone()),
+                    });
+                }
+            }
+        }
     }
 
     fn remember_announcement(&mut self, id: String) -> bool {
@@ -729,6 +746,71 @@ mod tests {
                 }),
             },
         }
+    }
+
+    #[test]
+    fn each_new_workflow_firing_is_announced_once() {
+        use super::super::workflow_board::{InstrumentScales, WorkflowExample};
+        use aeris_trading_runtime::{WorkflowFiringOutcome, WorkflowState, WorkflowView};
+        let (definition, layout) = WorkflowExample::FlatBeforeClose
+            .draft(
+                "Flat".to_string(),
+                Some(TradingAccountId::try_new("practice-1").expect("account")),
+                Some(InstrumentId::try_new("instrument:fixture:A").expect("instrument")),
+            )
+            .build(
+                "wf-1".to_string(),
+                1,
+                Some(InstrumentScales {
+                    price: 2,
+                    quantity: 0,
+                }),
+            )
+            .expect("the example builds");
+        let firing = |sequence| WorkflowFiring {
+            sequence,
+            revision: 1,
+            fired_unix_nanos: 5,
+            outcome: WorkflowFiringOutcome::Blocked(Vec::new()),
+        };
+        let with_firings = |revision, recent_firings| {
+            let mut publication = update(revision, false);
+            publication.event.working_set.workflows = vec![WorkflowView {
+                definition: definition.clone(),
+                layout: layout.clone(),
+                state: WorkflowState::Armed,
+                session_firings: 0,
+                total_firings: 0,
+                last_attempt_unix_nanos: None,
+                next_due_unix_nanos: None,
+                blockers: Vec::new(),
+                recent_firings,
+            }];
+            publication
+        };
+        let mut store = TradingStore::default();
+        store.apply_test_publication(with_firings(2, vec![firing(1)]));
+        assert_eq!(
+            store.take_announcements(),
+            [],
+            "firings in the first view are history"
+        );
+        store.apply_test_publication(with_firings(3, vec![firing(3), firing(2), firing(1)]));
+        let sequences: Vec<_> = store
+            .take_announcements()
+            .into_iter()
+            .map(|announcement| match announcement {
+                TradingAnnouncement::Workflow { name, firing } => (name, firing.sequence),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            sequences,
+            [("Flat".to_string(), 2), ("Flat".to_string(), 3)],
+            "new firings are announced oldest first"
+        );
+        store.apply_test_publication(with_firings(4, vec![firing(3), firing(2), firing(1)]));
+        assert_eq!(store.take_announcements(), []);
     }
 
     #[test]

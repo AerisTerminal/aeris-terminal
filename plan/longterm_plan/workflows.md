@@ -16,12 +16,12 @@ Status as of 2026-11-02.
 - **The engine decides, deterministically.** Only `trading_runtime::workflow` evaluates an armed
   workflow, on the owner's verified quotes and injected clock. Its orders go through the same
   admission, risk and venue paths as a manual order. Nothing remote evaluates or fires a workflow.
-- **AI only writes blocks.** A model may translate plain language into blocks from the closed set
-  (W3). It never decides a trade, places an order or produces the readback the user accepts.
+- **No AI.** The user builds every workflow from the closed set of blocks. Indicators are engine
+  calculations on the owner's own market data, never a model's output.
 - **Venue-neutral.** Blocks name an account and an instrument, never a provider. A workflow that
   works on a practice account works unchanged on a broker account.
-- **Bounded.** At most 64 workflows, 32 blocks each, 50 firings a session, and a bounded firing
-  history per workflow.
+- **Bounded.** At most 64 workflows, 32 blocks each, four triggers each, four checks per If, 50
+  firings a session, and a bounded firing history per workflow.
 
 ## Checkpoints
 
@@ -29,10 +29,11 @@ Status as of 2026-11-02.
 | --- | --- | --- |
 | W1 | Engine: graph model, store, owner commands and evaluation | **Complete** |
 | W2 | Desktop Workflows page: board, inspector, list | **In progress** |
-| W3 | AI authoring | Open |
+| W3 | Several triggers, joined checks and firing notices | **In progress** |
 | W4 | Position management and order-flow blocks | Open |
-| W5 | Simulation before arming | Open; needs T6 |
+| W5 | Simulation before arming | Open |
 | W6 | Stock and options venues | Open; needs a PF11 broker |
+| W7 | Indicator triggers and checks (EMA, SMA) | Open |
 
 ### W1 — Engine
 
@@ -73,33 +74,57 @@ Status as of 2026-11-02.
 - [x] Four example workflows open as unsaved drafts with prices left to set: breakout buy,
       morning dip buy, flat before the close, exit and lock.
 - [ ] The page exercised by hand on the running app with a Hyperliquid practice account.
+- [ ] Symbol search on the page, so a workflow can name any symbol the catalog offers, not only
+      one already open in a chart. Needs its own catalog-search consumer and a bounded draft
+      instrument interest in the trading owner so the symbol's terms register.
 - [x] `workflow_probe` updated to the graph API, with a check that moving blocks keeps the armed
       revision; run live on the Hyperliquid BTC practice feed (below).
 - [x] Probe rerun from a clean, committed source tree (`2b5ee13f`).
 
-### W3 — AI authoring
+### W3 — Several triggers, joined checks and firing notices
 
-- [ ] Plain language to blocks through the user's own key or a local model; the prompt carries no
-      exchange prices or account data.
-- [ ] Validation errors go back to the model at most three times; the result opens as an unsaved
-      draft on the board for the user to review and save.
-- [ ] The readback the user accepts comes from the blocks, never from the model.
+AI authoring, the former W3, is dropped: workflows are built only from blocks.
+
+- [x] Up to four triggers per workflow; any of them fires it, and triggers due at the same moment
+      fire it once. New trigger: every N minutes, counted from midnight UTC.
+- [x] An If holds up to four checks joined by All or Any. New checks: price range (bid at or above
+      the low and ask at or below the high) and day of week in Chicago or UTC.
+- [x] V31 stores the trigger list and joined conditions in place; V31 has not been released, so
+      no new migration is needed.
+- [x] Board and inspector: several trigger sections, numbered checks with All/Any, range inputs,
+      weekday toggles, multi-line card summaries; strings in all ten languages.
+- [x] The workflow list and the inspector fold away from toolbar buttons to give the board the
+      width.
+- [x] Each new firing shows a toast on the workspace with the workflow's name and what it did,
+      announced once through the desktop trading store.
+- [x] `workflow_probe` timed close uses a time-of-day trigger and an every-minute trigger due at
+      the same minute, joined with a weekday check, and checks it fires once.
 
 ### W4 — Position management and order flow
 
 - [ ] Time in trade, profit in ticks or currency, pullback from the best price.
-- [ ] Move stop and partial exit actions.
-- [ ] Delta and footprint conditions over the trade tape (PF5).
+- [ ] Position opened and position closed triggers.
+- [ ] Move stop and partial exit actions; break-even and trailing-stop rules on entries.
+- [ ] Quantity by fixed size or by risk; repeat without a limit, with re-arming.
+- [ ] Trade prints into the trading owner through a bounded queue; delta and volume conditions
+      over the trade tape (PF5).
 - [ ] Buying power and margin checks once PF2 projects them.
 
 ### W5 — Simulation
 
-- [ ] Run a workflow over history and recorded sessions (T6) and show each firing it would have
-      made before the user arms it.
+- [ ] Run a workflow over the chart's candle history and show each firing it would have made
+      before the user arms it, through the same evaluation path the owner uses.
+- [ ] Recorded sessions (T6) once they exist.
 
 ### W6 — More venues
 
 - [ ] A stock and options broker on PF11, so the same workflows reach stock and options accounts.
+
+### W7 — Indicators
+
+- [ ] Completed candles into the trading owner for armed workflows that need them.
+- [ ] Fixed-point EMA and SMA in the engine, tested against the chart's indicator values.
+- [ ] Moving-average cross triggers and price-against-average checks.
 
 ## Acceptance
 
@@ -116,3 +141,4 @@ the user saves and arms the new revision.
 | 2026-11-02 | W2 | `workflow_probe` on the graph API, live Hyperliquid BTC practice | All 10 behavior checks passed (breakout fired on a live cross and filled at the owner ask with an active bracket; layout move kept revision 1 armed; timed close flattened 2 ms after the minute; restart did not refire; delete); `source_clean` failed on the uncommitted tree |
 | 2026-11-02 | W2 | `workflow_probe` rerun on `2b5ee13f` | All 11 checks passed with a clean source tree; entry filled at the owner ask with an active bracket, timed close 1 ms after the minute |
 | 2026-11-02 | W2 | Card-style blocks, dotted board, fit-to-view, palette in the sidebar, four examples | Examples opened and inspected on the running app; fmt, workspace clippy, naming check, workspace tests |
+| 2026-11-02 | W3 | Up to four triggers, every-N-minutes trigger, All/Any checks, price range and weekday checks, foldable list and inspector, firing toasts; AI authoring dropped | fmt, workspace clippy, naming check, 3,162 workspace tests; panels folded and restored on the running app; `workflow_probe` live on Hyperliquid BTC practice: all 10 behavior checks passed (time and every-minute triggers at the same minute fired once, 8 ms after the minute); `source_clean` failed on the uncommitted tree |

@@ -24,11 +24,11 @@ use aeris_trading::{
 use aeris_trading_runtime::{
     BracketViewStatus, CreatePracticeAccount, ExecutionPolicy, HistoryQuery, PositionRequirement,
     PriceDirection, TradingRetention, TradingService, TradingServiceConfig, WorkflowAction,
-    WorkflowActionResult, WorkflowClockTime, WorkflowCondition, WorkflowDefinition, WorkflowError,
-    WorkflowFiringOutcome, WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId,
-    WorkflowNodePosition, WorkflowProtection, WorkflowRepeat, WorkflowState, WorkflowStep,
-    WorkflowStepOutcome, WorkflowTimeZone, WorkflowTrigger, WorkflowView, WorkingSet,
-    clock::SystemClock,
+    WorkflowActionResult, WorkflowCheck, WorkflowClockTime, WorkflowCondition, WorkflowDefinition,
+    WorkflowError, WorkflowFiringOutcome, WorkflowJoin, WorkflowLayout, WorkflowLimits,
+    WorkflowNode, WorkflowNodeId, WorkflowNodePosition, WorkflowProtection, WorkflowRepeat,
+    WorkflowState, WorkflowStep, WorkflowStepOutcome, WorkflowTimeZone, WorkflowTrigger,
+    WorkflowView, WorkflowWeekdays, WorkingSet, clock::SystemClock,
 };
 use serde_json::json;
 
@@ -344,7 +344,7 @@ impl Probe<'_> {
             name: name.to_string(),
             account_id: self.account.id.clone(),
             instrument_id: self.instrument.clone(),
-            trigger,
+            triggers: vec![trigger],
             start: node(0)?,
             nodes,
             limits: WorkflowLimits {
@@ -364,7 +364,7 @@ impl Probe<'_> {
                 direction: PriceDirection::Above,
                 level,
             },
-            WorkflowCondition::Position(PositionRequirement::Flat),
+            WorkflowCondition::single(WorkflowCheck::Position(PositionRequirement::Flat)),
             &[WorkflowAction::Enter {
                 side: OrderSide::Buy,
                 quantity: fixed(QUANTITY)?,
@@ -562,32 +562,59 @@ impl Probe<'_> {
         })
     }
 
-    /// Arms a close at the next UTC minute and checks it flattens and cancels the bracket.
+    /// Closes a long at `minute_of_day` UTC and on every minute, with the position check
+    /// joined to a weekday check that holds on every day, as the board builds it.
+    fn timed_close(&self, minute_of_day: u16) -> ProbeResult<WorkflowDefinition> {
+        let mut close = self.definition(
+            CLOSE_ID,
+            1,
+            "Probe timed close",
+            WorkflowTrigger::TimeOfDay(WorkflowClockTime {
+                zone: WorkflowTimeZone::Utc,
+                minute_of_day,
+            }),
+            WorkflowCondition::joined(
+                WorkflowJoin::All,
+                &[
+                    WorkflowCheck::Position(PositionRequirement::Long),
+                    WorkflowCheck::Weekday {
+                        zone: WorkflowTimeZone::Utc,
+                        days: WorkflowWeekdays::from_bits(0b111_1111).ok_or_else(|| {
+                            ProbeError::Runtime("every day is a weekday set".into())
+                        })?,
+                    },
+                ],
+            )
+            .ok_or_else(|| ProbeError::Runtime("two checks join".into()))?,
+            &[WorkflowAction::Flatten, WorkflowAction::CancelOrders],
+        )?;
+        close.triggers.push(WorkflowTrigger::Every { minutes: 1 });
+        Ok(close)
+    }
+
+    /// Arms a close at the next UTC minute, triggered both by that time of day and by an
+    /// every-minute trigger due at the same moment, and checks it fires once, flattens and
+    /// cancels the bracket.
     fn time_of_day_closes_the_position(&mut self, entry: &Entry) -> ProbeResult<()> {
-        let now = unix_nanos_now();
-        let ahead = if now.rem_euclid(NANOS_PER_MINUTE) > 45 * NANOS_PER_SECOND {
-            2
-        } else {
-            1
-        };
-        let due_minute = now.div_euclid(NANOS_PER_MINUTE) + ahead;
+        let mut now = unix_nanos_now();
+        // Late in a minute, wait for the next one so the every-minute trigger is not due
+        // before the time of day.
+        let into_minute = now.rem_euclid(NANOS_PER_MINUTE);
+        if into_minute > 45 * NANOS_PER_SECOND {
+            std::thread::sleep(Duration::from_nanos(
+                u64::try_from(NANOS_PER_MINUTE - into_minute + NANOS_PER_SECOND)
+                    .unwrap_or_default(),
+            ));
+            now = unix_nanos_now();
+        }
+        let due_minute = now.div_euclid(NANOS_PER_MINUTE) + 1;
         let due = due_minute * NANOS_PER_MINUTE;
         let minute_of_day = u16::try_from(due_minute.rem_euclid(MINUTES_PER_DAY))
             .map_err(|error| ProbeError::Runtime(error.to_string()))?;
-        owner(self.trading.register_workflow(
-            self.definition(
-                CLOSE_ID,
-                1,
-                "Probe timed close",
-                WorkflowTrigger::TimeOfDay(WorkflowClockTime {
-                    zone: WorkflowTimeZone::Utc,
-                    minute_of_day,
-                }),
-                WorkflowCondition::Position(PositionRequirement::Long),
-                &[WorkflowAction::Flatten, WorkflowAction::CancelOrders],
-            )?,
-            WorkflowLayout::default(),
-        ))?;
+        owner(
+            self.trading
+                .register_workflow(self.timed_close(minute_of_day)?, WorkflowLayout::default()),
+        )?;
         let armed = owner(self.trading.arm_workflow(CLOSE_ID.to_string(), 1))?;
         self.evidence.check(
             "time_workflow_due_at_next_minute",
@@ -638,12 +665,14 @@ impl Probe<'_> {
             "time_workflow_flattened_and_cancelled",
             closed
                 && fired.state == WorkflowState::Completed
+                && fired.total_firings == 1
                 && (due..due + TIME_TRIGGER_TOLERANCE).contains(&firing.fired_unix_nanos)
                 && position == 0
                 && open_orders == 0
                 && !bracket_active,
             json!({
                 "outcome": format!("{:?}", firing.outcome),
+                "total_firings": fired.total_firings,
                 "fired_late_ms": (firing.fired_unix_nanos - due) / 1_000_000,
                 "position_units": position,
                 "open_orders": open_orders,
