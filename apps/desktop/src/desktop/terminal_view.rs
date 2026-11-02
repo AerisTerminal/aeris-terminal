@@ -545,6 +545,7 @@ impl TerminalApp {
             WorkspaceMarketArea {
                 terminal,
                 trading_store: self.services.trading_store(),
+                workflows: &self.pages.workflows,
                 workspace: self.tabs.active(),
                 active_surface: active,
                 expanded_drawing_toolbar: self

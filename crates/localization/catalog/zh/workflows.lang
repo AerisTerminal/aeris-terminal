@@ -268,3 +268,14 @@ problem_profit_ticks = 请输入 -{maximum} 到 {maximum} 之间且不为 0 的�
 problem_amount = 请输入最多 {decimals} 位小数的金额；亏损为负
 problem_pullback = 请输入 1 到 {maximum} 之间的整数跳数
 blocker_position_unknown = 该持仓在 Aeris 之外开立，入场价未知
+
+# 下单面板
+ticket_no_account = 选择一个账户以查看其工作流。
+ticket_empty = 此账户在该品种上还没有工作流。
+ticket_edit = 编辑
+ticket_edit_aria = 在工作流页面打开 {name}
+ticket_status = {state} · {firing}
+ticket_last_fired = 上次触发 {time}：{outcome}
+ticket_reason_finished = 此工作流已结束。请在工作流页面保存新版本以再次运行。
+ticket_reason_unsaved = 启用前请先保存工作流页面中未保存的更改。
+ticket_reason_busy = 正在等待上一条命令完成。

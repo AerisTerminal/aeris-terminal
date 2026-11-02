@@ -43,6 +43,48 @@ pub(super) struct WorkflowsPage {
     pub(super) board_size: Rc<Cell<BoardPoint>>,
     /// The inspector's search for the workflow's market.
     pub(super) markets: WorkflowMarketSearch,
+    /// Arms and pauses in flight by command token, from the page or an order ticket; at
+    /// most one per workflow, since a busy workflow takes no second command.
+    running: BTreeMap<u64, WorkflowRun>,
+}
+
+/// An arm or pause in flight.
+struct WorkflowRun {
+    workflow_id: String,
+    /// The reservation of the order ticket that sent it; the page shows its own replies.
+    request: Option<aeris_desktop::trading::RequestId>,
+}
+
+/// Where an arm or pause was pressed: the page answers in its toolbar, an order ticket on
+/// its pane's trading feedback line.
+pub(super) enum WorkflowRunOrigin {
+    Page,
+    Ticket(aeris_desktop::trading::TradingPaneToken),
+}
+
+impl WorkflowsPage {
+    /// Whether a command on `workflow_id` is in flight, from the page or an order ticket.
+    pub(super) fn is_busy(&self, workflow_id: &str) -> bool {
+        self.running
+            .values()
+            .any(|run| run.workflow_id == workflow_id)
+            || self.open.as_ref().is_some_and(|open| {
+                open.pending.is_some()
+                    && open
+                        .draft
+                        .saved
+                        .as_ref()
+                        .is_some_and(|saved| saved.workflow_id == workflow_id)
+            })
+    }
+
+    /// The saved workflow the page has open with changes not saved yet.
+    pub(super) fn unsaved_workflow(&self, set: Option<&WorkingSet>) -> Option<&str> {
+        let open = self.open.as_ref()?;
+        let saved = open.draft.saved.as_ref()?;
+        (draft_status(&open.draft, set).0 == DraftStatus::Changed)
+            .then_some(saved.workflow_id.as_str())
+    }
 }
 
 /// What the page shows from a publication; one that changes none of it leaves the page as
@@ -514,13 +556,68 @@ impl TerminalApp {
 
     /// Opens a new draft on the active chart's symbol and the first practice account.
     pub(super) fn open_new_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (account_id, instrument_id) = self.new_workflow_target(cx);
+        self.open_new_workflow_on(None, window, cx);
+    }
+
+    /// Opens a new draft on `account_id`, or the first practice account, and the active
+    /// chart's symbol.
+    fn open_new_workflow_on(
+        &mut self,
+        account_id: Option<TradingAccountId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (first_practice, instrument_id) = self.new_workflow_target(cx);
         let draft = WorkflowDraft::new(
             tr!(workflows::UNTITLED).to_string(),
-            account_id,
+            account_id.or(first_practice),
             instrument_id,
         );
         self.open_workflow_draft(draft, None, window, cx);
+    }
+
+    /// Shows the Workflows page with a new draft on an order ticket's account. A draft the
+    /// page holds with unsaved work stays open instead, since the ticket never showed it.
+    pub(super) fn new_workflow_on_page(
+        &mut self,
+        account_id: Option<TradingAccountId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.page_holds_unsaved_draft(cx) {
+            self.open_new_workflow_on(account_id, window, cx);
+        }
+        self.show_app_view(AppView::Workflows, window, cx);
+    }
+
+    /// Shows the Workflows page with `workflow_id` open. A draft of it the page already has
+    /// open stays, and so does any draft with unsaved work.
+    pub(super) fn edit_workflow_on_page(
+        &mut self,
+        workflow_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self
+            .pages
+            .workflows
+            .open
+            .as_ref()
+            .and_then(|open| open.draft.saved.as_ref())
+            .is_some_and(|saved| saved.workflow_id == workflow_id);
+        if !shown && !self.page_holds_unsaved_draft(cx) {
+            self.open_saved_workflow(workflow_id, window, cx);
+        }
+        self.show_app_view(AppView::Workflows, window, cx);
+    }
+
+    fn page_holds_unsaved_draft(&self, cx: &App) -> bool {
+        let store = self.services.trading_store().read(cx);
+        self.pages
+            .workflows
+            .open
+            .as_ref()
+            .is_some_and(|open| draft_status(&open.draft, store.current()).0 != DraftStatus::Saved)
     }
 
     /// Opens an example as an unsaved draft, with its trigger selected so the price it
@@ -1010,6 +1107,7 @@ impl TerminalApp {
         );
         self.send_workflow_command(
             false,
+            None,
             move |service| {
                 service
                     .set_workflow_layout(workflow_id, revision, layout)
@@ -1065,6 +1163,7 @@ impl TerminalApp {
         if status == DraftStatus::Saved && !finished {
             self.send_workflow_command(
                 true,
+                None,
                 move |service| {
                     service
                         .set_workflow_layout(workflow_id, revision, layout)
@@ -1077,6 +1176,7 @@ impl TerminalApp {
         definition.revision = revision + 1;
         self.send_workflow_command(
             true,
+            None,
             move |service| {
                 service
                     .register_workflow(definition, layout)
@@ -1097,12 +1197,45 @@ impl TerminalApp {
         else {
             return;
         };
-        let SavedRevision {
-            workflow_id,
-            revision,
-        } = saved;
+        self.run_workflow(
+            saved.workflow_id,
+            saved.revision,
+            arm,
+            WorkflowRunOrigin::Page,
+            cx,
+        );
+    }
+
+    /// Arms or pauses one accepted revision; the page and every order ticket send it here,
+    /// so a workflow takes one command at a time whichever surface pressed it.
+    pub(super) fn run_workflow(
+        &mut self,
+        workflow_id: String,
+        revision: u32,
+        arm: bool,
+        origin: WorkflowRunOrigin,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pages.workflows.is_busy(&workflow_id) {
+            return;
+        }
+        let (tracked, request) = match origin {
+            WorkflowRunOrigin::Page => (true, None),
+            WorkflowRunOrigin::Ticket(pane) => {
+                // A full reservation map refuses the command with its one notice.
+                let Some(request) = self.lifecycle.trading_feedback().begin_request(&pane) else {
+                    return;
+                };
+                (false, Some(request))
+            }
+        };
+        let run = WorkflowRun {
+            workflow_id: workflow_id.clone(),
+            request,
+        };
         self.send_workflow_command(
-            true,
+            tracked,
+            Some(run),
             move |service| {
                 if arm {
                     service
@@ -1138,6 +1271,7 @@ impl TerminalApp {
         let workflow_id = saved.workflow_id;
         self.send_workflow_command(
             true,
+            None,
             move |service| {
                 service
                     .delete_workflow(workflow_id.clone())
@@ -1148,10 +1282,11 @@ impl TerminalApp {
     }
 
     /// Runs a workflow command off the UI thread. A tracked command blocks further commands
-    /// of the open workflow until its reply arrives.
+    /// of the open workflow until its reply arrives, and a run blocks its workflow's.
     fn send_workflow_command(
         &mut self,
         tracked: bool,
+        run: Option<WorkflowRun>,
         command: impl FnOnce(&TradingService) -> Result<WorkflowReply, WorkflowError> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -1160,6 +1295,9 @@ impl TerminalApp {
         let token = page.next_command;
         if tracked && let Some(open) = page.open.as_mut() {
             open.pending = Some(token);
+        }
+        if let Some(run) = run {
+            page.running.insert(token, run);
         }
         let service = self.lifecycle.trading().clone();
         cx.spawn(async move |terminal, cx| {
@@ -1186,6 +1324,7 @@ impl TerminalApp {
     ) {
         let feedback = self.lifecycle.trading_feedback().clone();
         let page = &mut self.pages.workflows;
+        let request = page.running.remove(&token).and_then(|run| run.request);
         let open = page
             .open
             .as_mut()
@@ -1194,17 +1333,22 @@ impl TerminalApp {
             Ok(reply) => reply,
             Err(error) => {
                 let text = workflow_error_text(&error);
-                match open {
-                    Some(open) => {
+                match (request, open) {
+                    (Some(request), _) => feedback.finish_request(request, Err(text)),
+                    (None, Some(open)) => {
                         open.pending = None;
                         open.status = Some(PageStatus::Problem(text));
                     }
-                    None => feedback.record(Err(text)),
+                    (None, None) => feedback.record(Err(text)),
                 }
                 cx.notify();
                 return;
             }
         };
+        // A ticket's success is announced like the page's, so its reservation only ends.
+        if let Some(request) = request {
+            feedback.retire_request(request);
+        }
         let message = match reply {
             WorkflowReply::LayoutSaved => None,
             WorkflowReply::Saved(view) => {

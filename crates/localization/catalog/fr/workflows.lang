@@ -270,3 +270,14 @@ problem_profit_ticks = Saisissez un nombre entier de ticks de -{maximum} à {max
 problem_amount = Saisissez un montant d'au plus {decimals} décimales ; une perte est négative
 problem_pullback = Saisissez un nombre entier de ticks de 1 à {maximum}
 blocker_position_unknown = la position a été ouverte hors d'Aeris, son entrée est inconnue
+
+# Ticket d'ordre
+ticket_no_account = Choisissez un compte pour voir ses workflows.
+ticket_empty = Ce compte n'a pas encore de workflow sur ce symbole.
+ticket_edit = Modifier
+ticket_edit_aria = Ouvrir {name} dans la page Workflows
+ticket_status = {state} · {firing}
+ticket_last_fired = Dernier déclenchement {time} : {outcome}
+ticket_reason_finished = Ce workflow est terminé. Enregistrez une nouvelle révision dans la page Workflows pour le relancer.
+ticket_reason_unsaved = Enregistrez les modifications ouvertes dans la page Workflows avant d'armer.
+ticket_reason_busy = En attente de la fin de la commande précédente.

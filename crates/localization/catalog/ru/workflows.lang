@@ -271,3 +271,14 @@ problem_profit_ticks = Введите целое число тиков от -{ma
 problem_amount = Введите сумму не более чем с {decimals} знаками после запятой; убыток отрицательный
 problem_pullback = Введите целое число тиков от 1 до {maximum}
 blocker_position_unknown = позиция открыта вне Aeris, её вход неизвестен
+
+# Тикет заявки
+ticket_no_account = Выберите счёт, чтобы увидеть его сценарии.
+ticket_empty = На этом счёте пока нет сценариев для этого инструмента.
+ticket_edit = Изменить
+ticket_edit_aria = Открыть {name} на странице «Сценарии»
+ticket_status = {state} · {firing}
+ticket_last_fired = Последнее срабатывание {time}: {outcome}
+ticket_reason_finished = Этот сценарий завершён. Сохраните новую версию на странице «Сценарии», чтобы запустить его снова.
+ticket_reason_unsaved = Перед активацией сохраните изменения, открытые на странице «Сценарии».
+ticket_reason_busy = Ожидание завершения предыдущей команды.

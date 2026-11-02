@@ -80,6 +80,11 @@ Status as of 2026-11-02.
 - [x] A market whose owner quote interest lapses and returns in the same provider generation
       (a paused and re-armed workflow, a changed ticket) applies its quotes again: the owner
       drops the applied quote cursor with the quote book entry.
+- [x] The order ticket's Workflows section lists the selected account's workflows on the
+      ticket's symbol or on any symbol, with their state and last firing, and arms or pauses
+      them through the page's one command path (one command per workflow at a time; a
+      refusal shows on the ticket's feedback line). Edit and New workflow open the page.
+- [ ] The ticket's Workflows section exercised by hand on the running app.
 - [x] `workflow_probe` updated to the graph API, with a check that moving blocks keeps the armed
       revision; run live on the Hyperliquid BTC practice feed (below).
 - [x] Probe rerun from a clean, committed source tree (`2b5ee13f`).

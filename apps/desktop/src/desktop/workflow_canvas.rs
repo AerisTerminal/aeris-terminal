@@ -679,6 +679,11 @@ fn toolbar(
     };
     let environment = account_environment(ui.set, draft.account_id.as_ref());
     let (list_toggle, inspector_toggle) = panel_toggles(ui, page);
+    // An arm or pause an order ticket sent holds the page's commands too.
+    let busy = draft
+        .saved
+        .as_ref()
+        .is_some_and(|saved| page.is_busy(&saved.workflow_id));
     div()
         .flex_none()
         .w_full()
@@ -712,7 +717,7 @@ fn toolbar(
         .child(div().flex_1().min_w_0().truncate().text_xs().children(
             note.map(|(text, color)| div().text_color(gpui_color(color)).truncate().child(text)),
         ))
-        .child(command_buttons(ui, open, status, view))
+        .child(command_buttons(ui, open, status, view, busy))
         .child(inspector_toggle)
 }
 
@@ -922,9 +927,10 @@ fn command_buttons(
     open: &OpenWorkflow,
     status: DraftStatus,
     view: Option<&WorkflowView>,
+    busy: bool,
 ) -> Div {
     let theme = ui.theme;
-    let pending = open.pending.is_some();
+    let pending = open.pending.is_some() || busy;
     let saved = status == DraftStatus::Saved;
     let save = ui.terminal.clone();
     let save_button = Button::new("workflow_save", theme)

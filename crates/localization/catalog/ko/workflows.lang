@@ -268,3 +268,14 @@ problem_profit_ticks = -{maximum}~{maximum} 사이의 0이 아닌 정수 틱을 
 problem_amount = 소수점 이하 {decimals}자리 이하의 금액을 입력하세요. 손실은 음수입니다
 problem_pullback = 1~{maximum} 사이의 정수 틱을 입력하세요
 blocker_position_unknown = 포지션이 Aeris 밖에서 진입되어 진입가를 알 수 없습니다
+
+# 주문 티켓
+ticket_no_account = 워크플로를 보려면 계좌를 선택하세요.
+ticket_empty = 이 계좌에는 이 종목의 워크플로가 아직 없습니다.
+ticket_edit = 편집
+ticket_edit_aria = 워크플로 페이지에서 {name} 열기
+ticket_status = {state} · {firing}
+ticket_last_fired = 마지막 실행 {time}: {outcome}
+ticket_reason_finished = 이 워크플로는 종료되었습니다. 다시 실행하려면 워크플로 페이지에서 새 리비전을 저장하세요.
+ticket_reason_unsaved = 활성화하기 전에 워크플로 페이지에서 열려 있는 변경 사항을 저장하세요.
+ticket_reason_busy = 이전 명령이 완료되기를 기다리는 중입니다.

@@ -1,6 +1,9 @@
 //! The order ticket in the order entry panel: the symbol and its position, the quantity, the
-//! broker and account, the buy and sell order grid, and an optional stop-and-target bracket.
-//! Market orders use the solid buy and sell fills, resting orders the tinted ones.
+//! broker and account, the buy and sell order grid, an optional stop-and-target bracket and
+//! the account's workflows. Market orders use the solid buy and sell fills, resting orders
+//! the tinted ones.
+
+mod ticket_workflows;
 
 use super::*;
 use aeris_localization::{Text, common, panels, tr, tr_count};
@@ -116,6 +119,7 @@ pub(super) enum TicketMenu {
     Broker,
     Account,
     BracketMode,
+    Workflow,
 }
 
 /// The ticket's editing state: its tick fields and which menu is open. The values themselves
@@ -124,6 +128,9 @@ pub(super) struct OrderTicketControls {
     inputs: [Entity<InputState>; 3],
     invalid: [bool; 3],
     open_menu: Option<TicketMenu>,
+    /// The workflow chosen in the Workflows section; while it is not among the account's
+    /// workflows the section shows the first that applies here.
+    workflow: Option<String>,
 }
 
 impl OrderTicketControls {
@@ -140,6 +147,7 @@ impl OrderTicketControls {
             inputs,
             invalid: [false; 3],
             open_menu: None,
+            workflow: None,
         }
     }
 
@@ -233,6 +241,12 @@ impl WorkspaceSurface {
         self.order_ticket.open_menu = None;
         cx.notify();
     }
+
+    fn select_ticket_workflow(&mut self, workflow_id: String, cx: &mut Context<Self>) {
+        self.order_ticket.workflow = Some(workflow_id);
+        self.order_ticket.open_menu = None;
+        cx.notify();
+    }
 }
 
 /// Which venue holds an account's orders, as the ticket's broker field names it. Demo and
@@ -277,6 +291,9 @@ impl TicketBroker {
 #[derive(Clone, Copy)]
 pub(super) struct TradingOrderControlsState<'a> {
     pub(super) app: &'a Entity<WorkspaceSurface>,
+    /// The terminal that owns the workflow commands the ticket's Workflows section sends.
+    pub(super) terminal: &'a Entity<TerminalApp>,
+    pub(super) workflows: &'a super::workflows_page::WorkflowsPage,
     pub(super) frame: Option<&'a aeris_market_data::OrderBookFrame>,
     pub(super) product: Option<&'a InstallProviderInstrument>,
     pub(super) store: &'a trading_store::TradingStore,
@@ -292,6 +309,7 @@ struct TicketView<'a> {
     broker: Option<TicketBroker>,
     position: Option<&'a aeris_trading_runtime::PositionPnl>,
     working_orders: usize,
+    instrument: Option<aeris_instruments::InstrumentId>,
     /// Orders may be placed: an unlocked account and instrument.
     ready: bool,
 }
@@ -350,6 +368,7 @@ impl<'a> TicketView<'a> {
                 })
                 .is_none()
                 && instrument.is_some(),
+            instrument,
         }
     }
 
@@ -388,6 +407,8 @@ pub(super) fn trading_order_controls(
         .child(div().my_1().h_px().bg(gpui_color(colors.border)))
         .child(bracket_header(state))
         .child(bracket_fields(state, &view))
+        .child(div().my_1().h_px().bg(gpui_color(colors.border)))
+        .child(ticket_workflows::workflow_section(state, &view))
         .child(
             div()
                 .mx(px(2.0))

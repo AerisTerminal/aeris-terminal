@@ -270,3 +270,14 @@ problem_profit_ticks = Escribe un número entero de ticks de -{maximum} a {maxim
 problem_amount = Escribe un importe con como máximo {decimals} decimales; una pérdida es negativa
 problem_pullback = Escribe un número entero de ticks de 1 a {maximum}
 blocker_position_unknown = la posición se abrió fuera de Aeris y su entrada es desconocida
+
+# Ticket de órdenes
+ticket_no_account = Elige una cuenta para ver sus flujos.
+ticket_empty = Esta cuenta aún no tiene flujos para este símbolo.
+ticket_edit = Editar
+ticket_edit_aria = Abrir {name} en la página de flujos de trabajo
+ticket_status = {state} · {firing}
+ticket_last_fired = Última activación {time}: {outcome}
+ticket_reason_finished = Este flujo ha terminado. Guarda una nueva revisión en la página de flujos de trabajo para volver a ejecutarlo.
+ticket_reason_unsaved = Guarda los cambios abiertos en la página de flujos de trabajo antes de armar.
+ticket_reason_busy = Esperando a que termine el comando anterior.

@@ -432,7 +432,9 @@ violations and missing verification explicitly, and never describe them as satis
   workflow, against its own verified quotes and injected clock, takes the branch each If
   answers, and sends its actions through the same admission, risk and venue paths as a manual
   command. The desktop Workflows page (a header page beside Terminal and Screener) edits a draft
-  board and sends only the definition and layout the user saved. A firing is committed
+  board and sends only the definition and layout the user saved. The order ticket's Workflows
+  section arms and pauses through the page's one `TerminalApp::run_workflow` path, which holds
+  one command per workflow and answers a ticket on its pane's feedback line. A firing is committed
   before its first action runs, so a stop in between leaves it `Interrupted` and a restart never
   repeats it. A workflow runs on one instrument or on any symbol (`WorkflowScope`; the stored
   definition then names no instrument, and one stored with an instrument keeps opening): on any

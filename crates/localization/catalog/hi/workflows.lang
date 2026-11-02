@@ -269,3 +269,14 @@ problem_profit_ticks = -{maximum} से {maximum} तक टिक की प�
 problem_amount = अधिकतम {decimals} दशमलव वाली राशि दर्ज करें; घाटा ऋणात्मक है
 problem_pullback = 1 से {maximum} तक टिक की पूर्ण संख्या दर्ज करें
 blocker_position_unknown = पोज़िशन Aeris के बाहर खुली थी, इसलिए उसकी एंट्री अज्ञात है
+
+# ऑर्डर टिकट
+ticket_no_account = वर्कफ़्लो देखने के लिए एक खाता चुनें।
+ticket_empty = इस खाते में इस सिंबल के लिए अभी कोई वर्कफ़्लो नहीं है।
+ticket_edit = संपादित करें
+ticket_edit_aria = {name} को वर्कफ़्लो पेज पर खोलें
+ticket_status = {state} · {firing}
+ticket_last_fired = पिछली बार चला {time}: {outcome}
+ticket_reason_finished = यह वर्कफ़्लो समाप्त हो चुका है। इसे फिर से चलाने के लिए वर्कफ़्लो पेज पर नया संशोधन सहेजें।
+ticket_reason_unsaved = सक्रिय करने से पहले वर्कफ़्लो पेज पर खुले बदलाव सहेजें।
+ticket_reason_busy = पिछले कमांड के पूरा होने की प्रतीक्षा हो रही है।

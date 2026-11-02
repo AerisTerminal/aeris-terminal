@@ -394,6 +394,7 @@ pub(super) fn workspace_pane_element(
 pub(super) struct WorkspaceMarketArea<'a> {
     pub(super) terminal: &'a Entity<TerminalApp>,
     pub(super) trading_store: &'a Entity<trading_store::TradingStore>,
+    pub(super) workflows: &'a super::workflows_page::WorkflowsPage,
     pub(super) workspace: &'a WorkspaceTab,
     pub(super) active_surface: &'a Entity<WorkspaceSurface>,
     pub(super) expanded_drawing_toolbar: Option<DrawingSidebar<'a>>,
@@ -410,6 +411,7 @@ pub(super) fn workspace_market_area(
     let WorkspaceMarketArea {
         terminal,
         trading_store,
+        workflows,
         workspace,
         active_surface,
         expanded_drawing_toolbar,
@@ -420,12 +422,7 @@ pub(super) fn workspace_market_area(
     } = area;
     let drawing_toolbar_collapsed = expanded_drawing_toolbar.is_none();
     let grid = workspace_pane_grid(terminal, workspace, toaster, theme, cx);
-    let price_alert_dialog = workspace.panes.iter().find_map(|pane| {
-        let surface = pane.surface.read(cx);
-        surface.alerts.dialog().map(|dialog| {
-            price_alert_dialog_layer(&pane.surface, dialog, surface.alerts.alerts(), theme)
-        })
-    });
+    let price_alert_dialog = workspace_price_alert_dialog(workspace, theme, cx);
     let surface = active_surface.read(cx);
     let store = trading_store.read(cx);
     let drawing_state = surface.drawing_toolbar_state(cx);
@@ -450,6 +447,8 @@ pub(super) fn workspace_market_area(
             },
             order_entry: TradingOrderControlsState {
                 app: active_surface,
+                terminal,
+                workflows,
                 frame: order_book_frame.as_ref(),
                 product: surface.product.as_ref(),
                 store,
@@ -505,6 +504,20 @@ pub(super) fn workspace_market_area(
             ))
         })
         .children(price_alert_dialog)
+}
+
+/// The price alert dialog of whichever pane of the workspace has one open.
+fn workspace_price_alert_dialog(
+    workspace: &WorkspaceTab,
+    theme: &AerisTheme,
+    cx: &App,
+) -> Option<AnyElement> {
+    workspace.panes.iter().find_map(|pane| {
+        let surface = pane.surface.read(cx);
+        surface.alerts.dialog().map(|dialog| {
+            price_alert_dialog_layer(&pane.surface, dialog, surface.alerts.alerts(), theme)
+        })
+    })
 }
 
 /// Chart grid plus the panels docked below it (bar replay, then market context), inset past

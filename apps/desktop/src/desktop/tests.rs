@@ -3203,6 +3203,188 @@ mod timeframe_input {
         );
     }
 
+    const TICKET_WORKFLOW: &str = "wf-ticket";
+
+    /// A real trading owner holding one paused workflow on its fixture account and
+    /// instrument.
+    fn ticket_workflow_owner() -> (
+        aeris_trading_runtime::TradingService,
+        std::path::PathBuf,
+        aeris_trading::TradingAccountId,
+        aeris_instruments::InstrumentId,
+    ) {
+        use super::super::workflow_board::{InstrumentScales, WorkflowExample};
+        let (owner, root, account, _, instrument, _) =
+            trading_store::real_owner_fill_fixture_for("hyperliquid");
+        let (definition, layout) = WorkflowExample::FlatBeforeClose
+            .draft(
+                "Ticket flat".to_string(),
+                Some(account.clone()),
+                Some(instrument.clone()),
+            )
+            .build(
+                TICKET_WORKFLOW.to_string(),
+                1,
+                Some(InstrumentScales {
+                    price: 2,
+                    quantity: 0,
+                }),
+                None,
+            )
+            .expect("the example builds");
+        let saved = owner
+            .register_workflow(definition, layout)
+            .expect("the owner accepts the workflow");
+        assert_eq!(saved.state, aeris_trading_runtime::WorkflowState::Paused);
+        (owner, root, account, instrument)
+    }
+
+    /// Adopts owner publications into the terminal's store until the ticket workflow
+    /// reaches `expected`, as the subscription bridge would.
+    fn adopt_workflow_state(
+        terminal: &Entity<TerminalApp>,
+        subscription: &aeris_trading_runtime::TradingSubscription,
+        expected: aeris_trading_runtime::WorkflowState,
+        cx: &mut VisualTestContext,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let update = subscription
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("owner publication");
+            let reached = update.event.working_set.workflows.iter().any(|view| {
+                view.definition.workflow_id == TICKET_WORKFLOW && view.state == expected
+            });
+            update_terminal(terminal, cx, |terminal, _, cx| {
+                terminal.services.trading_store().update(cx, |store, cx| {
+                    store.apply_test_publication(update);
+                    cx.notify();
+                });
+            });
+            if reached {
+                return;
+            }
+        }
+    }
+
+    fn announced(terminal: &Entity<TerminalApp>, message: &str, cx: &VisualTestContext) -> bool {
+        cx.read(|cx| {
+            let toaster = terminal.read(cx).notices.toaster();
+            toaster
+                .feed()
+                .entries()
+                .any(|entry| entry.detail.as_deref() == Some(message))
+        })
+    }
+
+    #[gpui::test]
+    fn the_order_ticket_arms_and_pauses_through_the_shared_workflow_command_path(
+        cx: &mut TestAppContext,
+    ) {
+        use super::super::market_screener::AppView;
+        use super::super::workflows_page::WorkflowRunOrigin;
+        use aeris_localization::{tr, workflows};
+        use aeris_trading_runtime::WorkflowState;
+        let (owner, root, account, instrument) = ticket_workflow_owner();
+        let subscription = owner.subscribe().expect("owner subscription");
+        let mut product = aeris_desktop::test_support::fixture_public_crypto();
+        product.instrument_id = instrument.as_str().into();
+        let (terminal, cx) = terminal_harness_with_product(
+            cx,
+            DesktopLifecycle::new_for_test_with_trading(owner.clone()),
+            None,
+            product,
+        );
+        adopt_workflow_state(&terminal, &subscription, WorkflowState::Paused, cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        let pane = cx.read(|cx| surface.read(cx).trading_pane_token.clone());
+        update_terminal(&terminal, cx, |_, window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.select_trading_account(account.clone(), cx);
+                surface.set_side_panel_visible(SidePanel::OrderEntry, true, cx);
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let busy = |cx: &mut VisualTestContext| {
+            cx.read(|cx| terminal.read(cx).pages.workflows.is_busy(TICKET_WORKFLOW))
+        };
+        let run = |revision, arm, cx: &mut VisualTestContext| {
+            update_terminal(&terminal, cx, |terminal, _, cx| {
+                let origin = WorkflowRunOrigin::Ticket(pane.clone());
+                terminal.run_workflow(TICKET_WORKFLOW.to_string(), revision, arm, origin, cx);
+            });
+        };
+
+        // The ticket's Arm: one command per workflow, whichever surface sends it.
+        run(1, true, cx);
+        assert!(busy(cx), "the arm holds the workflow's commands");
+        cx.run_until_parked();
+        adopt_workflow_state(&terminal, &subscription, WorkflowState::Armed, cx);
+        assert!(!busy(cx));
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.apply_trading_request_results(cx);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        assert!(
+            announced(&terminal, "Armed Ticket flat", cx),
+            "the ticket's arm is announced like the page's"
+        );
+
+        // A refusal lands on the ticket's pane, not the page.
+        run(7, false, cx);
+        cx.run_until_parked();
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.apply_trading_request_results(cx);
+        });
+        let feedback = cx.read(|cx| surface.read(cx).trading_pnl.feedback.clone());
+        let feedback = feedback.expect("the pane shows the refusal");
+        assert!(feedback.is_error);
+        assert_eq!(feedback.message, tr!(workflows::ERROR_REVISION));
+
+        // The page pauses through the same path, and the ticket sees its unsaved changes.
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.edit_workflow_on_page(TICKET_WORKFLOW, window, cx);
+            assert_eq!(terminal.pages.view, AppView::Workflows);
+            let set = terminal
+                .services
+                .trading_store()
+                .read(cx)
+                .current()
+                .cloned();
+            assert_eq!(
+                terminal.pages.workflows.unsaved_workflow(set.as_ref()),
+                None
+            );
+            terminal.arm_open_workflow(false, cx);
+        });
+        assert!(busy(cx), "the page's pause holds the ticket too");
+        cx.run_until_parked();
+        adopt_workflow_state(&terminal, &subscription, WorkflowState::Paused, cx);
+        assert!(!busy(cx));
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            if let Some(open) = terminal.pages.workflows.open.as_mut() {
+                open.draft.name = "Renamed".to_string();
+            }
+            let set = terminal
+                .services
+                .trading_store()
+                .read(cx)
+                .current()
+                .cloned();
+            assert_eq!(
+                terminal.pages.workflows.unsaved_workflow(set.as_ref()),
+                Some(TICKET_WORKFLOW)
+            );
+        });
+        drop(subscription);
+        owner
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
+            .expect("owner stopped");
+        std::fs::remove_dir_all(root).expect("remove test root");
+    }
+
     #[gpui::test]
     fn saved_layouts_open_from_the_start_page_even_when_a_tab_shows_them(cx: &mut TestAppContext) {
         let (terminal, _additions, cx) = tabbed_terminal_harness(cx);

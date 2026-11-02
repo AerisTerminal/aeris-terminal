@@ -268,3 +268,14 @@ problem_profit_ticks = -{maximum}～{maximum} の 0 以外の整数ティック�
 problem_amount = 小数点以下 {decimals} 桁までの金額を入力してください（損失はマイナス）
 problem_pullback = 1～{maximum} の整数ティックを入力してください
 blocker_position_unknown = ポジションが Aeris の外で建てられたため、エントリーが不明です
+
+# 注文チケット
+ticket_no_account = ワークフローを表示するには口座を選択してください。
+ticket_empty = この口座にはこの銘柄のワークフローがまだありません。
+ticket_edit = 編集
+ticket_edit_aria = ワークフローページで {name} を開く
+ticket_status = {state} · {firing}
+ticket_last_fired = 最終実行 {time}：{outcome}
+ticket_reason_finished = このワークフローは終了しました。再実行するには、ワークフローページで新しいリビジョンを保存してください。
+ticket_reason_unsaved = 有効にする前に、ワークフローページで開いている変更を保存してください。
+ticket_reason_busy = 前のコマンドの完了を待っています。
