@@ -27,7 +27,7 @@ Status as of 2026-11-02.
 
 | ID | Checkpoint | Status |
 | --- | --- | --- |
-| W1 | Engine: graph model, store, owner commands and evaluation | **Complete** (uncommitted) |
+| W1 | Engine: graph model, store, owner commands and evaluation | **Complete** |
 | W2 | Desktop Workflows page: board, inspector, list | **In progress** |
 | W3 | AI authoring | Open |
 | W4 | Position management and order-flow blocks | Open |
@@ -70,7 +70,7 @@ Status as of 2026-11-02.
 - [ ] The page exercised by hand on the running app with a Hyperliquid practice account.
 - [x] `workflow_probe` updated to the graph API, with a check that moving blocks keeps the armed
       revision; run live on the Hyperliquid BTC practice feed (below).
-- [ ] Probe rerun from a clean, committed source tree.
+- [x] Probe rerun from a clean, committed source tree (`2b5ee13f`).
 
 ### W3 — AI authoring
 
@@ -109,3 +109,4 @@ the user saves and arms the new revision.
 | 2026-11-02 | W1 | Graph engine, V31 store with separate layout, owner commands and tests | `cargo test -p aeris_trading_runtime` |
 | 2026-11-02 | W2 | Workflows page with board, inspector and list replaces the bottom-panel tab | fmt, workspace clippy, 3,153 workspace tests, naming check |
 | 2026-11-02 | W2 | `workflow_probe` on the graph API, live Hyperliquid BTC practice | All 10 behavior checks passed (breakout fired on a live cross and filled at the owner ask with an active bracket; layout move kept revision 1 armed; timed close flattened 2 ms after the minute; restart did not refire; delete); `source_clean` failed on the uncommitted tree |
+| 2026-11-02 | W2 | `workflow_probe` rerun on `2b5ee13f` | All 11 checks passed with a clean source tree; entry filled at the owner ask with an active bracket, timed close 1 ms after the minute |
