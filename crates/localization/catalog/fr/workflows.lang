@@ -125,7 +125,7 @@ field_quantity = Quantité
 field_stop_ticks = Stop (ticks)
 field_target_ticks = Objectif (ticks)
 protection_hint = Laissez le stop et l'objectif vides pour entrer sans bracket.
-lock_hint = Rien ne s'exécute après le verrouillage du compte.
+lock_hint = Le verrouillage refuse les nouvelles entrées sur ce compte jusqu'à ce que vous le déverrouilliez. Les blocs suivants peuvent encore annuler des ordres et clôturer des positions.
 remove_block = Supprimer le bloc
 
 # Relecture des blocs d'un workflow
@@ -269,7 +269,28 @@ condition_pullback = Le prix a reculé de {ticks} ticks depuis son meilleur nive
 problem_profit_ticks = Saisissez un nombre entier de ticks de -{maximum} à {maximum}, autre que 0
 problem_amount = Saisissez un montant d'au plus {decimals} décimales ; une perte est négative
 problem_pullback = Saisissez un nombre entier de ticks de 1 à {maximum}
-blocker_position_unknown = la position a été ouverte hors d'Aeris, son entrée est inconnue
+blocker_position_unknown = l'entrée ou le P&L de la position n'est pas connu exactement, par exemple parce qu'elle a été ouverte hors d'Aeris
+
+# Déclencheurs sur condition, gain du jour, avis et répétitions
+trigger_choice_condition = Les vérifications deviennent vraies
+trigger_condition_hint = Se déclenche chaque fois que ses vérifications deviennent vraies après l'armement du workflow, et de nouveau seulement après qu'elles ont cessé de l'être. Les vérifications d'heure sont lues à chaque minute pleine. Avec « Tout symbole », l'exécution agit sur les positions qui les ont rendues vraies.
+block_if_day_profit = Si gain du jour
+field_day_profit_amount = Montant (une perte est négative)
+day_profit_hint = Le gain du compte aujourd'hui : ce que ses exécutions ont réalisé depuis le début de sa session de risque (minuit UTC sans profil de risque), avant frais, plus le gain latent de chaque position.
+condition_day_profit_at_least = Le gain du jour est d'au moins {amount}
+condition_day_profit_at_most = Le gain du jour est d'au plus {amount}
+summary_condition = Quand {checks}
+join_word_all = et
+join_word_any = ou
+block_notify = Avertir
+action_notify = Afficher un avis
+notify_hint = Affiche un avis au nom de ce workflow et le conserve dans l'historique des notifications. Rien ne quitte cet ordinateur.
+outcome_notified = avis affiché
+repeat_choice_always = À chaque fois
+example_deadline = Clôturer à l'échéance
+example_deadline_body = Chaque jour à 15:50, heure de Chicago, si une position est encore ouverte sur un symbole parce que son objectif n'a pas été atteint, annule les ordres actifs et la clôture.
+example_day_stop = Stop journalier de gains et pertes
+example_day_stop_body = Quand le gain du jour du compte atteint votre objectif ou descend à votre limite de perte, verrouille le compte, annule les ordres actifs et clôture toutes les positions. Au plus une fois par session.
 
 # Ticket d'ordre
 ticket_no_account = Choisissez un compte pour voir ses workflows.

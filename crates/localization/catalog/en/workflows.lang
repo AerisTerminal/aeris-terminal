@@ -125,7 +125,7 @@ field_quantity = Quantity
 field_stop_ticks = Stop (ticks)
 field_target_ticks = Target (ticks)
 protection_hint = Leave stop and target empty to enter without a bracket.
-lock_hint = Nothing runs after the account is locked.
+lock_hint = Locking refuses new entries on this account until you unlock it. The blocks after it can still cancel orders and close positions.
 remove_block = Remove block
 
 # Readback of a workflow's blocks
@@ -269,7 +269,28 @@ condition_pullback = Price came back {ticks} ticks from its best
 problem_profit_ticks = Enter a whole number of ticks from -{maximum} to {maximum}, other than 0
 problem_amount = Enter an amount with at most {decimals} decimals; a loss is negative
 problem_pullback = Enter a whole number of ticks from 1 to {maximum}
-blocker_position_unknown = the position opened outside Aeris, so its entry is unknown
+blocker_position_unknown = the position's entry or P&L is not known exactly, for example because it opened outside Aeris
+
+# Condition triggers, day profit, notices and repeats
+trigger_choice_condition = Checks become true
+trigger_condition_hint = Fires each time its checks start to hold after the workflow is armed, and again only after they stopped holding. Clock checks are read at each whole minute. On any symbol, the run acts on the positions that made them hold.
+block_if_day_profit = If day profit
+field_day_profit_amount = Amount (a loss is negative)
+day_profit_hint = The account's profit today: what its fills realized since its risk session began (midnight UTC without a risk profile), before fees, plus the open profit of every position.
+condition_day_profit_at_least = Day profit is at least {amount}
+condition_day_profit_at_most = Day profit is at most {amount}
+summary_condition = When {checks}
+join_word_all = and
+join_word_any = or
+block_notify = Notify
+action_notify = Show a notice
+notify_hint = Shows a notice naming this workflow and keeps it in the notification history. Nothing leaves this computer.
+outcome_notified = notice shown
+repeat_choice_always = Every time
+example_deadline = Close at the deadline
+example_deadline_body = Every day at 15:50 Chicago time, if a position is still open on any symbol because its target was not reached, cancel the working orders and close it.
+example_day_stop = Daily profit and loss stop
+example_day_stop_body = When the account's day profit reaches your target or falls to your loss limit, lock the account, cancel the working orders and close every position. At most once per session.
 
 # Order ticket
 ticket_no_account = Choose an account to see its workflows.

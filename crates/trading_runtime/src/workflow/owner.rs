@@ -11,11 +11,12 @@ use crate::risk::session::RiskSessionBoundary;
 use crate::service::{Command, WorkflowCommand};
 use crate::workflow::{
     MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS, PriceDirection, WORKFLOW_FIRING_HISTORY,
-    WorkflowAction, WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowCondition,
-    WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome, WorkflowInvalid,
-    WorkflowLayout, WorkflowNodeId, WorkflowPathStep, WorkflowProtection, WorkflowRecord,
-    WorkflowRepeat, WorkflowScope, WorkflowState, WorkflowStepOutcome, WorkflowStepResult,
-    WorkflowTargets, WorkflowTrigger, WorkflowView, time_window_holds, workflow_client_order_id,
+    WorkflowAction, WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowCompare,
+    WorkflowCondition, WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome,
+    WorkflowInvalid, WorkflowLayout, WorkflowNodeId, WorkflowPathStep, WorkflowProtection,
+    WorkflowRecord, WorkflowRepeat, WorkflowScope, WorkflowState, WorkflowStepOutcome,
+    WorkflowStepResult, WorkflowTargets, WorkflowTrigger, WorkflowView, time_window_holds,
+    workflow_client_order_id,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{
@@ -28,9 +29,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// skipped instead of firing away from its moment.
 const TIME_TRIGGER_GRACE_NANOS: i64 = 60_000_000_000;
 const NANOS_PER_MINUTE: i64 = 60_000_000_000;
-/// A position workflow's actions can open or close a position that fires another; the
-/// owner follows such a chain within one step this many times, and the next step goes on.
-const POSITION_EVALUATION_PASSES: usize = 4;
+/// A position or condition workflow's actions can open or close a position or change what a
+/// condition reads, firing another; the owner follows such a chain within one step this many
+/// times, and the next step goes on.
+const STEP_EVALUATION_PASSES: usize = 4;
+
+/// A condition trigger by its position in the definition, and the symbol it is read for
+/// (`None` for the whole account).
+type ConditionKey = (usize, Option<InstrumentId>);
 
 /// One workflow as the owner holds it between steps.
 pub(crate) struct WorkflowEntry {
@@ -48,6 +54,24 @@ pub(crate) struct WorkflowEntry {
     /// The best exit price of each open position in the workflow's symbols seen while
     /// armed, for pullback checks; only open positions are kept.
     best_exits: BTreeMap<InstrumentId, BestExit>,
+    /// Whether each condition trigger held at the last owner step; `None` until the first
+    /// step after arming, loading or accepting, which never fires. Bounded by the triggers
+    /// times the account's open positions.
+    condition_marks: Option<BTreeMap<ConditionKey, bool>>,
+    /// The next whole minute at which an armed condition trigger that reads the clock is
+    /// read again, though no command or quote arrives.
+    next_check_unix_nanos: Option<i64>,
+    /// The day's realized P&L a condition trigger last read, kept while the owner revision
+    /// and the session stay the same so a quote-only step does not sum the fills again.
+    day_realized: Option<DayRealized>,
+}
+
+/// The realized P&L of the account's current risk session as of one owner revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DayRealized {
+    revision: u64,
+    session_start_unix_nanos: i64,
+    realized: FixedPoint,
 }
 
 /// Which trade cycle the account's position is in and when it opened. Every close or
@@ -85,6 +109,9 @@ impl WorkflowEntry {
             next_due_unix_nanos: None,
             position_marks: None,
             best_exits: BTreeMap::new(),
+            condition_marks: None,
+            next_check_unix_nanos: None,
+            day_realized: None,
         }
     }
 }
@@ -200,9 +227,11 @@ impl TradingCore {
     pub(super) fn load_workflow_entries(&mut self) -> Result<(), WorkflowError> {
         for (record, firings) in self.store.load_workflows()? {
             let next_due_unix_nanos = next_due(&record, self.command_now);
+            let next_check_unix_nanos = next_condition_check(&record, self.command_now);
             let workflow_id = record.definition.workflow_id.clone();
             let mut entry = WorkflowEntry::new(record, firings.into());
             entry.next_due_unix_nanos = next_due_unix_nanos;
+            entry.next_check_unix_nanos = next_check_unix_nanos;
             self.workflows.insert(workflow_id, entry);
         }
         Ok(())
@@ -382,7 +411,7 @@ impl TradingCore {
         instruments
     }
 
-    /// The next timed trigger or expiry of an armed workflow.
+    /// The next timed trigger, clock condition read or expiry of an armed workflow.
     pub(crate) fn next_workflow_deadline_unix_nanos(&self) -> Option<i64> {
         self.workflows
             .values()
@@ -391,6 +420,7 @@ impl TradingCore {
                 entry
                     .next_due_unix_nanos
                     .into_iter()
+                    .chain(entry.next_check_unix_nanos)
                     .chain(entry.record.definition.limits.expires_unix_nanos)
             })
             .min()
@@ -502,49 +532,23 @@ impl TradingCore {
         }
     }
 
-    /// Fires every armed workflow with a position trigger whose position opened or closed
-    /// since the previous owner step. Runs after every command, market batch and timer.
-    pub(super) fn evaluate_position_workflows(&mut self) {
-        for _ in 0..POSITION_EVALUATION_PASSES {
-            let mut fired = Vec::new();
-            for (workflow_id, entry) in &mut self.workflows {
-                if entry.record.state != WorkflowState::Armed {
-                    continue;
-                }
-                let definition = &entry.record.definition;
-                let marks = workflow_position_marks(&self.state.trade_cycles, definition);
-                let Some(previous) = entry.position_marks.replace(marks.clone()) else {
-                    continue;
+    /// Fires every armed workflow with a position trigger whose position opened or closed,
+    /// or with a condition trigger that became true, since the previous owner step; one
+    /// workflow both triggers fire in a step fires once, on the symbols of both. Runs after
+    /// every command, market batch and timer.
+    pub(super) fn evaluate_step_workflows(&mut self) {
+        for _ in 0..STEP_EVALUATION_PASSES {
+            let mut fired = BTreeMap::<String, WorkflowTargets>::new();
+            for (workflow_id, targets) in self
+                .moved_position_workflows()
+                .into_iter()
+                .chain(self.met_condition_workflows())
+            {
+                let merged = match fired.remove(&workflow_id) {
+                    Some(earlier) => earlier.union(targets),
+                    None => targets,
                 };
-                let mut moved = BTreeSet::new();
-                for (instrument_id, mark) in marks {
-                    let before = previous
-                        .get(&instrument_id)
-                        .copied()
-                        .unwrap_or(PositionMark::UNTRADED);
-                    let open = self
-                        .state
-                        .positions
-                        .get(&(definition.account_id.clone(), instrument_id.clone()))
-                        .is_some_and(|position| position.net_quantity.units() != 0);
-                    let closed = mark.cycle_id != before.cycle_id;
-                    let opened = (mark.opened_unix_nanos.is_some()
-                        && mark.opened_unix_nanos != before.opened_unix_nanos)
-                        || (closed && open);
-                    let triggered = definition.triggers.iter().any(|trigger| match trigger {
-                        WorkflowTrigger::PositionOpened => opened,
-                        WorkflowTrigger::PositionClosed => closed,
-                        WorkflowTrigger::PriceCrosses { .. }
-                        | WorkflowTrigger::TimeOfDay(_)
-                        | WorkflowTrigger::Every { .. } => false,
-                    });
-                    if triggered {
-                        moved.insert(instrument_id);
-                    }
-                }
-                if !moved.is_empty() {
-                    fired.push((workflow_id.clone(), WorkflowTargets::Only(moved)));
-                }
+                fired.insert(workflow_id, merged);
             }
             if fired.is_empty() {
                 return;
@@ -553,6 +557,190 @@ impl TradingCore {
                 self.fire_workflow(&workflow_id, targets);
             }
         }
+    }
+
+    /// The armed workflows with a position trigger whose position opened or closed since
+    /// the previous read, with the symbols that moved.
+    fn moved_position_workflows(&mut self) -> Vec<(String, WorkflowTargets)> {
+        let mut fired = Vec::new();
+        for (workflow_id, entry) in &mut self.workflows {
+            if entry.record.state != WorkflowState::Armed {
+                continue;
+            }
+            let definition = &entry.record.definition;
+            let marks = workflow_position_marks(&self.state.trade_cycles, definition);
+            let Some(previous) = entry.position_marks.replace(marks.clone()) else {
+                continue;
+            };
+            let mut moved = BTreeSet::new();
+            for (instrument_id, mark) in marks {
+                let before = previous
+                    .get(&instrument_id)
+                    .copied()
+                    .unwrap_or(PositionMark::UNTRADED);
+                let open = self
+                    .state
+                    .positions
+                    .get(&(definition.account_id.clone(), instrument_id.clone()))
+                    .is_some_and(|position| position.net_quantity.units() != 0);
+                let closed = mark.cycle_id != before.cycle_id;
+                let opened = (mark.opened_unix_nanos.is_some()
+                    && mark.opened_unix_nanos != before.opened_unix_nanos)
+                    || (closed && open);
+                let triggered = definition.triggers.iter().any(|trigger| match trigger {
+                    WorkflowTrigger::PositionOpened => opened,
+                    WorkflowTrigger::PositionClosed => closed,
+                    WorkflowTrigger::PriceCrosses { .. }
+                    | WorkflowTrigger::TimeOfDay(_)
+                    | WorkflowTrigger::Every { .. }
+                    | WorkflowTrigger::ConditionMet(_) => false,
+                });
+                if triggered {
+                    moved.insert(instrument_id);
+                }
+            }
+            if !moved.is_empty() {
+                fired.push((workflow_id.clone(), WorkflowTargets::Only(moved)));
+            }
+        }
+        fired
+    }
+
+    /// The armed workflows with a condition trigger read false at the previous step and
+    /// true now, with the symbols that became true. Reads only armed workflows that have a
+    /// condition trigger; one that cannot read a symbol now keeps that symbol's last answer.
+    fn met_condition_workflows(&mut self) -> Vec<(String, WorkflowTargets)> {
+        let now = self.command_now;
+        let watched = self
+            .workflows
+            .iter()
+            .filter(|(_, entry)| {
+                entry.record.state == WorkflowState::Armed
+                    && entry
+                        .record
+                        .definition
+                        .trigger_conditions()
+                        .next()
+                        .is_some()
+            })
+            .map(|(workflow_id, _)| workflow_id.clone())
+            .collect::<Vec<_>>();
+        let mut fired = Vec::new();
+        for workflow_id in watched {
+            let Some(entry) = self.workflows.get(&workflow_id) else {
+                continue;
+            };
+            let day_realized = self.condition_day_realized(entry);
+            let day_pnl = day_realized.map(|realized| {
+                realized.and_then(|realized| {
+                    self.day_pnl(&entry.record.definition.account_id, realized.realized)
+                })
+            });
+            let readings = self.read_trigger_conditions(entry, day_pnl);
+            let any_symbol = entry.record.definition.scope == WorkflowScope::AnySymbol;
+            let all_targets = entry.record.definition.all_targets();
+            let Some(entry) = self.workflows.get_mut(&workflow_id) else {
+                continue;
+            };
+            entry.next_check_unix_nanos = next_condition_check(&entry.record, now);
+            if let Some(Ok(realized)) = day_realized {
+                entry.day_realized = Some(realized);
+            }
+            let previous = entry.condition_marks.take();
+            let mut marks = BTreeMap::new();
+            let mut became = BTreeSet::new();
+            for (key, held) in readings {
+                let before = previous.as_ref().and_then(|previous| {
+                    previous
+                        .get(&key)
+                        .copied()
+                        .or_else(|| any_symbol.then_some(false))
+                });
+                let Ok(held) = held else {
+                    marks.extend(before.map(|before| (key, before)));
+                    continue;
+                };
+                if held && before == Some(false) {
+                    became.insert(key.1.clone());
+                }
+                marks.insert(key, held);
+            }
+            entry.condition_marks = Some(marks);
+            if became.is_empty() {
+                continue;
+            }
+            let targets = if !any_symbol || became.contains(&None) {
+                all_targets
+            } else {
+                WorkflowTargets::Only(became.into_iter().flatten().collect())
+            };
+            fired.push((workflow_id, targets));
+        }
+        fired
+    }
+
+    /// The day's realized P&L when one of the workflow's condition triggers reads the day's
+    /// P&L: the kept value while the owner revision and the session have not moved since,
+    /// otherwise summed afresh.
+    fn condition_day_realized(
+        &self,
+        entry: &WorkflowEntry,
+    ) -> Option<Result<DayRealized, WorkflowBlocker>> {
+        let definition = &entry.record.definition;
+        let reads_day = definition
+            .trigger_conditions()
+            .flat_map(WorkflowCondition::checks)
+            .any(|check| matches!(check, WorkflowCheck::DayProfit { .. }));
+        if !reads_day {
+            return None;
+        }
+        let session_start = self.day_session_start(&definition.account_id);
+        Some(
+            entry
+                .day_realized
+                .filter(|kept| {
+                    kept.revision == self.state.revision
+                        && kept.session_start_unix_nanos == session_start
+                })
+                .map_or_else(|| self.day_realized(&definition.account_id), Ok),
+        )
+    }
+
+    /// Reads every condition trigger of the workflow for each symbol it is read for: the
+    /// one instrument; on any symbol each open position when a check reads the position,
+    /// otherwise (or while flat everywhere) the whole account once.
+    fn read_trigger_conditions(
+        &self,
+        entry: &WorkflowEntry,
+        day_pnl: Option<Result<FixedPoint, WorkflowBlocker>>,
+    ) -> Vec<(ConditionKey, Result<bool, WorkflowBlocker>)> {
+        let definition = &entry.record.definition;
+        let account_id = &definition.account_id;
+        let mut readings = Vec::new();
+        for (index, trigger) in definition.triggers.iter().enumerate() {
+            let WorkflowTrigger::ConditionMet(condition) = trigger else {
+                continue;
+            };
+            let symbols = match &definition.scope {
+                WorkflowScope::Instrument(instrument_id) => vec![Some(instrument_id.clone())],
+                WorkflowScope::AnySymbol
+                    if condition.checks().any(WorkflowCheck::reads_position) =>
+                {
+                    let open = open_positions(&self.state.positions, account_id)
+                        .map(|position| Some(position.instrument_id.clone()))
+                        .collect::<Vec<_>>();
+                    if open.is_empty() { vec![None] } else { open }
+                }
+                WorkflowScope::AnySymbol => vec![None],
+            };
+            for symbol in symbols {
+                let reading =
+                    self.check_reading(account_id, symbol.as_ref(), &entry.best_exits, day_pnl);
+                let held = condition.holds(|check| reading.holds(check));
+                readings.push(((index, symbol), held));
+            }
+        }
+        readings
     }
 
     fn current_workflow(
@@ -583,7 +771,9 @@ impl TradingCore {
             .ok_or(WorkflowError::UnknownWorkflow)?;
         entry.at_level = [None; MAXIMUM_WORKFLOW_TRIGGERS];
         entry.position_marks = None;
+        entry.condition_marks = None;
         entry.next_due_unix_nanos = next_due(&record, now);
+        entry.next_check_unix_nanos = next_condition_check(&record, now);
         entry.record = record;
         self.bump_revision().map_err(WorkflowError::Owner)
     }
@@ -624,12 +814,17 @@ impl TradingCore {
     }
 
     /// The blockers of every branch: what an armed workflow publishes and arming checks.
+    /// A check of the day's P&L reads a broker account's open P&L from its venue.
     fn workflow_blockers(&self, definition: &WorkflowDefinition) -> Vec<WorkflowBlocker> {
         let enters = definition
             .actions()
             .any(|action| matches!(action, WorkflowAction::Enter { .. }));
+        let venue = definition.actions().any(WorkflowAction::needs_venue)
+            || definition
+                .checks()
+                .any(|check| matches!(check, WorkflowCheck::DayProfit { .. }));
         let prices = definition.checks().any(WorkflowCheck::reads_quote);
-        self.blockers_for(definition, enters, prices)
+        self.blockers_for(definition, enters, venue, prices)
     }
 
     /// The blockers of the one branch a firing takes.
@@ -644,13 +839,19 @@ impl TradingCore {
                 WorkflowPathStep::Action(_, WorkflowAction::Enter { .. }, _)
             )
         });
-        self.blockers_for(definition, enters, false)
+        let venue = path.iter().any(
+            |step| matches!(step, WorkflowPathStep::Action(_, action, _) if action.needs_venue()),
+        );
+        self.blockers_for(definition, enters, venue, false)
     }
 
+    /// `venue`: whether something sends to (or reads from) the account's venue, which an
+    /// unreachable broker account cannot.
     fn blockers_for(
         &self,
         definition: &WorkflowDefinition,
         enters: bool,
+        venue: bool,
         reads_price: bool,
     ) -> Vec<WorkflowBlocker> {
         let account_id = &definition.account_id;
@@ -672,7 +873,7 @@ impl TradingCore {
             Ok(VenueRoute::Broker) => self.connected_broker_accounts.contains(account_id),
             Err(_) => !self.state.accounts.contains_key(account_id),
         };
-        if !reachable {
+        if venue && !reachable {
             blockers.push(WorkflowBlocker::BrokerUnreachable);
         }
         let needs_quote = enters
@@ -716,8 +917,15 @@ impl TradingCore {
         kept_best: &BTreeMap<InstrumentId, BestExit>,
     ) -> Result<bool, WorkflowBlocker> {
         let account_id = &definition.account_id;
+        let day_pnl = condition
+            .checks()
+            .any(|check| matches!(check, WorkflowCheck::DayProfit { .. }))
+            .then(|| {
+                self.day_realized(account_id)
+                    .and_then(|realized| self.day_pnl(account_id, realized.realized))
+            });
         let read = |instrument_id: Option<&InstrumentId>| {
-            let reading = self.check_reading(account_id, instrument_id, kept_best);
+            let reading = self.check_reading(account_id, instrument_id, kept_best, day_pnl);
             condition.holds(|check| reading.holds(check))
         };
         if let WorkflowScope::Instrument(instrument_id) = &definition.scope {
@@ -748,12 +956,13 @@ impl TradingCore {
     }
 
     /// What a check reads about the account's position and quote in one symbol, or about
-    /// the account alone, flat, without one.
+    /// the account alone, flat, without one, with the day's P&L when a check needs it.
     fn check_reading<'a>(
         &'a self,
         account_id: &TradingAccountId,
         instrument_id: Option<&InstrumentId>,
         kept_best: &BTreeMap<InstrumentId, BestExit>,
+        day_pnl: Option<Result<FixedPoint, WorkflowBlocker>>,
     ) -> CheckReading<'a> {
         let Some(instrument_id) = instrument_id else {
             return CheckReading {
@@ -763,6 +972,7 @@ impl TradingCore {
                 quote: None,
                 best_exit: None,
                 instrument: None,
+                day_pnl,
             };
         };
         let key = (account_id.clone(), instrument_id.clone());
@@ -786,7 +996,70 @@ impl TradingCore {
                 best_exit(kept, mark, position, bid, ask).map(|best| best.price)
             }),
             instrument: self.state.instruments.get(instrument_id),
+            day_pnl,
         }
+    }
+
+    /// The start of the account's current risk session: its configured boundary, or UTC
+    /// midnight for an account without a risk session.
+    fn day_session_start(&self, account_id: &TradingAccountId) -> i64 {
+        self.workflow_session_boundary(account_id)
+            .session_start_containing(self.command_now)
+    }
+
+    /// The realized P&L, before fees, of the account's fills executed since its current
+    /// risk session started. Summed from the owner's own retained fills, so an account
+    /// without a risk profile needs no stored baseline.
+    fn day_realized(&self, account_id: &TradingAccountId) -> Result<DayRealized, WorkflowBlocker> {
+        let account = self
+            .state
+            .accounts
+            .get(account_id)
+            .ok_or(WorkflowBlocker::AccountMissing)?;
+        let session_start_unix_nanos = self.day_session_start(account_id);
+        let realized = self
+            .fills_realized_since(account_id, session_start_unix_nanos, account.currency_scale)
+            .map_err(|_| WorkflowBlocker::PositionUnknown)?;
+        Ok(DayRealized {
+            revision: self.state.revision,
+            session_start_unix_nanos,
+            realized,
+        })
+    }
+
+    /// The day's realized P&L plus the open P&L of every position of the account. A broker
+    /// account's open P&L is the venue's, unknown while it is unreachable.
+    fn day_pnl(
+        &self,
+        account_id: &TradingAccountId,
+        realized: FixedPoint,
+    ) -> Result<FixedPoint, WorkflowBlocker> {
+        let scale = realized.scale();
+        let open = match self.route(account_id) {
+            Ok(VenueRoute::Simulated) => {
+                let zero =
+                    FixedPoint::try_new(0, scale).map_err(|_| WorkflowBlocker::PositionUnknown)?;
+                self.state
+                    .positions
+                    .values()
+                    .filter(|position| &position.account_id == account_id)
+                    .try_fold(zero, |total, position| {
+                        position
+                            .unrealized_pnl
+                            .exact_rescale(scale)
+                            .and_then(|open| total.checked_add(open))
+                    })
+                    .map_err(|_| WorkflowBlocker::PositionUnknown)?
+            }
+            Ok(VenueRoute::Broker) => self
+                .broker_unrealized(account_id, scale)
+                .map_err(|_| WorkflowBlocker::PositionUnknown)?
+                .ok_or(WorkflowBlocker::BrokerUnreachable)?,
+            Err(_) => return Err(WorkflowBlocker::AccountMissing),
+        };
+        realized
+            .checked_add(open)
+            .map_err(|_| WorkflowBlocker::PositionUnknown)
     }
 
     fn fire_workflow(&mut self, workflow_id: &str, targets: WorkflowTargets) {
@@ -891,6 +1164,7 @@ impl TradingCore {
             .ok_or(WorkflowError::UnknownWorkflow)?;
         if record.state != WorkflowState::Armed {
             entry.next_due_unix_nanos = None;
+            entry.next_check_unix_nanos = None;
         }
         entry.record = record;
         if entry
@@ -949,6 +1223,8 @@ impl TradingCore {
                 Ok(()) => WorkflowActionResult::Locked,
                 Err(detail) => WorkflowActionResult::Refused { detail },
             },
+            // The committed firing is the notice; the desktop announces it.
+            WorkflowAction::Notify => WorkflowActionResult::Notified,
         }
     }
 
@@ -1075,6 +1351,21 @@ fn next_due(record: &WorkflowRecord, now: i64) -> Option<i64> {
         .flatten()
 }
 
+/// The next whole minute after `now` while an armed workflow has a condition trigger whose
+/// answer can change with the time alone.
+fn next_condition_check(record: &WorkflowRecord, now: i64) -> Option<i64> {
+    let reads_clock = record
+        .definition
+        .trigger_conditions()
+        .flat_map(WorkflowCondition::checks)
+        .any(WorkflowCheck::reads_clock);
+    (record.state == WorkflowState::Armed && reads_clock).then(|| {
+        now.div_euclid(NANOS_PER_MINUTE)
+            .saturating_add(1)
+            .saturating_mul(NANOS_PER_MINUTE)
+    })
+}
+
 /// `Above` holds while the bid is at or above `level`, `Below` while the ask is at or
 /// below it; `None` when the quote is at another scale.
 fn price_holds(
@@ -1103,6 +1394,8 @@ struct CheckReading<'a> {
     quote: Option<(FixedPoint, FixedPoint)>,
     best_exit: Option<FixedPoint>,
     instrument: Option<&'a TradingInstrument>,
+    /// The account's P&L today; `None` when no check of the condition reads it.
+    day_pnl: Option<Result<FixedPoint, WorkflowBlocker>>,
 }
 
 impl CheckReading<'_> {
@@ -1161,12 +1454,11 @@ impl CheckReading<'_> {
                 let Some(position) = self.position else {
                     return Ok(false);
                 };
-                let open = position.unrealized_pnl;
-                let scale = open.scale().max(amount.scale());
-                lift(i128::from(open.units()), open.scale(), scale)
-                    .zip(lift(i128::from(amount.units()), amount.scale(), scale))
-                    .map(|(open, amount)| compare.holds(open, amount))
-                    .ok_or(WorkflowBlocker::PositionUnknown)
+                money_holds(compare, position.unrealized_pnl, amount)
+            }
+            WorkflowCheck::DayProfit { compare, amount } => {
+                let pnl = self.day_pnl.ok_or(WorkflowBlocker::PositionUnknown)??;
+                money_holds(compare, pnl, amount)
             }
             WorkflowCheck::Pullback { ticks } => {
                 let Some(position) = self.position else {
@@ -1211,6 +1503,19 @@ impl CheckReading<'_> {
         )
         .ok_or(WorkflowBlocker::QuoteUnavailable)
     }
+}
+
+/// Compares a money value with an amount at their common scale.
+fn money_holds(
+    compare: WorkflowCompare,
+    value: FixedPoint,
+    amount: FixedPoint,
+) -> Result<bool, WorkflowBlocker> {
+    let scale = value.scale().max(amount.scale());
+    lift(i128::from(value.units()), value.scale(), scale)
+        .zip(lift(i128::from(amount.units()), amount.scale(), scale))
+        .map(|(value, amount)| compare.holds(value, amount))
+        .ok_or(WorkflowBlocker::PositionUnknown)
 }
 
 /// The account's position mark in one instrument; before its first fill, cycle 0 and no
@@ -1346,7 +1651,11 @@ fn check_scales(
     currency_scale: u8,
 ) -> Result<(), WorkflowError> {
     if definition.checks().any(|check| {
-        matches!(check, WorkflowCheck::OpenProfit { amount, .. } if amount.scale() != currency_scale)
+        matches!(
+            check,
+            WorkflowCheck::OpenProfit { amount, .. } | WorkflowCheck::DayProfit { amount, .. }
+                if amount.scale() != currency_scale
+        )
     }) {
         return Err(WorkflowError::Invalid(WorkflowInvalid::Amount));
     }
@@ -1367,7 +1676,8 @@ fn check_scales(
         | WorkflowCheck::TimeInTrade { .. }
         | WorkflowCheck::OpenProfitTicks { .. }
         | WorkflowCheck::OpenProfit { .. }
-        | WorkflowCheck::Pullback { .. } => false,
+        | WorkflowCheck::Pullback { .. }
+        | WorkflowCheck::DayProfit { .. } => false,
     });
     if trigger_off_scale || condition_off_scale {
         return Err(WorkflowError::Invalid(WorkflowInvalid::Level));

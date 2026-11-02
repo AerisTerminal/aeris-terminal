@@ -63,7 +63,8 @@ pub enum WorkflowScope {
     /// Every symbol the account holds. A run starts on every position (or, fired by a
     /// position trigger, on the symbols whose position opened or closed); an If whose
     /// checks read the position holds when any of those positions passes, and its `then`
-    /// branch goes on with only the positions that passed. Price triggers, price checks and
+    /// branch goes on with only the positions that passed; a condition trigger starts a run
+    /// on the positions whose condition became true. Price triggers, price checks and
     /// entries need one symbol and are refused.
     AnySymbol,
 }
@@ -91,6 +92,17 @@ impl WorkflowTargets {
         match self {
             Self::Every => true,
             Self::Only(instruments) => instruments.contains(instrument_id),
+        }
+    }
+
+    /// The symbols of either.
+    pub(crate) fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Only(mut instruments), Self::Only(more)) => {
+                instruments.extend(more);
+                Self::Only(instruments)
+            }
+            (Self::Every, _) | (_, Self::Every) => Self::Every,
         }
     }
 }
@@ -146,6 +158,12 @@ pub enum WorkflowTrigger {
     /// Fires when the account's position in a workflow symbol closes to flat or reverses.
     /// Arming or a restart only records the current positions.
     PositionClosed,
+    /// Fires when the condition becomes true: it was read false at the previous owner step
+    /// and reads true now. The owner reads it after every command, market batch and timer
+    /// step, and at each whole minute while a check reads the clock; arming or a restart
+    /// only records whether it holds. On any symbol a condition with a position check is
+    /// read for each open position, and a run starts on the symbols that became true.
+    ConditionMet(WorkflowCondition),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,6 +248,14 @@ pub enum WorkflowCheck {
     /// The exit price has come back at least `ticks` from the best exit price since the
     /// position opened. Never holds while flat.
     Pullback { ticks: u32 },
+    /// The account's P&L today in the account currency, a loss negative: the realized P&L
+    /// of the fills executed since the current risk session started (the account's risk
+    /// session boundary, or UTC midnight when it has none) plus the open P&L of every
+    /// position. Read for the whole account, not one symbol.
+    DayProfit {
+        compare: WorkflowCompare,
+        amount: FixedPoint,
+    },
 }
 
 /// `AtLeast` holds at or above the value it is given, `AtMost` at or below it.
@@ -275,6 +301,21 @@ pub enum WorkflowAction {
     CancelOrders,
     /// Locks the account against new orders until the user unlocks it.
     LockAccount,
+    /// Records that the workflow reached this block, which the desktop announces; it sends
+    /// nothing to a venue.
+    Notify,
+}
+
+impl WorkflowAction {
+    /// Whether the action sends anything to the account's venue; a lock and a notice stay
+    /// in the owner.
+    #[must_use]
+    pub const fn needs_venue(self) -> bool {
+        matches!(
+            self,
+            Self::Enter { .. } | Self::Flatten | Self::CancelOrders
+        )
+    }
 }
 
 /// Stop and target distances from the entry fill, in the instrument's ticks.
@@ -290,6 +331,8 @@ pub enum WorkflowRepeat {
     Once,
     /// At most `maximum` firings in each risk session of the account.
     PerSession { maximum: u32 },
+    /// Every trigger fires it, kept apart only by the cooldown.
+    Always,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -354,7 +397,8 @@ pub enum WorkflowBlocker {
     BrokerUnreachable,
     QuoteUnavailable,
     /// A check reads the position's open time or entry price, and fills Aeris never saw
-    /// opened it (before this version, or at the broker while Aeris was away).
+    /// opened it (before this version, or at the broker while Aeris was away), or reads a
+    /// P&L the owner cannot sum exactly.
     PositionUnknown,
 }
 
@@ -405,6 +449,7 @@ pub enum WorkflowActionResult {
     Flattened,
     Cancelled { orders: usize },
     Locked,
+    Notified,
     Refused { detail: String },
 }
 
@@ -513,7 +558,7 @@ pub enum WorkflowInvalid {
     Cycle,
     /// A node the trigger never reaches.
     Unreachable,
-    /// No action, or a lock with a node after it.
+    /// No action.
     Actions,
     Quantity,
     Protection,
@@ -564,15 +609,26 @@ impl WorkflowDefinition {
         })
     }
 
-    /// Every check of every If anywhere in the graph.
+    /// Every check of a condition trigger and of every If anywhere in the graph.
     pub fn checks(&self) -> impl Iterator<Item = WorkflowCheck> + '_ {
-        self.nodes
-            .iter()
-            .filter_map(|node| match &node.step {
+        self.trigger_conditions()
+            .chain(self.nodes.iter().filter_map(|node| match &node.step {
                 WorkflowStep::If { condition, .. } => Some(condition),
                 WorkflowStep::Action { .. } => None,
-            })
+            }))
             .flat_map(WorkflowCondition::checks)
+    }
+
+    /// The condition of every condition trigger.
+    pub fn trigger_conditions(&self) -> impl Iterator<Item = &WorkflowCondition> + '_ {
+        self.triggers.iter().filter_map(|trigger| match trigger {
+            WorkflowTrigger::ConditionMet(condition) => Some(condition),
+            WorkflowTrigger::PriceCrosses { .. }
+            | WorkflowTrigger::TimeOfDay(_)
+            | WorkflowTrigger::Every { .. }
+            | WorkflowTrigger::PositionOpened
+            | WorkflowTrigger::PositionClosed => None,
+        })
     }
 
     /// Whether a block reads one symbol's price or trades it: a price trigger, a price check
@@ -644,6 +700,9 @@ impl WorkflowDefinition {
                     }
                 }
                 WorkflowTrigger::PositionOpened | WorkflowTrigger::PositionClosed => {}
+                WorkflowTrigger::ConditionMet(condition) => {
+                    condition.checks().try_for_each(validate_check)?;
+                }
             }
         }
         self.validate_graph()?;
@@ -655,11 +714,11 @@ impl WorkflowDefinition {
                 WorkflowStep::If { condition, .. } => {
                     condition.checks().try_for_each(validate_check)?;
                 }
-                WorkflowStep::Action { action, next } => validate_action(action, next)?,
+                WorkflowStep::Action { action, .. } => validate_action(action)?,
             }
         }
         match self.limits.repeat {
-            WorkflowRepeat::Once => {}
+            WorkflowRepeat::Once | WorkflowRepeat::Always => {}
             WorkflowRepeat::PerSession { maximum } => {
                 if !(1..=MAXIMUM_WORKFLOW_SESSION_FIRINGS).contains(&maximum) {
                     return Err(WorkflowInvalid::Repeat);
@@ -828,7 +887,8 @@ fn validate_check(check: WorkflowCheck) -> Result<(), WorkflowInvalid> {
     match check {
         WorkflowCheck::Position(_)
         | WorkflowCheck::Weekday { .. }
-        | WorkflowCheck::OpenProfit { .. } => Ok(()),
+        | WorkflowCheck::OpenProfit { .. }
+        | WorkflowCheck::DayProfit { .. } => Ok(()),
         WorkflowCheck::TimeInTrade { minutes, .. } => {
             if (1..=MAXIMUM_WORKFLOW_TRADE_MINUTES).contains(&minutes) {
                 Ok(())
@@ -964,6 +1024,15 @@ impl WorkflowCheck {
                 | Self::Pullback { .. }
         )
     }
+
+    /// Whether the check's answer can change with the time alone.
+    #[must_use]
+    pub const fn reads_clock(self) -> bool {
+        matches!(
+            self,
+            Self::Between { .. } | Self::Weekday { .. } | Self::TimeInTrade { .. }
+        )
+    }
 }
 
 impl WorkflowWeekdays {
@@ -997,7 +1066,10 @@ impl WorkflowTrigger {
     #[must_use]
     pub fn next_after(self, unix_nanos: i64) -> Option<i64> {
         match self {
-            Self::PriceCrosses { .. } | Self::PositionOpened | Self::PositionClosed => None,
+            Self::PriceCrosses { .. }
+            | Self::PositionOpened
+            | Self::PositionClosed
+            | Self::ConditionMet(_) => None,
             Self::TimeOfDay(time) => Some(time.next_after(unix_nanos)),
             Self::Every { minutes } => {
                 let period = i64::from(minutes) * 60 * NANOS_PER_SECOND;
@@ -1012,10 +1084,7 @@ impl WorkflowTrigger {
     }
 }
 
-fn validate_action(
-    action: WorkflowAction,
-    next: Option<WorkflowNodeId>,
-) -> Result<(), WorkflowInvalid> {
+fn validate_action(action: WorkflowAction) -> Result<(), WorkflowInvalid> {
     match action {
         WorkflowAction::Enter {
             quantity,
@@ -1033,11 +1102,12 @@ fn validate_action(
             }
             Ok(())
         }
-        // A locked account refuses every later order, so nothing follows a lock.
-        WorkflowAction::LockAccount if next.is_some() => Err(WorkflowInvalid::Actions),
-        WorkflowAction::LockAccount | WorkflowAction::Flatten | WorkflowAction::CancelOrders => {
-            Ok(())
-        }
+        // A lock refuses only later entries, so a flatten, a cancel or a notice may
+        // follow it.
+        WorkflowAction::LockAccount
+        | WorkflowAction::Flatten
+        | WorkflowAction::CancelOrders
+        | WorkflowAction::Notify => Ok(()),
     }
 }
 
@@ -1159,7 +1229,7 @@ impl WorkflowRecord {
     /// A `Once` workflow has no session cap: its firing completes it instead.
     pub(crate) fn session_cap_reached(&self) -> bool {
         match self.definition.limits.repeat {
-            WorkflowRepeat::Once => false,
+            WorkflowRepeat::Once | WorkflowRepeat::Always => false,
             WorkflowRepeat::PerSession { maximum } => self.session_firings >= maximum,
         }
     }
@@ -1304,16 +1374,20 @@ mod tests {
         let mut bad = definition();
         bad.triggers = vec![WorkflowTrigger::Every { minutes: 5 }; MAXIMUM_WORKFLOW_TRIGGERS + 1];
         assert_eq!(bad.validate(), Err(WorkflowInvalid::Triggers));
-        let mut bad = definition();
+        // A lock may lead on to a flatten or a notice.
+        let mut locked = definition();
         set_step(
-            &mut bad,
+            &mut locked,
             BUY,
             WorkflowStep::Action {
                 action: WorkflowAction::LockAccount,
                 next: Some(FLATTEN),
             },
         );
-        assert_eq!(bad.validate(), Err(WorkflowInvalid::Actions));
+        assert_eq!(locked.validate(), Ok(()));
+        let mut always = definition();
+        always.limits.repeat = WorkflowRepeat::Always;
+        assert_eq!(always.validate(), Ok(()));
         let mut bad = definition();
         set_step(
             &mut bad,
@@ -1638,6 +1712,57 @@ mod tests {
                 Err(WorkflowInvalid::Layout)
             );
         }
+    }
+
+    #[test]
+    fn a_condition_trigger_is_validated_and_read_like_an_if() {
+        let day_profit = WorkflowCheck::DayProfit {
+            compare: WorkflowCompare::AtLeast,
+            amount: FixedPoint::try_new(50_000, 2).expect("amount"),
+        };
+        let mut definition = definition();
+        definition.triggers = vec![WorkflowTrigger::ConditionMet(WorkflowCondition::single(
+            day_profit,
+        ))];
+        assert_eq!(definition.validate(), Ok(()));
+        assert_eq!(definition.next_timed_trigger_after(0), None);
+        // Its checks count with the If's, for scales, quotes and the scope.
+        assert!(definition.checks().any(|check| check == day_profit));
+        assert_eq!(definition.trigger_conditions().count(), 1);
+        definition.triggers = vec![WorkflowTrigger::ConditionMet(WorkflowCondition::single(
+            WorkflowCheck::Pullback { ticks: 0 },
+        ))];
+        assert_eq!(definition.validate(), Err(WorkflowInvalid::Ticks));
+        let mut any = definition.clone();
+        any.scope = WorkflowScope::AnySymbol;
+        set_step(
+            &mut any,
+            BUY,
+            WorkflowStep::Action {
+                action: WorkflowAction::Notify,
+                next: None,
+            },
+        );
+        any.triggers = vec![WorkflowTrigger::ConditionMet(WorkflowCondition::single(
+            WorkflowCheck::Price {
+                direction: PriceDirection::Above,
+                level: FixedPoint::try_new(500_000, 2).expect("level"),
+            },
+        ))];
+        assert_eq!(any.validate(), Err(WorkflowInvalid::Scope));
+        any.triggers = vec![WorkflowTrigger::ConditionMet(WorkflowCondition::single(
+            day_profit,
+        ))];
+        assert_eq!(any.validate(), Ok(()));
+        assert!(!day_profit.reads_position() && !day_profit.reads_quote());
+        assert!(
+            WorkflowCheck::Between {
+                zone: WorkflowTimeZone::Utc,
+                start_minute: 0,
+                end_minute: 60,
+            }
+            .reads_clock()
+        );
     }
 
     #[test]

@@ -472,7 +472,7 @@ impl TradingCore {
         session: &RiskSession,
     ) -> Result<FixedPoint, String> {
         if self.route(&profile.account_id)? != VenueRoute::Simulated {
-            return self.broker_realized_since(
+            return self.fills_realized_since(
                 &profile.account_id,
                 session.session_start_unix_nanos,
                 profile.daily_loss_limit.scale(),
@@ -549,8 +549,9 @@ impl TradingCore {
             .map(Some)
     }
 
-    /// The broker-reported realized P&L of the account's deals executed at or after `since`.
-    pub(super) fn broker_realized_since(
+    /// The realized P&L, before fees, of the account's fills executed at or after `since`:
+    /// for a broker account the venue-reported deals.
+    pub(super) fn fills_realized_since(
         &self,
         account_id: &TradingAccountId,
         since_unix_nanos: i64,

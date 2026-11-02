@@ -1139,8 +1139,9 @@ impl Toaster {
     }
 }
 
-/// A firing that sent nothing warns, one with a refused action reads as a loss, and one
-/// that ran is a quiet notice beside the fill toasts its orders bring.
+/// A firing that sent nothing warns, one with a refused action reads as a loss, one with a
+/// notify block asks for attention like a warning, and one that ran is a quiet notice beside
+/// the fill toasts its orders bring.
 fn workflow_firing_tone(outcome: &WorkflowFiringOutcome) -> ToastTone {
     match outcome {
         WorkflowFiringOutcome::Blocked(_) | WorkflowFiringOutcome::Interrupted => {
@@ -1155,6 +1156,16 @@ fn workflow_firing_tone(outcome: &WorkflowFiringOutcome) -> ToastTone {
             }) =>
         {
             ToastTone::Loss
+        }
+        WorkflowFiringOutcome::Executed(steps)
+            if steps.iter().any(|step| {
+                matches!(
+                    step.outcome,
+                    WorkflowStepOutcome::Action(WorkflowActionResult::Notified)
+                )
+            }) =>
+        {
+            ToastTone::Warning
         }
         WorkflowFiringOutcome::Executed(_) => ToastTone::Muted,
     }
@@ -1827,6 +1838,37 @@ mod tests {
 
     fn approx(actual: f32, expected: f32) -> bool {
         (actual - expected).abs() < 0.01
+    }
+
+    #[test]
+    fn a_workflow_notice_asks_for_attention_and_a_refusal_reads_as_a_loss() {
+        use aeris_trading_runtime::{WorkflowNodeId, WorkflowStepResult};
+        let ran = |results: &[WorkflowActionResult]| {
+            WorkflowFiringOutcome::Executed(
+                results
+                    .iter()
+                    .map(|result| WorkflowStepResult {
+                        node: WorkflowNodeId(1),
+                        outcome: WorkflowStepOutcome::Action(result.clone()),
+                    })
+                    .collect(),
+            )
+        };
+        let refused = WorkflowActionResult::Refused {
+            detail: "locked".to_string(),
+        };
+        assert_eq!(
+            workflow_firing_tone(&ran(&[WorkflowActionResult::Flattened])),
+            ToastTone::Muted
+        );
+        assert_eq!(
+            workflow_firing_tone(&ran(&[WorkflowActionResult::Notified])),
+            ToastTone::Warning
+        );
+        assert_eq!(
+            workflow_firing_tone(&ran(&[WorkflowActionResult::Notified, refused])),
+            ToastTone::Loss
+        );
     }
 
     fn fill(id: &str, side: aeris_trading::OrderSide, executed: i64) -> aeris_trading::Fill {

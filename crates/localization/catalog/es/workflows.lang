@@ -125,7 +125,7 @@ field_quantity = Cantidad
 field_stop_ticks = Stop (ticks)
 field_target_ticks = Objetivo (ticks)
 protection_hint = Deja el stop y el objetivo vacíos para entrar sin bracket.
-lock_hint = No se ejecuta nada después de bloquear la cuenta.
+lock_hint = Bloquear rechaza nuevas entradas en esta cuenta hasta que la desbloquees. Los bloques posteriores aún pueden cancelar órdenes y cerrar posiciones.
 remove_block = Quitar bloque
 
 # Lectura de los bloques de un flujo
@@ -269,7 +269,28 @@ condition_pullback = El precio retrocedió {ticks} ticks desde su mejor nivel
 problem_profit_ticks = Escribe un número entero de ticks de -{maximum} a {maximum}, distinto de 0
 problem_amount = Escribe un importe con como máximo {decimals} decimales; una pérdida es negativa
 problem_pullback = Escribe un número entero de ticks de 1 a {maximum}
-blocker_position_unknown = la posición se abrió fuera de Aeris y su entrada es desconocida
+blocker_position_unknown = la entrada o el P&L de la posición no se conocen con exactitud, por ejemplo porque se abrió fuera de Aeris
+
+# Disparadores por condición, ganancia del día, avisos y repeticiones
+trigger_choice_condition = Se cumplen las comprobaciones
+trigger_condition_hint = Se activa cada vez que sus comprobaciones empiezan a cumplirse después de armar el flujo, y solo de nuevo cuando antes dejaron de cumplirse. Las comprobaciones de hora se leen en cada minuto exacto. Con «Cualquier símbolo», la ejecución actúa sobre las posiciones que las hicieron cumplirse.
+block_if_day_profit = Si ganancia del día
+field_day_profit_amount = Importe (una pérdida es negativa)
+day_profit_hint = La ganancia de la cuenta hoy: lo que sus ejecuciones realizaron desde que empezó su sesión de riesgo (medianoche UTC sin perfil de riesgo), antes de comisiones, más la ganancia abierta de cada posición.
+condition_day_profit_at_least = La ganancia del día es al menos {amount}
+condition_day_profit_at_most = La ganancia del día es como máximo {amount}
+summary_condition = Cuando {checks}
+join_word_all = y
+join_word_any = o
+block_notify = Avisar
+action_notify = Mostrar un aviso
+notify_hint = Muestra un aviso con el nombre de este flujo y lo guarda en el historial de notificaciones. Nada sale de este equipo.
+outcome_notified = aviso mostrado
+repeat_choice_always = Cada vez
+example_deadline = Cerrar a la hora límite
+example_deadline_body = Cada día a las 15:50 hora de Chicago, si una posición sigue abierta en cualquier símbolo porque no alcanzó su objetivo, cancela las órdenes activas y la cierra.
+example_day_stop = Stop diario de ganancias y pérdidas
+example_day_stop_body = Cuando la ganancia del día de la cuenta alcanza tu objetivo o baja a tu límite de pérdida, bloquea la cuenta, cancela las órdenes activas y cierra todas las posiciones. Como máximo una vez por sesión.
 
 # Ticket de órdenes
 ticket_no_account = Elige una cuenta para ver sus flujos.

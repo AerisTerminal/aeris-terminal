@@ -6,9 +6,9 @@
 
 use super::market_screener::{AppView, capture_time_label};
 use super::workflow_board::{
-    ActionDraft, BoardCamera, BoardHit, BoardItem, BoardPoint, CheckDraft, DraftField,
-    DraftProblem, InstrumentScales, LinkRefusal, OutputPort, RepeatDraft, SavedRevision,
-    SearchedMarket, TriggerDraft, WorkflowDraft, WorkflowExample,
+    ActionDraft, BoardCamera, BoardHit, BoardItem, BoardPoint, CheckDraft, ConditionDraft,
+    DraftField, DraftProblem, InstrumentScales, LinkRefusal, OutputPort, RepeatDraft,
+    SavedRevision, SearchedMarket, TriggerDraft, WorkflowDraft, WorkflowExample,
 };
 use super::workflow_canvas::board_chrome;
 use super::workflow_market_search::{MarketSearchNotice, WorkflowMarketSearch};
@@ -19,9 +19,9 @@ use aeris_trading_runtime::{
     MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_PROTECTION_TICKS,
     MAXIMUM_WORKFLOW_TRADE_MINUTES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS, MINUTES_PER_DAY,
     PositionRequirement, PriceDirection, TradingInstrument, TradingService, WorkflowActionResult,
-    WorkflowBlocker, WorkflowCompare, WorkflowError, WorkflowFiringOutcome, WorkflowScope,
-    WorkflowState, WorkflowStepOutcome, WorkflowTimeZone, WorkflowView, WorkflowWeekdays,
-    WorkingSet,
+    WorkflowBlocker, WorkflowCompare, WorkflowError, WorkflowFiringOutcome, WorkflowJoin,
+    WorkflowScope, WorkflowState, WorkflowStepOutcome, WorkflowTimeZone, WorkflowView,
+    WorkflowWeekdays, WorkingSet,
 };
 
 const ZOOM_STEP: f32 = 1.2;
@@ -165,8 +165,12 @@ impl OpenWorkflow {
         match self.selected {
             None => {
                 let mut fields = vec![DraftField::Name];
-                if self.draft.repeat == RepeatDraft::PerSession {
-                    fields.extend([DraftField::SessionMaximum, DraftField::Cooldown]);
+                match self.draft.repeat {
+                    RepeatDraft::Once => {}
+                    RepeatDraft::PerSession => {
+                        fields.extend([DraftField::SessionMaximum, DraftField::Cooldown]);
+                    }
+                    RepeatDraft::Always => fields.push(DraftField::Cooldown),
                 }
                 fields
             }
@@ -175,7 +179,7 @@ impl OpenWorkflow {
                 .triggers
                 .iter()
                 .enumerate()
-                .filter_map(|(index, trigger)| trigger.field(index))
+                .flat_map(|(index, trigger)| trigger.fields(index))
                 .collect(),
             Some(BoardItem::Node(id)) => self
                 .draft
@@ -444,6 +448,7 @@ fn action_result_text(result: &WorkflowActionResult) -> String {
             tr!(workflows::OUTCOME_CANCELLED, orders = orders)
         }
         WorkflowActionResult::Locked => tr!(workflows::OUTCOME_LOCKED).to_string(),
+        WorkflowActionResult::Notified => tr!(workflows::OUTCOME_NOTIFIED).to_string(),
         WorkflowActionResult::Refused { detail } => {
             tr!(workflows::OUTCOME_REFUSED, detail = detail)
         }
@@ -1395,6 +1400,8 @@ pub(super) fn example_name(example: WorkflowExample) -> &'static str {
         WorkflowExample::SessionDip => tr!(workflows::EXAMPLE_SESSION_DIP),
         WorkflowExample::FlatBeforeClose => tr!(workflows::EXAMPLE_FLAT_BEFORE_CLOSE),
         WorkflowExample::ExitAndLock => tr!(workflows::EXAMPLE_EXIT_AND_LOCK),
+        WorkflowExample::DeadlineUnlessTarget => tr!(workflows::EXAMPLE_DEADLINE),
+        WorkflowExample::DayStop => tr!(workflows::EXAMPLE_DAY_STOP),
     }
 }
 
@@ -1404,6 +1411,8 @@ pub(super) fn example_description(example: WorkflowExample) -> &'static str {
         WorkflowExample::SessionDip => tr!(workflows::EXAMPLE_SESSION_DIP_BODY),
         WorkflowExample::FlatBeforeClose => tr!(workflows::EXAMPLE_FLAT_BEFORE_CLOSE_BODY),
         WorkflowExample::ExitAndLock => tr!(workflows::EXAMPLE_EXIT_AND_LOCK_BODY),
+        WorkflowExample::DeadlineUnlessTarget => tr!(workflows::EXAMPLE_DEADLINE_BODY),
+        WorkflowExample::DayStop => tr!(workflows::EXAMPLE_DAY_STOP_BODY),
     }
 }
 
@@ -1438,7 +1447,25 @@ pub(super) fn trigger_summary(trigger: &TriggerDraft) -> String {
         }
         TriggerDraft::PositionOpened => tr!(workflows::TRIGGER_CHOICE_OPENED).to_string(),
         TriggerDraft::PositionClosed => tr!(workflows::TRIGGER_CHOICE_CLOSED).to_string(),
+        TriggerDraft::Condition(condition) => tr!(
+            workflows::SUMMARY_CONDITION,
+            checks = condition_summary(condition)
+        ),
     }
+}
+
+/// A condition's checks, joined by how they combine.
+pub(super) fn condition_summary(condition: &ConditionDraft) -> String {
+    let separator = match condition.join {
+        WorkflowJoin::All => tr!(workflows::JOIN_WORD_ALL),
+        WorkflowJoin::Any => tr!(workflows::JOIN_WORD_ANY),
+    };
+    condition
+        .checks
+        .iter()
+        .map(check_summary)
+        .collect::<Vec<_>>()
+        .join(&format!(" {separator} "))
 }
 
 /// One check as a sentence, for an If with several.
@@ -1511,6 +1538,17 @@ pub(super) fn check_summary(check: &CheckDraft) -> String {
         CheckDraft::Pullback { ticks } => {
             tr!(workflows::CONDITION_PULLBACK, ticks = value_or_unset(ticks))
         }
+        CheckDraft::DayProfit { compare, amount } => {
+            let amount = value_or_unset(amount);
+            match compare {
+                WorkflowCompare::AtLeast => {
+                    tr!(workflows::CONDITION_DAY_PROFIT_AT_LEAST, amount = amount)
+                }
+                WorkflowCompare::AtMost => {
+                    tr!(workflows::CONDITION_DAY_PROFIT_AT_MOST, amount = amount)
+                }
+            }
+        }
     }
 }
 
@@ -1578,5 +1616,6 @@ pub(super) fn action_summary(action: &ActionDraft) -> String {
         ActionDraft::Flatten => tr!(workflows::ACTION_FLATTEN).to_string(),
         ActionDraft::CancelOrders => tr!(workflows::ACTION_CANCEL_ORDERS).to_string(),
         ActionDraft::LockAccount => tr!(workflows::ACTION_LOCK).to_string(),
+        ActionDraft::Notify => tr!(workflows::ACTION_NOTIFY).to_string(),
     }
 }

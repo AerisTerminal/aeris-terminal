@@ -1231,6 +1231,14 @@ fn an_open_profit_amount_must_be_at_the_account_currency_scale() {
         service.register_workflow(probe("off-scale", check), WorkflowLayout::default()),
         Err(WorkflowError::Invalid(WorkflowInvalid::Amount))
     );
+    let day = WorkflowCheck::DayProfit {
+        compare: WorkflowCompare::AtMost,
+        amount: FixedPoint::try_new(-100, 0).expect("amount"),
+    };
+    assert_eq!(
+        service.register_workflow(probe("day-off-scale", day), WorkflowLayout::default()),
+        Err(WorkflowError::Invalid(WorkflowInvalid::Amount))
+    );
     service
         .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
@@ -1548,6 +1556,337 @@ fn an_if_on_any_symbol_narrows_the_run_to_the_positions_that_pass() {
     let after = workflow(&restarted, "flatten-longs");
     assert_eq!(after.definition.scope, WorkflowScope::AnySymbol);
     assert_eq!(after.definition, before.definition);
+    restarted
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+/// When `condition` becomes true, notify, every time.
+fn condition_notice(workflow_id: &str, condition: WorkflowCondition) -> WorkflowDefinition {
+    let mut definition = single(workflow_id, 10_050, WorkflowAction::Notify);
+    definition.triggers = vec![WorkflowTrigger::ConditionMet(condition)];
+    definition.limits.repeat = WorkflowRepeat::Always;
+    definition
+}
+
+fn notified() -> Vec<WorkflowStepResult> {
+    vec![WorkflowStepResult {
+        node: THEN_NODE,
+        outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Notified),
+    }]
+}
+
+fn money(units: i64) -> FixedPoint {
+    FixedPoint::try_new(units, 2).expect("amount")
+}
+
+#[test]
+fn a_condition_trigger_fires_each_time_it_becomes_true() {
+    let directory = TestDirectory::new("workflow-condition-edge");
+    let instrument = instrument();
+    let (service, _clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let above = WorkflowCondition::single(WorkflowCheck::Price {
+        direction: PriceDirection::Above,
+        level: price(10_050),
+    });
+    register(&service, condition_notice("bid-above", above));
+    service.arm_workflow("bid-above".into(), 1).expect("armed");
+    // Already true when armed: arming only records it.
+    deliver_quote(&service, &feed, &instrument, 2, 10_075, 10_100);
+    register(&service, condition_notice("armed-above", above));
+    service
+        .arm_workflow("armed-above".into(), 1)
+        .expect("armed");
+    deliver_quote(&service, &feed, &instrument, 3, 10_100, 10_125);
+    let total = |workflow_id: &str| workflow(&service, workflow_id).total_firings;
+    assert_eq!(
+        (total("bid-above"), total("armed-above")),
+        (1, 0),
+        "false at arming then true fires; true at arming does not"
+    );
+    assert_eq!(executed(&workflow(&service, "bid-above")), notified());
+
+    // Staying true fires nothing more; going false and true again fires once more.
+    deliver_quote(&service, &feed, &instrument, 4, 10_125, 10_150);
+    assert_eq!(total("bid-above"), 1);
+    deliver_quote(&service, &feed, &instrument, 5, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 6, 10_050, 10_075);
+    assert_eq!((total("bid-above"), total("armed-above")), (2, 1));
+    let view = workflow(&service, "bid-above");
+    assert_eq!(
+        view.state,
+        WorkflowState::Armed,
+        "every time keeps it armed"
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn a_clock_condition_is_read_at_each_whole_minute() {
+    let directory = TestDirectory::new("workflow-condition-clock");
+    let instrument = instrument();
+    let (service, clock, _feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    // The fixture clock is 00:16:40 UTC; the window opens at 00:17.
+    let window = WorkflowCondition::single(WorkflowCheck::Between {
+        zone: WorkflowTimeZone::Utc,
+        start_minute: 17,
+        end_minute: 18,
+    });
+    register(&service, condition_notice("in-window", window));
+    service.arm_workflow("in-window".into(), 1).expect("armed");
+    let timer_calls = || {
+        service
+            .request(Command::OwnerDiagnostics)
+            .expect("owner diagnostics")
+            .1
+    };
+    let before = timer_calls();
+    clock.advance(Duration::from_secs(25));
+    service.status().expect("owner runs the due timer");
+    assert_eq!(timer_calls(), before + 1, "the minute mark is a deadline");
+    let view = workflow(&service, "in-window");
+    assert_eq!(view.total_firings, 1);
+    assert_eq!(executed(&view), notified());
+    clock.advance(Duration::from_secs(60));
+    service.status().expect("owner runs the due timer");
+    assert_eq!(workflow(&service, "in-window").total_firings, 1);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn the_day_profit_adds_realized_and_open_pnl_and_a_lock_can_flatten() {
+    let directory = TestDirectory::new("workflow-day-profit");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let day = |compare, units| {
+        WorkflowCondition::single(WorkflowCheck::DayProfit {
+            compare,
+            amount: money(units),
+        })
+    };
+    register(
+        &service,
+        condition_notice("up-25", day(WorkflowCompare::AtLeast, 2_500)),
+    );
+    // Down 25.00 on the day: lock the account, then flatten every symbol.
+    let mut stop = condition_notice("down-25", day(WorkflowCompare::AtMost, -2_500));
+    stop.scope = WorkflowScope::AnySymbol;
+    stop.limits.repeat = WorkflowRepeat::Once;
+    stop.nodes = vec![
+        WorkflowNode {
+            id: THEN_NODE,
+            step: WorkflowStep::Action {
+                action: WorkflowAction::LockAccount,
+                next: Some(ELSE_NODE),
+            },
+        },
+        action_node(ELSE_NODE, WorkflowAction::Flatten),
+    ];
+    register(&service, stop);
+    for workflow_id in ["up-25", "down-25"] {
+        let armed = service.arm_workflow(workflow_id.into(), 1).expect("armed");
+        assert!(armed.blockers.is_empty(), "{:?}", armed.blockers);
+    }
+    let total = |workflow_id: &str| workflow(&service, workflow_id).total_firings;
+
+    // Long one from 100.00 at 50.00 a point: 12.50, then 25.00 open.
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("open", OrderSide::Buy, 1),
+        2,
+        (10_025, 10_050),
+    );
+    assert_eq!(total("up-25"), 0);
+    quote_now(&service, &clock, &feed, 3, (10_050, 10_075));
+    assert_eq!(total("up-25"), 1);
+    assert_eq!(executed(&workflow(&service, "up-25")), notified());
+    // Closed at 100.75: 37.50 realized keeps the day up without a position.
+    quote_now(&service, &clock, &feed, 4, (10_075, 10_100));
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("close", OrderSide::Sell, 1),
+        5,
+        (10_000, 10_025),
+    );
+    assert_eq!(total("up-25"), 1, "still true, so no new firing");
+
+    // Long again from 100.25: 50.00 open loss is 12.50 down on the day, 75.00 is 37.50.
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("again", OrderSide::Buy, 1),
+        6,
+        (9_925, 9_950),
+    );
+    assert_eq!(total("down-25"), 0, "the realized profit counts");
+    quote_now(&service, &clock, &feed, 7, (9_875, 9_900));
+    let view = workflow(&service, "down-25");
+    assert_eq!(view.state, WorkflowState::Completed);
+    assert_eq!(
+        executed(&view),
+        vec![
+            WorkflowStepResult {
+                node: THEN_NODE,
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Locked),
+            },
+            WorkflowStepResult {
+                node: ELSE_NODE,
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Flattened),
+            },
+        ]
+    );
+    quote_now(&service, &clock, &feed, 8, (9_875, 9_900));
+    assert_eq!(net_quantity(&service, &instrument), 0);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn a_condition_on_any_symbol_acts_on_the_positions_that_became_true() {
+    let directory = TestDirectory::new("workflow-condition-any-symbol");
+    let (service, clock, feed) = two_symbol_fixture(&directory);
+    // Up two ticks in any symbol: flatten that symbol.
+    let mut definition = condition_notice(
+        "take-two-ticks",
+        WorkflowCondition::single(WorkflowCheck::OpenProfitTicks {
+            compare: WorkflowCompare::AtLeast,
+            ticks: 2,
+        }),
+    );
+    definition.scope = WorkflowScope::AnySymbol;
+    definition.nodes = vec![action_node(THEN_NODE, WorkflowAction::Flatten)];
+    register(&service, definition);
+    service
+        .arm_workflow("take-two-ticks".into(), 1)
+        .expect("armed");
+    trade_in(
+        &service,
+        &clock,
+        &feed,
+        &instrument(),
+        ("es-long", OrderSide::Buy, 1),
+        2,
+        (9_975, 10_000),
+    );
+    trade_in(
+        &service,
+        &clock,
+        &feed,
+        &crude(),
+        ("cl-short", OrderSide::Sell, 2),
+        2,
+        (7_975, 8_000),
+    );
+    assert_eq!(workflow(&service, "take-two-ticks").total_firings, 0);
+
+    deliver_quote(&service, &feed, &instrument(), 3, 10_050, 10_075);
+    assert_eq!(workflow(&service, "take-two-ticks").total_firings, 1);
+    assert_eq!(
+        (
+            net_quantity(&service, &instrument()),
+            net_quantity(&service, &crude())
+        ),
+        (0, -2),
+        "only the symbol that became true is flattened"
+    );
+    deliver_quote(&service, &feed, &crude(), 3, 7_900, 7_925);
+    assert_eq!(workflow(&service, "take-two-ticks").total_firings, 2);
+    assert_eq!(net_quantity(&service, &crude()), 0);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn condition_triggers_notices_and_every_time_survive_a_restart() {
+    let directory = TestDirectory::new("workflow-condition-restart");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let mut definition = condition_notice(
+        "durable-condition",
+        WorkflowCondition::single(WorkflowCheck::Price {
+            direction: PriceDirection::Above,
+            level: price(10_050),
+        }),
+    );
+    definition.triggers.push(WorkflowTrigger::ConditionMet(
+        WorkflowCondition::joined(
+            WorkflowJoin::All,
+            &[
+                WorkflowCheck::DayProfit {
+                    compare: WorkflowCompare::AtLeast,
+                    amount: money(-10_000),
+                },
+                WorkflowCheck::Between {
+                    zone: WorkflowTimeZone::Chicago,
+                    start_minute: 0,
+                    end_minute: 1_439,
+                },
+            ],
+        )
+        .expect("condition"),
+    ));
+    definition.nodes = vec![
+        WorkflowNode {
+            id: THEN_NODE,
+            step: WorkflowStep::Action {
+                action: WorkflowAction::Notify,
+                next: Some(ELSE_NODE),
+            },
+        },
+        action_node(ELSE_NODE, WorkflowAction::CancelOrders),
+    ];
+    register(&service, definition);
+    service
+        .arm_workflow("durable-condition".into(), 1)
+        .expect("armed");
+    deliver_quote(&service, &feed, &instrument, 2, 10_050, 10_075);
+    let before = workflow(&service, "durable-condition");
+    assert_eq!(before.total_firings, 1);
+    assert_eq!(
+        executed(&before),
+        vec![
+            WorkflowStepResult {
+                node: THEN_NODE,
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Notified),
+            },
+            WorkflowStepResult {
+                node: ELSE_NODE,
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Cancelled { orders: 0 }),
+            },
+        ]
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+
+    let (restarted, feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument, market_feed::route());
+    let after = workflow(&restarted, "durable-condition");
+    assert_eq!(after.definition, before.definition);
+    assert_eq!(after.definition.limits.repeat, WorkflowRepeat::Always);
+    assert_eq!(after.state, WorkflowState::Armed);
+    assert_eq!(after.recent_firings, before.recent_firings);
+    // The first read after the restart only records that the condition holds.
+    deliver_quote(&restarted, &feed, &instrument, 3, 10_050, 10_075);
+    assert_eq!(workflow(&restarted, "durable-condition").total_firings, 1);
+    deliver_quote(&restarted, &feed, &instrument, 4, 10_000, 10_025);
+    deliver_quote(&restarted, &feed, &instrument, 5, 10_050, 10_075);
+    assert_eq!(workflow(&restarted, "durable-condition").total_firings, 2);
     restarted
         .shutdown_after_owner_exit_for_test()
         .expect("shutdown");

@@ -7,13 +7,13 @@ use super::symbol_browser::{InstrumentMenuAction, InstrumentMenuEntry};
 use super::workflow_board::BoardCamera;
 use super::workflow_board::{
     ActionDraft, BlockDraft, BlockKind, BoardItem, BoardPoint, CheckDraft, CheckKind, CheckRef,
-    ConditionDraft, DraftField, DraftProblem, NODE_HEIGHT, NODE_TAB_HEIGHT, NODE_WIDTH, NodeDraft,
-    OutputPort, RepeatDraft, TriggerDraft, TriggerKind, WorkflowExample,
+    ConditionDraft, ConditionOwner, DraftField, DraftProblem, NODE_HEIGHT, NODE_TAB_HEIGHT,
+    NODE_WIDTH, NodeDraft, OutputPort, RepeatDraft, TriggerDraft, TriggerKind, WorkflowExample,
 };
 use super::workflows_page::{
     BoardGesture, DraftStatus, HeaderMenu, OpenWorkflow, PageStatus, WorkflowsPage,
-    account_environment, account_text, action_summary, check_summary, day_label, days_text,
-    draft_currency_scale, draft_scales, draft_status, draft_symbol, environment_text,
+    account_environment, account_text, action_summary, check_summary, condition_summary, day_label,
+    days_text, draft_currency_scale, draft_scales, draft_status, draft_symbol, environment_text,
     example_description, example_name, firing_time_text, outcome_text, problem_text, state_color,
     state_text, symbol_text, trigger_summary, zone_text,
 };
@@ -231,6 +231,7 @@ fn check_label(kind: CheckKind) -> &'static str {
         CheckKind::ProfitTicks => tr!(workflows::BLOCK_IF_PROFIT_TICKS),
         CheckKind::Profit => tr!(workflows::BLOCK_IF_PROFIT),
         CheckKind::Pullback => tr!(workflows::BLOCK_IF_PULLBACK),
+        CheckKind::DayProfit => tr!(workflows::BLOCK_IF_DAY_PROFIT),
     }
 }
 
@@ -258,6 +259,7 @@ fn kind_label(kind: BlockKind) -> &'static str {
         BlockKind::Flatten => tr!(workflows::BLOCK_FLATTEN),
         BlockKind::CancelOrders => tr!(workflows::BLOCK_CANCEL_ORDERS),
         BlockKind::LockAccount => tr!(workflows::BLOCK_LOCK_ACCOUNT),
+        BlockKind::Notify => tr!(workflows::BLOCK_NOTIFY),
     }
 }
 
@@ -272,10 +274,12 @@ fn kind_icon(kind: BlockKind) -> HugeIcon {
         BlockKind::If(CheckKind::ProfitTicks) => HugeIcon::ArrowRightDouble,
         BlockKind::If(CheckKind::Profit) => HugeIcon::FlagFilled,
         BlockKind::If(CheckKind::Pullback) => HugeIcon::Undo,
+        BlockKind::If(CheckKind::DayProfit) => HugeIcon::Flag,
         BlockKind::Buy | BlockKind::Sell => HugeIcon::OrderEntry,
         BlockKind::Flatten => HugeIcon::CloseBold,
         BlockKind::CancelOrders => HugeIcon::CancelCircle,
         BlockKind::LockAccount => HugeIcon::Lock,
+        BlockKind::Notify => HugeIcon::Notification,
     }
 }
 
@@ -289,6 +293,7 @@ fn kind_accent(kind: Option<BlockKind>, theme: &AerisTheme) -> Hsla {
         Some(BlockKind::Sell) => colors.sell,
         Some(BlockKind::Flatten | BlockKind::CancelOrders) => colors.indigo,
         Some(BlockKind::LockAccount) => colors.danger,
+        Some(BlockKind::Notify) => colors.purple,
     })
 }
 
@@ -384,6 +389,8 @@ fn example_icon(example: WorkflowExample) -> HugeIcon {
         WorkflowExample::SessionDip => HugeIcon::TimeSales,
         WorkflowExample::FlatBeforeClose => HugeIcon::CloseBold,
         WorkflowExample::ExitAndLock => HugeIcon::Lock,
+        WorkflowExample::DeadlineUnlessTarget => HugeIcon::Flag,
+        WorkflowExample::DayStop => HugeIcon::CancelCircle,
     }
 }
 
@@ -1548,6 +1555,7 @@ const fn trigger_icon(trigger: &TriggerDraft) -> HugeIcon {
         TriggerDraft::Every { .. } => HugeIcon::RefreshV2,
         TriggerDraft::PositionOpened => HugeIcon::Play,
         TriggerDraft::PositionClosed => HugeIcon::CloseBold,
+        TriggerDraft::Condition(_) => HugeIcon::CheckIcon,
     }
 }
 
@@ -1559,6 +1567,7 @@ fn trigger_kind_label(kind: TriggerKind) -> &'static str {
         TriggerKind::Every => tr!(workflows::TRIGGER_CHOICE_EVERY),
         TriggerKind::Opened => tr!(workflows::TRIGGER_CHOICE_OPENED),
         TriggerKind::Closed => tr!(workflows::TRIGGER_CHOICE_CLOSED),
+        TriggerKind::Condition => tr!(workflows::TRIGGER_CHOICE_CONDITION),
     }
 }
 
@@ -1574,15 +1583,20 @@ fn trigger_face(
             let label = match trigger {
                 TriggerDraft::Price { .. }
                 | TriggerDraft::PositionOpened
-                | TriggerDraft::PositionClosed => symbol.to_string().into(),
+                | TriggerDraft::PositionClosed
+                | TriggerDraft::Condition(_) => symbol.to_string().into(),
                 TriggerDraft::Time { zone, .. } => zone_text(*zone).into(),
                 TriggerDraft::Every { .. } => tr!(workflows::FIELD_MINUTES).into(),
+            };
+            let detail = match trigger {
+                TriggerDraft::Condition(condition) => Some(condition_summary(condition).into()),
+                _ => None,
             };
             (
                 trigger_kind_label(trigger.kind()),
                 label,
                 trigger.text().map(|value| text_or_unset(value)),
-                None,
+                detail,
             )
         }
         triggers => (
@@ -1642,7 +1656,7 @@ fn check_face(check: &CheckDraft, symbol: &str) -> (SharedString, SharedString) 
         CheckDraft::ProfitTicks { compare, ticks } => {
             (compare_choice(*compare).into(), text_or_unset(ticks))
         }
-        CheckDraft::Profit { compare, amount } => {
+        CheckDraft::Profit { compare, amount } | CheckDraft::DayProfit { compare, amount } => {
             (compare_choice(*compare).into(), text_or_unset(amount))
         }
         CheckDraft::Pullback { ticks } => (
@@ -1707,7 +1721,7 @@ fn node_face(block: &BlockDraft, symbol: &str, account: &str, theme: &AerisTheme
                     Some(symbol.to_string().into()),
                     Some(action_summary(action).into()),
                 ),
-                ActionDraft::LockAccount => (
+                ActionDraft::LockAccount | ActionDraft::Notify => (
                     tr!(workflows::FIELD_ACCOUNT).into(),
                     Some(account.to_string().into()),
                     Some(action_summary(action).into()),
@@ -2131,6 +2145,10 @@ fn repeat_settings(ui: Page<'_>, open: &OpenWorkflow) -> Div {
             RepeatDraft::PerSession,
             tr!(workflows::REPEAT_CHOICE_SESSION).into(),
         ),
+        (
+            RepeatDraft::Always,
+            tr!(workflows::REPEAT_CHOICE_ALWAYS).into(),
+        ),
     ];
     div()
         .flex()
@@ -2338,6 +2356,7 @@ fn trigger_section(
         ),
         TriggerDraft::PositionOpened => ("", tr!(workflows::TRIGGER_OPENED_HINT)),
         TriggerDraft::PositionClosed => ("", tr!(workflows::TRIGGER_CLOSED_HINT)),
+        TriggerDraft::Condition(_) => ("", tr!(workflows::TRIGGER_CONDITION_HINT)),
     };
     numbered_section(
         ui,
@@ -2377,7 +2396,14 @@ fn trigger_section(
         TriggerDraft::Price { .. }
         | TriggerDraft::Every { .. }
         | TriggerDraft::PositionOpened
-        | TriggerDraft::PositionClosed => None,
+        | TriggerDraft::PositionClosed
+        | TriggerDraft::Condition(_) => None,
+    })
+    .children(match trigger {
+        TriggerDraft::Condition(condition) => {
+            condition_settings(ui, open, ConditionOwner::Trigger(index), condition)
+        }
+        _ => Vec::new(),
     })
     .child(secondary_text(hint, theme))
 }
@@ -2408,7 +2434,12 @@ fn node_settings(ui: Page<'_>, open: &OpenWorkflow, node: &NodeDraft) -> Vec<Any
     let mut sections = vec![heading(block_title(&node.block), theme).into_any_element()];
     match &node.block {
         BlockDraft::If { condition, .. } => {
-            sections.extend(condition_settings(ui, open, id, condition));
+            sections.extend(condition_settings(
+                ui,
+                open,
+                ConditionOwner::Node(id),
+                condition,
+            ));
             sections.push(secondary_text(tr!(workflows::IF_HINT), theme).into_any_element());
         }
         BlockDraft::Action { action, .. } => {
@@ -2439,12 +2470,12 @@ fn node_settings(ui: Page<'_>, open: &OpenWorkflow, node: &NodeDraft) -> Vec<Any
     sections
 }
 
-/// Every check of an If, how they join while there are several, and the button that adds
-/// one.
+/// Every check of an If or a condition trigger, how they join while there are several, and
+/// the button that adds one.
 fn condition_settings(
     ui: Page<'_>,
     open: &OpenWorkflow,
-    node: WorkflowNodeId,
+    owner: ConditionOwner,
     condition: &ConditionDraft,
 ) -> Vec<AnyElement> {
     let several = condition.checks.len() > 1;
@@ -2453,7 +2484,7 @@ fn condition_settings(
         .iter()
         .enumerate()
         .map(|(index, check)| {
-            check_section(ui, open, CheckRef { node, index }, check, several).into_any_element()
+            check_section(ui, open, CheckRef { owner, index }, check, several).into_any_element()
         })
         .collect::<Vec<_>>();
     if several {
@@ -2470,7 +2501,7 @@ fn condition_settings(
                     options,
                     Some(&condition.join),
                     move |open, join| {
-                        if let Some(condition) = open.draft.condition_mut(node) {
+                        if let Some(condition) = open.draft.condition_mut(owner) {
                             condition.join = join;
                         }
                     },
@@ -2487,7 +2518,7 @@ fn condition_settings(
             tr!(workflows::ADD_CHECK),
             condition.checks.len() >= MAXIMUM_WORKFLOW_CHECKS,
             move |open| {
-                open.draft.add_check(node);
+                open.draft.add_check(owner);
             },
         )
         .into_any_element(),
@@ -2562,35 +2593,7 @@ fn check_settings(
         .map(IntoElement::into_any_element)
         .collect(),
         CheckDraft::Price { direction, .. } => price_settings(ui, open, check, *direction),
-        CheckDraft::PriceRange { .. } => {
-            let inputs = [
-                input_field(
-                    ui,
-                    open,
-                    DraftField::RangeLow(check),
-                    tr!(workflows::FIELD_LOW),
-                ),
-                input_field(
-                    ui,
-                    open,
-                    DraftField::RangeHigh(check),
-                    tr!(workflows::FIELD_HIGH),
-                ),
-            ];
-            vec![
-                div()
-                    .flex()
-                    .gap_2()
-                    .children(
-                        inputs
-                            .into_iter()
-                            .flatten()
-                            .map(|input| input.flex_1().min_w_0()),
-                    )
-                    .into_any_element(),
-                secondary_text(tr!(workflows::RANGE_HINT), ui.theme).into_any_element(),
-            ]
-        }
+        CheckDraft::PriceRange { .. } => range_settings(ui, open, check),
         CheckDraft::Weekday { zone, days } => vec![
             day_choices(ui, check, *days).into_any_element(),
             zone_choices(ui, "workflow_weekday_zone", *zone, set_zone).into_any_element(),
@@ -2627,12 +2630,69 @@ fn check_settings(
             DraftField::Ticks(check),
             tr!(workflows::FIELD_PULLBACK_TICKS),
         ),
+        CheckDraft::DayProfit { compare, .. } => {
+            let mut settings = compare_and_value(
+                ui,
+                open,
+                check,
+                Some(*compare),
+                DraftField::Amount(check),
+                tr!(workflows::FIELD_DAY_PROFIT_AMOUNT),
+            );
+            settings
+                .push(secondary_text(tr!(workflows::DAY_PROFIT_HINT), ui.theme).into_any_element());
+            settings
+        }
     }
+}
+
+fn range_settings(ui: Page<'_>, open: &OpenWorkflow, check: CheckRef) -> Vec<AnyElement> {
+    let inputs = [
+        input_field(
+            ui,
+            open,
+            DraftField::RangeLow(check),
+            tr!(workflows::FIELD_LOW),
+        ),
+        input_field(
+            ui,
+            open,
+            DraftField::RangeHigh(check),
+            tr!(workflows::FIELD_HIGH),
+        ),
+    ];
+    vec![
+        div()
+            .flex()
+            .gap_2()
+            .children(
+                inputs
+                    .into_iter()
+                    .flatten()
+                    .map(|input| input.flex_1().min_w_0()),
+            )
+            .into_any_element(),
+        secondary_text(tr!(workflows::RANGE_HINT), ui.theme).into_any_element(),
+    ]
 }
 
 /// A check on the open trade: how it compares, when it compares, its one value, and that it
 /// never holds while flat.
 fn trade_settings(
+    ui: Page<'_>,
+    open: &OpenWorkflow,
+    check: CheckRef,
+    compare: Option<WorkflowCompare>,
+    value: DraftField,
+    label: &'static str,
+) -> Vec<AnyElement> {
+    let mut settings = compare_and_value(ui, open, check, compare, value, label);
+    settings.push(secondary_text(tr!(workflows::TRADE_CHECK_HINT), ui.theme).into_any_element());
+    settings
+}
+
+/// How a check compares, when it compares, and its one value.
+fn compare_and_value(
     ui: Page<'_>,
     open: &OpenWorkflow,
     check: CheckRef,
@@ -2667,15 +2727,11 @@ fn trade_settings(
             ui.theme,
         )
     });
-    [
-        compare,
-        input_field(ui, open, value, label),
-        Some(secondary_text(tr!(workflows::TRADE_CHECK_HINT), ui.theme)),
-    ]
-    .into_iter()
-    .flatten()
-    .map(IntoElement::into_any_element)
-    .collect()
+    [compare, input_field(ui, open, value, label)]
+        .into_iter()
+        .flatten()
+        .map(IntoElement::into_any_element)
+        .collect()
 }
 
 /// One toggle per day of the week; the last chosen day cannot be turned off.
@@ -2832,6 +2888,9 @@ fn action_settings(
         }
         ActionDraft::LockAccount => {
             vec![secondary_text(tr!(workflows::LOCK_HINT), theme).into_any_element()]
+        }
+        ActionDraft::Notify => {
+            vec![secondary_text(tr!(workflows::NOTIFY_HINT), theme).into_any_element()]
         }
         ActionDraft::Flatten | ActionDraft::CancelOrders => Vec::new(),
     }

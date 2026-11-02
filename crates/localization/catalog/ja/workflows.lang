@@ -123,7 +123,7 @@ field_quantity = 数量
 field_stop_ticks = ストップ（ティック）
 field_target_ticks = ターゲット（ティック）
 protection_hint = ブラケットなしで建てるには、ストップとターゲットを空欄にしてください。
-lock_hint = 口座をロックした後は何も実行されません。
+lock_hint = ロックすると、解除するまでこの口座の新規エントリーは拒否されます。その後のブロックは引き続き注文の取り消しとポジションの決済ができます。
 remove_block = ブロックを削除
 
 # ワークフローのブロックの読み上げ
@@ -267,7 +267,28 @@ condition_pullback = 価格が最良水準から {ticks} ティック戻った
 problem_profit_ticks = -{maximum}～{maximum} の 0 以外の整数ティックを入力してください
 problem_amount = 小数点以下 {decimals} 桁までの金額を入力してください（損失はマイナス）
 problem_pullback = 1～{maximum} の整数ティックを入力してください
-blocker_position_unknown = ポジションが Aeris の外で建てられたため、エントリーが不明です
+blocker_position_unknown = ポジションのエントリーまたは損益を正確に把握できません（Aeris の外で建てられた場合など）
+
+# 条件トリガー、当日損益、通知と繰り返し
+trigger_choice_condition = チェックが成立したとき
+trigger_condition_hint = ワークフローを有効にした後、チェックが成立し始めるたびに実行されます。再び実行されるのは、いったん不成立になった後だけです。時刻のチェックは毎分ちょうどに読み取られます。「任意の銘柄」では、成立のきっかけとなったポジションに対して実行されます。
+block_if_day_profit = 当日損益条件
+field_day_profit_amount = 金額（損失はマイナス）
+day_profit_hint = 口座の本日の損益です。リスクセッション開始以降（リスクプロファイルがなければ UTC 午前 0 時以降）の約定による実現損益（手数料前）に、各ポジションの含み損益を加えたものです。
+condition_day_profit_at_least = 当日損益が {amount} 以上
+condition_day_profit_at_most = 当日損益が {amount} 以下
+summary_condition = {checks} のとき
+join_word_all = かつ
+join_word_any = または
+block_notify = 通知
+action_notify = 通知を表示
+notify_hint = このワークフロー名を付けた通知を表示し、通知履歴に残します。このコンピューターの外には何も送られません。
+outcome_notified = 通知を表示しました
+repeat_choice_always = 毎回
+example_deadline = 期限で決済
+example_deadline_body = 毎日シカゴ時間 15:50 に、目標に届かずまだ保有しているポジションがどの銘柄かにあれば、有効な注文を取り消して決済します。
+example_day_stop = 日次損益ストップ
+example_day_stop_body = 口座の当日損益が目標に達するか損失上限まで下がったら、口座をロックし、有効な注文を取り消し、すべてのポジションを決済します。セッションごとに最大 1 回です。
 
 # 注文チケット
 ticket_no_account = ワークフローを表示するには口座を選択してください。

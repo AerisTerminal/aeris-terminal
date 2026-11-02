@@ -125,7 +125,7 @@ field_quantity = Menge
 field_stop_ticks = Stop (Ticks)
 field_target_ticks = Ziel (Ticks)
 protection_hint = Lassen Sie Stop und Ziel leer, um ohne Bracket einzusteigen.
-lock_hint = Nach dem Sperren des Kontos läuft nichts mehr.
+lock_hint = Das Sperren lehnt neue Einstiege auf diesem Konto ab, bis Sie es entsperren. Die Blöcke danach können weiterhin Orders stornieren und Positionen schließen.
 remove_block = Block entfernen
 
 # Wiedergabe der Workflow-Blöcke
@@ -269,7 +269,28 @@ condition_pullback = Kurs {ticks} Ticks vom besten Kurs zurückgelaufen
 problem_profit_ticks = Geben Sie eine ganze Tickzahl von -{maximum} bis {maximum} außer 0 ein
 problem_amount = Geben Sie einen Betrag mit höchstens {decimals} Dezimalstellen ein; ein Verlust ist negativ
 problem_pullback = Geben Sie eine ganze Tickzahl von 1 bis {maximum} ein
-blocker_position_unknown = die Position wurde außerhalb von Aeris eröffnet, ihr Einstieg ist unbekannt
+blocker_position_unknown = Einstieg oder G&V der Position sind nicht genau bekannt, etwa weil sie außerhalb von Aeris eröffnet wurde
+
+# Bedingungsauslöser, Tagesgewinn, Hinweise und Wiederholungen
+trigger_choice_condition = Prüfungen treffen zu
+trigger_condition_hint = Löst jedes Mal aus, wenn seine Prüfungen nach dem Aktivieren zu treffen, und erst wieder, nachdem sie zwischendurch nicht mehr zutrafen. Uhrzeitprüfungen werden zu jeder vollen Minute gelesen. Mit „Jedes Symbol“ wirkt der Lauf auf die Positionen, durch die sie zutreffen.
+block_if_day_profit = Wenn Tagesgewinn
+field_day_profit_amount = Betrag (Verlust ist negativ)
+day_profit_hint = Der heutige Gewinn des Kontos: was seine Ausführungen seit Beginn seiner Risikositzung realisiert haben (ohne Risikoprofil ab Mitternacht UTC), vor Gebühren, plus der offene Gewinn jeder Position.
+condition_day_profit_at_least = Tagesgewinn mindestens {amount}
+condition_day_profit_at_most = Tagesgewinn höchstens {amount}
+summary_condition = Wenn {checks}
+join_word_all = und
+join_word_any = oder
+block_notify = Benachrichtigen
+action_notify = Hinweis anzeigen
+notify_hint = Zeigt einen Hinweis mit dem Namen dieses Workflows und behält ihn im Benachrichtigungsverlauf. Nichts verlässt diesen Computer.
+outcome_notified = Hinweis angezeigt
+repeat_choice_always = Jedes Mal
+example_deadline = Zum Stichzeitpunkt schließen
+example_deadline_body = Täglich um 15:50 Uhr Chicagoer Zeit: Ist in einem Symbol noch eine Position offen, weil ihr Ziel nicht erreicht wurde, werden die offenen Orders storniert und die Position geschlossen.
+example_day_stop = Tagesgewinn- und Verluststopp
+example_day_stop_body = Erreicht der Tagesgewinn des Kontos Ihr Ziel oder fällt er auf Ihr Verlustlimit, wird das Konto gesperrt, die offenen Orders werden storniert und alle Positionen geschlossen. Höchstens einmal pro Sitzung.
 
 # Orderticket
 ticket_no_account = Wählen Sie ein Konto, um seine Workflows zu sehen.

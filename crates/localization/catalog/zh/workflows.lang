@@ -123,7 +123,7 @@ field_quantity = 数量
 field_stop_ticks = 止损（跳）
 field_target_ticks = 止盈（跳）
 protection_hint = 止损和止盈都留空即可不带括号单入场。
-lock_hint = 账户锁定后不再执行任何操作。
+lock_hint = 锁定后，在您解锁之前，此账户会拒绝新的开仓。其后的模块仍可撤销订单并平仓。
 remove_block = 移除模块
 
 # 工作流模块的复述
@@ -267,7 +267,28 @@ condition_pullback = 价格自最佳价位回撤 {ticks} 跳
 problem_profit_ticks = 请输入 -{maximum} 到 {maximum} 之间且不为 0 的整数跳数
 problem_amount = 请输入最多 {decimals} 位小数的金额；亏损为负
 problem_pullback = 请输入 1 到 {maximum} 之间的整数跳数
-blocker_position_unknown = 该持仓在 Aeris 之外开立，入场价未知
+blocker_position_unknown = 该持仓的入场价或盈亏无法准确得知，例如它是在 Aeris 之外开立的
+
+# 条件触发、当日盈亏、通知与重复
+trigger_choice_condition = 检查变为满足
+trigger_condition_hint = 工作流启用后，每当其检查开始满足时触发；只有在它们先变为不满足后才会再次触发。时间类检查在每个整分钟读取。选择“任意代码”时，运行作用于使其满足的持仓。
+block_if_day_profit = 如果当日盈亏
+field_day_profit_amount = 金额（亏损为负）
+day_profit_hint = 账户今天的盈亏：自其风控时段开始（无风控配置时自 UTC 午夜起）成交已实现的部分（未扣手续费），加上每个持仓的浮动盈亏。
+condition_day_profit_at_least = 当日盈亏至少 {amount}
+condition_day_profit_at_most = 当日盈亏至多 {amount}
+summary_condition = 当 {checks}
+join_word_all = 且
+join_word_any = 或
+block_notify = 通知
+action_notify = 显示通知
+notify_hint = 显示一条带有此工作流名称的通知，并保留在通知记录中。不会有任何内容离开这台电脑。
+outcome_notified = 已显示通知
+repeat_choice_always = 每次
+example_deadline = 到点平仓
+example_deadline_body = 每天芝加哥时间 15:50，如果任意品种仍有持仓因未达到目标而未平，撤销挂单并将其平仓。
+example_day_stop = 当日盈亏止损
+example_day_stop_body = 当账户当日盈亏达到您的目标或跌至您的亏损上限时，锁定账户、撤销挂单并平掉所有持仓。每个时段最多一次。
 
 # 下单面板
 ticket_no_account = 选择一个账户以查看其工作流。

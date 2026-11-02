@@ -125,7 +125,7 @@ field_quantity = Quantidade
 field_stop_ticks = Stop (ticks)
 field_target_ticks = Alvo (ticks)
 protection_hint = Deixe stop e alvo vazios para entrar sem bracket.
-lock_hint = Nada é executado depois que a conta é bloqueada.
+lock_hint = O bloqueio recusa novas entradas nesta conta até você desbloqueá-la. Os blocos seguintes ainda podem cancelar ordens e encerrar posições.
 remove_block = Remover bloco
 
 # Leitura dos blocos de um fluxo
@@ -269,7 +269,28 @@ condition_pullback = O preço recuou {ticks} ticks desde o melhor nível
 problem_profit_ticks = Digite um número inteiro de ticks de -{maximum} a {maximum}, diferente de 0
 problem_amount = Digite um valor com no máximo {decimals} casas decimais; prejuízo é negativo
 problem_pullback = Digite um número inteiro de ticks de 1 a {maximum}
-blocker_position_unknown = a posição foi aberta fora do Aeris, então a entrada é desconhecida
+blocker_position_unknown = a entrada ou o P&L da posição não são conhecidos com exatidão, por exemplo porque ela foi aberta fora do Aeris
+
+# Gatilhos por condição, lucro do dia, avisos e repetições
+trigger_choice_condition = As verificações passam a valer
+trigger_condition_hint = Dispara sempre que suas verificações passam a valer depois que o fluxo é armado, e só de novo depois que deixarem de valer. Verificações de horário são lidas a cada minuto cheio. Com “Qualquer símbolo”, a execução age sobre as posições que as fizeram valer.
+block_if_day_profit = Se lucro do dia
+field_day_profit_amount = Valor (prejuízo é negativo)
+day_profit_hint = O lucro da conta hoje: o que suas execuções realizaram desde o início da sessão de risco (meia-noite UTC sem perfil de risco), antes das taxas, mais o lucro aberto de cada posição.
+condition_day_profit_at_least = O lucro do dia é de pelo menos {amount}
+condition_day_profit_at_most = O lucro do dia é de no máximo {amount}
+summary_condition = Quando {checks}
+join_word_all = e
+join_word_any = ou
+block_notify = Avisar
+action_notify = Mostrar um aviso
+notify_hint = Mostra um aviso com o nome deste fluxo e o mantém no histórico de notificações. Nada sai deste computador.
+outcome_notified = aviso mostrado
+repeat_choice_always = Toda vez
+example_deadline = Encerrar no prazo
+example_deadline_body = Todo dia às 15:50 no horário de Chicago, se uma posição ainda estiver aberta em qualquer símbolo porque o alvo não foi atingido, cancela as ordens ativas e a encerra.
+example_day_stop = Stop diário de lucro e prejuízo
+example_day_stop_body = Quando o lucro do dia da conta atinge o seu alvo ou cai até o seu limite de prejuízo, bloqueia a conta, cancela as ordens ativas e encerra todas as posições. No máximo uma vez por sessão.
 
 # Boleta de ordens
 ticket_no_account = Escolha uma conta para ver seus fluxos.

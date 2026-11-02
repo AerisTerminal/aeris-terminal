@@ -305,6 +305,9 @@ enum StoredTrigger {
     },
     PositionOpened,
     PositionClosed,
+    ConditionMet {
+        condition: StoredCondition,
+    },
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -392,6 +395,10 @@ enum StoredCheck {
     Pullback {
         ticks: u32,
     },
+    DayProfit {
+        compare: StoredCompare,
+        amount: StoredFixed,
+    },
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -421,6 +428,7 @@ enum StoredAction {
     Flatten,
     CancelOrders,
     LockAccount,
+    Notify,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -441,6 +449,7 @@ struct StoredProtection {
 enum StoredRepeat {
     Once,
     PerSession { maximum: u32 },
+    Always,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -478,6 +487,7 @@ enum StoredActionResult {
     Flattened,
     Cancelled { orders: usize },
     Locked,
+    Notified,
     Refused { detail: String },
 }
 
@@ -645,6 +655,10 @@ impl StoredCheck {
                 amount: StoredFixed::from_fixed(amount),
             },
             WorkflowCheck::Pullback { ticks } => Self::Pullback { ticks },
+            WorkflowCheck::DayProfit { compare, amount } => Self::DayProfit {
+                compare: StoredCompare::from_compare(compare),
+                amount: StoredFixed::from_fixed(amount),
+            },
         }
     }
 
@@ -690,6 +704,10 @@ impl StoredCheck {
                 amount: amount.into_fixed()?,
             },
             Self::Pullback { ticks } => WorkflowCheck::Pullback { ticks },
+            Self::DayProfit { compare, amount } => WorkflowCheck::DayProfit {
+                compare: compare.into_compare(),
+                amount: amount.into_fixed()?,
+            },
         })
     }
 }
@@ -718,6 +736,7 @@ impl StoredAction {
             WorkflowAction::Flatten => Self::Flatten,
             WorkflowAction::CancelOrders => Self::CancelOrders,
             WorkflowAction::LockAccount => Self::LockAccount,
+            WorkflowAction::Notify => Self::Notify,
         }
     }
 
@@ -741,6 +760,7 @@ impl StoredAction {
             Self::Flatten => WorkflowAction::Flatten,
             Self::CancelOrders => WorkflowAction::CancelOrders,
             Self::LockAccount => WorkflowAction::LockAccount,
+            Self::Notify => WorkflowAction::Notify,
         })
     }
 }
@@ -809,6 +829,7 @@ impl StoredDefinition {
             repeat: match definition.limits.repeat {
                 WorkflowRepeat::Once => StoredRepeat::Once,
                 WorkflowRepeat::PerSession { maximum } => StoredRepeat::PerSession { maximum },
+                WorkflowRepeat::Always => StoredRepeat::Always,
             },
             cooldown_seconds: definition.limits.cooldown_seconds,
             expires_unix_nanos: definition.limits.expires_unix_nanos,
@@ -849,6 +870,7 @@ impl StoredDefinition {
                 repeat: match self.repeat {
                     StoredRepeat::Once => WorkflowRepeat::Once,
                     StoredRepeat::PerSession { maximum } => WorkflowRepeat::PerSession { maximum },
+                    StoredRepeat::Always => WorkflowRepeat::Always,
                 },
                 cooldown_seconds: self.cooldown_seconds,
                 expires_unix_nanos: self.expires_unix_nanos,
@@ -858,7 +880,7 @@ impl StoredDefinition {
 }
 
 impl StoredTrigger {
-    const fn from_trigger(trigger: WorkflowTrigger) -> Self {
+    fn from_trigger(trigger: WorkflowTrigger) -> Self {
         match trigger {
             WorkflowTrigger::PriceCrosses { direction, level } => Self::PriceCrosses {
                 direction: StoredDirection::from_direction(direction),
@@ -871,6 +893,9 @@ impl StoredTrigger {
             WorkflowTrigger::Every { minutes } => Self::Every { minutes },
             WorkflowTrigger::PositionOpened => Self::PositionOpened,
             WorkflowTrigger::PositionClosed => Self::PositionClosed,
+            WorkflowTrigger::ConditionMet(condition) => Self::ConditionMet {
+                condition: StoredCondition::from_condition(condition),
+            },
         }
     }
 
@@ -890,6 +915,9 @@ impl StoredTrigger {
             Self::Every { minutes } => WorkflowTrigger::Every { minutes },
             Self::PositionOpened => WorkflowTrigger::PositionOpened,
             Self::PositionClosed => WorkflowTrigger::PositionClosed,
+            Self::ConditionMet { condition } => {
+                WorkflowTrigger::ConditionMet(condition.into_condition()?)
+            }
         })
     }
 }
@@ -927,6 +955,7 @@ impl StoredActionResult {
             WorkflowActionResult::Flattened => Self::Flattened,
             WorkflowActionResult::Cancelled { orders } => Self::Cancelled { orders: *orders },
             WorkflowActionResult::Locked => Self::Locked,
+            WorkflowActionResult::Notified => Self::Notified,
             WorkflowActionResult::Refused { detail } => Self::Refused {
                 detail: detail.clone(),
             },
@@ -941,6 +970,7 @@ impl StoredActionResult {
             Self::Flattened => WorkflowActionResult::Flattened,
             Self::Cancelled { orders } => WorkflowActionResult::Cancelled { orders },
             Self::Locked => WorkflowActionResult::Locked,
+            Self::Notified => WorkflowActionResult::Notified,
             Self::Refused { detail } => WorkflowActionResult::Refused { detail },
         })
     }

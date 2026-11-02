@@ -1813,10 +1813,10 @@ impl TradingCore {
         true
     }
 
-    /// Ends every owner step: position workflows see the step's fills, then quote interest
-    /// follows whatever the step and those workflows changed.
+    /// Ends every owner step: position and condition workflows see the step's fills and
+    /// quotes, then quote interest follows whatever the step and those workflows changed.
     fn finish_step(&mut self) {
-        self.evaluate_position_workflows();
+        self.evaluate_step_workflows();
         if let Err(error) = self.recompute_quote_interest() {
             self.market_observation_error = Some(error.to_string());
         }

@@ -20,8 +20,9 @@ Status as of 2026-11-02.
   calculations on the owner's own market data, never a model's output.
 - **Venue-neutral.** Blocks name an account and an instrument (or any symbol), never a provider.
   A workflow that works on a practice account works unchanged on a broker account.
-- **Bounded.** At most 64 workflows, 32 blocks each, four triggers each, four checks per If, 50
-  firings a session, and a bounded firing history per workflow.
+- **Bounded.** At most 64 workflows, 32 blocks each, four triggers each, four checks per If or
+  condition trigger, 50 firings a session for a per-session repeat ("Every time" is kept apart
+  only by its cooldown), and a bounded firing history per workflow.
 
 ## Checkpoints
 
@@ -41,8 +42,10 @@ Status as of 2026-11-02.
       start block and an acyclic graph of If blocks (position, time window, price above or below)
       and action blocks (enter with an optional bracket, close the position, cancel working
       orders, lock the account), with repeat limits (once, or per session with a cooldown).
-- [x] Validation: every block reachable from the trigger, no cycles, no link after a lock, every
-      value within its bound; the layout validated against the definition.
+- [x] Validation: every block reachable from the trigger, no cycles, every value within its
+      bound; the layout validated against the definition. A lock may lead on to further actions
+      (it refuses new entries, and cancels and exits stay allowed), so a workflow can lock and
+      then close out.
 - [x] Store migration V31: `workflows` (definition, layout, state, counters) and
       `workflow_firings`; the layout is stored apart from the definition, so moving a block keeps
       the revision, state and firings.
@@ -71,8 +74,11 @@ Status as of 2026-11-02.
 - [x] Blocks drawn as folder-tab cards (category tab, accent tab, title, inset value panel) on a
       dotted board; the block palette sits under the workflow list; opening a workflow fits
       every block in view.
-- [x] Four example workflows open as unsaved drafts with prices left to set: breakout buy,
-      morning dip buy, flat before the close, exit and lock.
+- [x] Six example workflows open as unsaved drafts with prices left to set: breakout buy,
+      morning dip buy, flat before the close, exit and lock, close at the deadline (15:50 Chicago:
+      if a position is still open because its target was not reached, cancel and close it, on
+      any symbol) and the daily profit and loss stop (a condition trigger on the day profit:
+      lock, cancel and close everything, once per session).
 - [ ] The page exercised by hand on the running app with a Hyperliquid practice account.
 - [x] Symbol search on the page, so a workflow can name any symbol the catalog offers, not only
       one already open in a chart. The page owns its own catalog-search consumer; choosing a
@@ -118,7 +124,26 @@ AI authoring, the former W3, is dropped: workflows are built only from blocks.
       checks and entries need one symbol. "Flat before the close" opens on any symbol; the
       header symbol menu offers Any symbol first.
 - [ ] Move stop and partial exit actions; break-even and trailing-stop rules on entries.
-- [ ] Quantity by fixed size or by risk; repeat without a limit, with re-arming.
+- [x] Condition trigger ("Checks become true"): up to four checks joined by All or Any, any
+      check an If offers. It fires each time the condition goes from not holding to holding
+      while armed; the first read after arming, saving or a restart only records the state, so
+      a condition already true then waits until it clears and holds again. It is read at every
+      owner step, and a condition that reads the clock also at each whole minute (an owner
+      deadline). On any symbol it reads each open position and the run acts on the positions
+      that turned true. The previous answers are owner memory, bounded by the triggers times
+      the account's open positions.
+- [x] Day profit check: the account's realized P&L from its fills since the current risk
+      session began (UTC midnight without a risk profile), before fees, plus the open P&L of
+      every position; the realized part is cached per owner revision. It reads at the account's
+      currency scale, and a P&L the owner cannot sum exactly blocks the firing
+      (`PositionUnknown`) instead of guessing; a broker account without a venue P&L report
+      blocks as `BrokerUnreachable`.
+- [x] Notify action: records `Notified` in the firing, which the desktop announces as a
+      toast in the attention tone and keeps in the notification history. Nothing leaves the
+      machine.
+- [x] Repeat "Every time" (`WorkflowRepeat::Always`): no session or total limit, only the
+      cooldown between firings; the workflow stays armed after each firing.
+- [ ] Quantity by fixed size or by risk.
 - [ ] Trade prints into the trading owner through a bounded queue; delta and volume conditions
       over the trade tape (PF5).
 - [ ] Buying power and margin checks once PF2 projects them.
@@ -160,3 +185,4 @@ the user saves and arms the new revision.
 | 2026-11-02 | W2 | `workflow_probe` rerun on `400f314b` | All 12 checks passed with a clean source tree; the re-armed ETH entry filled at the owner quote with no observation error; the timed close fired 11 ms after the minute |
 | 2026-11-02 | W4 | Position opened and closed triggers; time in trade, open profit in ticks or currency and pullback checks; V32 records each trade cycle's open time | fmt, workspace clippy, naming check, 3,177 workspace tests |
 | 2026-11-02 | W4 | `workflow_probe` on `9721c3a5` with a position watch | All 14 checks passed with a clean source tree; a watch armed while flat flattened a live 0.01 BTC open in the same owner step and fired again on that close, both reading the owner's open time without a blocker; the first run caught that the probe's watch had no action on its no branch, which the engine rightly does not count as a firing |
+| 2026-11-02 | W4 | Condition trigger, day profit check, notify action, every-time repeat, lock followed by actions, deadline and daily stop examples; V31 stores the new kinds in place (unreleased, no migration) | Runtime and desktop unit tests; not yet exercised on the running app or by `workflow_probe` |
