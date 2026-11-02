@@ -202,6 +202,7 @@ impl TradingCore {
         }
         if route_changed {
             self.quote_book.retire_route(&id);
+            self.observation_cursors.remove(&id);
         }
         if needs_quote {
             self.quote_book
@@ -360,13 +361,16 @@ impl TradingCore {
         .map_err(MarketConsumerError::Feed)?;
         self.interest_revision = revision;
         self.published_interest = routes;
-        self.quote_book.retain(
-            &self
-                .published_interest
-                .iter()
-                .map(|route| route.instrument_id.clone())
-                .collect(),
-        );
+        let interested = self
+            .published_interest
+            .iter()
+            .map(|route| route.instrument_id.clone())
+            .collect();
+        self.quote_book.retain(&interested);
+        // A dropped book entry restarts its ingress revisions from zero, so its applied
+        // cursor must go with it or every later quote in that generation looks stale.
+        self.observation_cursors
+            .retain(|id, _| interested.contains(id));
         Ok(())
     }
 

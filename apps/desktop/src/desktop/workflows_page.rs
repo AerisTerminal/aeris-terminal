@@ -8,9 +8,10 @@ use super::market_screener::{AppView, capture_time_label};
 use super::workflow_board::{
     ActionDraft, BoardCamera, BoardHit, BoardItem, BoardPoint, CheckDraft, DraftField,
     DraftProblem, InstrumentScales, LinkRefusal, OutputPort, RepeatDraft, SavedRevision,
-    TriggerDraft, WorkflowDraft, WorkflowExample,
+    SearchedMarket, TriggerDraft, WorkflowDraft, WorkflowExample,
 };
 use super::workflow_canvas::board_chrome;
+use super::workflow_market_search::{MarketSearchNotice, WorkflowMarketSearch};
 use super::*;
 use aeris_localization::{tr, workflows};
 use aeris_trading::{AccountEnvironment, OrderSide, TradingAccountId};
@@ -38,6 +39,8 @@ pub(super) struct WorkflowsPage {
     pub(super) inspector_hidden: bool,
     /// The board's size in pixels when it last painted; zero before it first did.
     pub(super) board_size: Rc<Cell<BoardPoint>>,
+    /// The inspector's search for the workflow's market.
+    pub(super) markets: WorkflowMarketSearch,
 }
 
 /// What the page shows from a publication; one that changes none of it leaves the page as
@@ -196,6 +199,25 @@ pub(super) fn symbol_text(
     }
 }
 
+/// The scales of the draft's market, from the working set or the market picked by search.
+pub(super) fn draft_scales(
+    set: Option<&WorkingSet>,
+    draft: &WorkflowDraft,
+) -> Option<InstrumentScales> {
+    instrument_scales(instrument(set, draft.instrument_id.as_ref()))
+        .or_else(|| draft.searched_market().map(|market| market.scales))
+}
+
+pub(super) fn draft_symbol(set: Option<&WorkingSet>, draft: &WorkflowDraft) -> String {
+    match (
+        instrument(set, draft.instrument_id.as_ref()),
+        draft.searched_market(),
+    ) {
+        (None, Some(market)) => market.display_symbol.clone(),
+        _ => symbol_text(set, draft.instrument_id.as_ref()),
+    }
+}
+
 pub(super) fn account_text(set: Option<&WorkingSet>, account_id: &TradingAccountId) -> String {
     set.and_then(|set| {
         set.accounts
@@ -241,7 +263,7 @@ pub(super) fn draft_status(
             .find(|view| view.definition.workflow_id == saved.workflow_id)
             .cloned()
     });
-    let scales = instrument_scales(instrument(set, draft.instrument_id.as_ref()));
+    let scales = draft_scales(set, draft);
     let unchanged = view.as_ref().is_some_and(|view| {
         draft
             .build(saved.workflow_id.clone(), saved.revision, scales)
@@ -475,8 +497,97 @@ impl TerminalApp {
         open.selected = selected;
         open.camera = BoardCamera::fitting(open.draft.extent(), self.workflow_board_size(window));
         self.pages.workflows.open = Some(open);
+        self.ensure_workflow_market_search(window, cx);
         self.refresh_workflow_inputs(window, cx);
         cx.notify();
+    }
+
+    /// Starts the market search's consumer and field the first time a workflow opens.
+    fn ensure_workflow_market_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace_id = self.tabs.active().id;
+        self.pages.workflows.markets.ensure_worker(
+            self.services.market_factory(),
+            workspace_id,
+            self.frames.dirty(),
+        );
+        if self.pages.workflows.markets.input().is_some() {
+            return;
+        }
+        let input = cx.new(|input_cx| {
+            InputState::new(window, input_cx).placeholder(tr!(workflows::MARKET_SEARCH_PLACEHOLDER))
+        });
+        cx.subscribe(&input, |terminal, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let query = input.read(cx).value();
+                terminal.pages.workflows.markets.search(&query);
+                cx.notify();
+            }
+        })
+        .detach();
+        self.pages.workflows.markets.set_input(input);
+    }
+
+    pub(super) fn activate_workflow_market(
+        &mut self,
+        action: &super::symbol_browser::InstrumentMenuAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.pages.workflows.markets.activate(action);
+        cx.notify();
+    }
+
+    /// Applies the market search's latest messages; an installed market becomes the open
+    /// draft's symbol when its terms are complete enough to trade.
+    pub(super) fn poll_workflow_markets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let outcome = self.pages.workflows.markets.poll();
+        if let Some(instrument) = outcome.installed {
+            self.adopt_searched_market(&instrument, window, cx);
+        }
+        if outcome.changed {
+            cx.notify();
+        }
+    }
+
+    fn adopt_searched_market(
+        &mut self,
+        instrument: &InstallProviderInstrument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page = &mut self.pages.workflows;
+        match aeris_market_runtime::market_service::instrument_terms_from_install(instrument) {
+            Ok(terms) => {
+                page.markets.finish(None);
+                if let Some(open) = page.open.as_mut() {
+                    open.draft.choose_searched(SearchedMarket {
+                        instrument_id: terms.route.instrument_id,
+                        display_symbol: terms.route.display_symbol,
+                        scales: InstrumentScales {
+                            price: terms.route.price_scale,
+                            quantity: terms.route.quantity_scale,
+                        },
+                    });
+                    open.status = None;
+                    open.confirm_delete = false;
+                }
+            }
+            Err(error) => {
+                diagnostic!("Aeris workflow market has no trading terms: {error}");
+                page.markets.finish(Some(MarketSearchNotice::NotTradable(
+                    instrument.display_symbol.clone(),
+                )));
+            }
+        }
+        if let Some(input) = page.markets.input().cloned() {
+            input.update(cx, |input, input_cx| input.set_value("", window, input_cx));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn retire_workflow_markets(&mut self, cx: &App) {
+        if let Some(retirement) = self.pages.workflows.markets.begin_retirement() {
+            self.lifecycle.retire_market_worker(retirement, cx);
+        }
     }
 
     /// The board's last painted size, or the window less the page's side panels before the
@@ -823,7 +934,7 @@ impl TerminalApp {
         let store = self.services.trading_store().read(cx);
         let set = store.current();
         let (status, view) = draft_status(&open.draft, set);
-        let scales = instrument_scales(instrument(set, open.draft.instrument_id.as_ref()));
+        let scales = draft_scales(set, &open.draft);
         let (workflow_id, revision) = open.draft.saved.as_ref().map_or_else(
             || {
                 (

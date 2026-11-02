@@ -32,7 +32,7 @@ pub(super) fn fence_recovery_command(
     Ok(None)
 }
 
-pub(super) fn initialize_market_screen_endpoint(
+pub(super) fn initialize_catalog_endpoint(
     market: &MarketService,
     client_id: u64,
     workspace_id: u64,

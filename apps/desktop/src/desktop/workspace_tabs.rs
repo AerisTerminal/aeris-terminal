@@ -2865,6 +2865,7 @@ impl TerminalApp {
             TabClose::LastTab => {
                 self.retire_market_summaries(cx);
                 self.retire_market_screener(cx);
+                self.retire_workflow_markets(cx);
                 self.retire_workspaces(cx);
                 window.remove_window();
                 return;
@@ -3407,6 +3408,7 @@ impl TerminalApp {
         }
         self.retire_market_summaries(cx);
         self.retire_market_screener(cx);
+        self.retire_workflow_markets(cx);
         self.retire_workspaces(cx);
         true
     }
@@ -3683,6 +3685,9 @@ impl TerminalApp {
         }
         if work.contains(AppSource::Screener) {
             self.poll_market_screener(window, cx);
+        }
+        if work.contains(AppSource::WorkflowMarkets) {
+            self.poll_workflow_markets(window, cx);
         }
         #[cfg(feature = "diagnostics")]
         let mut presented = Vec::new();

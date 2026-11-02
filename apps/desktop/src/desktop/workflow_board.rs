@@ -663,6 +663,16 @@ pub(super) struct InstrumentScales {
     pub(super) quantity: u8,
 }
 
+/// A market picked by search, described by its verified route. The owner's working set
+/// lists only markets in use, so the draft keeps the symbol and scales until a workflow on
+/// the market is saved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SearchedMarket {
+    pub(super) instrument_id: InstrumentId,
+    pub(super) display_symbol: String,
+    pub(super) scales: InstrumentScales,
+}
+
 /// The first part of a draft that does not yet make a valid workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DraftProblem {
@@ -804,6 +814,8 @@ pub(super) struct WorkflowDraft {
     pub(super) name: String,
     pub(super) account_id: Option<TradingAccountId>,
     pub(super) instrument_id: Option<InstrumentId>,
+    /// The last market picked by search; it stays offered after another symbol is chosen.
+    pub(super) searched: Option<SearchedMarket>,
     /// One to [`MAXIMUM_WORKFLOW_TRIGGERS`] triggers, drawn as one block.
     pub(super) triggers: Vec<TriggerDraft>,
     pub(super) trigger_at: BoardPoint,
@@ -826,6 +838,7 @@ impl WorkflowDraft {
             name,
             account_id,
             instrument_id,
+            searched: None,
             triggers: vec![TriggerDraft::of_kind(TriggerKind::Rises)],
             trigger_at: BoardPoint::default(),
             start: None,
@@ -865,6 +878,7 @@ impl WorkflowDraft {
             name: definition.name.clone(),
             account_id: Some(definition.account_id.clone()),
             instrument_id: Some(definition.instrument_id.clone()),
+            searched: None,
             triggers: definition
                 .triggers
                 .iter()
@@ -888,6 +902,19 @@ impl WorkflowDraft {
         };
         draft.arrange(&positions);
         draft
+    }
+
+    /// Puts the draft on a market picked by search.
+    pub(super) fn choose_searched(&mut self, market: SearchedMarket) {
+        self.instrument_id = Some(market.instrument_id.clone());
+        self.searched = Some(market);
+    }
+
+    /// The searched market, while the draft is on it.
+    pub(super) fn searched_market(&self) -> Option<&SearchedMarket> {
+        self.searched
+            .as_ref()
+            .filter(|market| self.instrument_id.as_ref() == Some(&market.instrument_id))
     }
 
     /// Places every item at its saved position, and each one without a position in a
@@ -2093,6 +2120,40 @@ mod tests {
                 .map(|(definition, _)| definition),
             Ok(definition)
         );
+    }
+
+    #[test]
+    fn a_searched_market_describes_the_draft_only_while_it_is_chosen() {
+        use super::super::workflows_page::{draft_scales, draft_symbol};
+        let mut draft = draft();
+        assert_eq!(draft_scales(None, &draft), None);
+        let searched = SearchedMarket {
+            instrument_id: InstrumentId::try_new("instrument:fixture:CME:NQZ6")
+                .expect("instrument"),
+            display_symbol: "NQZ6".into(),
+            scales: SCALES,
+        };
+        draft.choose_searched(searched.clone());
+        assert_eq!(draft.instrument_id.as_ref(), Some(&searched.instrument_id));
+        assert_eq!(draft_scales(None, &draft), Some(SCALES));
+        assert_eq!(draft_symbol(None, &draft), "NQZ6");
+        assert_ne!(
+            draft
+                .build("wf-1".into(), 1, draft_scales(None, &draft))
+                .err(),
+            Some(DraftProblem::Symbol)
+        );
+
+        let other = InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("instrument");
+        draft.instrument_id = Some(other);
+        assert_eq!(draft.searched_market(), None);
+        assert_eq!(
+            draft
+                .build("wf-1".into(), 1, draft_scales(None, &draft))
+                .err(),
+            Some(DraftProblem::Symbol)
+        );
+        assert_eq!(draft.searched.as_ref(), Some(&searched), "still offered");
     }
 
     #[test]

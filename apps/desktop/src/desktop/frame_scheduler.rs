@@ -21,6 +21,8 @@ pub(super) enum AppSource {
     Summaries,
     /// The market-screener worker.
     Screener,
+    /// The Workflows page's market-search worker.
+    WorkflowMarkets,
     /// The trading subscription published a newer working set.
     Trading,
     /// Trading requests completed, and their outcomes become notices.
@@ -314,6 +316,7 @@ mod tests {
         for source in [
             AppSource::Summaries,
             AppSource::Screener,
+            AppSource::WorkflowMarkets,
             AppSource::Trading,
             AppSource::Notices,
             AppSource::PersistenceReceipts,

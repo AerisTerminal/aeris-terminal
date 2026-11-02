@@ -3,6 +3,7 @@
 //! open draft through `TerminalApp`; nothing here talks to the trading owner.
 
 use super::market_screener::AppView;
+use super::symbol_browser::{InstrumentMenuAction, InstrumentMenuEntry};
 use super::workflow_board::BoardCamera;
 use super::workflow_board::{
     ActionDraft, BlockDraft, BlockKind, BoardItem, BoardPoint, CheckDraft, CheckKind, CheckRef,
@@ -11,10 +12,9 @@ use super::workflow_board::{
 };
 use super::workflows_page::{
     BoardGesture, DraftStatus, OpenWorkflow, PageStatus, WorkflowsPage, account_environment,
-    account_text, action_summary, check_summary, day_label, days_text, draft_status,
-    environment_text, example_description, example_name, firing_time_text, instrument,
-    instrument_scales, outcome_text, problem_text, state_color, state_text, symbol_text,
-    trigger_summary, zone_text,
+    account_text, action_summary, check_summary, day_label, days_text, draft_scales, draft_status,
+    draft_symbol, environment_text, example_description, example_name, firing_time_text,
+    outcome_text, problem_text, state_color, state_text, symbol_text, trigger_summary, zone_text,
 };
 use super::*;
 use aeris_localization::{tr, tr_count, workflows};
@@ -74,6 +74,8 @@ const PALETTE_ICON_SIZE: f32 = 14.0;
 /// The page's header and the workflow toolbar above the board.
 const BOARD_CHROME_HEIGHT: f32 = 152.0;
 const RECENT_FIRINGS_SHOWN: usize = 8;
+/// Market search rows the inspector lists; typing more narrows them.
+const MARKET_RESULTS_SHOWN: usize = 24;
 #[cfg(target_os = "macos")]
 const ZOOM_KEY: &str = "⌘";
 #[cfg(not(target_os = "macos"))]
@@ -540,7 +542,7 @@ fn empty_state(ui: Page<'_>) -> Div {
 
 fn editor(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div {
     let (status, view) = draft_status(&open.draft, ui.set);
-    let scales = instrument_scales(instrument(ui.set, open.draft.instrument_id.as_ref()));
+    let scales = draft_scales(ui.set, &open.draft);
     let problem = open.draft.build(String::new(), 1, scales).err();
     div()
         .flex_1()
@@ -628,7 +630,7 @@ fn toolbar(
     let theme = ui.theme;
     let colors = theme.colors;
     let draft = &open.draft;
-    let mut detail = vec![symbol_text(ui.set, draft.instrument_id.as_ref())];
+    let mut detail = vec![draft_symbol(ui.set, draft)];
     detail.extend(
         draft
             .account_id
@@ -1529,7 +1531,7 @@ fn blocks(
     badge: Badge,
 ) -> Vec<(BoardItem, BoardPoint, BlockFace)> {
     let draft = &open.draft;
-    let symbol = symbol_text(ui.set, draft.instrument_id.as_ref());
+    let symbol = draft_symbol(ui.set, draft);
     let account = draft.account_id.as_ref().map_or_else(
         || tr!(workflows::VALUE_UNSET).to_string(),
         |account_id| account_text(ui.set, account_id),
@@ -1748,7 +1750,7 @@ fn inspector(
 ) -> Stateful<Div> {
     let theme = ui.theme;
     let sections = match open.selected {
-        None => workflow_settings(ui, open, view),
+        None => workflow_settings(ui, page, open, view),
         Some(BoardItem::Trigger) => trigger_settings(ui, open),
         Some(BoardItem::Node(id)) => open
             .draft
@@ -1774,6 +1776,7 @@ fn inspector(
 
 fn workflow_settings(
     ui: Page<'_>,
+    page: &WorkflowsPage,
     open: &OpenWorkflow,
     view: Option<&WorkflowView>,
 ) -> Vec<AnyElement> {
@@ -1784,7 +1787,7 @@ fn workflow_settings(
             .map(IntoElement::into_any_element),
     );
     sections.push(account_picker(ui, open).into_any_element());
-    sections.push(symbol_picker(ui, open).into_any_element());
+    sections.push(symbol_picker(ui, page, open).into_any_element());
     sections.push(repeat_settings(ui, open).into_any_element());
     sections.extend(view.map(|view| firings(view, theme).into_any_element()));
     sections.push(secondary_text(tr!(workflows::SAVED_NOTE), theme).into_any_element());
@@ -1826,9 +1829,10 @@ fn account_picker(ui: Page<'_>, open: &OpenWorkflow) -> Div {
     )
 }
 
-fn symbol_picker(ui: Page<'_>, open: &OpenWorkflow) -> Div {
+/// The symbols in use, the market last picked by search, and the search for any other.
+fn symbol_picker(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div {
     let instruments = ui.set.map_or(&[][..], |set| set.instruments.as_slice());
-    let options = instruments
+    let mut options = instruments
         .iter()
         .map(|instrument| {
             (
@@ -1836,11 +1840,21 @@ fn symbol_picker(ui: Page<'_>, open: &OpenWorkflow) -> Div {
                 SharedString::from(instrument.contract.provenance.display_symbol.clone()),
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if let Some(market) = open.draft.searched.as_ref()
+        && !options.iter().any(|(id, _)| id == &market.instrument_id)
+    {
+        options.push((
+            market.instrument_id.clone(),
+            market.display_symbol.clone().into(),
+        ));
+    }
+    let search = &page.markets;
+    let results = search.entries();
     div()
         .flex()
         .flex_col()
-        .gap_1()
+        .gap_2()
         .child(field(
             tr!(workflows::FIELD_SYMBOL),
             choices(
@@ -1852,7 +1866,86 @@ fn symbol_picker(ui: Page<'_>, open: &OpenWorkflow) -> Div {
             ),
             ui.theme,
         ))
+        .children(
+            search
+                .input()
+                .map(|input| Input::new(input).platform(ui.theme)),
+        )
+        .children(
+            search
+                .status()
+                .map(|status| secondary_text(status, ui.theme)),
+        )
+        .children((!results.is_empty()).then(|| market_results(ui, results)))
         .child(secondary_text(tr!(workflows::SYMBOL_HINT), ui.theme))
+}
+
+fn market_results(ui: Page<'_>, entries: Vec<InstrumentMenuEntry>) -> Div {
+    let theme = ui.theme;
+    div()
+        .flex()
+        .flex_col()
+        .p_1()
+        .rounded(radius(1.0))
+        .border(border_width(theme))
+        .border_color(gpui_color(theme.colors.border_secondary))
+        .children(
+            entries
+                .into_iter()
+                .take(MARKET_RESULTS_SHOWN)
+                .enumerate()
+                .map(|(index, entry)| market_row(ui, index, entry)),
+        )
+}
+
+fn market_row(ui: Page<'_>, index: usize, entry: InstrumentMenuEntry) -> Stateful<Div> {
+    let colors = ui.theme.colors;
+    let terminal = ui.terminal.clone();
+    let action = entry.action;
+    let selectable = action != InstrumentMenuAction::Inert;
+    div()
+        .id(("workflow_market_result", index))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded(radius(1.0))
+        .when(selectable, |row| {
+            row.cursor_pointer()
+                .hover(|style| style.bg(gpui_color(colors.hover_bg)))
+                .on_click(move |_, _, cx| {
+                    terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.activate_workflow_market(&action, terminal_cx);
+                    });
+                })
+        })
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_sm()
+                        .truncate()
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
+                        .child(entry.label),
+                )
+                .children(
+                    entry
+                        .description
+                        .map(|description| secondary_text(description, ui.theme).truncate()),
+                ),
+        )
+        .children(entry.detail.map(|detail| {
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(gpui_color(colors.text_muted))
+                .child(detail)
+        }))
 }
 
 fn repeat_settings(ui: Page<'_>, open: &OpenWorkflow) -> Div {

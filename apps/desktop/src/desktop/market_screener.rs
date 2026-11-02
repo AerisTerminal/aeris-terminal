@@ -564,15 +564,15 @@ impl MarketScreener {
         if self.worker.is_some() {
             return;
         }
-        let Some(provider) = self.provider else {
+        if self.provider.is_none() {
             self.message = Some(tr!(panels::SCREENER_NO_PROVIDER).to_string());
             return;
-        };
+        }
         let Some(factory) = factory else {
             self.message = Some(tr!(panels::SCREENER_NO_MARKET_DATA).to_string());
             return;
         };
-        match factory.create_market_screen_worker(workspace_id, provider.id) {
+        match factory.create_catalog_worker(workspace_id) {
             Ok(worker) => {
                 worker.set_message_wake(dirty.source_wake(AppSource::Screener));
                 self.worker = Some(worker);

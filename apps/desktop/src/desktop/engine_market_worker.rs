@@ -89,8 +89,8 @@ fn chart_streams(order_book: OrderBookDetail) -> StreamRequirements {
 enum EndpointRole {
     /// Chart or market-summary demand for one instrument.
     Market,
-    /// Listed-market statistics screens and their selections; never demands a series.
-    MarketScreen,
+    /// Catalog searches, listed-market screens and their selections; never demands a series.
+    Catalog,
 }
 
 impl EndpointRole {
@@ -177,23 +177,15 @@ impl WorkspaceMarketFactory {
             .map(|endpoint| endpoint.worker)
     }
 
-    /// Starts a consumer that only screens `provider`'s listed markets and resolves the
-    /// screener's selections. It owns no series demand, so it costs no provider stream.
-    pub fn create_market_screen_worker(
-        &self,
-        workspace_id: u64,
-        provider: &str,
-    ) -> Result<MarketDataWorker, String> {
-        let placeholder = InstallProviderInstrument {
-            provider: provider.to_string(),
-            ..Default::default()
-        };
+    /// Starts a consumer that only searches and screens provider catalogs and resolves their
+    /// selections. It owns no series demand, so it costs no provider stream.
+    pub fn create_catalog_worker(&self, workspace_id: u64) -> Result<MarketDataWorker, String> {
         self.add_endpoint(
             workspace_id,
-            placeholder,
+            InstallProviderInstrument::default(),
             ChartInterval::Day1,
             ConsumerResourceClass::Foreground,
-            EndpointRole::MarketScreen,
+            EndpointRole::Catalog,
         )
         .map(|endpoint| endpoint.worker)
     }
@@ -872,7 +864,7 @@ use runtime::{retire_endpoint, run_workers};
 mod selection_commands;
 #[cfg(test)]
 use selection_commands::retain_order_book_detail;
-use selection_commands::{initialize_endpoint, initialize_market_screen_endpoint, process_command};
+use selection_commands::{initialize_catalog_endpoint, initialize_endpoint, process_command};
 
 mod publications;
 use publications::{cancel_pending_recovery, complete_pending_recovery, send_recovery};
@@ -1232,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn market_screen_endpoint_defers_demand_and_starts_selection_at_one() {
+    fn catalog_endpoint_defers_demand_and_starts_selection_at_one() {
         let placeholder = fixture_futures_contract("MNQ");
         let (pane, mut record) = worker_endpoint(
             DEFAULT_WORKSPACE_ID,
@@ -1243,7 +1235,7 @@ mod tests {
             None,
             0,
         );
-        record.role = EndpointRole::MarketScreen;
+        record.role = EndpointRole::Catalog;
 
         assert!(matches!(pane.startup, MarketWorkerStartup::Loading(_)));
         assert!(!record.role.demands_series());

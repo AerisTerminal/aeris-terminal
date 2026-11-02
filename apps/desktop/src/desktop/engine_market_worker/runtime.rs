@@ -3,7 +3,7 @@
 use super::{
     EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent, MarketService,
     MarketWorkerCommand, PaneProjectionEvent, WorkerEndpoint, complete_pending_recovery,
-    initialize_endpoint, initialize_market_screen_endpoint, mpsc, process_command,
+    initialize_catalog_endpoint, initialize_endpoint, mpsc, process_command,
 };
 use aeris_desktop::market_worker::{
     LocalSessionStatus, MarketProjectionSender, MarketWorkerSendError, verified_terms_supersede,
@@ -382,12 +382,9 @@ fn initialize_record(
 ) -> Result<(), String> {
     match record.role {
         EndpointRole::Market => initialize_endpoint(market, client_id, record),
-        EndpointRole::MarketScreen => initialize_market_screen_endpoint(
-            market,
-            client_id,
-            record.workspace_id,
-            &record.endpoint,
-        ),
+        EndpointRole::Catalog => {
+            initialize_catalog_endpoint(market, client_id, record.workspace_id, &record.endpoint)
+        }
     }
 }
 
@@ -432,8 +429,8 @@ fn apply_received_event(
         ));
     }
     let endpoint = &mut record.endpoint;
-    // A screen consumer owns no series, so any other event is not addressed to its presentation.
-    if record.role == EndpointRole::MarketScreen {
+    // A catalog consumer owns no series, so any other event is not addressed to its presentation.
+    if record.role == EndpointRole::Catalog {
         return Ok(false);
     }
     if let MarketRuntimeEvent::ProviderState(state) = &event

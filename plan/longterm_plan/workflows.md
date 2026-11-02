@@ -74,9 +74,12 @@ Status as of 2026-11-02.
 - [x] Four example workflows open as unsaved drafts with prices left to set: breakout buy,
       morning dip buy, flat before the close, exit and lock.
 - [ ] The page exercised by hand on the running app with a Hyperliquid practice account.
-- [ ] Symbol search on the page, so a workflow can name any symbol the catalog offers, not only
-      one already open in a chart. Needs its own catalog-search consumer and a bounded draft
-      instrument interest in the trading owner so the symbol's terms register.
+- [x] Symbol search on the page, so a workflow can name any symbol the catalog offers, not only
+      one already open in a chart. The page owns its own catalog-search consumer; choosing a
+      market installs it so the trading owner registers its terms before the workflow saves.
+- [x] A market whose owner quote interest lapses and returns in the same provider generation
+      (a paused and re-armed workflow, a changed ticket) applies its quotes again: the owner
+      drops the applied quote cursor with the quote book entry.
 - [x] `workflow_probe` updated to the graph API, with a check that moving blocks keeps the armed
       revision; run live on the Hyperliquid BTC practice feed (below).
 - [x] Probe rerun from a clean, committed source tree (`2b5ee13f`).
@@ -143,3 +146,4 @@ the user saves and arms the new revision.
 | 2026-11-02 | W2 | Card-style blocks, dotted board, fit-to-view, palette in the sidebar, four examples | Examples opened and inspected on the running app; fmt, workspace clippy, naming check, workspace tests |
 | 2026-11-02 | W3 | Up to four triggers, every-N-minutes trigger, All/Any checks, price range and weekday checks, foldable list and inspector, firing toasts; AI authoring dropped | fmt, workspace clippy, naming check, 3,162 workspace tests; panels folded and restored on the running app; `workflow_probe` live on Hyperliquid BTC practice: all 10 behavior checks passed (time and every-minute triggers at the same minute fired once, 8 ms after the minute); `source_clean` failed on the uncommitted tree |
 | 2026-11-02 | W3 | `workflow_probe` rerun on `7c001ed2` | All 11 checks passed with a clean source tree; entry filled at the owner ask with an active bracket; time and every-minute triggers fired once, 7 ms after the minute |
+| 2026-11-02 | W2 | Symbol search on the Workflows page; stale quote cursor after a lapsed interest fixed | ETH searched, saved and armed on the running app; regression test `a_workflow_rearmed_after_its_quote_interest_lapsed_still_fills`; `workflow_probe` now pauses and re-arms the ETH entry before it is due: without the fix the entry was cancelled with no error (the desktop symptom), with it all 11 behavior checks passed and the entry filled 71 ms after the minute; `source_clean` failed on the uncommitted tree |

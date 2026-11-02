@@ -355,6 +355,204 @@ fn any_trigger_fires_and_an_interval_trigger_repeats() {
 }
 
 #[test]
+fn a_timed_bracket_entry_fills_on_the_next_quote() {
+    let directory = TestDirectory::new("workflow-timed-bracket");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let mut definition = single("timed-entry", 10_050, bracketed_buy());
+    definition.triggers = vec![WorkflowTrigger::Every { minutes: 1 }];
+    register(&service, definition);
+    service
+        .arm_workflow("timed-entry".into(), 1)
+        .expect("armed");
+    clock.advance(Duration::from_secs(19));
+    deliver_quote_at(
+        &service,
+        &feed,
+        &instrument,
+        2,
+        9_975,
+        10_000,
+        clock.wall_unix_nanos(),
+    );
+    clock.advance(Duration::from_secs(1));
+    service.status().expect("owner runs the due timer");
+    assert_eq!(workflow(&service, "timed-entry").total_firings, 1);
+    clock.advance(Duration::from_millis(100));
+    let fills = deliver_quote_at(
+        &service,
+        &feed,
+        &instrument,
+        3,
+        9_975,
+        10_000,
+        clock.wall_unix_nanos(),
+    );
+    assert_eq!(fills.len(), 1, "the timed entry fills on the next quote");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn a_timed_bracket_entry_on_a_significant_figure_grid_fills_on_the_next_quote() {
+    let directory = TestDirectory::new("workflow-timed-bracket-sf");
+    let mut eth = high_precision_crypto_instrument();
+    eth.instrument_id = InstrumentId::try_new("hyperliquid:perp:ETH").expect("instrument");
+    eth.contract.tick_size = None;
+    eth.contract.price_grid = aeris_instruments::PriceGrid::SignificantFigures {
+        figures: 5,
+        max_decimals: 2,
+    };
+    let route = aeris_trading::market::MarketRoute {
+        provider_id: "fixture".into(),
+        instrument_id: eth.instrument_id.clone(),
+        provider_symbol: "ETH".into(),
+        display_symbol: "ETH-USDC".into(),
+        venue_id: "HYPERLIQUID".into(),
+        entitlement_id: None,
+        price_scale: 8,
+        quantity_scale: 8,
+    };
+    let (service, clock, feed) = live_feed_service(&directory);
+    bootstrap_always_open_feed(&feed, &eth, route);
+    service.status().expect("verified terms drain");
+    let quote = |sequence| {
+        push_live_quote_at(
+            &feed,
+            &eth,
+            sequence,
+            228_840_000_000,
+            228_850_000_000,
+            8,
+            clock.wall_unix_nanos(),
+        );
+        service.status().expect("owner applies quote");
+    };
+    quote(1);
+    let mut definition = single(
+        "timed-eth",
+        10_050,
+        WorkflowAction::Enter {
+            side: OrderSide::Buy,
+            quantity: FixedPoint::try_new(100_000_000, 8).expect("one"),
+            protection: Some(WorkflowProtection {
+                stop_ticks: 20,
+                target_ticks: 40,
+            }),
+        },
+    );
+    definition.instrument_id = eth.instrument_id.clone();
+    definition.triggers = vec![WorkflowTrigger::Every { minutes: 1 }];
+    register(&service, definition);
+    service.arm_workflow("timed-eth".into(), 1).expect("armed");
+    clock.advance(Duration::from_secs(19));
+    quote(2);
+    clock.advance(Duration::from_secs(1));
+    service.status().expect("owner runs the due timer");
+    let view = workflow(&service, "timed-eth");
+    assert_eq!(view.total_firings, 1, "{:?}", view.recent_firings);
+    clock.advance(Duration::from_millis(100));
+    quote(3);
+    let set = working_set(&service);
+    assert_eq!(
+        set.positions.len(),
+        1,
+        "error {:?}, firings {:?}",
+        set.market_observation_error,
+        workflow(&service, "timed-eth").recent_firings
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn a_workflow_rearmed_after_its_quote_interest_lapsed_still_fills() {
+    let directory = TestDirectory::new("workflow-rearmed-interest");
+    let mut eth = high_precision_crypto_instrument();
+    eth.instrument_id = InstrumentId::try_new("hyperliquid:perp:ETH").expect("instrument");
+    let route = aeris_trading::market::MarketRoute {
+        provider_id: "fixture".into(),
+        instrument_id: eth.instrument_id.clone(),
+        provider_symbol: "ETH".into(),
+        display_symbol: "ETH-USDC".into(),
+        venue_id: "HYPERLIQUID".into(),
+        entitlement_id: None,
+        price_scale: 8,
+        quantity_scale: 8,
+    };
+    let (service, clock, feed) = live_feed_service(&directory);
+    bootstrap_always_open_feed(&feed, &eth, route.clone());
+    service.status().expect("verified terms drain");
+    let mut sequence = 0;
+    let mut quote = || {
+        sequence += 1;
+        push_live_quote_at(
+            &feed,
+            &eth,
+            sequence,
+            228_840_000_000,
+            228_850_000_000,
+            8,
+            clock.wall_unix_nanos(),
+        );
+        service.status().expect("owner applies quote");
+    };
+    let mut definition = single(
+        "rearmed-eth",
+        10_050,
+        WorkflowAction::Enter {
+            side: OrderSide::Buy,
+            quantity: FixedPoint::try_new(100_000_000, 8).expect("one"),
+            protection: Some(WorkflowProtection {
+                stop_ticks: 20,
+                target_ticks: 40,
+            }),
+        },
+    );
+    definition.instrument_id = eth.instrument_id.clone();
+    definition.triggers = vec![WorkflowTrigger::Every { minutes: 1 }];
+    register(&service, definition);
+    service
+        .arm_workflow("rearmed-eth".into(), 1)
+        .expect("armed");
+    for _ in 0..5 {
+        quote();
+    }
+    // Pausing drops the owner's only interest in the market; arming again restores it and
+    // the market runtime republishes the route's feed state and session.
+    service
+        .pause_workflow("rearmed-eth".into(), 1)
+        .expect("paused");
+    service
+        .arm_workflow("rearmed-eth".into(), 1)
+        .expect("armed again");
+    bootstrap_always_open_feed(&feed, &eth, route);
+    service.status().expect("republished feed drains");
+    quote();
+    clock.advance(Duration::from_secs(19));
+    quote();
+    clock.advance(Duration::from_secs(1));
+    service.status().expect("owner runs the due timer");
+    assert_eq!(workflow(&service, "rearmed-eth").total_firings, 1);
+    clock.advance(Duration::from_millis(100));
+    quote();
+    let set = working_set(&service);
+    assert_eq!(
+        set.positions.len(),
+        1,
+        "error {:?}, orders {:?}",
+        set.market_observation_error,
+        set.orders
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
 fn joined_checks_read_the_quote_range_and_the_weekday() {
     let directory = TestDirectory::new("workflow-joined-checks");
     let instrument = instrument();

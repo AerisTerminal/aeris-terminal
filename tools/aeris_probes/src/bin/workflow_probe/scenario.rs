@@ -4,13 +4,19 @@
 
 use std::{
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use aeris_instruments::InstrumentId;
-use aeris_market_runtime::MarketService;
+use aeris_market_data::ChartInterval;
+use aeris_market_runtime::{
+    InstrumentRequest, MarketService, MarketStream, SelectionRequest, StreamRequirements,
+};
 use aeris_platform_runtime::data_root::{DataRoot, InstanceLock};
 use aeris_probes::{
     Evidence, ProbeError, ProbeResult,
@@ -34,12 +40,15 @@ use serde_json::json;
 
 const PROVIDER: &str = "hyperliquid";
 const BTC_ID: &str = "hyperliquid:perp:BTC";
+const ETH_ID: &str = "hyperliquid:perp:ETH";
 const ACCOUNT_NAME: &str = "Workflow Probe";
 const STARTING_EQUITY: (i64, u8) = (10_000_000, 2); // $100,000.00
 const QUANTITY: (i64, u8) = (1_000_000, 8); // 0.01 BTC
+const ETH_QUANTITY: (i64, u8) = (100_000_000, 8); // 1 ETH
 const PROTECTION_TICKS: u32 = 500;
 const BREAKOUT_ID: &str = "probe-breakout";
 const CLOSE_ID: &str = "probe-timed-close";
+const TIMED_ENTRY_ID: &str = "probe-timed-entry";
 /// Each attempt levels the trigger at the current ask; a market that only falls during one
 /// attempt is retried with a new revision at the new ask.
 const CROSS_ATTEMPTS: u32 = 5;
@@ -78,12 +87,16 @@ fn poll_until<T>(
 
 /// The probe declares the durable route identity; verified terms arrive from the coordinator.
 fn ticket_route() -> ProbeResult<MarketRoute> {
+    hyperliquid_route(BTC_ID, "BTC")
+}
+
+fn hyperliquid_route(instrument: &str, symbol: &str) -> ProbeResult<MarketRoute> {
     Ok(MarketRoute {
         provider_id: PROVIDER.to_string(),
-        instrument_id: InstrumentId::try_new(BTC_ID)
+        instrument_id: InstrumentId::try_new(instrument)
             .map_err(|error| ProbeError::Runtime(error.to_string()))?,
-        provider_symbol: "BTC".to_string(),
-        display_symbol: "BTC-USDC".to_string(),
+        provider_symbol: symbol.to_string(),
+        display_symbol: format!("{symbol}-USDC"),
         venue_id: "Hyperliquid".to_string(),
         entitlement_id: Some("hyperliquid-public".to_string()),
         price_scale: 8,
@@ -135,6 +148,84 @@ fn find_order(
     Ok(order_history(trading)?
         .into_iter()
         .find(|order| &order.client_order_id == client_order_id))
+}
+
+const CHART_CLIENT: u64 = 91;
+const CHART_CONSUMER: u64 = 92;
+
+/// A BTC chart as the desktop opens one (bars, trades, quotes and depth), drained on its
+/// own thread so the workflow-only market shares the provider session with chart demand.
+struct ChartLoad {
+    service: MarketService,
+    stop: Arc<AtomicBool>,
+    events: Arc<AtomicU64>,
+    drain: Option<thread::JoinHandle<()>>,
+}
+
+impl ChartLoad {
+    fn open(service: &MarketService) -> ProbeResult<Self> {
+        market(service.attach(CHART_CLIENT))?;
+        market(service.register_consumer(CHART_CLIENT, 1, CHART_CONSUMER))?;
+        market(
+            service.select_and_demand(
+                CHART_CLIENT,
+                SelectionRequest {
+                    consumer_id: CHART_CONSUMER,
+                    generation: 1,
+                    instrument: InstrumentRequest::Default,
+                    interval: ChartInterval::Minute1,
+                    streams: StreamRequirements::BARS
+                        .with(MarketStream::Trades)
+                        .with(MarketStream::Quotes)
+                        .with(MarketStream::Depth),
+                    viewport: None,
+                },
+            ),
+        )?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(AtomicU64::new(0));
+        let drain = {
+            let service = service.clone();
+            let stop = Arc::clone(&stop);
+            let events = Arc::clone(&events);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if !service.wait_for_events(CHART_CLIENT, Duration::from_millis(30)) {
+                        continue;
+                    }
+                    if let Ok(drained) =
+                        service.drain_events(CHART_CLIENT, &[(CHART_CONSUMER, 256)])
+                    {
+                        events.fetch_add(drained.len() as u64, Ordering::Relaxed);
+                    }
+                }
+            })
+        };
+        Ok(Self {
+            service: service.clone(),
+            stop,
+            events,
+            drain: Some(drain),
+        })
+    }
+
+    fn events(&self) -> u64 {
+        self.events.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ChartLoad {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(drain) = self.drain.take()
+            && drain.join().is_err()
+        {
+            eprintln!("chart drain thread panicked");
+        }
+        if let Err(error) = self.service.detach(CHART_CLIENT) {
+            eprintln!("chart client detach failed: {error}");
+        }
+    }
 }
 
 /// Bounded shutdown of the active trading owner on every exit path.
@@ -234,6 +325,7 @@ fn run_with_market(
     probe.time_of_day_closes_the_position(&entry)?;
     probe.restart_fires_nothing_again(market_service, &mut guard, &target, &route, root)?;
     probe.deleted_workflows_are_gone()?;
+    probe.workflow_only_market_entry_fills(market_service, &route)?;
     let (quotes, push_failures) = recorder.statistics();
     probe.evidence.metrics = json!({
         "quotes_recorded": quotes,
@@ -765,5 +857,158 @@ impl Probe<'_> {
                 "arm_deleted": arm_deleted.err().map(|error| error.to_string()),
             }),
         )
+    }
+
+    /// A market no ticket demands, as one picked by the page's market search: once its
+    /// terms are known only the armed workflow brings its quotes back, a provider
+    /// reconnect while it is armed resubscribes them, and the bracketed entry its timer
+    /// places fills on a later quote.
+    fn workflow_only_market_entry_fills(
+        &mut self,
+        market_service: &MarketService,
+        btc_route: &MarketRoute,
+    ) -> ProbeResult<()> {
+        let eth_route = hyperliquid_route(ETH_ID, "ETH")?;
+        let chart = ChartLoad::open(market_service)?;
+        market(
+            self.trading
+                .set_ticket_interest(vec![btc_route.clone(), eth_route.clone()]),
+        )?;
+        wait_for("verified ETH terms", Duration::from_secs(45), || {
+            Ok(self
+                .current()?
+                .instruments
+                .into_iter()
+                .find(|instrument| instrument.instrument_id == eth_route.instrument_id))
+        })?;
+        wait_for("live ETH quote", QUOTE_WAIT, || {
+            Ok(self.recorder.latest_quote(ETH_ID))
+        })?;
+        market(self.trading.set_ticket_interest(vec![btc_route.clone()]))?;
+        let armed = self.arm_timed_entry(&eth_route)?;
+        let due = armed
+            .next_due_unix_nanos
+            .ok_or_else(|| ProbeError::Invariant("timed entry has no due time".to_string()))?;
+        let generation_before = wait_for("armed ETH quote", QUOTE_WAIT, || {
+            Ok(self.recorder.latest_quote(ETH_ID))
+        })?
+        .provider_generation;
+        market(market_service.probe_fail_hyperliquid_websocket(0))?;
+        let resubscribed = poll_until(Duration::from_secs(45), || {
+            Ok(self
+                .recorder
+                .latest_quote(ETH_ID)
+                .filter(|quote| quote.provider_generation > generation_before))
+        })?;
+        let rearmed_quote = self.lapse_timed_entry_interest(due)?;
+        let wait = Duration::from_nanos(
+            u64::try_from(due - unix_nanos_now() + 30 * NANOS_PER_SECOND).unwrap_or_default(),
+        );
+        let fired = poll_until(wait, || {
+            Ok(self
+                .workflow(TIMED_ENTRY_ID)?
+                .filter(|view| !view.recent_firings.is_empty()))
+        })?
+        .ok_or_else(|| ProbeError::Invariant("timed entry never fired".to_string()))?;
+        let outcome = &fired.recent_firings[0].outcome;
+        let placed = match outcome {
+            WorkflowFiringOutcome::Executed(steps) => {
+                steps.iter().find_map(|step| match &step.outcome {
+                    WorkflowStepOutcome::Action(WorkflowActionResult::Placed {
+                        client_order_id,
+                    }) => Some(client_order_id.clone()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        let order = match &placed {
+            Some(client_order_id) => poll_until(QUOTE_WAIT, || {
+                Ok(find_order(&self.trading, client_order_id)?
+                    .filter(|order| !order.status.is_open()))
+            })?,
+            None => None,
+        };
+        let current = self.current()?;
+        let latest = self.recorder.latest_quote(ETH_ID);
+        self.evidence.check(
+            "workflow_only_market_entry_filled",
+            resubscribed.is_some()
+                && rearmed_quote.is_some()
+                && order
+                    .as_ref()
+                    .is_some_and(|order| order.status == OrderStatus::Filled),
+            json!({
+                "generation_before_reconnect": generation_before,
+                "resubscribed_generation": resubscribed.map(|quote| quote.provider_generation),
+                "reconnected_before_due": resubscribed
+                    .is_some_and(|quote| quote.received_unix_nanos < due),
+                "rearmed_quote_generation": rearmed_quote.map(|quote| quote.provider_generation),
+                "blockers_when_armed": format!("{:?}", armed.blockers),
+                "outcome": format!("{outcome:?}"),
+                "order_status": order.as_ref().map(|order| format!("{:?}", order.status)),
+                "fired_unix_nanos": fired.recent_firings[0].fired_unix_nanos,
+                "latest_eth_quote_received_unix_nanos":
+                    latest.map(|quote| quote.received_unix_nanos),
+                "market_observation_error": current.market_observation_error,
+                "feed": self.recorder.debug_state(&[ETH_ID]),
+                "chart_events": chart.events(),
+            }),
+        )?;
+        owner(self.trading.delete_workflow(TIMED_ENTRY_ID.to_string()))
+    }
+
+    /// Registers and arms the bracketed ETH entry early in a minute, so the reconnect and the
+    /// interest lapse that follow complete before the trigger is due.
+    fn arm_timed_entry(&mut self, eth_route: &MarketRoute) -> ProbeResult<WorkflowView> {
+        let mut definition = self.definition(
+            TIMED_ENTRY_ID,
+            1,
+            "Probe timed entry",
+            WorkflowTrigger::Every { minutes: 1 },
+            WorkflowCondition::single(WorkflowCheck::Position(PositionRequirement::Flat)),
+            &[WorkflowAction::Enter {
+                side: OrderSide::Buy,
+                quantity: fixed(ETH_QUANTITY)?,
+                protection: Some(WorkflowProtection {
+                    stop_ticks: 20,
+                    target_ticks: 40,
+                }),
+            }],
+        )?;
+        definition.instrument_id = eth_route.instrument_id.clone();
+        let into_minute = unix_nanos_now().rem_euclid(NANOS_PER_MINUTE);
+        if into_minute > 20 * NANOS_PER_SECOND {
+            thread::sleep(Duration::from_nanos(
+                u64::try_from(NANOS_PER_MINUTE - into_minute + NANOS_PER_SECOND)
+                    .unwrap_or_default(),
+            ));
+        }
+        owner(
+            self.trading
+                .register_workflow(definition, WorkflowLayout::default()),
+        )?;
+        owner(self.trading.arm_workflow(TIMED_ENTRY_ID.to_string(), 1))
+    }
+
+    /// Lets the owner apply most of a minute of ETH quotes, then pauses the timed entry so its
+    /// only ETH interest lapses within that provider generation, arms it again shortly before
+    /// it is due and waits for the first quote of the restored interest. The restored quotes
+    /// must apply although far fewer arrive before the entry's five-second window ends.
+    fn lapse_timed_entry_interest(&mut self, due: i64) -> ProbeResult<Option<RecordedQuote>> {
+        let lapse_at = due - 8 * NANOS_PER_SECOND;
+        thread::sleep(Duration::from_nanos(
+            u64::try_from(lapse_at - unix_nanos_now()).unwrap_or_default(),
+        ));
+        owner(self.trading.pause_workflow(TIMED_ENTRY_ID.to_string(), 1))?;
+        thread::sleep(Duration::from_secs(1));
+        let rearmed_at = unix_nanos_now();
+        owner(self.trading.arm_workflow(TIMED_ENTRY_ID.to_string(), 1))?;
+        poll_until(QUOTE_WAIT, || {
+            Ok(self
+                .recorder
+                .latest_quote(ETH_ID)
+                .filter(|quote| quote.received_unix_nanos > rearmed_at))
+        })
     }
 }

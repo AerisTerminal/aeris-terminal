@@ -94,6 +94,7 @@ use window_state::{ActivityChange, WindowState};
 mod watchlist_panel;
 mod workflow_board;
 mod workflow_canvas;
+mod workflow_market_search;
 mod workflows_page;
 mod workspace_layout;
 
