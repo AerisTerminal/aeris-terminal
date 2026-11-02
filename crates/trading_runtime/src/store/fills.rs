@@ -67,7 +67,31 @@ pub(super) fn upsert_trade_cycle(
             ],
         )
         .map_err(database_error)?;
+    if trade_cycle_open_time_present(transaction).map_err(database_error)? {
+        transaction
+            .execute(
+                "UPDATE trade_cycles SET opened_unix_nanos=?3
+                 WHERE account_id=?1 AND instrument_id=?2",
+                params![
+                    cycle.account_id.as_str(),
+                    cycle.instrument_id.as_str(),
+                    cycle.opened_unix_nanos,
+                ],
+            )
+            .map_err(database_error)?;
+    }
     Ok(())
+}
+
+/// Whether `trade_cycles` carries the V32 open time. A gated pre-group store stops at V23
+/// and gains the column with the rest of the chain once its group conversion finalizes.
+fn trade_cycle_open_time_present(connection: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('trade_cycles')
+             WHERE name = 'opened_unix_nanos')",
+        [],
+        |row| row.get(0),
+    )
 }
 
 impl TradingStore {
@@ -336,15 +360,18 @@ impl TradingStore {
         &self,
     ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), TradeCycle>, String> {
         let mut output = BTreeMap::new();
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT account_id, instrument_id, cycle_id, peak_quantity_units,
-                    peak_quantity_scale, realized_units, realized_scale,
-                    risk_realized_units, risk_realized_scale, pnl_known
-                 FROM trade_cycles ORDER BY account_id, instrument_id",
-            )
-            .map_err(database_error)?;
+        let query = if trade_cycle_open_time_present(&self.connection).map_err(database_error)? {
+            "SELECT account_id, instrument_id, cycle_id, peak_quantity_units,
+                peak_quantity_scale, realized_units, realized_scale,
+                risk_realized_units, risk_realized_scale, pnl_known, opened_unix_nanos
+             FROM trade_cycles ORDER BY account_id, instrument_id"
+        } else {
+            "SELECT account_id, instrument_id, cycle_id, peak_quantity_units,
+                peak_quantity_scale, realized_units, realized_scale,
+                risk_realized_units, risk_realized_scale, pnl_known, NULL
+             FROM trade_cycles ORDER BY account_id, instrument_id"
+        };
+        let mut statement = self.connection.prepare(query).map_err(database_error)?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -358,6 +385,7 @@ impl TradingStore {
                     row.get::<_, i64>(7)?,
                     row.get::<_, u8>(8)?,
                     row.get::<_, bool>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
                 ))
             })
             .map_err(database_error)?;
@@ -373,6 +401,7 @@ impl TradingStore {
                 risk_units,
                 risk_scale,
                 pnl_known,
+                opened_unix_nanos,
             ) = row.map_err(database_error)?;
             let account_id = TradingAccountId::try_new(account).map_err(|e| e.to_string())?;
             let instrument_id = InstrumentId::try_new(instrument).map_err(|e| e.to_string())?;
@@ -386,6 +415,7 @@ impl TradingStore {
                     realized_pnl: fixed(units, scale)?,
                     risk_realized_pnl: fixed(risk_units, risk_scale)?,
                     pnl_known,
+                    opened_unix_nanos,
                 },
             );
         }

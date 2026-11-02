@@ -4,11 +4,12 @@
 use super::{StepTx, TradingStore, database_error, params};
 use crate::workflow::{
     PositionRequirement, PriceDirection, WORKFLOW_FIRING_HISTORY, WorkflowAction,
-    WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowClockTime, WorkflowCondition,
-    WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome, WorkflowJoin,
-    WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId, WorkflowNodePosition,
-    WorkflowProtection, WorkflowRecord, WorkflowRepeat, WorkflowState, WorkflowStep,
-    WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger, WorkflowWeekdays,
+    WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowClockTime, WorkflowCompare,
+    WorkflowCondition, WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome,
+    WorkflowJoin, WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId,
+    WorkflowNodePosition, WorkflowProtection, WorkflowRecord, WorkflowRepeat, WorkflowState,
+    WorkflowStep, WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger,
+    WorkflowWeekdays,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{ClientOrderId, FixedPoint, OrderSide, TradingAccountId};
@@ -299,6 +300,8 @@ enum StoredTrigger {
     Every {
         minutes: u16,
     },
+    PositionOpened,
+    PositionClosed,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -371,6 +374,28 @@ enum StoredCheck {
         zone: StoredZone,
         days: u8,
     },
+    TimeInTrade {
+        compare: StoredCompare,
+        minutes: u32,
+    },
+    OpenProfitTicks {
+        compare: StoredCompare,
+        ticks: i32,
+    },
+    OpenProfit {
+        compare: StoredCompare,
+        amount: StoredFixed,
+    },
+    Pullback {
+        ticks: u32,
+    },
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredCompare {
+    AtLeast,
+    AtMost,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -461,6 +486,7 @@ enum StoredBlocker {
     AccountLocked,
     BrokerUnreachable,
     QuoteUnavailable,
+    PositionUnknown,
 }
 
 impl StoredFixed {
@@ -504,6 +530,22 @@ impl StoredZone {
         match self {
             Self::Utc => WorkflowTimeZone::Utc,
             Self::Chicago => WorkflowTimeZone::Chicago,
+        }
+    }
+}
+
+impl StoredCompare {
+    const fn from_compare(compare: WorkflowCompare) -> Self {
+        match compare {
+            WorkflowCompare::AtLeast => Self::AtLeast,
+            WorkflowCompare::AtMost => Self::AtMost,
+        }
+    }
+
+    const fn into_compare(self) -> WorkflowCompare {
+        match self {
+            Self::AtLeast => WorkflowCompare::AtLeast,
+            Self::AtMost => WorkflowCompare::AtMost,
         }
     }
 }
@@ -587,6 +629,19 @@ impl StoredCheck {
                 zone: StoredZone::from_zone(zone),
                 days: days.bits(),
             },
+            WorkflowCheck::TimeInTrade { compare, minutes } => Self::TimeInTrade {
+                compare: StoredCompare::from_compare(compare),
+                minutes,
+            },
+            WorkflowCheck::OpenProfitTicks { compare, ticks } => Self::OpenProfitTicks {
+                compare: StoredCompare::from_compare(compare),
+                ticks,
+            },
+            WorkflowCheck::OpenProfit { compare, amount } => Self::OpenProfit {
+                compare: StoredCompare::from_compare(compare),
+                amount: StoredFixed::from_fixed(amount),
+            },
+            WorkflowCheck::Pullback { ticks } => Self::Pullback { ticks },
         }
     }
 
@@ -619,6 +674,19 @@ impl StoredCheck {
                 zone: zone.into_zone(),
                 days: WorkflowWeekdays::from_bits(days).ok_or_else(|| corrupt("weekdays"))?,
             },
+            Self::TimeInTrade { compare, minutes } => WorkflowCheck::TimeInTrade {
+                compare: compare.into_compare(),
+                minutes,
+            },
+            Self::OpenProfitTicks { compare, ticks } => WorkflowCheck::OpenProfitTicks {
+                compare: compare.into_compare(),
+                ticks,
+            },
+            Self::OpenProfit { compare, amount } => WorkflowCheck::OpenProfit {
+                compare: compare.into_compare(),
+                amount: amount.into_fixed()?,
+            },
+            Self::Pullback { ticks } => WorkflowCheck::Pullback { ticks },
         })
     }
 }
@@ -790,6 +858,8 @@ impl StoredTrigger {
                 minute_of_day: time.minute_of_day,
             },
             WorkflowTrigger::Every { minutes } => Self::Every { minutes },
+            WorkflowTrigger::PositionOpened => Self::PositionOpened,
+            WorkflowTrigger::PositionClosed => Self::PositionClosed,
         }
     }
 
@@ -807,6 +877,8 @@ impl StoredTrigger {
                 minute_of_day,
             }),
             Self::Every { minutes } => WorkflowTrigger::Every { minutes },
+            Self::PositionOpened => WorkflowTrigger::PositionOpened,
+            Self::PositionClosed => WorkflowTrigger::PositionClosed,
         })
     }
 }
@@ -819,6 +891,7 @@ impl StoredBlocker {
             WorkflowBlocker::AccountLocked => Self::AccountLocked,
             WorkflowBlocker::BrokerUnreachable => Self::BrokerUnreachable,
             WorkflowBlocker::QuoteUnavailable => Self::QuoteUnavailable,
+            WorkflowBlocker::PositionUnknown => Self::PositionUnknown,
         }
     }
 
@@ -829,6 +902,7 @@ impl StoredBlocker {
             Self::AccountLocked => WorkflowBlocker::AccountLocked,
             Self::BrokerUnreachable => WorkflowBlocker::BrokerUnreachable,
             Self::QuoteUnavailable => WorkflowBlocker::QuoteUnavailable,
+            Self::PositionUnknown => WorkflowBlocker::PositionUnknown,
         }
     }
 }

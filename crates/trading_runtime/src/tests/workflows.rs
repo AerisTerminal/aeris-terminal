@@ -798,6 +798,8 @@ fn workflows_and_their_firings_survive_a_restart() {
     definition
         .triggers
         .push(WorkflowTrigger::Every { minutes: 720 });
+    definition.triggers.push(WorkflowTrigger::PositionOpened);
+    definition.triggers.push(WorkflowTrigger::PositionClosed);
     definition.nodes = vec![
         WorkflowNode {
             id: IF_NODE,
@@ -813,14 +815,41 @@ fn workflows_and_their_firings_survive_a_restart() {
                             zone: WorkflowTimeZone::Chicago,
                             days: WorkflowWeekdays::WEEKDAYS,
                         },
+                        WorkflowCheck::TimeInTrade {
+                            compare: WorkflowCompare::AtMost,
+                            minutes: 90,
+                        },
+                        WorkflowCheck::OpenProfit {
+                            compare: WorkflowCompare::AtLeast,
+                            amount: FixedPoint::try_new(-2_500, 2).expect("amount"),
+                        },
                     ],
                 )
                 .expect("condition"),
                 then: Some(THEN_NODE),
-                otherwise: None,
+                otherwise: Some(ELSE_NODE),
             },
         },
         action_node(THEN_NODE, WorkflowAction::CancelOrders),
+        WorkflowNode {
+            id: ELSE_NODE,
+            step: WorkflowStep::If {
+                condition: WorkflowCondition::joined(
+                    WorkflowJoin::All,
+                    &[
+                        WorkflowCheck::OpenProfitTicks {
+                            compare: WorkflowCompare::AtMost,
+                            ticks: -8,
+                        },
+                        WorkflowCheck::Pullback { ticks: 6 },
+                    ],
+                )
+                .expect("condition"),
+                then: Some(WorkflowNodeId(4)),
+                otherwise: None,
+            },
+        },
+        action_node(WorkflowNodeId(4), WorkflowAction::Flatten),
     ];
     definition.limits.repeat = WorkflowRepeat::PerSession { maximum: 5 };
     register(&service, definition);
@@ -844,6 +873,342 @@ fn workflows_and_their_firings_survive_a_restart() {
     deliver_quote(&restarted, &feed, &instrument, 4, 10_050, 10_075);
     assert_eq!(workflow(&restarted, "durable").recent_firings.len(), 1);
     restarted
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+/// On `trigger`, cancel the working orders, up to ten times a session.
+fn position_watch(workflow_id: &str, trigger: WorkflowTrigger) -> WorkflowDefinition {
+    let mut definition = single(workflow_id, 10_050, WorkflowAction::CancelOrders);
+    definition.triggers = vec![trigger];
+    definition.limits.repeat = WorkflowRepeat::PerSession { maximum: 10 };
+    definition
+}
+
+/// Every minute, reads `check` and cancels the working orders on either branch, so each
+/// firing records the branch the check decided.
+fn probe(workflow_id: &str, check: WorkflowCheck) -> WorkflowDefinition {
+    let mut definition = position_watch(workflow_id, WorkflowTrigger::Every { minutes: 1 });
+    definition.start = IF_NODE;
+    definition.nodes = vec![
+        WorkflowNode {
+            id: IF_NODE,
+            step: WorkflowStep::If {
+                condition: WorkflowCondition::single(check),
+                then: Some(THEN_NODE),
+                otherwise: Some(ELSE_NODE),
+            },
+        },
+        action_node(THEN_NODE, WorkflowAction::CancelOrders),
+        action_node(ELSE_NODE, WorkflowAction::CancelOrders),
+    ];
+    definition
+}
+
+fn branch_taken(service: &TradingService, workflow_id: &str) -> bool {
+    match executed(&workflow(service, workflow_id)).first() {
+        Some(WorkflowStepResult {
+            outcome: WorkflowStepOutcome::Branch(held),
+            ..
+        }) => *held,
+        steps => panic!("{workflow_id} decided a branch: {steps:?}"),
+    }
+}
+
+/// Places a market order, which fills on the owner's current quote, then delivers the next
+/// quote.
+fn trade(
+    service: &TradingService,
+    clock: &crate::clock::ManualClock,
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    (client_id, side, quantity): (&str, OrderSide, i64),
+    sequence: u64,
+    (bid, ask): (i64, i64),
+) -> Vec<Fill> {
+    let mut order = market_order(client_id, side, 1, clock.wall_unix_nanos());
+    order.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
+    service.place_order(order, false).expect("market order");
+    quote_now(service, clock, feed, sequence, (bid, ask))
+}
+
+/// Delivers a quote received a moment after the clock's current time.
+fn quote_now(
+    service: &TradingService,
+    clock: &crate::clock::ManualClock,
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    sequence: u64,
+    (bid, ask): (i64, i64),
+) -> Vec<Fill> {
+    clock.advance(Duration::from_millis(100));
+    deliver_quote_at(
+        service,
+        feed,
+        &instrument(),
+        sequence,
+        bid,
+        ask,
+        clock.wall_unix_nanos(),
+    )
+}
+
+#[test]
+fn position_triggers_fire_when_a_position_opens_closes_or_reverses() {
+    let directory = TestDirectory::new("workflow-position-triggers");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    for (workflow_id, trigger) in [
+        ("on-open", WorkflowTrigger::PositionOpened),
+        ("on-close", WorkflowTrigger::PositionClosed),
+    ] {
+        register(&service, position_watch(workflow_id, trigger));
+        let armed = service.arm_workflow(workflow_id.into(), 1).expect("armed");
+        assert!(armed.blockers.is_empty(), "{:?}", armed.blockers);
+    }
+    let firings = |service: &TradingService| {
+        (
+            workflow(service, "on-open").total_firings,
+            workflow(service, "on-close").total_firings,
+        )
+    };
+    let book = (9_975, 10_000);
+    assert_eq!(firings(&service), (0, 0));
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("open", OrderSide::Buy, 1),
+        2,
+        book,
+    );
+    assert_eq!(firings(&service), (1, 0), "opening fires the open trigger");
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("close", OrderSide::Sell, 1),
+        3,
+        book,
+    );
+    assert_eq!(firings(&service), (1, 1), "closing fires the close trigger");
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("reopen", OrderSide::Buy, 1),
+        4,
+        book,
+    );
+    assert_eq!(firings(&service), (2, 1));
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("reverse", OrderSide::Sell, 2),
+        5,
+        book,
+    );
+    assert_eq!(
+        firings(&service),
+        (3, 2),
+        "a reversal closes one side and opens the other"
+    );
+    assert_eq!(working_set(&service).positions[0].net_quantity.units(), -1);
+    quote_now(&service, &clock, &feed, 6, (9_950, 9_975));
+    assert_eq!(firings(&service), (3, 2), "a quote alone moves no position");
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn trade_checks_read_time_in_trade_open_profit_and_pullback() {
+    let directory = TestDirectory::new("workflow-trade-checks");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let amount = |units| FixedPoint::try_new(units, 2).expect("amount");
+    let (at_least, at_most) = (WorkflowCompare::AtLeast, WorkflowCompare::AtMost);
+    let probes = [
+        (
+            "in-trade-at-most-1m",
+            WorkflowCheck::TimeInTrade {
+                compare: at_most,
+                minutes: 1,
+            },
+            true,
+        ),
+        (
+            "in-trade-at-least-1m",
+            WorkflowCheck::TimeInTrade {
+                compare: at_least,
+                minutes: 1,
+            },
+            false,
+        ),
+        (
+            "up-2-ticks",
+            WorkflowCheck::OpenProfitTicks {
+                compare: at_least,
+                ticks: 2,
+            },
+            true,
+        ),
+        (
+            "up-3-ticks",
+            WorkflowCheck::OpenProfitTicks {
+                compare: at_least,
+                ticks: 3,
+            },
+            false,
+        ),
+        (
+            "down-1-tick",
+            WorkflowCheck::OpenProfitTicks {
+                compare: at_most,
+                ticks: -1,
+            },
+            false,
+        ),
+        (
+            "up-1-dollar",
+            WorkflowCheck::OpenProfit {
+                compare: at_least,
+                amount: amount(100),
+            },
+            true,
+        ),
+        (
+            "not-up",
+            WorkflowCheck::OpenProfit {
+                compare: at_most,
+                amount: amount(0),
+            },
+            false,
+        ),
+        ("pulled-2-ticks", WorkflowCheck::Pullback { ticks: 2 }, true),
+        (
+            "pulled-3-ticks",
+            WorkflowCheck::Pullback { ticks: 3 },
+            false,
+        ),
+    ];
+    for (workflow_id, check, _) in probes {
+        register(&service, probe(workflow_id, check));
+        service.arm_workflow(workflow_id.into(), 1).expect("armed");
+    }
+    // Long one from 100.00; the bid runs to 101.00, then comes back to 100.50: two ticks
+    // up from the entry and two back from the best exit.
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("open", OrderSide::Buy, 1),
+        2,
+        (9_975, 10_000),
+    );
+    quote_now(&service, &clock, &feed, 3, (10_100, 10_125));
+    quote_now(&service, &clock, &feed, 4, (10_050, 10_075));
+    // The fixture clock started at 00:16:40 UTC; the probes fire at 00:17.
+    clock.advance(Duration::from_secs(20));
+    service.status().expect("owner runs the due timer");
+    for (workflow_id, _, expected) in probes {
+        assert_eq!(
+            branch_taken(&service, workflow_id),
+            expected,
+            "{workflow_id}"
+        );
+    }
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn the_open_time_survives_a_restart_and_an_unknown_one_blocks() {
+    let directory = TestDirectory::new("workflow-open-time");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let held = WorkflowCheck::TimeInTrade {
+        compare: WorkflowCompare::AtLeast,
+        minutes: 1,
+    };
+    register(&service, probe("held-a-minute", held));
+    register(
+        &service,
+        position_watch("on-open", WorkflowTrigger::PositionOpened),
+    );
+    for workflow_id in ["held-a-minute", "on-open"] {
+        service.arm_workflow(workflow_id.into(), 1).expect("armed");
+    }
+    trade(
+        &service,
+        &clock,
+        &feed,
+        ("open", OrderSide::Buy, 1),
+        2,
+        (9_975, 10_000),
+    );
+    assert_eq!(workflow(&service, "on-open").total_firings, 1);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+
+    // A restart only records the open position; the open time is durable.
+    let (restarted, feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument, market_feed::route());
+    quote_now(&restarted, &clock, &feed, 3, (9_975, 10_000));
+    assert_eq!(workflow(&restarted, "on-open").total_firings, 1);
+    clock.advance(Duration::from_secs(25));
+    restarted.status().expect("owner runs the due timer");
+    assert!(
+        !branch_taken(&restarted, "held-a-minute"),
+        "open for 20 seconds"
+    );
+    clock.advance(Duration::from_secs(60));
+    restarted.status().expect("owner runs the due timer");
+    assert!(
+        branch_taken(&restarted, "held-a-minute"),
+        "open for 80 seconds"
+    );
+    restarted
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+
+    // A position whose opening fill Aeris never accounted has no open time to read.
+    rusqlite::Connection::open(directory.0.join("trading.sqlite3"))
+        .expect("database opens")
+        .execute("UPDATE trade_cycles SET opened_unix_nanos = NULL", [])
+        .expect("open time cleared");
+    let (restarted, _feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument, market_feed::route());
+    clock.advance(Duration::from_secs(60));
+    restarted.status().expect("owner runs the due timer");
+    assert_eq!(
+        workflow(&restarted, "held-a-minute").recent_firings[0].outcome,
+        WorkflowFiringOutcome::Blocked(vec![WorkflowBlocker::PositionUnknown])
+    );
+    restarted
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn an_open_profit_amount_must_be_at_the_account_currency_scale() {
+    let directory = TestDirectory::new("workflow-amount-scale");
+    let instrument = instrument();
+    let (service, _clock, _feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let check = WorkflowCheck::OpenProfit {
+        compare: WorkflowCompare::AtLeast,
+        amount: FixedPoint::try_new(100, 3).expect("amount"),
+    };
+    assert_eq!(
+        service.register_workflow(probe("off-scale", check), WorkflowLayout::default()),
+        Err(WorkflowError::Invalid(WorkflowInvalid::Amount))
+    );
+    service
         .shutdown_after_owner_exit_for_test()
         .expect("shutdown");
 }

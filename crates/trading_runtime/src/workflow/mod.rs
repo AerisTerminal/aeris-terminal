@@ -23,6 +23,8 @@ pub const MAXIMUM_WORKFLOW_CHECKS: usize = 4;
 pub const MAXIMUM_WORKFLOW_SESSION_FIRINGS: u32 = 50;
 pub const MAXIMUM_WORKFLOW_COOLDOWN_SECONDS: u32 = 86_400;
 pub const MAXIMUM_WORKFLOW_PROTECTION_TICKS: u32 = 10_000;
+/// The longest time in trade a check can name: one week.
+pub const MAXIMUM_WORKFLOW_TRADE_MINUTES: u32 = 10_080;
 /// The newest firings kept, durably and in the working set, per workflow.
 pub const WORKFLOW_FIRING_HISTORY: usize = 20;
 pub const MAXIMUM_WORKFLOW_ID_BYTES: usize = 64;
@@ -98,6 +100,12 @@ pub enum WorkflowTrigger {
     /// Fires at UTC midnight and every `minutes` after it, so every 15 minutes fires at
     /// :00, :15, :30 and :45. A moment that passes while Aeris is closed does not fire later.
     Every { minutes: u16 },
+    /// Fires when the account's position in the workflow instrument opens from flat or
+    /// reverses into its other side. Arming or a restart only records the current position.
+    PositionOpened,
+    /// Fires when the account's position in the workflow instrument closes to flat or
+    /// reverses. Arming or a restart only records the current position.
+    PositionClosed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,6 +169,44 @@ pub enum WorkflowCheck {
         zone: WorkflowTimeZone,
         days: WorkflowWeekdays,
     },
+    /// How long the position has been open. Never holds while flat.
+    TimeInTrade {
+        compare: WorkflowCompare,
+        minutes: u32,
+    },
+    /// The open position's distance from its average entry to the price it would exit at
+    /// (the bid when long, the ask when short) in the instrument's ticks; a loss is
+    /// negative. Never holds while flat.
+    OpenProfitTicks {
+        compare: WorkflowCompare,
+        ticks: i32,
+    },
+    /// The open position's unrealized profit in the account currency; a loss is negative.
+    /// Never holds while flat.
+    OpenProfit {
+        compare: WorkflowCompare,
+        amount: FixedPoint,
+    },
+    /// The exit price has come back at least `ticks` from the best exit price since the
+    /// position opened. Never holds while flat.
+    Pullback { ticks: u32 },
+}
+
+/// `AtLeast` holds at or above the value it is given, `AtMost` at or below it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkflowCompare {
+    AtLeast,
+    AtMost,
+}
+
+impl WorkflowCompare {
+    #[must_use]
+    pub fn holds<T: Ord + Copy>(self, value: T, threshold: T) -> bool {
+        match self {
+            Self::AtLeast => value >= threshold,
+            Self::AtMost => value <= threshold,
+        }
+    }
 }
 
 /// A non-empty set of days of the week; bit 0 is Monday and bit 6 Sunday.
@@ -267,6 +313,9 @@ pub enum WorkflowBlocker {
     AccountLocked,
     BrokerUnreachable,
     QuoteUnavailable,
+    /// A check reads the position's open time or entry price, and fills Aeris never saw
+    /// opened it (before this version, or at the broker while Aeris was away).
+    PositionUnknown,
 }
 
 impl WorkflowBlocker {
@@ -428,6 +477,10 @@ pub enum WorkflowInvalid {
     Actions,
     Quantity,
     Protection,
+    /// A tick distance out of its bounds.
+    Ticks,
+    /// A money amount not at the account currency's scale.
+    Amount,
     Repeat,
     Cooldown,
     Expiry,
@@ -524,6 +577,7 @@ impl WorkflowDefinition {
                         return Err(WorkflowInvalid::Time);
                     }
                 }
+                WorkflowTrigger::PositionOpened | WorkflowTrigger::PositionClosed => {}
             }
         }
         self.validate_graph()?;
@@ -616,12 +670,13 @@ impl WorkflowDefinition {
         Ok(())
     }
 
-    /// The nodes one run passes from `start`, deciding every check with `holds`. `None`
-    /// when a check on the path cannot be read (a price check without a current quote).
+    /// The nodes one run passes from `start`, deciding every check with `holds`. Fails
+    /// with what stops a check on the path from being read (a price check without a
+    /// current quote).
     pub(crate) fn resolve_path(
         &self,
-        mut holds: impl FnMut(WorkflowCheck) -> Option<bool>,
-    ) -> Option<Vec<WorkflowPathStep>> {
+        mut holds: impl FnMut(WorkflowCheck) -> Result<bool, WorkflowBlocker>,
+    ) -> Result<Vec<WorkflowPathStep>, WorkflowBlocker> {
         let mut path = Vec::new();
         let mut next = Some(self.start);
         // An acyclic graph visits each node at most once; the bound guards a corrupt one.
@@ -629,7 +684,9 @@ impl WorkflowDefinition {
             if path.len() >= self.nodes.len() {
                 break;
             }
-            let node = self.node(id)?;
+            let Some(node) = self.node(id) else {
+                break;
+            };
             match node.step {
                 WorkflowStep::If {
                     condition,
@@ -649,7 +706,7 @@ impl WorkflowDefinition {
                 }
             }
         }
-        Some(path)
+        Ok(path)
     }
 }
 
@@ -694,8 +751,34 @@ const fn validate_minute(minute: u16) -> Result<(), WorkflowInvalid> {
 }
 
 fn validate_check(check: WorkflowCheck) -> Result<(), WorkflowInvalid> {
+    let ticks = 1..=MAXIMUM_WORKFLOW_PROTECTION_TICKS;
     match check {
-        WorkflowCheck::Position(_) | WorkflowCheck::Weekday { .. } => Ok(()),
+        WorkflowCheck::Position(_)
+        | WorkflowCheck::Weekday { .. }
+        | WorkflowCheck::OpenProfit { .. } => Ok(()),
+        WorkflowCheck::TimeInTrade { minutes, .. } => {
+            if (1..=MAXIMUM_WORKFLOW_TRADE_MINUTES).contains(&minutes) {
+                Ok(())
+            } else {
+                Err(WorkflowInvalid::Time)
+            }
+        }
+        WorkflowCheck::OpenProfitTicks {
+            ticks: distance, ..
+        } => {
+            if ticks.contains(&distance.unsigned_abs()) {
+                Ok(())
+            } else {
+                Err(WorkflowInvalid::Ticks)
+            }
+        }
+        WorkflowCheck::Pullback { ticks: distance } => {
+            if ticks.contains(&distance) {
+                Ok(())
+            } else {
+                Err(WorkflowInvalid::Ticks)
+            }
+        }
         WorkflowCheck::Between {
             start_minute,
             end_minute,
@@ -756,12 +839,12 @@ impl WorkflowCondition {
         self.checks.iter().flatten().copied()
     }
 
-    /// Reads every check, so a test never holds on a check it could not read. `None` when
-    /// any check cannot be read.
+    /// Reads every check, so a test never holds on a check it could not read. Fails with
+    /// what stops the first unreadable check.
     pub(crate) fn holds(
         &self,
-        mut holds: impl FnMut(WorkflowCheck) -> Option<bool>,
-    ) -> Option<bool> {
+        mut holds: impl FnMut(WorkflowCheck) -> Result<bool, WorkflowBlocker>,
+    ) -> Result<bool, WorkflowBlocker> {
         let mut all = true;
         let mut any = false;
         for check in self.checks() {
@@ -769,7 +852,7 @@ impl WorkflowCondition {
             all &= held;
             any |= held;
         }
-        Some(match self.join {
+        Ok(match self.join {
             WorkflowJoin::All => all,
             WorkflowJoin::Any => any,
         })
@@ -780,7 +863,13 @@ impl WorkflowCheck {
     /// Whether the check reads the owner's quote.
     #[must_use]
     pub const fn reads_quote(self) -> bool {
-        matches!(self, Self::Price { .. } | Self::PriceRange { .. })
+        matches!(
+            self,
+            Self::Price { .. }
+                | Self::PriceRange { .. }
+                | Self::OpenProfitTicks { .. }
+                | Self::Pullback { .. }
+        )
     }
 }
 
@@ -815,7 +904,7 @@ impl WorkflowTrigger {
     #[must_use]
     pub fn next_after(self, unix_nanos: i64) -> Option<i64> {
         match self {
-            Self::PriceCrosses { .. } => None,
+            Self::PriceCrosses { .. } | Self::PositionOpened | Self::PositionClosed => None,
             Self::TimeOfDay(time) => Some(time.next_after(unix_nanos)),
             Self::Every { minutes } => {
                 let period = i64::from(minutes) * 60 * NANOS_PER_SECOND;
@@ -1166,17 +1255,71 @@ mod tests {
     }
 
     #[test]
+    fn trade_checks_stay_within_their_bounds() {
+        let check = |check| {
+            let mut bad = definition();
+            set_step(
+                &mut bad,
+                IF_FLAT,
+                WorkflowStep::If {
+                    condition: WorkflowCondition::single(check),
+                    then: Some(BUY),
+                    otherwise: Some(FLATTEN),
+                },
+            );
+            bad.validate()
+        };
+        let compare = WorkflowCompare::AtLeast;
+        for (minutes, expected) in [
+            (0, Err(WorkflowInvalid::Time)),
+            (1, Ok(())),
+            (MAXIMUM_WORKFLOW_TRADE_MINUTES, Ok(())),
+            (
+                MAXIMUM_WORKFLOW_TRADE_MINUTES + 1,
+                Err(WorkflowInvalid::Time),
+            ),
+        ] {
+            assert_eq!(
+                check(WorkflowCheck::TimeInTrade { compare, minutes }),
+                expected
+            );
+        }
+        for (ticks, expected) in [
+            (0, Err(WorkflowInvalid::Ticks)),
+            (-8, Ok(())),
+            (10_001, Err(WorkflowInvalid::Ticks)),
+        ] {
+            assert_eq!(
+                check(WorkflowCheck::OpenProfitTicks { compare, ticks }),
+                expected
+            );
+        }
+        assert_eq!(
+            check(WorkflowCheck::Pullback { ticks: 0 }),
+            Err(WorkflowInvalid::Ticks)
+        );
+        assert_eq!(check(WorkflowCheck::Pullback { ticks: 4 }), Ok(()));
+    }
+
+    #[test]
     fn a_condition_joins_its_checks_by_all_or_any() {
         let flat = WorkflowCheck::Position(PositionRequirement::Flat);
         let long = WorkflowCheck::Position(PositionRequirement::Long);
-        let holds = |check| Some(check == flat);
+        let holds = |check| Ok(check == flat);
         let all = WorkflowCondition::joined(WorkflowJoin::All, &[flat, long]).expect("all");
         let any = WorkflowCondition::joined(WorkflowJoin::Any, &[flat, long]).expect("any");
-        assert_eq!(all.holds(holds), Some(false));
-        assert_eq!(any.holds(holds), Some(true));
+        assert_eq!(all.holds(holds), Ok(false));
+        assert_eq!(any.holds(holds), Ok(true));
         assert_eq!(all.checks().collect::<Vec<_>>(), vec![flat, long]);
         // A check it cannot read leaves the whole test unread.
-        assert_eq!(any.holds(|check| (check == long).then_some(true)), None);
+        assert_eq!(
+            any.holds(|check| if check == long {
+                Ok(true)
+            } else {
+                Err(WorkflowBlocker::PositionUnknown)
+            }),
+            Err(WorkflowBlocker::PositionUnknown)
+        );
         assert_eq!(WorkflowCondition::joined(WorkflowJoin::All, &[]), None);
         assert_eq!(
             WorkflowCondition::joined(WorkflowJoin::Any, &[flat; 5]),
@@ -1301,20 +1444,23 @@ mod tests {
     fn a_run_follows_the_branch_its_condition_decides() {
         let definition = definition();
         assert_eq!(
-            definition.resolve_path(|_| Some(true)),
-            Some(vec![
+            definition.resolve_path(|_| Ok(true)),
+            Ok(vec![
                 WorkflowPathStep::Branch(IF_FLAT, true),
                 WorkflowPathStep::Action(BUY, enter()),
             ])
         );
         assert_eq!(
-            definition.resolve_path(|_| Some(false)),
-            Some(vec![
+            definition.resolve_path(|_| Ok(false)),
+            Ok(vec![
                 WorkflowPathStep::Branch(IF_FLAT, false),
                 WorkflowPathStep::Action(FLATTEN, WorkflowAction::Flatten),
             ])
         );
-        assert_eq!(definition.resolve_path(|_| None), None);
+        assert_eq!(
+            definition.resolve_path(|_| Err(WorkflowBlocker::QuoteUnavailable)),
+            Err(WorkflowBlocker::QuoteUnavailable)
+        );
     }
 
     #[test]

@@ -68,14 +68,15 @@ use crate::venue::VenueInbox;
 pub use crate::workflow::{
     MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_COOLDOWN_SECONDS, MAXIMUM_WORKFLOW_ID_BYTES,
     MAXIMUM_WORKFLOW_LAYOUT_COORDINATE, MAXIMUM_WORKFLOW_NAME_CHARS, MAXIMUM_WORKFLOW_NODES,
-    MAXIMUM_WORKFLOW_PROTECTION_TICKS, MAXIMUM_WORKFLOW_SESSION_FIRINGS, MAXIMUM_WORKFLOW_TRIGGERS,
-    MAXIMUM_WORKFLOWS, MINUTES_PER_DAY, PositionRequirement, PriceDirection,
-    WORKFLOW_FIRING_HISTORY, WorkflowAction, WorkflowActionResult, WorkflowBlocker, WorkflowCheck,
-    WorkflowClockTime, WorkflowCondition, WorkflowDefinition, WorkflowError, WorkflowFiring,
-    WorkflowFiringOutcome, WorkflowInvalid, WorkflowJoin, WorkflowLayout, WorkflowLimits,
-    WorkflowNode, WorkflowNodeId, WorkflowNodePosition, WorkflowProtection, WorkflowRepeat,
-    WorkflowState, WorkflowStep, WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone,
-    WorkflowTrigger, WorkflowView, WorkflowWeekdays,
+    MAXIMUM_WORKFLOW_PROTECTION_TICKS, MAXIMUM_WORKFLOW_SESSION_FIRINGS,
+    MAXIMUM_WORKFLOW_TRADE_MINUTES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS, MINUTES_PER_DAY,
+    PositionRequirement, PriceDirection, WORKFLOW_FIRING_HISTORY, WorkflowAction,
+    WorkflowActionResult, WorkflowBlocker, WorkflowCheck, WorkflowClockTime, WorkflowCompare,
+    WorkflowCondition, WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome,
+    WorkflowInvalid, WorkflowJoin, WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId,
+    WorkflowNodePosition, WorkflowProtection, WorkflowRepeat, WorkflowState, WorkflowStep,
+    WorkflowStepOutcome, WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger, WorkflowView,
+    WorkflowWeekdays,
 };
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
@@ -1807,11 +1808,18 @@ impl TradingCore {
                 return false;
             }
         }
+        self.finish_step();
+        self.market_feed.wake_if_pending();
+        true
+    }
+
+    /// Ends every owner step: position workflows see the step's fills, then quote interest
+    /// follows whatever the step and those workflows changed.
+    fn finish_step(&mut self) {
+        self.evaluate_position_workflows();
         if let Err(error) = self.recompute_quote_interest() {
             self.market_observation_error = Some(error.to_string());
         }
-        self.market_feed.wake_if_pending();
-        true
     }
 
     #[cfg(test)]
@@ -1847,9 +1855,7 @@ impl TradingCore {
             }
         }
         self.evaluate_price_workflows();
-        if let Err(error) = self.recompute_quote_interest() {
-            self.market_observation_error = Some(error.to_string());
-        }
+        self.finish_step();
     }
 
     /// The next wall-clock instant timer work is due: an order deadline, a workflow time
@@ -1896,9 +1902,7 @@ impl TradingCore {
             self.run_equity_timer(self.command_now);
         }
         self.run_workflow_timer();
-        if let Err(error) = self.recompute_quote_interest() {
-            self.market_observation_error = Some(error.to_string());
-        }
+        self.finish_step();
     }
 
     fn dispatch_account_command(&mut self, command: Command) {

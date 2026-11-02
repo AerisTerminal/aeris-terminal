@@ -16,6 +16,29 @@ pub(crate) struct TradeCycle {
     /// Winner/discipline accumulator since the latest risk-profile registration.
     pub risk_realized_pnl: FixedPoint,
     pub pnl_known: bool,
+    /// When the newest cycle's position opened: its first fill, or the fill that reversed
+    /// into it. Kept after the cycle closes; `None` when no fill Aeris accounted opened it.
+    pub opened_unix_nanos: Option<i64>,
+}
+
+impl TradeCycle {
+    /// Starts the next round trip with no realized P&L or peak. The open time changes only
+    /// when a fill opens a position, so a closed cycle keeps its last one.
+    fn restart(
+        &mut self,
+        zero: FixedPoint,
+        zero_quantity: FixedPoint,
+        pnl_known: bool,
+        opened_unix_nanos: Option<i64>,
+    ) {
+        self.realized_pnl = zero;
+        self.risk_realized_pnl = zero;
+        self.peak_quantity = zero_quantity;
+        self.pnl_known = pnl_known;
+        if opened_unix_nanos.is_some() {
+            self.opened_unix_nanos = opened_unix_nanos;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -170,12 +193,10 @@ impl TradingCore {
                 realized_pnl: zero,
                 risk_realized_pnl: zero,
                 pnl_known: previous_quantity == 0,
+                opened_unix_nanos: None,
             });
         if previous_quantity == 0 {
-            cycle.realized_pnl = zero;
-            cycle.risk_realized_pnl = zero;
-            cycle.peak_quantity = zero_quantity;
-            cycle.pnl_known = true;
+            cycle.restart(zero, zero_quantity, true, Some(fill.execution_unix_nanos));
         }
         cycle.realized_pnl = cycle
             .realized_pnl
@@ -204,10 +225,13 @@ impl TradingCore {
                 .cycle_id
                 .checked_add(1)
                 .ok_or_else(|| "trade cycle id overflowed".to_string())?;
-            cycle.realized_pnl = zero;
-            cycle.risk_realized_pnl = zero;
-            cycle.peak_quantity = zero_quantity;
-            cycle.pnl_known = next_quantity != 0;
+            let reopened = next_quantity != 0;
+            cycle.restart(
+                zero,
+                zero_quantity,
+                reopened,
+                reopened.then_some(fill.execution_unix_nanos),
+            );
         }
         let fee = super::fees::fee_for_fill(
             self.state.fee_schedules.get(&fill.account_id),

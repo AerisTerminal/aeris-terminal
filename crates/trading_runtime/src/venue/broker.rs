@@ -1312,6 +1312,8 @@ impl TradingCore {
             realized_pnl: zero_money,
             risk_realized_pnl: zero_money,
             pnl_known: false,
+            // Fills Aeris never saw opened the venue's position, so its open time is unknown.
+            opened_unix_nanos: None,
         };
         let released = if net.units() == 0 {
             self.ended_brackets(account_id, instrument_id, true, None)

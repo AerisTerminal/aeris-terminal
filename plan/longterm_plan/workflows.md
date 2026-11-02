@@ -105,8 +105,8 @@ AI authoring, the former W3, is dropped: workflows are built only from blocks.
 
 ### W4 — Position management and order flow
 
-- [ ] Time in trade, profit in ticks or currency, pullback from the best price.
-- [ ] Position opened and position closed triggers.
+- [x] Time in trade, profit in ticks or currency, pullback from the best price.
+- [x] Position opened and position closed triggers.
 - [ ] Move stop and partial exit actions; break-even and trailing-stop rules on entries.
 - [ ] Quantity by fixed size or by risk; repeat without a limit, with re-arming.
 - [ ] Trade prints into the trading owner through a bounded queue; delta and volume conditions
@@ -148,3 +148,4 @@ the user saves and arms the new revision.
 | 2026-11-02 | W3 | `workflow_probe` rerun on `7c001ed2` | All 11 checks passed with a clean source tree; entry filled at the owner ask with an active bracket; time and every-minute triggers fired once, 7 ms after the minute |
 | 2026-11-02 | W2 | Symbol search on the Workflows page; stale quote cursor after a lapsed interest fixed | ETH searched, saved and armed on the running app; regression test `a_workflow_rearmed_after_its_quote_interest_lapsed_still_fills`; `workflow_probe` now pauses and re-arms the ETH entry before it is due: without the fix the entry was cancelled with no error (the desktop symptom), with it all 11 behavior checks passed and the entry filled 71 ms after the minute; `source_clean` failed on the uncommitted tree |
 | 2026-11-02 | W2 | `workflow_probe` rerun on `400f314b` | All 12 checks passed with a clean source tree; the re-armed ETH entry filled at the owner quote with no observation error; the timed close fired 11 ms after the minute |
+| 2026-11-02 | W4 | Position opened and closed triggers; time in trade, open profit in ticks or currency and pullback checks; V32 records each trade cycle's open time | fmt, workspace clippy, naming check, 3,177 workspace tests |

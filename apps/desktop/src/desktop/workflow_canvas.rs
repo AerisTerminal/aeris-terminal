@@ -12,17 +12,18 @@ use super::workflow_board::{
 };
 use super::workflows_page::{
     BoardGesture, DraftStatus, OpenWorkflow, PageStatus, WorkflowsPage, account_environment,
-    account_text, action_summary, check_summary, day_label, days_text, draft_scales, draft_status,
-    draft_symbol, environment_text, example_description, example_name, firing_time_text,
-    outcome_text, problem_text, state_color, state_text, symbol_text, trigger_summary, zone_text,
+    account_text, action_summary, check_summary, day_label, days_text, draft_currency_scale,
+    draft_scales, draft_status, draft_symbol, environment_text, example_description, example_name,
+    firing_time_text, outcome_text, problem_text, state_color, state_text, symbol_text,
+    trigger_summary, zone_text,
 };
 use super::*;
 use aeris_localization::{tr, tr_count, workflows};
 use aeris_trading::{AccountEnvironment, TradingAccountId};
 use aeris_trading_runtime::{
     MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS,
-    PositionRequirement, PriceDirection, WorkflowJoin, WorkflowNodeId, WorkflowState,
-    WorkflowTimeZone, WorkflowView, WorkflowWeekdays, WorkingSet,
+    PositionRequirement, PriceDirection, WorkflowCompare, WorkflowJoin, WorkflowNodeId,
+    WorkflowState, WorkflowTimeZone, WorkflowView, WorkflowWeekdays, WorkingSet,
 };
 use gpui::{
     Bounds, ClickEvent, DispatchPhase, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
@@ -219,6 +220,10 @@ fn check_label(kind: CheckKind) -> &'static str {
         CheckKind::Price => tr!(workflows::BLOCK_IF_PRICE),
         CheckKind::PriceRange => tr!(workflows::BLOCK_IF_PRICE_RANGE),
         CheckKind::Weekday => tr!(workflows::BLOCK_IF_WEEKDAY),
+        CheckKind::TimeInTrade => tr!(workflows::BLOCK_IF_TIME_IN_TRADE),
+        CheckKind::ProfitTicks => tr!(workflows::BLOCK_IF_PROFIT_TICKS),
+        CheckKind::Profit => tr!(workflows::BLOCK_IF_PROFIT),
+        CheckKind::Pullback => tr!(workflows::BLOCK_IF_PULLBACK),
     }
 }
 
@@ -256,6 +261,10 @@ fn kind_icon(kind: BlockKind) -> HugeIcon {
         BlockKind::If(CheckKind::Price) => HugeIcon::Chart,
         BlockKind::If(CheckKind::PriceRange) => HugeIcon::OrderBook,
         BlockKind::If(CheckKind::Weekday) => HugeIcon::Template,
+        BlockKind::If(CheckKind::TimeInTrade) => HugeIcon::Loader,
+        BlockKind::If(CheckKind::ProfitTicks) => HugeIcon::ArrowRightDouble,
+        BlockKind::If(CheckKind::Profit) => HugeIcon::FlagFilled,
+        BlockKind::If(CheckKind::Pullback) => HugeIcon::Undo,
         BlockKind::Buy | BlockKind::Sell => HugeIcon::OrderEntry,
         BlockKind::Flatten => HugeIcon::CloseBold,
         BlockKind::CancelOrders => HugeIcon::CancelCircle,
@@ -543,7 +552,11 @@ fn empty_state(ui: Page<'_>) -> Div {
 fn editor(ui: Page<'_>, page: &WorkflowsPage, open: &OpenWorkflow) -> Div {
     let (status, view) = draft_status(&open.draft, ui.set);
     let scales = draft_scales(ui.set, &open.draft);
-    let problem = open.draft.build(String::new(), 1, scales).err();
+    let currency_scale = draft_currency_scale(ui.set, &open.draft);
+    let problem = open
+        .draft
+        .build(String::new(), 1, scales, currency_scale)
+        .err();
     div()
         .flex_1()
         .min_w_0()
@@ -1358,6 +1371,8 @@ const fn trigger_icon(trigger: &TriggerDraft) -> HugeIcon {
         TriggerDraft::Price { .. } => HugeIcon::Chart,
         TriggerDraft::Time { .. } => HugeIcon::TimeSales,
         TriggerDraft::Every { .. } => HugeIcon::RefreshV2,
+        TriggerDraft::PositionOpened => HugeIcon::Play,
+        TriggerDraft::PositionClosed => HugeIcon::CloseBold,
     }
 }
 
@@ -1367,6 +1382,8 @@ fn trigger_kind_label(kind: TriggerKind) -> &'static str {
         TriggerKind::Falls => tr!(workflows::TRIGGER_CHOICE_BELOW),
         TriggerKind::Time => tr!(workflows::TRIGGER_CHOICE_TIME),
         TriggerKind::Every => tr!(workflows::TRIGGER_CHOICE_EVERY),
+        TriggerKind::Opened => tr!(workflows::TRIGGER_CHOICE_OPENED),
+        TriggerKind::Closed => tr!(workflows::TRIGGER_CHOICE_CLOSED),
     }
 }
 
@@ -1379,15 +1396,17 @@ fn trigger_face(
 ) -> BlockFace {
     let (title, label, value, detail): (_, SharedString, _, _) = match triggers {
         [trigger] => {
-            let (label, value) = match trigger {
-                TriggerDraft::Price { level, .. } => (symbol.to_string().into(), level),
-                TriggerDraft::Time { zone, time } => (zone_text(*zone).into(), time),
-                TriggerDraft::Every { minutes } => (tr!(workflows::FIELD_MINUTES).into(), minutes),
+            let label = match trigger {
+                TriggerDraft::Price { .. }
+                | TriggerDraft::PositionOpened
+                | TriggerDraft::PositionClosed => symbol.to_string().into(),
+                TriggerDraft::Time { zone, .. } => zone_text(*zone).into(),
+                TriggerDraft::Every { .. } => tr!(workflows::FIELD_MINUTES).into(),
             };
             (
                 trigger_kind_label(trigger.kind()),
                 label,
-                Some(text_or_unset(value)),
+                trigger.text().map(|value| text_or_unset(value)),
                 None,
             )
         }
@@ -1441,6 +1460,27 @@ fn check_face(check: &CheckDraft, symbol: &str) -> (SharedString, SharedString) 
             format!("{}–{}", text_or_unset(low), text_or_unset(high)).into(),
         ),
         CheckDraft::Weekday { zone, days } => (zone_text(*zone).into(), days_text(*days).into()),
+        CheckDraft::TimeInTrade { compare, minutes } => (
+            compare_choice(*compare).into(),
+            tr!(workflows::VALUE_MINUTES, minutes = text_or_unset(minutes)).into(),
+        ),
+        CheckDraft::ProfitTicks { compare, ticks } => {
+            (compare_choice(*compare).into(), text_or_unset(ticks))
+        }
+        CheckDraft::Profit { compare, amount } => {
+            (compare_choice(*compare).into(), text_or_unset(amount))
+        }
+        CheckDraft::Pullback { ticks } => (
+            tr!(workflows::FIELD_PULLBACK_TICKS).into(),
+            text_or_unset(ticks),
+        ),
+    }
+}
+
+fn compare_choice(compare: WorkflowCompare) -> &'static str {
+    match compare {
+        WorkflowCompare::AtLeast => tr!(workflows::CHOICE_AT_LEAST),
+        WorkflowCompare::AtMost => tr!(workflows::CHOICE_AT_MOST),
     }
 }
 
@@ -2160,6 +2200,8 @@ fn trigger_section(
             tr!(workflows::FIELD_MINUTES),
             tr!(workflows::TRIGGER_EVERY_HINT),
         ),
+        TriggerDraft::PositionOpened => ("", tr!(workflows::TRIGGER_OPENED_HINT)),
+        TriggerDraft::PositionClosed => ("", tr!(workflows::TRIGGER_CLOSED_HINT)),
     };
     numbered_section(
         ui,
@@ -2178,7 +2220,11 @@ fn trigger_section(
         ),
         theme,
     ))
-    .children(input_field(ui, open, trigger.field(index), label))
+    .children(
+        trigger
+            .field(index)
+            .and_then(|draft_field| input_field(ui, open, draft_field, label)),
+    )
     .children(match trigger {
         TriggerDraft::Time { zone, .. } => Some(zone_choices(
             ui,
@@ -2192,7 +2238,10 @@ fn trigger_section(
                 }
             },
         )),
-        TriggerDraft::Price { .. } | TriggerDraft::Every { .. } => None,
+        TriggerDraft::Price { .. }
+        | TriggerDraft::Every { .. }
+        | TriggerDraft::PositionOpened
+        | TriggerDraft::PositionClosed => None,
     })
     .child(secondary_text(hint, theme))
 }
@@ -2410,7 +2459,87 @@ fn check_settings(
             day_choices(ui, check, *days).into_any_element(),
             zone_choices(ui, "workflow_weekday_zone", *zone, set_zone).into_any_element(),
         ],
+        CheckDraft::TimeInTrade { compare, .. } => trade_settings(
+            ui,
+            open,
+            check,
+            Some(*compare),
+            DraftField::TradeMinutes(check),
+            tr!(workflows::FIELD_TRADE_MINUTES),
+        ),
+        CheckDraft::ProfitTicks { compare, .. } => trade_settings(
+            ui,
+            open,
+            check,
+            Some(*compare),
+            DraftField::Ticks(check),
+            tr!(workflows::FIELD_PROFIT_TICKS),
+        ),
+        CheckDraft::Profit { compare, .. } => trade_settings(
+            ui,
+            open,
+            check,
+            Some(*compare),
+            DraftField::Amount(check),
+            tr!(workflows::FIELD_PROFIT_AMOUNT),
+        ),
+        CheckDraft::Pullback { .. } => trade_settings(
+            ui,
+            open,
+            check,
+            None,
+            DraftField::Ticks(check),
+            tr!(workflows::FIELD_PULLBACK_TICKS),
+        ),
     }
+}
+
+/// A check on the open trade: how it compares, when it compares, its one value, and that it
+/// never holds while flat.
+fn trade_settings(
+    ui: Page<'_>,
+    open: &OpenWorkflow,
+    check: CheckRef,
+    compare: Option<WorkflowCompare>,
+    value: DraftField,
+    label: &'static str,
+) -> Vec<AnyElement> {
+    let compare = compare.map(|compare| {
+        let options = vec![
+            (
+                WorkflowCompare::AtLeast,
+                compare_choice(WorkflowCompare::AtLeast).into(),
+            ),
+            (
+                WorkflowCompare::AtMost,
+                compare_choice(WorkflowCompare::AtMost).into(),
+            ),
+        ];
+        field(
+            tr!(workflows::FIELD_COMPARE),
+            choices(
+                ui,
+                "workflow_compare",
+                options,
+                Some(&compare),
+                move |open, compare| {
+                    if let Some(check) = open.draft.check_mut(check) {
+                        check.set_compare(compare);
+                    }
+                },
+            ),
+            ui.theme,
+        )
+    });
+    [
+        compare,
+        input_field(ui, open, value, label),
+        Some(secondary_text(tr!(workflows::TRADE_CHECK_HINT), ui.theme)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(IntoElement::into_any_element)
+    .collect()
 }
 
 /// One toggle per day of the week; the last chosen day cannot be turned off.

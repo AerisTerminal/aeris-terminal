@@ -765,6 +765,7 @@ mod tests {
                     price: 2,
                     quantity: 0,
                 }),
+                None,
             )
             .expect("the example builds");
         let firing = |sequence| WorkflowFiring {

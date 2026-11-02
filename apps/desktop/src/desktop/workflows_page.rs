@@ -16,9 +16,10 @@ use super::*;
 use aeris_localization::{tr, workflows};
 use aeris_trading::{AccountEnvironment, OrderSide, TradingAccountId};
 use aeris_trading_runtime::{
-    MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS,
-    MINUTES_PER_DAY, PositionRequirement, PriceDirection, TradingInstrument, TradingService,
-    WorkflowActionResult, WorkflowBlocker, WorkflowError, WorkflowFiringOutcome, WorkflowState,
+    MAXIMUM_WORKFLOW_CHECKS, MAXIMUM_WORKFLOW_NODES, MAXIMUM_WORKFLOW_PROTECTION_TICKS,
+    MAXIMUM_WORKFLOW_TRADE_MINUTES, MAXIMUM_WORKFLOW_TRIGGERS, MAXIMUM_WORKFLOWS, MINUTES_PER_DAY,
+    PositionRequirement, PriceDirection, TradingInstrument, TradingService, WorkflowActionResult,
+    WorkflowBlocker, WorkflowCompare, WorkflowError, WorkflowFiringOutcome, WorkflowState,
     WorkflowStepOutcome, WorkflowTimeZone, WorkflowView, WorkflowWeekdays, WorkingSet,
 };
 
@@ -118,7 +119,7 @@ impl OpenWorkflow {
                 .triggers
                 .iter()
                 .enumerate()
-                .map(|(index, trigger)| trigger.field(index))
+                .filter_map(|(index, trigger)| trigger.field(index))
                 .collect(),
             Some(BoardItem::Node(id)) => self
                 .draft
@@ -208,6 +209,15 @@ pub(super) fn draft_scales(
         .or_else(|| draft.searched_market().map(|market| market.scales))
 }
 
+/// The currency scale of the draft's account, which an open profit amount is written in.
+pub(super) fn draft_currency_scale(set: Option<&WorkingSet>, draft: &WorkflowDraft) -> Option<u8> {
+    let account_id = draft.account_id.as_ref()?;
+    set?.accounts
+        .iter()
+        .find(|account| &account.id == account_id)
+        .map(|account| account.currency_scale)
+}
+
 pub(super) fn draft_symbol(set: Option<&WorkingSet>, draft: &WorkflowDraft) -> String {
     match (
         instrument(set, draft.instrument_id.as_ref()),
@@ -264,9 +274,15 @@ pub(super) fn draft_status(
             .cloned()
     });
     let scales = draft_scales(set, draft);
+    let currency_scale = draft_currency_scale(set, draft);
     let unchanged = view.as_ref().is_some_and(|view| {
         draft
-            .build(saved.workflow_id.clone(), saved.revision, scales)
+            .build(
+                saved.workflow_id.clone(),
+                saved.revision,
+                scales,
+                currency_scale,
+            )
             .is_ok_and(|(definition, _)| definition == view.definition)
     });
     let status = if unchanged {
@@ -314,6 +330,21 @@ pub(super) fn problem_text(problem: DraftProblem) -> String {
         }
         DraftProblem::Window(_) => tr!(workflows::PROBLEM_WINDOW).to_string(),
         DraftProblem::Range { decimals, .. } => tr!(workflows::PROBLEM_RANGE, decimals = decimals),
+        DraftProblem::TradeMinutes(_) => tr!(
+            workflows::PROBLEM_MINUTES,
+            maximum = MAXIMUM_WORKFLOW_TRADE_MINUTES
+        ),
+        DraftProblem::ProfitTicks(_) => tr!(
+            workflows::PROBLEM_PROFIT_TICKS,
+            maximum = MAXIMUM_WORKFLOW_PROTECTION_TICKS
+        ),
+        DraftProblem::Amount { decimals, .. } => {
+            tr!(workflows::PROBLEM_AMOUNT, decimals = decimals)
+        }
+        DraftProblem::Pullback(_) => tr!(
+            workflows::PROBLEM_PULLBACK,
+            maximum = MAXIMUM_WORKFLOW_PROTECTION_TICKS
+        ),
         DraftProblem::NoStart => tr!(workflows::PROBLEM_NO_START).to_string(),
         DraftProblem::Unconnected(_) => tr!(workflows::PROBLEM_UNCONNECTED).to_string(),
         DraftProblem::NoAction => tr!(workflows::PROBLEM_NO_ACTION).to_string(),
@@ -331,6 +362,7 @@ pub(super) fn blocker_text(blocker: WorkflowBlocker) -> &'static str {
         WorkflowBlocker::AccountLocked => tr!(workflows::BLOCKER_ACCOUNT_LOCKED),
         WorkflowBlocker::BrokerUnreachable => tr!(workflows::BLOCKER_BROKER_UNREACHABLE),
         WorkflowBlocker::QuoteUnavailable => tr!(workflows::BLOCKER_QUOTE_UNAVAILABLE),
+        WorkflowBlocker::PositionUnknown => tr!(workflows::BLOCKER_POSITION_UNKNOWN),
     }
 }
 
@@ -935,6 +967,7 @@ impl TerminalApp {
         let set = store.current();
         let (status, view) = draft_status(&open.draft, set);
         let scales = draft_scales(set, &open.draft);
+        let currency_scale = draft_currency_scale(set, &open.draft);
         let (workflow_id, revision) = open.draft.saved.as_ref().map_or_else(
             || {
                 (
@@ -947,7 +980,7 @@ impl TerminalApp {
         let (mut definition, layout) =
             match open
                 .draft
-                .build(workflow_id.clone(), revision.max(1), scales)
+                .build(workflow_id.clone(), revision.max(1), scales, currency_scale)
             {
                 Ok(built) => built,
                 Err(problem) => {
@@ -1194,6 +1227,8 @@ pub(super) fn trigger_summary(trigger: &TriggerDraft) -> String {
         TriggerDraft::Every { minutes } => {
             tr!(workflows::SUMMARY_EVERY, minutes = value_or_unset(minutes))
         }
+        TriggerDraft::PositionOpened => tr!(workflows::TRIGGER_CHOICE_OPENED).to_string(),
+        TriggerDraft::PositionClosed => tr!(workflows::TRIGGER_CHOICE_CLOSED).to_string(),
     }
 }
 
@@ -1231,6 +1266,42 @@ pub(super) fn check_summary(check: &CheckDraft) -> String {
             days = days_text(*days),
             zone = zone_text(*zone)
         ),
+        CheckDraft::TimeInTrade { compare, minutes } => {
+            let minutes = value_or_unset(minutes);
+            match compare {
+                WorkflowCompare::AtLeast => {
+                    tr!(workflows::CONDITION_IN_TRADE_AT_LEAST, minutes = minutes)
+                }
+                WorkflowCompare::AtMost => {
+                    tr!(workflows::CONDITION_IN_TRADE_AT_MOST, minutes = minutes)
+                }
+            }
+        }
+        CheckDraft::ProfitTicks { compare, ticks } => {
+            let ticks = value_or_unset(ticks);
+            match compare {
+                WorkflowCompare::AtLeast => {
+                    tr!(workflows::CONDITION_PROFIT_TICKS_AT_LEAST, ticks = ticks)
+                }
+                WorkflowCompare::AtMost => {
+                    tr!(workflows::CONDITION_PROFIT_TICKS_AT_MOST, ticks = ticks)
+                }
+            }
+        }
+        CheckDraft::Profit { compare, amount } => {
+            let amount = value_or_unset(amount);
+            match compare {
+                WorkflowCompare::AtLeast => {
+                    tr!(workflows::CONDITION_PROFIT_AT_LEAST, amount = amount)
+                }
+                WorkflowCompare::AtMost => {
+                    tr!(workflows::CONDITION_PROFIT_AT_MOST, amount = amount)
+                }
+            }
+        }
+        CheckDraft::Pullback { ticks } => {
+            tr!(workflows::CONDITION_PULLBACK, ticks = value_or_unset(ticks))
+        }
     }
 }
 

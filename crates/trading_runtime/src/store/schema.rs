@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 31;
+pub const SCHEMA_VERSION: u32 = 32;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -415,6 +415,10 @@ pub(super) const MIGRATION_V31: &str = "
      outcome_json TEXT NOT NULL,
      PRIMARY KEY (workflow_id, sequence)
  ) STRICT;";
+/// When each trade cycle's position opened, for workflow time-in-trade checks. Cycles
+/// opened before this version keep no open time.
+pub(super) const MIGRATION_V32: &str = "
+ ALTER TABLE trade_cycles ADD COLUMN opened_unix_nanos INTEGER;";
 
 pub(super) const MIGRATION_V26: &str = "
  CREATE TABLE position_checkpoints (
@@ -600,6 +604,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 30,
         to: 31,
         sql: MIGRATION_V31,
+    },
+    Migration {
+        from: 31,
+        to: 32,
+        sql: MIGRATION_V32,
     },
 ];
 

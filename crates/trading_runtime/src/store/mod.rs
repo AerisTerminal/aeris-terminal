@@ -824,7 +824,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 31);
+        assert_eq!(SCHEMA_VERSION, 32);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

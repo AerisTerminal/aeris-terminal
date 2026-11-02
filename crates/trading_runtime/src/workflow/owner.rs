@@ -2,9 +2,10 @@
 //! verified quotes and clock, and the actions of each firing, which go through the same
 //! admission, risk and venue paths as a manual command.
 
+use super::ledger::TradeCycle;
 use super::{
-    BracketStrategyTemplate, BracketTarget, FlattenScope, PlaceOrder, RiskLockKind, TradingCore,
-    TradingService, VenueRoute, respond,
+    BracketStrategyTemplate, BracketTarget, FlattenScope, PlaceOrder, Position, RiskLockKind,
+    TradingCore, TradingInstrument, TradingService, VenueRoute, instrument_tick_units, respond,
 };
 use crate::risk::session::RiskSessionBoundary;
 use crate::service::{Command, WorkflowCommand};
@@ -20,11 +21,16 @@ use aeris_instruments::InstrumentId;
 use aeris_trading::{
     ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingAccountId,
 };
-use std::collections::VecDeque;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, VecDeque};
 
 /// A time trigger reached more than this late (the computer slept or the owner stalled) is
 /// skipped instead of firing away from its moment.
 const TIME_TRIGGER_GRACE_NANOS: i64 = 60_000_000_000;
+const NANOS_PER_MINUTE: i64 = 60_000_000_000;
+/// A position workflow's actions can open or close a position that fires another; the
+/// owner follows such a chain within one step this many times, and the next step goes on.
+const POSITION_EVALUATION_PASSES: usize = 4;
 
 /// One workflow as the owner holds it between steps.
 pub(crate) struct WorkflowEntry {
@@ -35,6 +41,42 @@ pub(crate) struct WorkflowEntry {
     /// arming was at or past its level; `None` until the first quote, which never fires.
     at_level: [Option<bool>; MAXIMUM_WORKFLOW_TRIGGERS],
     next_due_unix_nanos: Option<i64>,
+    /// The position the last owner step saw, for the position triggers; `None` until the
+    /// first step after arming, loading or accepting, which never fires.
+    position_mark: Option<PositionMark>,
+    /// The best exit price of the open position seen while armed, for pullback checks.
+    best_exit: Option<BestExit>,
+}
+
+/// Which trade cycle the account's position is in and when it opened. Every close or
+/// reversal moves the cycle and every open moves the open time, so two marks differ
+/// whenever a position opened or closed between them, even within one step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PositionMark {
+    cycle_id: i64,
+    opened_unix_nanos: Option<i64>,
+}
+
+/// The most favorable exit price of one position: the highest bid while long, the lowest
+/// ask while short. It starts from the average entry, a price the market traded at while
+/// the position was open, so after a restart a pullback can only read smaller than it was.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BestExit {
+    mark: PositionMark,
+    price: FixedPoint,
+}
+
+impl WorkflowEntry {
+    const fn new(record: WorkflowRecord, firings: VecDeque<WorkflowFiring>) -> Self {
+        Self {
+            record,
+            firings,
+            at_level: [None; MAXIMUM_WORKFLOW_TRIGGERS],
+            next_due_unix_nanos: None,
+            position_mark: None,
+            best_exit: None,
+        }
+    }
 }
 
 impl TradingService {
@@ -148,15 +190,10 @@ impl TradingCore {
     pub(super) fn load_workflow_entries(&mut self) -> Result<(), WorkflowError> {
         for (record, firings) in self.store.load_workflows()? {
             let next_due_unix_nanos = next_due(&record, self.command_now);
-            self.workflows.insert(
-                record.definition.workflow_id.clone(),
-                WorkflowEntry {
-                    record,
-                    firings: firings.into(),
-                    at_level: [None; MAXIMUM_WORKFLOW_TRIGGERS],
-                    next_due_unix_nanos,
-                },
-            );
+            let workflow_id = record.definition.workflow_id.clone();
+            let mut entry = WorkflowEntry::new(record, firings.into());
+            entry.next_due_unix_nanos = next_due_unix_nanos;
+            self.workflows.insert(workflow_id, entry);
         }
         Ok(())
     }
@@ -170,9 +207,11 @@ impl TradingCore {
         layout
             .validate(&definition)
             .map_err(WorkflowError::Invalid)?;
-        if !self.state.accounts.contains_key(&definition.account_id) {
-            return Err(WorkflowError::UnknownAccount);
-        }
+        let account = self
+            .state
+            .accounts
+            .get(&definition.account_id)
+            .ok_or(WorkflowError::UnknownAccount)?;
         let instrument = self
             .state
             .instruments
@@ -182,6 +221,7 @@ impl TradingCore {
             &definition,
             instrument.price_scale,
             instrument.quantity_scale,
+            account.currency_scale,
         )?;
         match self.workflows.get(&definition.workflow_id) {
             Some(previous) if definition.revision <= previous.record.definition.revision => {
@@ -206,15 +246,8 @@ impl TradingCore {
             .remove(&workflow_id)
             .map(|entry| entry.firings)
             .unwrap_or_default();
-        self.workflows.insert(
-            workflow_id.clone(),
-            WorkflowEntry {
-                record,
-                firings,
-                at_level: [None; MAXIMUM_WORKFLOW_TRIGGERS],
-                next_due_unix_nanos: None,
-            },
-        );
+        self.workflows
+            .insert(workflow_id.clone(), WorkflowEntry::new(record, firings));
         self.bump_revision().map_err(WorkflowError::Owner)?;
         self.workflow_view(&workflow_id)
     }
@@ -335,20 +368,32 @@ impl TradingCore {
     }
 
     /// Fires every armed workflow with a price trigger whose market moved across its level
-    /// since the previous quote; several crossings in one batch fire it once. Runs after a
-    /// market batch, outside quote planning.
+    /// since the previous quote; several crossings in one batch fire it once. Also keeps the
+    /// best exit price of each armed workflow's open position. Runs after a market batch,
+    /// outside quote planning.
     pub(super) fn evaluate_price_workflows(&mut self) {
         let mut fired = Vec::new();
         for (workflow_id, entry) in &mut self.workflows {
             if entry.record.state != WorkflowState::Armed {
                 continue;
             }
-            let Some(quote) = self
-                .quote_book
-                .observation(&entry.record.definition.instrument_id)
-            else {
+            let definition = &entry.record.definition;
+            let Some(quote) = self.quote_book.observation(&definition.instrument_id) else {
                 continue;
             };
+            let key = (
+                definition.account_id.clone(),
+                definition.instrument_id.clone(),
+            );
+            if let Some(position) = self
+                .state
+                .positions
+                .get(&key)
+                .filter(|position| position.net_quantity.units() != 0)
+            {
+                let mark = position_mark(&self.state.trade_cycles, &key);
+                entry.best_exit = best_exit(entry.best_exit, mark, position, quote.bid, quote.ask);
+            }
             let mut crossed = false;
             for (trigger, last) in entry
                 .record
@@ -411,6 +456,53 @@ impl TradingCore {
         }
     }
 
+    /// Fires every armed workflow with a position trigger whose position opened or closed
+    /// since the previous owner step. Runs after every command, market batch and timer.
+    pub(super) fn evaluate_position_workflows(&mut self) {
+        for _ in 0..POSITION_EVALUATION_PASSES {
+            let mut fired = Vec::new();
+            for (workflow_id, entry) in &mut self.workflows {
+                if entry.record.state != WorkflowState::Armed {
+                    continue;
+                }
+                let definition = &entry.record.definition;
+                let key = (
+                    definition.account_id.clone(),
+                    definition.instrument_id.clone(),
+                );
+                let mark = position_mark(&self.state.trade_cycles, &key);
+                let Some(previous) = entry.position_mark.replace(mark) else {
+                    continue;
+                };
+                let open = self
+                    .state
+                    .positions
+                    .get(&key)
+                    .is_some_and(|position| position.net_quantity.units() != 0);
+                let closed = mark.cycle_id != previous.cycle_id;
+                let opened = (mark.opened_unix_nanos.is_some()
+                    && mark.opened_unix_nanos != previous.opened_unix_nanos)
+                    || (closed && open);
+                let triggered = definition.triggers.iter().any(|trigger| match trigger {
+                    WorkflowTrigger::PositionOpened => opened,
+                    WorkflowTrigger::PositionClosed => closed,
+                    WorkflowTrigger::PriceCrosses { .. }
+                    | WorkflowTrigger::TimeOfDay(_)
+                    | WorkflowTrigger::Every { .. } => false,
+                });
+                if triggered {
+                    fired.push(workflow_id.clone());
+                }
+            }
+            if fired.is_empty() {
+                return;
+            }
+            for workflow_id in fired {
+                self.fire_workflow(&workflow_id);
+            }
+        }
+    }
+
     fn current_workflow(
         &self,
         workflow_id: &str,
@@ -438,6 +530,7 @@ impl TradingCore {
             .get_mut(&record.definition.workflow_id)
             .ok_or(WorkflowError::UnknownWorkflow)?;
         entry.at_level = [None; MAXIMUM_WORKFLOW_TRIGGERS];
+        entry.position_mark = None;
         entry.next_due_unix_nanos = next_due(&record, now);
         entry.record = record;
         self.bump_revision().map_err(WorkflowError::Owner)
@@ -549,47 +642,37 @@ impl TradingCore {
     }
 
     /// The branch a firing now takes, every check read from the owner's state before any
-    /// action runs. `None` when a price check has no current quote at its scale.
+    /// action runs. Fails with what stops a check on the path from being read.
     fn resolve_workflow_path(
         &self,
         definition: &WorkflowDefinition,
-    ) -> Option<Vec<WorkflowPathStep>> {
-        let position_units = self
+        kept_best: Option<BestExit>,
+    ) -> Result<Vec<WorkflowPathStep>, WorkflowBlocker> {
+        let key = (
+            definition.account_id.clone(),
+            definition.instrument_id.clone(),
+        );
+        let position = self
             .state
             .positions
-            .get(&(
-                definition.account_id.clone(),
-                definition.instrument_id.clone(),
-            ))
-            .map_or(0, |position| position.net_quantity.units());
-        let quote = self.quote_book.observation(&definition.instrument_id);
-        definition.resolve_path(|check| match check {
-            WorkflowCheck::Position(requirement) => Some(requirement.holds(position_units)),
-            WorkflowCheck::Between {
-                zone,
-                start_minute,
-                end_minute,
-            } => Some(time_window_holds(
-                zone,
-                start_minute,
-                end_minute,
-                self.command_now,
-            )),
-            WorkflowCheck::Weekday { zone, days } => {
-                Some(days.contains(zone.weekday(self.command_now)))
-            }
-            WorkflowCheck::Price { direction, level } => {
-                let quote = quote.as_ref()?;
-                price_holds(direction, level, quote.bid, quote.ask)
-            }
-            WorkflowCheck::PriceRange { low, high } => {
-                let quote = quote.as_ref()?;
-                Some(
-                    price_holds(PriceDirection::Above, low, quote.bid, quote.ask)?
-                        && price_holds(PriceDirection::Below, high, quote.bid, quote.ask)?,
-                )
-            }
-        })
+            .get(&key)
+            .filter(|position| position.net_quantity.units() != 0);
+        let mark = position_mark(&self.state.trade_cycles, &key);
+        let quote = self
+            .quote_book
+            .observation(&definition.instrument_id)
+            .map(|quote| (quote.bid, quote.ask));
+        let reading = CheckReading {
+            now: self.command_now,
+            position,
+            opened_unix_nanos: mark.opened_unix_nanos,
+            quote,
+            best_exit: position.zip(quote).and_then(|(position, (bid, ask))| {
+                best_exit(kept_best, mark, position, bid, ask).map(|best| best.price)
+            }),
+            instrument: self.state.instruments.get(&definition.instrument_id),
+        };
+        definition.resolve_path(|check| reading.holds(check))
     }
 
     fn fire_workflow(&mut self, workflow_id: &str) {
@@ -615,12 +698,16 @@ impl TradingCore {
         if record.cooling_down(now) || record.session_cap_reached() {
             return Ok(());
         }
-        let path = self.resolve_workflow_path(&definition);
+        let kept_best = self
+            .workflows
+            .get(workflow_id)
+            .and_then(|entry| entry.best_exit);
+        let path = self.resolve_workflow_path(&definition, kept_best);
         let acts = |path: &[WorkflowPathStep]| {
             path.iter()
                 .any(|step| matches!(step, WorkflowPathStep::Action(..)))
         };
-        if path.as_deref().is_some_and(|path| !acts(path)) {
+        if path.as_deref().is_ok_and(|path| !acts(path)) {
             return Ok(());
         }
         let sequence = record
@@ -630,11 +717,11 @@ impl TradingCore {
         record.last_sequence = sequence;
         record.last_attempt_unix_nanos = Some(now);
         let (path, blockers) = match path {
-            Some(path) => {
+            Ok(path) => {
                 let blockers = self.path_blockers(&definition, &path);
                 (path, blockers)
             }
-            None => (Vec::new(), vec![WorkflowBlocker::QuoteUnavailable]),
+            Err(blocker) => (Vec::new(), vec![blocker]),
         };
         let mut firing = WorkflowFiring {
             sequence,
@@ -844,6 +931,206 @@ fn price_holds(
     })
 }
 
+/// What one run's checks read, taken once before any action of the run.
+struct CheckReading<'a> {
+    now: i64,
+    /// The account's open position in the workflow instrument; `None` while flat.
+    position: Option<&'a Position>,
+    opened_unix_nanos: Option<i64>,
+    /// The current verified bid and ask.
+    quote: Option<(FixedPoint, FixedPoint)>,
+    best_exit: Option<FixedPoint>,
+    instrument: Option<&'a TradingInstrument>,
+}
+
+impl CheckReading<'_> {
+    fn holds(&self, check: WorkflowCheck) -> Result<bool, WorkflowBlocker> {
+        let position_units = self
+            .position
+            .map_or(0, |position| position.net_quantity.units());
+        match check {
+            WorkflowCheck::Position(requirement) => Ok(requirement.holds(position_units)),
+            WorkflowCheck::Between {
+                zone,
+                start_minute,
+                end_minute,
+            } => Ok(time_window_holds(zone, start_minute, end_minute, self.now)),
+            WorkflowCheck::Weekday { zone, days } => Ok(days.contains(zone.weekday(self.now))),
+            WorkflowCheck::Price { direction, level } => {
+                let (bid, ask) = self.quote.ok_or(WorkflowBlocker::QuoteUnavailable)?;
+                price_holds(direction, level, bid, ask).ok_or(WorkflowBlocker::QuoteUnavailable)
+            }
+            WorkflowCheck::PriceRange { low, high } => {
+                let (bid, ask) = self.quote.ok_or(WorkflowBlocker::QuoteUnavailable)?;
+                let above = price_holds(PriceDirection::Above, low, bid, ask);
+                let below = price_holds(PriceDirection::Below, high, bid, ask);
+                above
+                    .zip(below)
+                    .map(|(above, below)| above && below)
+                    .ok_or(WorkflowBlocker::QuoteUnavailable)
+            }
+            WorkflowCheck::TimeInTrade { compare, minutes } => {
+                if self.position.is_none() {
+                    return Ok(false);
+                }
+                let opened = self
+                    .opened_unix_nanos
+                    .ok_or(WorkflowBlocker::PositionUnknown)?;
+                Ok(compare.holds(
+                    self.now.saturating_sub(opened),
+                    i64::from(minutes).saturating_mul(NANOS_PER_MINUTE),
+                ))
+            }
+            WorkflowCheck::OpenProfitTicks { compare, ticks } => {
+                let Some(position) = self.position else {
+                    return Ok(false);
+                };
+                let exit = self.exit_price(position)?;
+                let entry = position
+                    .average_entry_price
+                    .ok_or(WorkflowBlocker::PositionUnknown)?;
+                let (moved, scale) =
+                    signed_move(entry, exit, position.net_quantity.units().signum())
+                        .ok_or(WorkflowBlocker::QuoteUnavailable)?;
+                let threshold = self.tick_distance(i64::from(ticks), exit, scale)?;
+                Ok(compare.holds(moved, threshold))
+            }
+            WorkflowCheck::OpenProfit { compare, amount } => {
+                let Some(position) = self.position else {
+                    return Ok(false);
+                };
+                let open = position.unrealized_pnl;
+                let scale = open.scale().max(amount.scale());
+                lift(i128::from(open.units()), open.scale(), scale)
+                    .zip(lift(i128::from(amount.units()), amount.scale(), scale))
+                    .map(|(open, amount)| compare.holds(open, amount))
+                    .ok_or(WorkflowBlocker::PositionUnknown)
+            }
+            WorkflowCheck::Pullback { ticks } => {
+                let Some(position) = self.position else {
+                    return Ok(false);
+                };
+                let exit = self.exit_price(position)?;
+                let best = self.best_exit.unwrap_or(exit);
+                let (pulled, scale) =
+                    signed_move(exit, best, position.net_quantity.units().signum())
+                        .ok_or(WorkflowBlocker::QuoteUnavailable)?;
+                Ok(pulled >= self.tick_distance(i64::from(ticks), exit, scale)?)
+            }
+        }
+    }
+
+    /// The price the open position would exit at: the bid when long, the ask when short.
+    fn exit_price(&self, position: &Position) -> Result<FixedPoint, WorkflowBlocker> {
+        let (bid, ask) = self.quote.ok_or(WorkflowBlocker::QuoteUnavailable)?;
+        Ok(if position.net_quantity.units() > 0 {
+            bid
+        } else {
+            ask
+        })
+    }
+
+    /// `ticks` of the instrument's tick at `at`, in units of `scale` decimals.
+    fn tick_distance(
+        &self,
+        ticks: i64,
+        at: FixedPoint,
+        scale: u8,
+    ) -> Result<i128, WorkflowBlocker> {
+        let instrument = self
+            .instrument
+            .ok_or(WorkflowBlocker::InstrumentTermsMissing)?;
+        let tick = instrument_tick_units(instrument, at)
+            .map_err(|_| WorkflowBlocker::InstrumentTermsMissing)?;
+        lift(
+            i128::from(ticks).saturating_mul(i128::from(tick)),
+            at.scale(),
+            scale,
+        )
+        .ok_or(WorkflowBlocker::QuoteUnavailable)
+    }
+}
+
+/// The account's position mark in one instrument; before its first fill, cycle 0 and no
+/// open time.
+fn position_mark(
+    cycles: &BTreeMap<(TradingAccountId, InstrumentId), TradeCycle>,
+    key: &(TradingAccountId, InstrumentId),
+) -> PositionMark {
+    cycles.get(key).map_or(
+        PositionMark {
+            cycle_id: 0,
+            opened_unix_nanos: None,
+        },
+        |cycle| PositionMark {
+            cycle_id: cycle.cycle_id,
+            opened_unix_nanos: cycle.opened_unix_nanos,
+        },
+    )
+}
+
+/// The most favorable of the kept best exit of this same position, its average entry and
+/// the current exit price.
+fn best_exit(
+    kept: Option<BestExit>,
+    mark: PositionMark,
+    position: &Position,
+    bid: FixedPoint,
+    ask: FixedPoint,
+) -> Option<BestExit> {
+    let long = position.net_quantity.units() > 0;
+    let exit = if long { bid } else { ask };
+    let favorable = if long {
+        Ordering::Greater
+    } else {
+        Ordering::Less
+    };
+    kept.filter(|kept| kept.mark == mark)
+        .map(|kept| kept.price)
+        .into_iter()
+        .chain(position.average_entry_price)
+        .chain([exit])
+        .reduce(|best, price| {
+            if compare_fixed(price, best) == Some(favorable) {
+                price
+            } else {
+                best
+            }
+        })
+        .map(|price| BestExit { mark, price })
+}
+
+/// `to - from` toward the position's side (`sign` is its quantity's sign), in units of
+/// their common scale, with that scale.
+fn signed_move(from: FixedPoint, to: FixedPoint, sign: i64) -> Option<(i128, u8)> {
+    let scale = from.scale().max(to.scale());
+    let delta = lift(i128::from(to.units()), to.scale(), scale)?.checked_sub(lift(
+        i128::from(from.units()),
+        from.scale(),
+        scale,
+    )?)?;
+    Some((delta.checked_mul(i128::from(sign))?, scale))
+}
+
+fn compare_fixed(left: FixedPoint, right: FixedPoint) -> Option<Ordering> {
+    let scale = left.scale().max(right.scale());
+    Some(
+        lift(i128::from(left.units()), left.scale(), scale)?.cmp(&lift(
+            i128::from(right.units()),
+            right.scale(),
+            scale,
+        )?),
+    )
+}
+
+/// `units` at `from` decimals expressed at `to` decimals; `None` when `to` has fewer
+/// decimals than `from` or the value overflows.
+fn lift(units: i128, from: u8, to: u8) -> Option<i128> {
+    10_i128
+        .checked_pow(u32::from(to.checked_sub(from)?))?
+        .checked_mul(units)
+}
+
 fn is_expired(definition: &WorkflowDefinition, now: i64) -> bool {
     definition
         .limits
@@ -851,11 +1138,13 @@ fn is_expired(definition: &WorkflowDefinition, now: i64) -> bool {
         .is_some_and(|expiry| expiry <= now)
 }
 
-/// Levels and quantities must be at the instrument's own scales.
+/// Levels and quantities must be at the instrument's own scales, and money amounts at the
+/// account currency's.
 fn check_scales(
     definition: &WorkflowDefinition,
     price_scale: u8,
     quantity_scale: u8,
+    currency_scale: u8,
 ) -> Result<(), WorkflowError> {
     let trigger_off_scale = definition.triggers.iter().any(|trigger| {
         matches!(trigger, WorkflowTrigger::PriceCrosses { level, .. } if level.scale() != price_scale)
@@ -867,10 +1156,19 @@ fn check_scales(
         }
         WorkflowCheck::Position(_)
         | WorkflowCheck::Between { .. }
-        | WorkflowCheck::Weekday { .. } => false,
+        | WorkflowCheck::Weekday { .. }
+        | WorkflowCheck::TimeInTrade { .. }
+        | WorkflowCheck::OpenProfitTicks { .. }
+        | WorkflowCheck::OpenProfit { .. }
+        | WorkflowCheck::Pullback { .. } => false,
     });
     if trigger_off_scale || condition_off_scale {
         return Err(WorkflowError::Invalid(WorkflowInvalid::Level));
+    }
+    if definition.checks().any(|check| {
+        matches!(check, WorkflowCheck::OpenProfit { amount, .. } if amount.scale() != currency_scale)
+    }) {
+        return Err(WorkflowError::Invalid(WorkflowInvalid::Amount));
     }
     if definition.actions().any(|action| {
         matches!(action, WorkflowAction::Enter { quantity, .. } if quantity.scale() != quantity_scale)
