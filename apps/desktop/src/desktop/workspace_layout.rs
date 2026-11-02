@@ -399,6 +399,7 @@ pub(super) struct WorkspaceMarketArea<'a> {
     pub(super) expanded_drawing_toolbar: Option<DrawingSidebar<'a>>,
     pub(super) watchlist: WatchlistPanelState,
     pub(super) toaster: &'a Toaster,
+    pub(super) unread_notifications: usize,
     pub(super) theme: &'a AerisTheme,
 }
 
@@ -414,6 +415,7 @@ pub(super) fn workspace_market_area(
         expanded_drawing_toolbar,
         watchlist,
         toaster,
+        unread_notifications,
         theme,
     } = area;
     let drawing_toolbar_collapsed = expanded_drawing_toolbar.is_none();
@@ -473,12 +475,9 @@ pub(super) fn workspace_market_area(
         })
     });
     let panel_sidebar = super::terminal_chrome::panel_sidebar(
+        terminal,
         active_surface,
-        super::terminal_chrome::PanelSidebarState {
-            side_panels,
-            context_visible: surface.context_panel.is_visible(),
-            market_selected: surface.has_market_selection(),
-        },
+        super::terminal_chrome::PanelSidebarState::of(surface, unread_notifications),
         theme,
     );
     let below = [

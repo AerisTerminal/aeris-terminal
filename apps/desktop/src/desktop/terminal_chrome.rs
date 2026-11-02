@@ -2,7 +2,7 @@ use super::app_navigation::app_navigation_button;
 use super::platform_menu::account_avatar_button;
 use super::*;
 use crate::desktop::native_ui::tooltip::TooltipPlacement;
-use aeris_localization::{Text, shell, tr};
+use aeris_localization::{Text, panels, shell, tr};
 use aeris_market_runtime::{MarketSessionPhase, MarketSessionStatus};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -710,11 +710,26 @@ pub(super) struct PanelSidebarState {
     pub(super) context_visible: bool,
     /// Order book, order entry and Time & Sales need a selected market.
     pub(super) market_selected: bool,
+    /// Announcements the notifications bell marks as unread.
+    pub(super) unread_notifications: usize,
+}
+
+impl PanelSidebarState {
+    pub(super) fn of(surface: &WorkspaceSurface, unread_notifications: usize) -> Self {
+        Self {
+            side_panels: surface.chrome.side_panels(),
+            context_visible: surface.context_panel.is_visible(),
+            market_selected: surface.has_market_selection(),
+            unread_notifications,
+        }
+    }
 }
 
 /// Icon-only toggles for the market panels on the workspace's right edge, mirroring the
-/// drawing sidebar on the left so the header keeps only chart controls.
+/// drawing sidebar on the left so the header keeps only chart controls, with the
+/// notifications bell at the bottom.
 pub(super) fn panel_sidebar(
+    terminal: &Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: PanelSidebarState,
     theme: &AerisTheme,
@@ -762,6 +777,57 @@ pub(super) fn panel_sidebar(
         .child(side_panel(SidePanel::OrderEntry))
         .child(side_panel(SidePanel::TimeSales))
         .child(context)
+        .child(div().flex_1())
+        .child(notifications_bell(
+            terminal,
+            state.unread_notifications,
+            theme,
+        ))
+}
+
+/// Opens the notifications popover; a dot marks announcements not yet seen.
+fn notifications_bell(
+    terminal: &Entity<TerminalApp>,
+    unread: usize,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let toggle = terminal.clone();
+    div()
+        .relative()
+        .flex_none()
+        .child(
+            Button::new("notifications_bell", theme)
+                .variant(ButtonVariant::Ghost)
+                .button_size(ButtonSize::Default)
+                .icon(header_icon(HugeIcon::Notification))
+                .aria_label(tr!(panels::NOTIFICATIONS))
+                .tooltip(
+                    TooltipSpec::new(tr!(panels::NOTIFICATIONS), theme)
+                        .show_delay(TOOLTIP_OPEN_DELAY)
+                        .placement(TooltipPlacement::Left),
+                )
+                .on_click(move |event, _, cx| {
+                    let anchor = event.position();
+                    toggle.update(cx, |terminal, terminal_cx| {
+                        terminal.toggle_notifications_at(anchor, terminal_cx);
+                    });
+                }),
+        )
+        .when(unread > 0, |bell| {
+            bell.child(
+                div()
+                    .debug_selector(|| "notifications_unread_dot".into())
+                    .absolute()
+                    .top(px(3.0))
+                    .right(px(3.0))
+                    .size(px(8.0))
+                    .rounded_full()
+                    .border(px(theme.dimensions.border_width))
+                    .border_color(gpui_color(colors.surface))
+                    .bg(gpui_color(colors.primary)),
+            )
+        })
 }
 
 fn side_panel_toggle(

@@ -513,3 +513,16 @@ report_unknown = 不明
 report_chart_cumulative_aria = 決済済み取引ごとの累積損益
 report_chart_drawdown_aria = 決済済み取引ごとのドローダウン
 report_bar_trades[other] = 取引 {count} 件
+
+## Notifications popover
+notifications = 通知
+notifications_sections = 通知のセクション
+notifications_tab_triggered = トリガー済み
+notifications_tab_running = 稼働中
+notifications_clear = クリア
+notifications_clear_aria = 通知履歴をクリア
+notifications_feed_empty = 通知はまだありません
+notifications_triggered_empty = トリガー済みのアラートはありません
+notifications_running_empty = 稼働中のアラートはありません
+notifications_triggered_at = {time} にトリガー
+notifications_last_triggered = 最終トリガー {time}

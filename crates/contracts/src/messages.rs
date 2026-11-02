@@ -737,6 +737,10 @@ pub struct WorkspacePriceAlertState {
     pub status: i32,
     #[prost(sint64, tag = "9")]
     pub created_at_unix_nanos: i64,
+    /// When the alert last triggered, from the runtime's observation; 0 when it never
+    /// triggered or triggered before this field existed.
+    #[prost(sint64, tag = "10")]
+    pub triggered_at_unix_nanos: i64,
 }
 
 /// Durable host-owned state for one native indicator instance.

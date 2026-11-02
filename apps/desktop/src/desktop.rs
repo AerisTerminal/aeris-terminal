@@ -54,6 +54,8 @@ mod market_watch;
 use market_watch::MarketWatch;
 mod native_ui;
 mod notification_center;
+mod notification_feed;
+mod notifications_popover;
 mod order_book_panel;
 mod order_entry_panel;
 mod order_flow_dialog;

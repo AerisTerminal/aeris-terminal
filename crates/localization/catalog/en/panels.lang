@@ -520,3 +520,16 @@ report_chart_cumulative_aria = Cumulative P&amp;L by closed trade
 report_chart_drawdown_aria = Drawdown by closed trade
 report_bar_trades[one] = {count} trade
 report_bar_trades[other] = {count} trades
+
+## Notifications popover
+notifications = Notifications
+notifications_sections = Notification sections
+notifications_tab_triggered = Triggered
+notifications_tab_running = Running
+notifications_clear = Clear
+notifications_clear_aria = Clear notification history
+notifications_feed_empty = No notifications yet
+notifications_triggered_empty = No triggered alerts
+notifications_running_empty = No running alerts
+notifications_triggered_at = Triggered {time}
+notifications_last_triggered = Last triggered {time}

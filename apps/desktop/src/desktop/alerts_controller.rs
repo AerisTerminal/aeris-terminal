@@ -50,7 +50,7 @@ enum RestoreNotice {
 pub(super) enum AlertTriggerOutcome {
     /// The trigger names no alert this pane holds.
     Unknown,
-    /// The alert was announced and stays active.
+    /// The alert was announced and stays active with its new trigger time, a persisted change.
     Announced,
     /// The alert was announced and is now triggered, a persisted change.
     Retired,
@@ -133,6 +133,7 @@ impl AlertsController {
             frequency: dialog.frequency as i32,
             status: PriceAlertStatus::Active as i32,
             created_at_unix_nanos,
+            triggered_at_unix_nanos: 0,
         });
         Ok(next)
     }
@@ -170,6 +171,7 @@ impl AlertsController {
         else {
             return AlertTriggerOutcome::Unknown;
         };
+        alert.triggered_at_unix_nanos = trigger.observed_unix_nanos;
         let outcome = if trigger.remains_active {
             AlertTriggerOutcome::Announced
         } else {
@@ -325,6 +327,34 @@ mod tests {
         assert_eq!(taken.len(), PENDING_ANNOUNCEMENTS);
         assert_eq!(taken[0].title, "0");
         assert_eq!(alerts.take_announcements(), []);
+    }
+
+    #[test]
+    fn every_trigger_records_when_it_happened() {
+        let mut alerts = AlertsController::restore(vec![alert("once"), alert("every")], true);
+        let at = |alert_id: &str, remains_active: bool, observed_unix_nanos: i64| {
+            MarketPriceAlertTrigger {
+                observed_unix_nanos,
+                ..trigger(alert_id, remains_active)
+            }
+        };
+        assert_eq!(alerts.alerts()[0].triggered_at_unix_nanos, 0);
+        alerts.apply_trigger(&at("every", true, 50), announcement("every"));
+        alerts.apply_trigger(&at("every", true, 70), announcement("every"));
+        alerts.apply_trigger(&at("once", false, 60), announcement("once"));
+        let once = &alerts.alerts()[0];
+        assert_eq!(once.status, PriceAlertStatus::Triggered as i32);
+        assert_eq!(once.triggered_at_unix_nanos, 60);
+        let every = &alerts.alerts()[1];
+        assert_eq!(
+            every.status,
+            PriceAlertStatus::Active as i32,
+            "an every-time alert keeps running"
+        );
+        assert_eq!(
+            every.triggered_at_unix_nanos, 70,
+            "it remembers its latest trigger"
+        );
     }
 
     #[test]

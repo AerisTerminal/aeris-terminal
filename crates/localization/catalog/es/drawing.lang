@@ -194,6 +194,5 @@ alert_dialog_subtitle = {symbol} a
 condition = Condición
 frequency = Frecuencia
 monitoring_note = Aeris supervisa las operaciones en vivo aceptadas y envía una notificación del sistema operativo mientras la aplicación de escritorio está abierta.
-existing_alerts = Alertas existentes para este mercado
 create_price_alert = Crear alerta de precio
 create_alert = Crear alerta

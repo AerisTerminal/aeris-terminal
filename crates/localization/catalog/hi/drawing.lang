@@ -194,6 +194,5 @@ alert_dialog_subtitle = {symbol} पर
 condition = शर्त
 frequency = आवृत्ति
 monitoring_note = डेस्कटॉप ऐप चलते समय Aeris स्वीकृत लाइव ट्रेड पर नज़र रखता है और ऑपरेटिंग सिस्टम नोटिफ़िकेशन भेजता है।
-existing_alerts = इस मार्केट के मौजूदा अलर्ट
 create_price_alert = प्राइस अलर्ट बनाएँ
 create_alert = अलर्ट बनाएँ

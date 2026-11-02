@@ -521,3 +521,16 @@ report_chart_cumulative_aria = P&amp;L acumulado por operación cerrada
 report_chart_drawdown_aria = Drawdown por operación cerrada
 report_bar_trades[one] = {count} operación
 report_bar_trades[other] = {count} operaciones
+
+## Notifications popover
+notifications = Notificaciones
+notifications_sections = Secciones de notificaciones
+notifications_tab_triggered = Activadas
+notifications_tab_running = En curso
+notifications_clear = Borrar
+notifications_clear_aria = Borrar el historial de notificaciones
+notifications_feed_empty = Aún no hay notificaciones
+notifications_triggered_empty = No hay alertas activadas
+notifications_running_empty = No hay alertas en curso
+notifications_triggered_at = Activada {time}
+notifications_last_triggered = Última activación {time}

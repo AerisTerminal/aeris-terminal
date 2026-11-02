@@ -528,3 +528,16 @@ report_chart_drawdown_aria = Просадка по закрытым сделка
 report_bar_trades[one] = {count} сделка
 report_bar_trades[few] = {count} сделки
 report_bar_trades[many] = {count} сделок
+
+## Notifications popover
+notifications = Уведомления
+notifications_sections = Разделы уведомлений
+notifications_tab_triggered = Сработавшие
+notifications_tab_running = Активные
+notifications_clear = Очистить
+notifications_clear_aria = Очистить историю уведомлений
+notifications_feed_empty = Уведомлений пока нет
+notifications_triggered_empty = Нет сработавших оповещений
+notifications_running_empty = Нет активных оповещений
+notifications_triggered_at = Сработало {time}
+notifications_last_triggered = Последнее срабатывание {time}

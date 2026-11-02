@@ -513,3 +513,16 @@ report_unknown = 未知
 report_chart_cumulative_aria = 按已平仓交易的累计盈亏
 report_chart_drawdown_aria = 按已平仓交易的回撤
 report_bar_trades[other] = {count} 笔交易
+
+## Notifications popover
+notifications = 通知
+notifications_sections = 通知分区
+notifications_tab_triggered = 已触发
+notifications_tab_running = 运行中
+notifications_clear = 清除
+notifications_clear_aria = 清除通知记录
+notifications_feed_empty = 暂无通知
+notifications_triggered_empty = 没有已触发的提醒
+notifications_running_empty = 没有运行中的提醒
+notifications_triggered_at = 触发于 {time}
+notifications_last_triggered = 上次触发于 {time}

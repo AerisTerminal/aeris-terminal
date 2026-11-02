@@ -22,6 +22,7 @@
 use super::notification_center::{
     NoticeAction, NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, UserNotice,
 };
+use super::notification_feed::{FeedEntry, NotificationFeed};
 use super::*;
 use aeris_localization::{panels, tr, workflows};
 use aeris_trading_runtime::{WorkflowActionResult, WorkflowFiringOutcome, WorkflowStepOutcome};
@@ -165,7 +166,7 @@ struct ToastFrame {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ToastTone {
+pub(super) enum ToastTone {
     Buy,
     Sell,
     Warning,
@@ -356,9 +357,19 @@ pub(super) struct Toaster {
     /// The timer expiry a wake-up is already scheduled for.
     wake: Option<Instant>,
     execution_glows: super::execution_glow::ExecutionGlows,
+    /// Every announcement, kept after its toast leaves, for the notifications popover.
+    feed: NotificationFeed,
 }
 
 impl Toaster {
+    pub(super) const fn feed(&self) -> &NotificationFeed {
+        &self.feed
+    }
+
+    pub(super) const fn feed_mut(&mut self) -> &mut NotificationFeed {
+        &mut self.feed
+    }
+
     pub(super) fn execution_glow(
         &self,
         now: Instant,
@@ -383,6 +394,13 @@ impl Toaster {
     /// owner of its lifetime and bound; the toast is only the animated visible projection.
     pub(super) fn post_notice(&mut self, stack: ToastStack, notice: UserNotice, now: Instant) {
         let key = notice.key.clone();
+        // A keyed condition reported again with the same words is not news for the history.
+        let repeated = self.notices.notices().iter().any(|held| {
+            held.key == key
+                && held.tone == notice.tone
+                && held.title == notice.title
+                && held.detail == notice.detail
+        });
         let evicted = self.notices.post(notice);
         if let Some(evicted) = evicted {
             self.remove_notice_toast(&evicted, now);
@@ -395,12 +413,20 @@ impl Toaster {
             NoticeTone::Warning => ToastTone::Warning,
             NoticeTone::Loss => ToastTone::Loss,
         };
-        let title = notice.title.into();
-        let description = Some(notice.detail.clone().into());
+        let title = SharedString::new_static(notice.title);
+        let description = Some(SharedString::from(notice.detail.clone()));
         let lifetime = match notice.lifetime {
             NoticeLifetime::Timed(duration) => Some(duration),
             NoticeLifetime::UntilCleared | NoticeLifetime::UntilDismissed => None,
         };
+        if !repeated {
+            self.feed.record(FeedEntry {
+                tone,
+                title: title.clone(),
+                detail: description.clone(),
+                recorded: now,
+            });
+        }
         if let Some(toast) = self
             .toasts
             .iter_mut()
@@ -520,6 +546,23 @@ impl Toaster {
         self.retire_overflow(stack, now);
         self.relayout(now);
         id
+    }
+
+    /// Records an announcement in the history and shows it as a toast on `stack`, when the
+    /// window has a pane to show it on.
+    fn announce(
+        &mut self,
+        stack: Option<ToastStack>,
+        content: ToastContent,
+        now: Instant,
+    ) -> Option<u64> {
+        self.feed.record(FeedEntry {
+            tone: content.tone,
+            title: content.title.clone(),
+            detail: content.description.clone(),
+            recorded: now,
+        });
+        stack.map(|stack| self.push(stack, content, now))
     }
 
     /// Keeps a stack bounded: past the limit the oldest timed toasts leave, and toasts already
@@ -836,9 +879,6 @@ impl Toaster {
         now_unix_nanos: i64,
         now: Instant,
     ) -> bool {
-        let Some(host) = host else {
-            return false;
-        };
         let mut posted = false;
         for item in announcements {
             match item {
@@ -850,8 +890,12 @@ impl Toaster {
                     }
                     let (title, description) =
                         fill_notice_text(fill, &snapshot.instruments, &snapshot.accounts);
-                    self.push_fill(host, fill.side, title, description, now);
-                    self.execution_glows.start(now);
+                    if self
+                        .push_fill(host, fill.side, title, description, now)
+                        .is_some()
+                    {
+                        self.execution_glows.start(now);
+                    }
                 }
                 trading_store::TradingAnnouncement::Order { event, order } => {
                     if now_unix_nanos.saturating_sub(event.event_unix_nanos) > NEWS_FRESHNESS_NANOS
@@ -879,10 +923,12 @@ impl Toaster {
                                         .unwrap_or_default(),
                                 )
                             });
-                    if event.reason == Some(aeris_trading::OrderEventReason::RiskWarning) {
+                    if event.reason == Some(aeris_trading::OrderEventReason::RiskWarning)
+                        && let Some(host) = host
+                    {
                         self.post_notice(host, risk_warning_user_notice(event, description), now);
                     } else {
-                        self.push(
+                        self.announce(
                             host,
                             ToastContent {
                                 kind: ToastKind::Notice,
@@ -901,7 +947,7 @@ impl Toaster {
                     {
                         continue;
                     }
-                    self.push(
+                    self.announce(
                         host,
                         ToastContent {
                             kind: ToastKind::Notice,
@@ -924,17 +970,17 @@ impl Toaster {
 
     fn push_fill(
         &mut self,
-        stack: ToastStack,
+        stack: Option<ToastStack>,
         side: aeris_trading::OrderSide,
         title: String,
         description: String,
         now: Instant,
-    ) -> u64 {
+    ) -> Option<u64> {
         let tone = match side {
             aeris_trading::OrderSide::Buy => ToastTone::Buy,
             aeris_trading::OrderSide::Sell => ToastTone::Sell,
         };
-        self.push(
+        self.announce(
             stack,
             ToastContent {
                 kind: ToastKind::Fill,
@@ -950,11 +996,11 @@ impl Toaster {
 
     fn push_price_alert(
         &mut self,
-        stack: ToastStack,
+        stack: Option<ToastStack>,
         announcement: PriceAlertAnnouncement,
         now: Instant,
-    ) -> u64 {
-        self.push(
+    ) -> Option<u64> {
+        self.announce(
             stack,
             ToastContent {
                 kind: ToastKind::PriceAlert,
@@ -1308,7 +1354,7 @@ pub(super) trait ToastHost: 'static {
         Self: Sized;
 }
 
-fn tone_icon(tone: ToastTone, theme: &AerisTheme) -> (HugeIcon, ThemeColor) {
+pub(super) fn tone_icon(tone: ToastTone, theme: &AerisTheme) -> (HugeIcon, ThemeColor) {
     let colors = theme.colors;
     match tone {
         ToastTone::Buy => (HugeIcon::CheckIcon, colors.buy),
@@ -1687,9 +1733,6 @@ impl TerminalApp {
                 } else {
                     visible_host
                 };
-                let Some(host) = host else {
-                    continue;
-                };
                 for announcement in announcements {
                     self.notices
                         .toaster_mut()
@@ -1825,13 +1868,15 @@ mod tests {
     }
 
     fn toast(toaster: &mut Toaster, stack: ToastStack, now: Instant) -> u64 {
-        toaster.push_fill(
-            stack,
-            aeris_trading::OrderSide::Buy,
-            "Bought 0.01 EURUSD".into(),
-            "at 1.08412 · account".into(),
-            now,
-        )
+        toaster
+            .push_fill(
+                Some(stack),
+                aeris_trading::OrderSide::Buy,
+                "Bought 0.01 EURUSD".into(),
+                "at 1.08412 · account".into(),
+                now,
+            )
+            .expect("a pane shows the toast")
     }
 
     #[test]
@@ -1885,6 +1930,116 @@ mod tests {
         toaster.clear_notice(&key, now);
         assert_eq!(toaster.notices.notices(), []);
         assert_eq!(toaster.live_indices(stack(1)).len(), 0);
+    }
+
+    fn feed_titles(toaster: &Toaster) -> Vec<String> {
+        toaster
+            .feed()
+            .entries()
+            .map(|entry| entry.title.to_string())
+            .collect()
+    }
+
+    fn keyed_notice(detail: &str) -> notification_center::UserNotice {
+        notification_center::UserNotice {
+            key: notification_center::NoticeKey {
+                scope: 7,
+                kind: "order_book_demand",
+            },
+            severity: notification_center::NoticeSeverity::Warning,
+            tone: notification_center::NoticeTone::Warning,
+            source: notification_center::NoticeSource::Pane(7),
+            title: "Order book unavailable",
+            detail: detail.into(),
+            action: None,
+            lifetime: notification_center::NoticeLifetime::UntilCleared,
+        }
+    }
+
+    #[test]
+    fn the_history_records_announcements_newest_first_but_not_chart_conditions() {
+        let now = Instant::now();
+        let mut toaster = Toaster::default();
+        toaster.show_chart_status(stack(1), Some(corner("Chart stale", "silent")), now);
+        toast(&mut toaster, stack(1), now);
+        toaster.push_price_alert(
+            Some(stack(1)),
+            PriceAlertAnnouncement {
+                title: "NQZ6 crossed 31258.00".to_string(),
+                description: "Last trade 31258.25".to_string(),
+            },
+            now,
+        );
+        toaster.post_notice(stack(1), keyed_notice("Try again later"), now);
+        assert_eq!(
+            feed_titles(&toaster),
+            [
+                "Order book unavailable",
+                "NQZ6 crossed 31258.00",
+                "Bought 0.01 EURUSD"
+            ]
+        );
+        assert_eq!(toaster.feed().unread(), 3);
+        let first = toaster.feed().entries().nth(2).expect("fill entry");
+        assert_eq!(first.tone, ToastTone::Buy);
+        assert_eq!(
+            first.detail.as_ref().map(ToString::to_string).as_deref(),
+            Some("at 1.08412 · account")
+        );
+        toaster.tick(now + Duration::from_secs(60), true, false);
+        assert_eq!(
+            toaster.feed().entries().count(),
+            3,
+            "the history outlives the toasts"
+        );
+    }
+
+    #[test]
+    fn a_keyed_notice_repeated_unchanged_is_recorded_once() {
+        let now = Instant::now();
+        let mut toaster = Toaster::default();
+        toaster.post_notice(stack(1), keyed_notice("Try again later"), now);
+        toaster.post_notice(stack(1), keyed_notice("Try again later"), now);
+        assert_eq!(feed_titles(&toaster), ["Order book unavailable"]);
+        toaster.post_notice(stack(1), keyed_notice("Provider disconnected"), now);
+        let details: Vec<String> = toaster
+            .feed()
+            .entries()
+            .filter_map(|entry| entry.detail.as_ref().map(ToString::to_string))
+            .collect();
+        assert_eq!(
+            details,
+            ["Provider disconnected", "Try again later"],
+            "a changed detail is news"
+        );
+        assert_eq!(toaster.live_notice_cards(stack(1)), 1);
+    }
+
+    #[test]
+    fn news_is_recorded_without_a_pane_to_show_it() {
+        let now = Instant::now();
+        let mut toaster = Toaster::default();
+        let fill = toaster.push_fill(
+            None,
+            aeris_trading::OrderSide::Sell,
+            "Sold 0.01 EURUSD".into(),
+            "at 1.08412 · account".into(),
+            now,
+        );
+        let alert = toaster.push_price_alert(
+            None,
+            PriceAlertAnnouncement {
+                title: "NQZ6 crossed 31258.00".to_string(),
+                description: String::new(),
+            },
+            now,
+        );
+        assert_eq!((fill, alert), (None, None));
+        assert!(toaster.toasts.is_empty());
+        assert_eq!(
+            feed_titles(&toaster),
+            ["NQZ6 crossed 31258.00", "Sold 0.01 EURUSD"]
+        );
     }
 
     fn frame(toaster: &Toaster, id: u64, now: Instant) -> ToastFrame {
@@ -2382,7 +2537,7 @@ mod tests {
         let start = Instant::now();
         let mut toaster = Toaster::default();
         toaster.push_price_alert(
-            stack(1),
+            Some(stack(1)),
             PriceAlertAnnouncement {
                 title: "NQZ6 crossed 31258.00".to_string(),
                 description: "Last trade 31258.25".to_string(),

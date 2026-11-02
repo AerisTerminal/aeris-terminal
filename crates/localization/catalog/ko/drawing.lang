@@ -194,6 +194,5 @@ alert_dialog_subtitle = {symbol} 가격
 condition = 조건
 frequency = 빈도
 monitoring_note = Aeris는 데스크톱 앱이 실행 중일 때 수신된 실시간 체결을 모니터링하고 운영 체제 알림을 보냅니다.
-existing_alerts = 이 시장의 기존 알림
 create_price_alert = 가격 알림 만들기
 create_alert = 알림 만들기

@@ -194,6 +194,5 @@ alert_dialog_subtitle = {symbol} à
 condition = Condition
 frequency = Fréquence
 monitoring_note = Aeris surveille les trades en direct acceptés et envoie une notification du système d'exploitation tant que l'application de bureau est ouverte.
-existing_alerts = Alertes existantes pour ce marché
 create_price_alert = Créer une alerte de prix
 create_alert = Créer l'alerte

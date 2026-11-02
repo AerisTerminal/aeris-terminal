@@ -558,6 +558,7 @@ impl TerminalApp {
                     }),
                 watchlist,
                 toaster: self.notices.toaster(),
+                unread_notifications: self.unread_notifications(),
                 theme: &self.theme,
             },
             cx,
@@ -763,6 +764,18 @@ impl TerminalApp {
             .children(self.layouts_dialog_layer(terminal, cx))
     }
 
+    /// The page menu and the notifications popover; one overlay slot holds at most one.
+    fn shell_menu_overlays(
+        &self,
+        terminal: &Entity<Self>,
+        viewport: gpui::Size<Pixels>,
+        cx: &App,
+    ) -> impl Iterator<Item = AnyElement> + use<> {
+        self.app_navigation_overlay(terminal, viewport)
+            .into_iter()
+            .chain(self.notifications_overlay(terminal, viewport, cx))
+    }
+
     fn rendered_terminal_page(
         &self,
         terminal: &Entity<Self>,
@@ -817,7 +830,7 @@ impl TerminalApp {
         let bottom_panel = self.rendered_bottom_panel(&terminal, &active, cx);
         let market = self.rendered_market_area(&terminal, &active, cx);
         let fullscreen_hint = fullscreen_hint_layer(self.window.fullscreen_hint(), &self.theme);
-        let app_navigation = self.app_navigation_overlay(&terminal, window.viewport_size());
+        let shell_menus = self.shell_menu_overlays(&terminal, window.viewport_size(), cx);
         if self.window.chart_fullscreen() {
             // Every chart in the workspace layout fills the screen; a pane maximized with
             // Alt+click stays the only one shown, exactly as in the docked workspace.
@@ -866,7 +879,7 @@ impl TerminalApp {
             .children(settings_menu)
             .children(drawing_tool_menu)
             .children(platform_menu)
-            .children(app_navigation)
+            .children(shell_menus)
             .children(keyboard_shortcuts)
             .children(command_palette)
             .children(trading_confirmation)

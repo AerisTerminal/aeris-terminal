@@ -979,6 +979,7 @@ mod tests {
             frequency: PriceAlertFrequency::OnlyOnce as i32,
             status: PriceAlertStatus::Active as i32,
             created_at_unix_nanos: 42,
+            triggered_at_unix_nanos: 0,
         }
     }
 

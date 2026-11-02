@@ -520,3 +520,16 @@ report_chart_cumulative_aria = बंद ट्रेड के अनुसा�
 report_chart_drawdown_aria = बंद ट्रेड के अनुसार ड्रॉडाउन
 report_bar_trades[one] = {count} ट्रेड
 report_bar_trades[other] = {count} ट्रेड
+
+## Notifications popover
+notifications = नोटिफ़िकेशन
+notifications_sections = नोटिफ़िकेशन अनुभाग
+notifications_tab_triggered = ट्रिगर हुए
+notifications_tab_running = चालू
+notifications_clear = साफ़ करें
+notifications_clear_aria = नोटिफ़िकेशन इतिहास साफ़ करें
+notifications_feed_empty = अभी कोई नोटिफ़िकेशन नहीं
+notifications_triggered_empty = कोई ट्रिगर हुआ अलर्ट नहीं
+notifications_running_empty = कोई चालू अलर्ट नहीं
+notifications_triggered_at = {time} पर ट्रिगर हुआ
+notifications_last_triggered = आख़िरी बार {time} पर ट्रिगर हुआ

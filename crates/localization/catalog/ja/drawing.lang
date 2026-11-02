@@ -194,6 +194,5 @@ alert_dialog_subtitle = {symbol} の価格
 condition = 条件
 frequency = 頻度
 monitoring_note = デスクトップアプリの起動中、Aeris は受信したライブの約定を監視し、オペレーティングシステムの通知を送信します。
-existing_alerts = この市場の既存のアラート
 create_price_alert = 価格アラートを作成
 create_alert = アラートを作成

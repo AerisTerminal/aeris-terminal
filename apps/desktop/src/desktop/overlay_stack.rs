@@ -1,5 +1,6 @@
 //! The terminal's app-level overlays: the profile menu and the page menu under the title bar,
-//! the keyboard shortcuts dialog and the command palette. Each one covers the window with a
+//! the notifications popover beside the panel rail, the keyboard shortcuts dialog and the
+//! command palette. Each one covers the window with a
 //! scrim or takes the keyboard until it is dismissed, so no two can be in use together: one
 //! slot holds the open overlay and opening another replaces it. Chart menus and pane dialogs
 //! have their own owners. The terminal decides what to repaint and where focus goes.
@@ -7,6 +8,7 @@
 use gpui::{Entity, Pixels, Point};
 
 use super::InputState;
+use super::notifications_popover::NotificationsTab;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OverlayKind {
@@ -14,6 +16,8 @@ pub(super) enum OverlayKind {
     PlatformMenu,
     /// The page menu under the navigation button.
     AppNavigation,
+    /// The notifications popover beside the panel rail's bell.
+    Notifications,
     KeyboardShortcuts,
     CommandPalette,
 }
@@ -35,6 +39,11 @@ enum AppOverlay {
     },
     /// Anchored under the click point that opened it.
     AppNavigation(Point<Pixels>),
+    Notifications {
+        /// The click point on the bell, which the popover opens beside.
+        anchor: Point<Pixels>,
+        tab: NotificationsTab,
+    },
     KeyboardShortcuts,
     CommandPalette {
         /// The highlighted result row.
@@ -49,6 +58,7 @@ impl AppOverlay {
         match self {
             Self::PlatformMenu { .. } => OverlayKind::PlatformMenu,
             Self::AppNavigation(_) => OverlayKind::AppNavigation,
+            Self::Notifications { .. } => OverlayKind::Notifications,
             Self::KeyboardShortcuts => OverlayKind::KeyboardShortcuts,
             Self::CommandPalette { .. } => OverlayKind::CommandPalette,
         }
@@ -154,6 +164,38 @@ impl OverlayStack {
             Some(AppOverlay::AppNavigation(anchor)) => Some(anchor),
             _ => None,
         }
+    }
+
+    /// Opens the notifications popover on its feed beside `anchor`, or closes it when it is
+    /// open. Reports whether it is open afterwards.
+    pub(super) fn toggle_notifications(&mut self, anchor: Point<Pixels>) -> bool {
+        if self.close(OverlayKind::Notifications) {
+            return false;
+        }
+        self.open = Some(AppOverlay::Notifications {
+            anchor,
+            tab: NotificationsTab::Feed,
+        });
+        true
+    }
+
+    /// The open notifications popover's anchor and shown tab.
+    pub(super) const fn notifications(&self) -> Option<(Point<Pixels>, NotificationsTab)> {
+        match self.open {
+            Some(AppOverlay::Notifications { anchor, tab }) => Some((anchor, tab)),
+            _ => None,
+        }
+    }
+
+    /// Shows `selected` in the open notifications popover, reporting whether it changed.
+    pub(super) fn select_notifications_tab(&mut self, selected: NotificationsTab) -> bool {
+        if let Some(AppOverlay::Notifications { tab, .. }) = &mut self.open
+            && *tab != selected
+        {
+            *tab = selected;
+            return true;
+        }
+        false
     }
 
     /// Opens the keyboard shortcuts dialog, returning the other overlay it replaced.
@@ -294,6 +336,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_notifications_popover_opens_on_its_feed_and_keeps_its_tab(cx: &mut TestAppContext) {
+        let mut overlays = stack(cx);
+        assert!(
+            !overlays.select_notifications_tab(NotificationsTab::Running),
+            "a closed popover has no tab to show"
+        );
+        assert!(overlays.toggle_app_navigation(point(px(3.0), px(2.0))));
+        assert!(overlays.toggle_notifications(point(px(40.0), px(80.0))));
+        assert_eq!(overlays.app_navigation_anchor(), None);
+        assert_eq!(
+            overlays.notifications(),
+            Some((point(px(40.0), px(80.0)), NotificationsTab::Feed))
+        );
+        assert!(overlays.select_notifications_tab(NotificationsTab::Running));
+        assert!(!overlays.select_notifications_tab(NotificationsTab::Running));
+        assert_eq!(
+            overlays.notifications(),
+            Some((point(px(40.0), px(80.0)), NotificationsTab::Running))
+        );
+        assert!(!overlays.toggle_notifications(point(px(40.0), px(80.0))));
+        assert_eq!(overlays.kind(), None);
+        assert!(overlays.toggle_notifications(point(px(40.0), px(80.0))));
+        assert_eq!(
+            overlays.notifications(),
+            Some((point(px(40.0), px(80.0)), NotificationsTab::Feed)),
+            "a reopened popover starts on its feed"
+        );
+    }
+
+    #[gpui::test]
     fn the_language_dropdown_lives_and_closes_with_the_profile_menu(cx: &mut TestAppContext) {
         let mut overlays = stack(cx);
         assert!(
@@ -321,6 +393,7 @@ mod tests {
     fn only_title_bar_menus_pin_the_title_bar() {
         assert!(OverlayKind::PlatformMenu.pins_title_bar());
         assert!(OverlayKind::AppNavigation.pins_title_bar());
+        assert!(!OverlayKind::Notifications.pins_title_bar());
         assert!(!OverlayKind::KeyboardShortcuts.pins_title_bar());
         assert!(!OverlayKind::CommandPalette.pins_title_bar());
     }

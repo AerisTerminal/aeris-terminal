@@ -520,3 +520,16 @@ report_chart_cumulative_aria = Kumulierte GuV nach geschlossenem Trade
 report_chart_drawdown_aria = Drawdown nach geschlossenem Trade
 report_bar_trades[one] = {count} Trade
 report_bar_trades[other] = {count} Trades
+
+## Notifications popover
+notifications = Benachrichtigungen
+notifications_sections = Benachrichtigungsbereiche
+notifications_tab_triggered = Ausgelöst
+notifications_tab_running = Aktiv
+notifications_clear = Leeren
+notifications_clear_aria = Benachrichtigungsverlauf leeren
+notifications_feed_empty = Noch keine Benachrichtigungen
+notifications_triggered_empty = Keine ausgelösten Alarme
+notifications_running_empty = Keine aktiven Alarme
+notifications_triggered_at = Ausgelöst {time}
+notifications_last_triggered = Zuletzt ausgelöst {time}

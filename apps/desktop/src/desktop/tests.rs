@@ -2084,6 +2084,56 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn the_bell_marks_unread_news_until_the_popover_shows_it(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.window.chrome_focus().clone().focus(window, cx);
+            terminal
+                .notices
+                .toaster_mut()
+                .feed_mut()
+                .record(notification_feed::FeedEntry {
+                    tone: toaster::ToastTone::Buy,
+                    title: "Bought 0.01 EURUSD".into(),
+                    detail: None,
+                    recorded: Instant::now(),
+                });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("notifications_unread_dot").is_some(),
+            "the bell marks news it has not shown"
+        );
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.toggle_notifications_at(point(px(1180.0), px(700.0)), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.read(|cx| terminal.read(cx).notifications_open()));
+        assert!(cx.debug_bounds("notifications_unread_dot").is_none());
+        assert_eq!(
+            cx.read(|cx| terminal.read(cx).notices.toaster().feed().unread()),
+            0,
+            "opening the popover reads the history"
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            !cx.read(|cx| terminal.read(cx).notifications_open()),
+            "Escape closes the popover"
+        );
+        assert!(cx.debug_bounds("notifications_unread_dot").is_none());
+        assert_eq!(
+            cx.read(|cx| terminal.read(cx).notices.toaster().feed().entries().count()),
+            1,
+            "the history stays after it is read"
+        );
+    }
+
+    #[gpui::test]
     fn trading_shortcuts_ask_first_and_send_once_per_press(cx: &mut TestAppContext) {
         let (terminal, cx) = terminal_harness(cx);
         let surface = cx.read(|cx| terminal.read(cx).active_surface());

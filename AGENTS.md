@@ -114,6 +114,13 @@ violations and missing verification explicitly, and never describe them as satis
   another instrument; instrument-level changes notify only matching selections.
   Other accounts are not notified. Truly global trading notices use a bounded
   64-entry FIFO, dropping oldest with one counted loss notice per drain.
+- The toaster owns the session's in-memory notification history
+  (`notification_feed.rs`, newest 50 announcements with an unread count): fills, order and
+  workflow notices, triggered price alerts and `UserNotice`s are recorded when announced,
+  even with no pane to show the toast; chart conditions are not. The panel rail's bell opens
+  it in the notifications popover, which also lists triggered and running price alerts of
+  every tab and pane. Alerts stay owned by their pane: the popover's remove action calls that
+  pane's `delete_price_alert`, and the create dialog no longer lists or removes alerts.
 - Desktop trading instruction and pane alert timestamps use the instance's
   `DesktopServices` clock; do not restore `trading::now()` or a process-global
   desktop clock.

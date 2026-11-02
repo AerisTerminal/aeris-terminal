@@ -194,6 +194,5 @@ alert_dialog_subtitle = {symbol} 价格
 condition = 条件
 frequency = 频率
 monitoring_note = Aeris 会监控已接收的实时成交，并在桌面应用运行期间发送操作系统通知。
-existing_alerts = 此市场的现有提醒
 create_price_alert = 创建价格提醒
 create_alert = 创建提醒

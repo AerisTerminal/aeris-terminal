@@ -194,6 +194,5 @@ alert_dialog_subtitle = {symbol} at
 condition = Condition
 frequency = Frequency
 monitoring_note = Aeris monitors accepted live trades and sends an operating-system notification while the desktop app is running.
-existing_alerts = Existing alerts for this market
 create_price_alert = Create price alert
 create_alert = Create alert

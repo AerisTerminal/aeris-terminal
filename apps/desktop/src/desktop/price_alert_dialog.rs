@@ -325,9 +325,8 @@ impl WorkspaceSurface {
         if outcome == AlertTriggerOutcome::Unknown {
             return;
         }
-        if outcome == AlertTriggerOutcome::Retired {
-            self.persistence.mark_dirty();
-        }
+        // Both outcomes changed the persisted alert: its status or its latest trigger time.
+        self.persistence.mark_dirty();
         replace_chart_price_alert_lines(
             self.chart.as_ref(),
             self.alerts.alerts(),
@@ -350,7 +349,7 @@ const CONDITIONS: [PriceAlertCondition; 5] = [
     PriceAlertCondition::LessThan,
 ];
 
-const fn condition_label(condition: PriceAlertCondition) -> Text {
+pub(super) const fn condition_label(condition: PriceAlertCondition) -> Text {
     match condition {
         PriceAlertCondition::Crossing => drawing::CONDITION_CROSSING,
         PriceAlertCondition::CrossingUp => drawing::CONDITION_CROSSING_UP,
@@ -452,7 +451,7 @@ fn condition_dropdown(
     )
 }
 
-const fn frequency_label(frequency: PriceAlertFrequency) -> Text {
+pub(super) const fn frequency_label(frequency: PriceAlertFrequency) -> Text {
     match frequency {
         PriceAlertFrequency::OnlyOnce => drawing::FREQUENCY_ONLY_ONCE,
         PriceAlertFrequency::EveryTime => drawing::FREQUENCY_EVERY_TIME,
@@ -502,82 +501,6 @@ fn frequency_dropdown(
     )
 }
 
-fn alerts_for_instrument(
-    alerts: &[WorkspacePriceAlertState],
-    instrument: &InstallProviderInstrument,
-) -> Vec<WorkspacePriceAlertState> {
-    alerts
-        .iter()
-        .filter(|alert| {
-            alert.instrument.as_ref().is_some_and(|candidate| {
-                candidate.provider == instrument.provider
-                    && candidate.instrument_id == instrument.instrument_id
-                    && candidate.entitlement_id == instrument.entitlement_id
-            })
-        })
-        .cloned()
-        .collect()
-}
-
-fn price_alert_existing_rows(
-    app: &Entity<WorkspaceSurface>,
-    existing: &[WorkspacePriceAlertState],
-    theme: &AerisTheme,
-) -> AnyElement {
-    let colors = theme.colors;
-    let mut rows = div().flex().flex_col().gap_1();
-    for (index, alert) in existing.iter().enumerate() {
-        let remove = app.clone();
-        let id = alert.id.clone();
-        let condition =
-            PriceAlertCondition::try_from(alert.condition).map_or(drawing::ALERT, condition_label);
-        let alert_price = alert.instrument.as_ref().map_or_else(
-            || tr!(drawing::UNAVAILABLE).to_string(),
-            |value| market_price_text(alert.price, value.price_scale),
-        );
-        rows = rows.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .bg(gpui_color(field_surface(theme)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_sm()
-                        .text_color(gpui_color(colors.text_default))
-                        .child(format!("{condition} ·"))
-                        .child(
-                            div()
-                                .font_family(aeris_design_system::platform_font_family())
-                                .font_features(platform_tabular_numerals())
-                                .child(alert_price),
-                        ),
-                )
-                .child(
-                    Button::new(("delete_price_alert", index), theme)
-                        .variant(ButtonVariant::Ghost)
-                        .icon(header_icon(HugeIcon::Trash))
-                        .aria_label(tr!(drawing::DELETE_PRICE_ALERT))
-                        .danger_on_hover()
-                        .on_click(move |_, _, cx| {
-                            remove.update(cx, |surface, surface_cx| {
-                                surface.delete_price_alert(&id, surface_cx);
-                            });
-                        }),
-                ),
-        );
-    }
-    rows.into_any_element()
-}
-
 /// "SYMBOL at PRICE", with the price in tabular numerals.
 fn price_alert_dialog_subtitle(symbol: &str, price: &str) -> Div {
     div()
@@ -596,7 +519,6 @@ fn price_alert_dialog_subtitle(symbol: &str, price: &str) -> Div {
 fn price_alert_dialog_body(
     app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
-    existing: &[WorkspacePriceAlertState],
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
@@ -628,29 +550,6 @@ fn price_alert_dialog_body(
                 .text_color(gpui_color(colors.text_secondary))
                 .child(tr!(drawing::MONITORING_NOTE)),
         )
-        .children((!existing.is_empty()).then(|| {
-            div()
-                .mt_2()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(tr!(drawing::EXISTING_ALERTS)),
-                )
-                .child(
-                    div()
-                        .id("price_alert_existing_scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .child(price_alert_existing_rows(app, existing, theme)),
-                )
-        }))
         .into_any_element()
 }
 
@@ -668,14 +567,12 @@ pub(super) fn price_alert_dialog_layer(
         || tr!(drawing::UNAVAILABLE).to_string(),
         |price| market_price_text(price, dialog.instrument.price_scale),
     );
-    let existing = alerts_for_instrument(alerts, &dialog.instrument);
-
     Dialog::new("price_alert_dialog", DialogSize::Md, theme, move |_, cx| {
         dismiss.update(cx, WorkspaceSurface::close_price_alert_dialog);
     })
     .title(tr!(drawing::CREATE_PRICE_ALERT))
     .subtitle(price_alert_dialog_subtitle(symbol, &price))
-    .child(price_alert_dialog_body(app, dialog, &existing, theme))
+    .child(price_alert_dialog_body(app, dialog, theme))
     .action(
         Button::new("price_alert_cancel", theme)
             .variant(ButtonVariant::Secondary)

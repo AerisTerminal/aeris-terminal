@@ -194,6 +194,5 @@ alert_dialog_subtitle = {symbol} на уровне
 condition = Условие
 frequency = Частота
 monitoring_note = Aeris отслеживает принятые сделки в реальном времени и отправляет уведомление операционной системы, пока приложение запущено.
-existing_alerts = Существующие оповещения для этого рынка
 create_price_alert = Создать ценовое оповещение
 create_alert = Создать оповещение

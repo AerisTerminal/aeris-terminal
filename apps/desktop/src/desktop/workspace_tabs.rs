@@ -3488,6 +3488,23 @@ impl TerminalApp {
         true
     }
 
+    /// Closes the open profile menu, page menu, notifications popover or drawing tool menu,
+    /// reporting whether one was open for Escape to close.
+    fn close_shell_menu_on_escape(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        if self.overlays.is_open(OverlayKind::PlatformMenu) {
+            self.close_platform_menu(window, cx);
+        } else if self.app_navigation_open() {
+            self.close_app_navigation(window, cx);
+        } else if self.notifications_open() {
+            self.close_notifications(cx);
+        } else if self.chrome.tool_menu().is_open() {
+            self.close_drawing_tool_menu(cx);
+        } else {
+            return false;
+        }
+        true
+    }
+
     pub(super) fn on_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -3525,19 +3542,8 @@ impl TerminalApp {
             return;
         }
         if event.keystroke.key.eq_ignore_ascii_case("escape")
-            && self.overlays.is_open(OverlayKind::PlatformMenu)
+            && self.close_shell_menu_on_escape(window, cx)
         {
-            self.close_platform_menu(window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.app_navigation_open() {
-            self.close_app_navigation(window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.chrome.tool_menu().is_open() {
-            self.close_drawing_tool_menu(cx);
             cx.stop_propagation();
             return;
         }
