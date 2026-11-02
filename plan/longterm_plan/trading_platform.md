@@ -11,7 +11,7 @@ CT1–CT6, I1–I4, PD1–PD11, batches B1–B9); this file names them by ID onl
 
 Item IDs are stable: **T** batches, **PF** foundations, **M** features, **D** decisions. A status
 is **Complete** only when every item works through the real runtime and desktop path, not when a
-unit test alone passes. Status as of 2026-10-08.
+unit test alone passes. Status as of 2026-11-02.
 
 ## Trading batches
 
@@ -21,14 +21,15 @@ unit test alone passes. Status as of 2026-10-08.
 | T2 Trading, execution and risk | M2.1–M2.8, M3.1–M3.4, M7.2 | **Partial**: engine complete; lock release, hotkeys and the profile, plan and template editors deferred until after Rithmic onboarding | — |
 | T3 Order flow | PF5, M1.2, M1.4, M1.5, M1.7 | **Complete** | — |
 | T4 Context and workspace | D6, M5.1–M5.5, M7.1, M7.4 | **Complete**; keyed sources not live-qualified | Maintainer API keys |
-| [T5](#t5--rithmic-live-trading) Rithmic live trading | PF1, PF2, PF4, M1.6, live T2 | **Blocked**; adapter order and PnL plant sessions exist, not wired to `trading_runtime` | Rithmic onboarding and conformance; D4 |
+| [T5](#t5--rithmic-live-trading) Rithmic live trading | PF1, PF2, PF4, M1.6, live T2 | **Partial**: conformance passed; production gateways, demo and live order routing through PF11 (`67566b80`) and order levels shipped; margin and broker risk limits are not projected, T2 is not qualified on live accounts, M1.6 is absent | — |
 | [T6](#t6--record-replay-and-review) Record, replay and review | D2, PF8, M4.1–M4.4 | **Open** | D2; data licensing checklist |
 | [T7](#t7--institutional-depth) Institutional depth | M1.1, M1.3, M1.8, M4.5, M5.6, M5.7 | **Open** | T6; Aeris Charts B4–B7; licensing checklist |
 | [T8](#t8--power-users) Power users | M6.1–M6.5, M7.3, M7.5–M7.8 | **Open** | Aeris Charts B9; a release path for M7.8 |
 
-**Order:** T1 unblocked T2, T5, T6 and part of T7. T5 starts when Rithmic onboarding clears and
-reuses T2 unchanged against the live venue; PF11, the live-venue contract, is built once and
-carries T5's PF1. T6 needs T1's store and T2's execution log.
+**Order:** T1 unblocked T2, T5, T6 and part of T7. T5 reuses T2 unchanged against the live venue;
+PF11, the live-venue contract, is built once and carries T5's PF1. T6 needs T1's store and T2's
+execution log. Trading workflows have their own plan in [workflows.md](workflows.md); they need only
+T2.
 
 **Batch delivery:** build the whole batch with deterministic tests, run the gates in `AGENTS.md`,
 commit once per batch listing the delivered IDs, and update this file in the same commit. Deliver
@@ -45,13 +46,16 @@ any Aeris Charts batch first, then pin only the `aeris_charts_*` revisions here.
       level updates, bracket snapshots and updates, and exit position. A live Rithmic Test run
       (ESZ6, 2026-10-22) verified a bracket whose exits Rithmic held across a logout, cancel all and
       exit position; the other requests are not verified live.
-- [ ] Production endpoints and a system/gateway picker from Rithmic's system list; the adapter
-      connects only to the hardcoded Rithmic Test endpoint (`endpoint.rs`).
-- [ ] **PF1** Order routing with idempotent client order IDs, as a `trading_runtime` venue on PF11.
-- [ ] **PF2** Positions, PnL, balance, margin and broker risk limits.
-- [ ] Rithmic conformance passed.
+- [x] Production endpoints and a system/gateway picker from Rithmic's system list
+      (`27317e74`; the gateways in `endpoint.rs`).
+- [x] **PF1** Order routing with idempotent client order IDs, as a `trading_runtime` venue on PF11
+      (`9c0a2b34`), for demo and live logins (`67566b80`).
+- [~] **PF2** Positions, open P&L and balance from the venue; margin and broker risk limits are not
+      projected.
+- [x] Rithmic conformance passed; Rithmic issued the production connect points.
 - [ ] T2 features qualified on live accounts, including the copier across several accounts.
-- [ ] **D4** decided; **PF4** bounded canonical order-level publication.
+- [x] **D4** decided; **PF4** bounded order-level publication as its own stream (`80a640b5`); not
+      yet run against a live DBO stream.
 - [ ] **M1.6** Queue position, iceberg, pulled-liquidity and size-cluster detectors, labeled as
       estimates.
 
@@ -208,16 +212,16 @@ and release time; missing keys or outages show "unavailable", never invented val
 
 | ID | Foundation | Batch | Status |
 | --- | --- | --- | --- |
-| PF1 | Rithmic order routing | T5 | Partial (adapter sessions only) |
-| PF2 | Rithmic PnL plant and account state | T5 | Partial (adapter sessions only) |
+| PF1 | Rithmic order routing | T5 | Delivered (demo and live logins) |
+| PF2 | Rithmic PnL plant and account state | T5 | Partial (positions, open P&L and balance; no margin or broker limits) |
 | PF3 | Canonical trading domain | T1 | Delivered |
-| PF4 | Canonical order-level book publication | T5 | Absent |
+| PF4 | Canonical order-level book publication | T5 | Delivered (not run against a live DBO stream) |
 | PF5 | Trade tape publication | T3 | Delivered |
 | PF6 | Contract metadata | T1 | Delivered |
 | PF7 | Local store for user-owned records | T1 | Delivered |
 | PF8 | Session recording store | T6 | Absent |
 | PF9 | Local simulated venue | T1 | Delivered |
-| PF11 | Provider-neutral live venue in `trading_runtime` | T5 | Partial (routing, schema-v18 broker tables and demo venue inbox; defects T-1 to T-6 open) |
+| PF11 | Provider-neutral live venue in `trading_runtime` | T5 | Delivered (netted broker accounts, reconcile gating; relay edge cases in `known_gaps.md`) |
 
 **PF1 — Rithmic order routing.** Submit, modify and cancel market, limit, stop and stop-limit
 orders; server-side brackets, OCO and trailing stops where Rithmic supports them; status, fill and
@@ -265,7 +269,7 @@ broker approves Aeris.
 
 | Route | Reaches | Market data | Accounts and trading | Gate |
 | --- | --- | --- | --- | --- |
-| Rithmic | Futures prop firms (Bulenox, Tradeify, Alpha Futures, Take Profit Trader, Phidias, TradeDay) and brokers (Discount Trading, AMP Futures, Stage 5) | Present, full depth; Rithmic Test only | Adapter sessions only | Onboarding, production systems, conformance |
+| Rithmic | Futures prop firms (Bulenox, Tradeify, Alpha Futures, Take Profit Trader, Phidias, TradeDay) and brokers (Discount Trading, AMP Futures, Stage 5) | Present, full depth; production systems | Present: demo and live logins | Live-account qualification of T2 |
 | Hyperliquid | Crypto perps and spot; US users blocked | Present, public | Absent | Builder code (100 USDC) and agent-wallet approval |
 | Crypto exchanges | OKX, Bybit, KuCoin, Binance, Kraken, Coinbase, Bitget, Gate, Deribit, Delta Exchange India, CoinDCX | Absent; public WebSocket, no login | Absent | Broker program per exchange; Indian legal check on rebates; geo-blocking |
 | Other forex/CFD | TradeLocker, DXtrade, Match-Trader, OANDA, IBKR TWS, Capital.com, IG | Absent | Absent | Per route |
@@ -275,18 +279,12 @@ Every route reuses T2 unchanged, so the remaining T2 gaps close before broker pi
 
 **Rithmic (T5)**
 
-1. Settle onboarding in writing: dev-kit, API and conformance costs, any per-user vendor fee, and
-   whether Rithmic accepts an Indian individual or company.
-2. Verify every order and PnL plant template against the licensed Provider Kit and exercise the
-   adapter sessions on Rithmic Test.
-3. Add production endpoints and a system/gateway picker; confirm per-system enablement with Rithmic.
-4. **PF1:** a Rithmic venue on PF11, with idempotent client order IDs fenced by session generation
-   and every command through the M3.2 checks.
-5. **PF2:** positions, PnL, balance, margin and broker limits projected into the canonical trading
-   domain.
-6. Pass conformance, then qualify T2 on live accounts, including the copier.
-7. D4, PF4 and M1.6.
-8. Get listed on rithmic.com/platforms and by a broker before prop-firm outreach.
+Onboarding, conformance, production endpoints, PF1 and PF4 are done. Remaining:
+
+1. **PF2:** margin and broker risk limits projected into the canonical trading domain.
+2. Qualify T2 on live accounts, including the copier.
+3. M1.6 detectors over PF4.
+4. Get listed on rithmic.com/platforms and by a broker before prop-firm outreach.
 
 **Hyperliquid and crypto exchanges**
 

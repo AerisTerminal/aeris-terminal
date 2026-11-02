@@ -12,7 +12,7 @@ use crate::service::Command;
 use crate::{
     BracketView, GroupKind, OrderGroup, PlannedLeg, PositionPnl, PositionProtection,
     ProtectionRole, ProtectionView, RecoveryNotice, RiskLock, RiskMeter, RiskProfile, SessionPlan,
-    TradeRoundTrip, TradingInstrument, VenueNotice,
+    TradeRoundTrip, TradingInstrument, VenueNotice, WorkflowView,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::market::{FeedReason, FeedState};
@@ -47,8 +47,9 @@ pub struct WorkingSet {
     /// The owner revision this working set reflects; equal revisions are identical views.
     pub revision: u64,
     pub accounts: Vec<TradingAccount>,
-    /// Registered terms for open orders, positions, the fills window and current ticket
-    /// interests, so a closed position's recent fills still name their instrument.
+    /// Registered terms for open orders, positions, the fills window, current ticket
+    /// interests and workflows, so a closed position's recent fills still name their
+    /// instrument.
     pub instruments: Vec<TradingInstrument>,
     pub orders: Vec<Order>,
     /// The newest events, newest first, as in the snapshot window.
@@ -78,6 +79,8 @@ pub struct WorkingSet {
     pub recovery_notices: Vec<RecoveryNotice>,
     /// The newest broker venue notices, oldest first.
     pub venue_notices: Vec<VenueNotice>,
+    /// Every accepted workflow, by identity.
+    pub workflows: Vec<WorkflowView>,
 }
 
 struct WorkingGroupViews {
@@ -467,6 +470,7 @@ impl crate::TradingCore {
             .chain(positions.iter().map(|position| &position.instrument_id))
             .chain(fills.iter().map(|fill| &fill.instrument_id))
             .chain(self.ticket_interest.keys())
+            .chain(self.workflow_instruments())
             .collect::<BTreeSet<&InstrumentId>>();
         let WorkingGroupViews {
             groups: order_groups,
@@ -526,6 +530,7 @@ impl crate::TradingCore {
             market_observation_error: self.market_observation_error.clone(),
             recovery_notices: self.recovery_notices.clone(),
             venue_notices: self.broker_sync.notices(),
+            workflows: self.workflow_views(),
         })
     }
 

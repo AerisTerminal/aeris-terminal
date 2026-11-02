@@ -90,6 +90,7 @@ context_in_minutes = dans {minutes} min
 ## Screener de marchés
 app_view_terminal = Terminal
 app_view_screener = Screener
+app_view_workflows = Workflows
 screener_kind_perp = Perp
 screener_kind_spot = Spot
 screener_category_all = Tous les marchés

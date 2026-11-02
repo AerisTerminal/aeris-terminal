@@ -106,6 +106,7 @@ pub(crate) mod market_feed;
 mod oco;
 mod property;
 mod publication;
+mod workflows;
 
 #[test]
 fn simulated_currency_mismatch_is_typed_before_an_order_fact() {

@@ -1,0 +1,170 @@
+# 交易工作流：“工作流”页面、其画布和检查器，以及工作流命令的反馈。
+
+# 页面与列表
+count[other] = {count} 个工作流
+new_button = 新建工作流
+new_aria = 新建交易工作流
+list_empty = 还没有工作流。
+empty_title = 构建工作流
+empty_body = 在画布上把触发器连接到检查和操作。Aeris 严格执行您保存的模块，使用其自身已验证的价格和时钟，每笔订单都要通过与手动订单相同的风险检查。
+untitled = 未命名工作流
+state_paused = 已暂停
+state_armed = 已启用
+state_completed = 已完成
+state_expired = 已过期
+state_armed_waiting = 已启用 · {reasons}
+status_new = 未保存
+status_changed = 有未保存的更改
+ready = 可以保存
+fired_value = 本时段 {session} 次 · 共 {total} 次
+never_fired = 尚未触发
+recent_firings = 最近触发
+environment_practice = 模拟
+environment_demo = 模拟盘
+environment_live = 实盘
+live_warning = 实盘账户：订单将发送给您的经纪商
+symbol_unset = 无代码
+
+# 命令
+save = 保存
+arm = 启用
+pause = 暂停
+arm_aria = 启用 {name}
+pause_aria = 暂停 {name}
+arm_hint = 启用前请先保存更改
+delete = 删除
+delete_confirm = 确认删除
+close_aria = 关闭工作流
+saved_note = 保存的工作流在您启用前保持暂停。保存已更改的工作流会再次将其暂停。
+
+# 画布
+add_block = 添加模块
+palette_hint = 新模块会接在所选模块之后。
+palette_checks = 检查
+palette_actions = 操作
+block_trigger = 触发器
+block_if_position = 如果持仓
+block_if_time = 如果时间段
+block_if_price = 如果价格
+block_buy = 买入
+block_sell = 卖出
+block_flatten = 平仓
+block_cancel_orders = 撤销订单
+block_lock_account = 锁定账户
+port_yes = 是
+port_no = 否
+board_hint = 从圆点拖动以连接模块 · 将连线拖到空白处即可删除 · 拖动画布以平移 · {key}+滚轮缩放
+zoom_in_aria = 放大
+zoom_out_aria = 缩小
+zoom_reset_aria = 重置视图
+too_many_blocks = 一个工作流最多包含 {maximum} 个模块
+link_loop = 该连线会让工作流将同一模块执行两次
+value_unset = 未设置
+
+# 检查器
+inspector_workflow = 工作流
+field_name = 名称
+field_account = 账户
+no_accounts = 还没有交易账户。请在“账户”面板中添加模拟账户。
+field_symbol = 代码
+symbol_hint = 此处列出图表中已打开的代码；打开某个代码的图表即可添加它。
+field_repeat = 重复
+repeat_choice_once = 一次
+repeat_choice_session = 每个时段
+field_session_maximum = 每个时段最多
+field_cooldown = 两次触发间隔秒数
+field_trigger = 当
+trigger_choice_above = 价格上涨至
+trigger_choice_below = 价格下跌至
+trigger_choice_time = 每天的时间
+field_level = 价格
+field_time = 时间（HH:MM）
+field_zone = 时区
+trigger_price_hint = 工作流启用后，已验证价格穿越此价位时触发。
+trigger_time_hint = 工作流启用期间，每天在此时间触发。
+field_check = 检查
+field_position = 持仓
+choice_flat = 无持仓
+choice_long = 多头
+choice_short = 空头
+choice_open = 任意未平持仓
+field_start = 从（HH:MM）
+field_end = 至（HH:MM）
+field_direction = 价格
+choice_above = 高于
+choice_below = 低于
+if_hint = 检查成立时执行“是”，不成立时执行“否”。未连接的输出会在此结束运行。
+field_action = 操作
+field_quantity = 数量
+field_stop_ticks = 止损（跳）
+field_target_ticks = 止盈（跳）
+protection_hint = 止损和止盈都留空即可不带括号单入场。
+lock_hint = 账户锁定后不再执行任何操作。
+remove_block = 移除模块
+
+# 工作流模块的复述
+trigger_price_above = {symbol} 上涨至 {price}
+trigger_price_below = {symbol} 下跌至 {price}
+trigger_time = 每天 {zone} {time}
+zone_chicago = 芝加哥时间
+zone_utc = UTC
+condition_flat = 无持仓
+condition_long = 持有多头
+condition_short = 持有空头
+condition_open = 有未平持仓
+condition_between = 时间为 {zone} {start}–{end}
+condition_price_above = 价格高于 {price}
+condition_price_below = 价格低于 {price}
+action_buy = 以市价买入 {quantity}
+action_sell = 以市价卖出 {quantity}
+action_protection = {entry}，止损 {stop} 跳，止盈 {target} 跳
+action_flatten = 平仓
+action_cancel_orders = 撤销挂单
+action_lock = 锁定账户
+
+# 触发结果
+outcome_yes = 是
+outcome_no = 否
+outcome_placed = 已发送订单 {id}
+outcome_flattened = 已平仓
+outcome_cancelled = 已撤销 {orders} 笔订单
+outcome_locked = 账户已锁定
+outcome_refused = 被拒绝：{detail}
+outcome_blocked = 未发送：{reasons}
+outcome_interrupted = Aeris 在此次触发完成前已停止；不会重复执行
+blocker_account_missing = 账户已被删除
+blocker_terms_missing = 该代码没有交易条款
+blocker_account_locked = 账户已锁定
+blocker_broker_unreachable = 经纪商未连接
+blocker_quote_unavailable = 正在等待已验证的报价
+
+# 草稿问题
+problem_name = 请输入不超过 80 个字符的名称
+problem_account = 请选择账户
+problem_symbol = 请选择有交易条款的代码
+problem_level = 请输入最多 {decimals} 位小数的正价格
+problem_time = 请按 HH:MM 输入时间，范围 00:00 至 23:59
+problem_window = 请将时间段输入为两个不同的时间，HH:MM
+problem_no_start = 请将触发器连接到第一个模块
+problem_unconnected = 请连接每个模块，或移除不需要的模块
+problem_no_action = 请至少添加一个操作
+problem_quantity = 请输入该市场接受的正数量
+problem_protection = 请将止损和止盈都设为 1 至 10000 跳，或两者都留空
+problem_session_maximum = 请输入 1 至 50 之间的数字
+problem_cooldown = 请输入 0 至 86400 之间的秒数
+
+# 命令反馈
+saved = 已保存 {name}；启用后才会运行
+armed = 已启用 {name}
+paused = 已暂停 {name}
+deleted = 已删除 {name}
+error_invalid = 工作流不完整或超出范围
+error_too_many = 最多允许 {maximum} 个工作流
+error_unknown = 该工作流已不存在
+error_unknown_account = 工作流的账户未注册
+error_unknown_instrument = 工作流的代码没有交易条款
+error_revision = 该工作流已更改；请重新复核
+error_completed = 该工作流已完成；如需再次运行请新建一个
+error_expired = 该工作流已过期
+error_not_ready = 工作流无法运行：{reasons}
+error_owner = 交易引擎无法应用该工作流：{detail}

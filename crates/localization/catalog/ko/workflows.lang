@@ -1,0 +1,170 @@
+# 트레이딩 워크플로: 워크플로 페이지, 보드와 인스펙터, 워크플로 명령의 결과 안내.
+
+# 페이지와 목록
+count[other] = 워크플로 {count}개
+new_button = 새 워크플로
+new_aria = 새 트레이딩 워크플로 만들기
+list_empty = 아직 워크플로가 없습니다.
+empty_title = 워크플로 만들기
+empty_body = 보드에서 트리거를 검사와 동작에 연결하세요. Aeris는 저장한 블록만 자체 검증된 가격과 시계에 따라 정확히 실행하며, 모든 주문은 수동 주문과 같은 위험 검사를 거칩니다.
+untitled = 제목 없는 워크플로
+state_paused = 일시 중지됨
+state_armed = 활성
+state_completed = 완료됨
+state_expired = 만료됨
+state_armed_waiting = 활성 · {reasons}
+status_new = 저장되지 않음
+status_changed = 저장되지 않은 변경 사항
+ready = 저장 준비됨
+fired_value = 이번 세션 {session}회 · 총 {total}회
+never_fired = 아직 실행되지 않음
+recent_firings = 최근 실행
+environment_practice = 모의
+environment_demo = 데모
+environment_live = 실계좌
+live_warning = 실계좌: 주문이 브로커로 전송됩니다
+symbol_unset = 종목 없음
+
+# 명령
+save = 저장
+arm = 활성화
+pause = 일시 중지
+arm_aria = {name} 활성화
+pause_aria = {name} 일시 중지
+arm_hint = 활성화하기 전에 변경 사항을 저장하세요
+delete = 삭제
+delete_confirm = 삭제 확인
+close_aria = 워크플로 닫기
+saved_note = 저장한 워크플로는 활성화할 때까지 일시 중지 상태로 유지됩니다. 변경한 워크플로를 저장하면 다시 일시 중지됩니다.
+
+# 보드
+add_block = 블록 추가
+palette_hint = 새 블록은 선택한 블록 뒤에 이어집니다.
+palette_checks = 검사
+palette_actions = 동작
+block_trigger = 트리거
+block_if_position = 포지션 조건
+block_if_time = 시간대 조건
+block_if_price = 가격 조건
+block_buy = 매수
+block_sell = 매도
+block_flatten = 포지션 청산
+block_cancel_orders = 주문 취소
+block_lock_account = 계좌 잠금
+port_yes = 예
+port_no = 아니요
+board_hint = 점에서 끌어 블록 연결 · 연결을 빈 곳에 놓아 삭제 · 보드를 끌어 이동 · {key}+스크롤로 확대/축소
+zoom_in_aria = 확대
+zoom_out_aria = 축소
+zoom_reset_aria = 보기 초기화
+too_many_blocks = 워크플로에는 블록을 최대 {maximum}개까지 넣을 수 있습니다
+link_loop = 이 연결을 사용하면 워크플로가 블록을 두 번 실행할 수 있습니다
+value_unset = 설정 안 됨
+
+# 인스펙터
+inspector_workflow = 워크플로
+field_name = 이름
+field_account = 계좌
+no_accounts = 아직 트레이딩 계좌가 없습니다. 계좌 패널에서 모의 계좌를 추가하세요.
+field_symbol = 종목
+symbol_hint = 차트에 열린 종목이 여기에 표시됩니다. 종목을 추가하려면 해당 종목의 차트를 여세요.
+field_repeat = 반복
+repeat_choice_once = 한 번
+repeat_choice_session = 세션마다
+field_session_maximum = 세션당 최대
+field_cooldown = 실행 간격 (초)
+field_trigger = 조건
+trigger_choice_above = 가격이 상승하여 도달
+trigger_choice_below = 가격이 하락하여 도달
+trigger_choice_time = 시각
+field_level = 가격
+field_time = 시각 (HH:MM)
+field_zone = 시간대
+trigger_price_hint = 워크플로를 활성화한 뒤 검증된 가격이 이 수준을 넘으면 실행됩니다.
+trigger_time_hint = 워크플로가 활성 상태인 동안 매일 이 시각에 실행됩니다.
+field_check = 검사
+field_position = 포지션
+choice_flat = 포지션 없음
+choice_long = 매수
+choice_short = 매도
+choice_open = 모든 보유 포지션
+field_start = 시작 (HH:MM)
+field_end = 종료 (HH:MM)
+field_direction = 가격
+choice_above = 위
+choice_below = 아래
+if_hint = 검사가 참이면 예가, 거짓이면 아니요가 실행됩니다. 연결되지 않은 출력에서는 실행이 그곳에서 끝납니다.
+field_action = 동작
+field_quantity = 수량
+field_stop_ticks = 스톱 (틱)
+field_target_ticks = 목표 (틱)
+protection_hint = 브래킷 없이 진입하려면 스톱과 목표를 비워 두세요.
+lock_hint = 계좌가 잠기면 이후에는 아무것도 실행되지 않습니다.
+remove_block = 블록 삭제
+
+# 워크플로 블록 읽기
+trigger_price_above = {symbol}이(가) {price}까지 상승
+trigger_price_below = {symbol}이(가) {price}까지 하락
+trigger_time = 매일 {zone} {time}
+zone_chicago = 시카고 시간
+zone_utc = UTC
+condition_flat = 포지션 없음
+condition_long = 매수 포지션
+condition_short = 매도 포지션
+condition_open = 보유 포지션 있음
+condition_between = 시각이 {zone} {start}–{end}
+condition_price_above = 가격이 {price}보다 높음
+condition_price_below = 가격이 {price}보다 낮음
+action_buy = 시장가로 {quantity} 매수
+action_sell = 시장가로 {quantity} 매도
+action_protection = {entry}, 스톱 {stop}틱, 목표 {target}틱
+action_flatten = 포지션 청산
+action_cancel_orders = 대기 주문 취소
+action_lock = 계좌 잠금
+
+# 실행 결과
+outcome_yes = 예
+outcome_no = 아니요
+outcome_placed = 주문 {id} 전송됨
+outcome_flattened = 포지션 청산됨
+outcome_cancelled = 주문 {orders}건 취소됨
+outcome_locked = 계좌 잠김
+outcome_refused = 거부됨: {detail}
+outcome_blocked = 전송되지 않음: {reasons}
+outcome_interrupted = 이 실행이 끝나기 전에 Aeris가 종료되었습니다. 다시 실행하지 않습니다
+blocker_account_missing = 계좌가 삭제되었습니다
+blocker_terms_missing = 종목의 거래 조건이 없습니다
+blocker_account_locked = 계좌가 잠겨 있습니다
+blocker_broker_unreachable = 브로커가 연결되지 않았습니다
+blocker_quote_unavailable = 검증된 호가를 기다리는 중입니다
+
+# 초안 문제
+problem_name = 80자 이하의 이름을 입력하세요
+problem_account = 계좌를 선택하세요
+problem_symbol = 거래 조건이 있는 종목을 선택하세요
+problem_level = 소수점 이하 {decimals}자리 이하의 양수 가격을 입력하세요
+problem_time = 시각을 HH:MM 형식(00:00~23:59)으로 입력하세요
+problem_window = 시간대를 서로 다른 두 시각(HH:MM)으로 입력하세요
+problem_no_start = 트리거를 첫 번째 블록에 연결하세요
+problem_unconnected = 모든 블록을 연결하거나 필요 없는 블록을 삭제하세요
+problem_no_action = 동작을 하나 이상 추가하세요
+problem_quantity = 이 시장에서 허용하는 양수 수량을 입력하세요
+problem_protection = 스톱과 목표를 모두 1~10000틱으로 입력하거나 둘 다 비워 두세요
+problem_session_maximum = 1~50 사이의 숫자를 입력하세요
+problem_cooldown = 0~86400 사이의 초를 입력하세요
+
+# 명령 결과
+saved = {name} 저장됨. 실행하려면 활성화하세요
+armed = {name} 활성화됨
+paused = {name} 일시 중지됨
+deleted = {name} 삭제됨
+error_invalid = 워크플로가 불완전하거나 범위를 벗어났습니다
+error_too_many = 워크플로는 최대 {maximum}개까지 허용됩니다
+error_unknown = 이 워크플로는 더 이상 존재하지 않습니다
+error_unknown_account = 워크플로의 계좌가 등록되어 있지 않습니다
+error_unknown_instrument = 워크플로의 종목에 거래 조건이 없습니다
+error_revision = 이 워크플로가 변경되었습니다. 다시 검토하세요
+error_completed = 이 워크플로는 완료되었습니다. 다시 실행하려면 새로 만드세요
+error_expired = 이 워크플로는 만료되었습니다
+error_not_ready = 워크플로를 실행할 수 없습니다: {reasons}
+error_owner = 트레이딩 엔진이 워크플로를 적용하지 못했습니다: {detail}

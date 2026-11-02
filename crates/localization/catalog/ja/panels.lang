@@ -88,6 +88,7 @@ context_in_minutes = {minutes}分後
 ## マーケットスクリーナー
 app_view_terminal = ターミナル
 app_view_screener = スクリーナー
+app_view_workflows = ワークフロー
 screener_kind_perp = 無期限
 screener_kind_spot = 現物
 screener_category_all = すべての市場

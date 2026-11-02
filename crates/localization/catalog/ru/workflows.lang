@@ -1,0 +1,173 @@
+# Торговые сценарии: страница «Сценарии», её поле и инспектор, а также ответы на команды
+# сценариев.
+
+# Страница и список
+count[one] = {count} сценарий
+count[few] = {count} сценария
+count[many] = {count} сценариев
+new_button = Новый сценарий
+new_aria = Создать новый торговый сценарий
+list_empty = Сценариев пока нет.
+empty_title = Создайте сценарий
+empty_body = Соедините на поле триггер с проверками и действиями. Aeris выполняет ровно те блоки, которые вы сохранили, по своим проверенным ценам и своим часам, и каждая заявка проходит те же проверки риска, что и ручная.
+untitled = Сценарий без названия
+state_paused = Приостановлен
+state_armed = Активен
+state_completed = Завершён
+state_expired = Истёк
+state_armed_waiting = Активен · {reasons}
+status_new = Не сохранён
+status_changed = Есть несохранённые изменения
+ready = Готов к сохранению
+fired_value = {session} за сессию · {total} всего
+never_fired = Ещё не срабатывал
+recent_firings = Последние срабатывания
+environment_practice = Практика
+environment_demo = Демо
+environment_live = Реальный
+live_warning = Реальный счёт: заявки уходят вашему брокеру
+symbol_unset = Нет символа
+
+# Команды
+save = Сохранить
+arm = Активировать
+pause = Приостановить
+arm_aria = Активировать {name}
+pause_aria = Приостановить {name}
+arm_hint = Сохраните изменения перед активацией
+delete = Удалить
+delete_confirm = Подтвердить удаление
+close_aria = Закрыть сценарий
+saved_note = Сохранённый сценарий остаётся приостановленным, пока вы его не активируете. Сохранение изменённого сценария снова приостанавливает его.
+
+# Поле
+add_block = Добавить блок
+palette_hint = Новый блок встаёт после выбранного.
+palette_checks = Проверки
+palette_actions = Действия
+block_trigger = Триггер
+block_if_position = Если позиция
+block_if_time = Если время
+block_if_price = Если цена
+block_buy = Купить
+block_sell = Продать
+block_flatten = Закрыть позицию
+block_cancel_orders = Отменить заявки
+block_lock_account = Заблокировать счёт
+port_yes = Да
+port_no = Нет
+board_hint = Перетащите от точки, чтобы связать блоки · отпустите связь на пустом месте, чтобы удалить её · перетаскивайте поле, чтобы сдвинуть его · {key}+прокрутка для масштаба
+zoom_in_aria = Увеличить
+zoom_out_aria = Уменьшить
+zoom_reset_aria = Сбросить вид
+too_many_blocks = Сценарий содержит не более {maximum} блоков
+link_loop = Эта связь позволила бы сценарию выполнить блок дважды
+value_unset = не задано
+
+# Инспектор
+inspector_workflow = Сценарий
+field_name = Название
+field_account = Счёт
+no_accounts = Торгового счёта пока нет. Добавьте практический счёт на панели «Счета».
+field_symbol = Символ
+symbol_hint = Здесь перечислены символы, открытые на графиках; откройте график символа, чтобы добавить его.
+field_repeat = Повтор
+repeat_choice_once = Один раз
+repeat_choice_session = Каждую сессию
+field_session_maximum = Не больше за сессию
+field_cooldown = Секунд между срабатываниями
+field_trigger = Когда
+trigger_choice_above = Цена поднимается до
+trigger_choice_below = Цена опускается до
+trigger_choice_time = Время дня
+field_level = Цена
+field_time = Время (HH:MM)
+field_zone = Часовой пояс
+trigger_price_hint = Срабатывает, когда проверенная цена пересекает этот уровень после активации сценария.
+trigger_time_hint = Срабатывает каждый день в это время, пока сценарий активен.
+field_check = Проверка
+field_position = Позиция
+choice_flat = Без позиции
+choice_long = Длинная
+choice_short = Короткая
+choice_open = Любая открытая позиция
+field_start = С (HH:MM)
+field_end = До (HH:MM)
+field_direction = Цена
+choice_above = Выше
+choice_below = Ниже
+if_hint = «Да» выполняется, когда проверка верна, «Нет» — когда нет. Несвязанный выход завершает выполнение в этом месте.
+field_action = Действие
+field_quantity = Количество
+field_stop_ticks = Стоп (тики)
+field_target_ticks = Цель (тики)
+protection_hint = Оставьте стоп и цель пустыми, чтобы войти без брекета.
+lock_hint = После блокировки счёта ничего не выполняется.
+remove_block = Удалить блок
+
+# Описание блоков сценария
+trigger_price_above = {symbol} поднимается до {price}
+trigger_price_below = {symbol} опускается до {price}
+trigger_time = Каждый день в {time} {zone}
+zone_chicago = по чикагскому времени
+zone_utc = UTC
+condition_flat = Позиции нет
+condition_long = Позиция длинная
+condition_short = Позиция короткая
+condition_open = Позиция открыта
+condition_between = Время {start}–{end} {zone}
+condition_price_above = Цена выше {price}
+condition_price_below = Цена ниже {price}
+action_buy = Купить {quantity} по рынку
+action_sell = Продать {quantity} по рынку
+action_protection = {entry}, стоп {stop} тик., цель {target} тик.
+action_flatten = Закрыть позицию
+action_cancel_orders = Отменить активные заявки
+action_lock = Заблокировать счёт
+
+# Результаты срабатывания
+outcome_yes = да
+outcome_no = нет
+outcome_placed = заявка {id} отправлена
+outcome_flattened = позиция закрыта
+outcome_cancelled = отменено заявок: {orders}
+outcome_locked = счёт заблокирован
+outcome_refused = отклонено: {detail}
+outcome_blocked = не отправлено: {reasons}
+outcome_interrupted = Aeris остановился до завершения этого срабатывания; оно не повторяется
+blocker_account_missing = счёт удалён
+blocker_terms_missing = нет торговых условий для символа
+blocker_account_locked = счёт заблокирован
+blocker_broker_unreachable = брокер не подключён
+blocker_quote_unavailable = ожидание проверенной котировки
+
+# Ошибки черновика
+problem_name = Введите название не длиннее 80 символов
+problem_account = Выберите счёт
+problem_symbol = Выберите символ с торговыми условиями
+problem_level = Введите положительную цену, не более {decimals} знаков после запятой
+problem_time = Введите время в формате HH:MM, от 00:00 до 23:59
+problem_window = Введите интервал как два разных времени, HH:MM
+problem_no_start = Свяжите триггер с первым блоком
+problem_unconnected = Свяжите все блоки или удалите ненужные
+problem_no_action = Добавьте хотя бы одно действие
+problem_quantity = Введите положительное количество, допустимое на этом рынке
+problem_protection = Введите стоп и цель от 1 до 10000 тиков или оставьте оба поля пустыми
+problem_session_maximum = Введите число от 1 до 50
+problem_cooldown = Введите число секунд от 0 до 86400
+
+# Ответы на команды
+saved = {name} сохранён; активируйте его, чтобы запустить
+armed = {name} активирован
+paused = {name} приостановлен
+deleted = {name} удалён
+error_invalid = Сценарий неполон или выходит за допустимые пределы
+error_too_many = Допускается не более {maximum} сценариев
+error_unknown = Этот сценарий больше не существует
+error_unknown_account = Счёт сценария не зарегистрирован
+error_unknown_instrument = У символа сценария нет торговых условий
+error_revision = Сценарий изменился; проверьте его снова
+error_completed = Сценарий завершён; создайте новый, чтобы запустить его снова
+error_expired = Срок действия сценария истёк
+error_not_ready = Сценарий не может работать: {reasons}
+error_owner = Торговый движок не смог применить сценарий: {detail}

@@ -55,7 +55,7 @@ impl RiskSessionBoundary {
                 if close_local <= local {
                     close_local += DAY_SECONDS;
                 }
-                chicago_close_unix_seconds(close_local) * NANOS_PER_SECOND
+                chicago_local_to_unix_seconds(close_local) * NANOS_PER_SECOND
             }
         }
     }
@@ -73,24 +73,26 @@ impl RiskSessionBoundary {
                 if close_local > local {
                     close_local -= DAY_SECONDS;
                 }
-                chicago_close_unix_seconds(close_local) * NANOS_PER_SECOND
+                chicago_local_to_unix_seconds(close_local) * NANOS_PER_SECOND
             }
         }
     }
 }
 
-/// Converts one Chicago local 17:00 timestamp to Unix seconds. The DST offset is recomputed
-/// at the candidate instant until it agrees with itself; the offset changes only at 02:00
-/// local, never between 17:00 local and its Unix projection, so this converges at once.
-fn chicago_close_unix_seconds(close_local_seconds: i64) -> i64 {
-    let mut utc = close_local_seconds - chicago_utc_offset_seconds(close_local_seconds);
-    loop {
-        let refined = close_local_seconds - chicago_utc_offset_seconds(utc);
+/// Converts one Chicago local timestamp to Unix seconds. The DST offset is recomputed at the
+/// candidate instant until it agrees with itself, which takes one step for every local time
+/// outside the hour a change skips or repeats. A skipped local time (02:30 on the spring
+/// change) has no exact instant; the bounded refinement keeps it within that hour.
+pub(crate) fn chicago_local_to_unix_seconds(local_seconds: i64) -> i64 {
+    let mut utc = local_seconds - chicago_utc_offset_seconds(local_seconds);
+    for _ in 0..2 {
+        let refined = local_seconds - chicago_utc_offset_seconds(utc);
         if refined == utc {
-            return utc;
+            break;
         }
         utc = refined;
     }
+    utc
 }
 
 /// One account's durable risk session: when it started and the all-time realized-P&L

@@ -4392,6 +4392,7 @@ mod tests {
                     ),
                     ("platform_menu.rs", "theme radio cards"),
                     ("watchlist_panel.rs", "selectable watchlist rows"),
+                    ("workflow_canvas.rs", "selectable workflow list rows"),
                 ],
             ),
             (

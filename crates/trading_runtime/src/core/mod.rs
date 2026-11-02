@@ -33,6 +33,8 @@ mod broker;
 mod broker_sync;
 #[path = "../venue/scales.rs"]
 mod scales;
+#[path = "../workflow/owner.rs"]
+mod workflow_owner;
 pub use broker_sync::{ReverseCancelCause, UnaccountedCause, VENUE_NOTICE_LIMIT, VenueNoticeKind};
 
 use self::ledger::{CostBasis, FillAccounting, TradeCycle};
@@ -63,6 +65,17 @@ pub use crate::strategy::{
     ProtectionView, TrailingStopRule,
 };
 use crate::venue::VenueInbox;
+pub use crate::workflow::{
+    MAXIMUM_WORKFLOW_COOLDOWN_SECONDS, MAXIMUM_WORKFLOW_ID_BYTES,
+    MAXIMUM_WORKFLOW_LAYOUT_COORDINATE, MAXIMUM_WORKFLOW_NAME_CHARS, MAXIMUM_WORKFLOW_NODES,
+    MAXIMUM_WORKFLOW_PROTECTION_TICKS, MAXIMUM_WORKFLOW_SESSION_FIRINGS, MAXIMUM_WORKFLOWS,
+    PositionRequirement, PriceDirection, WORKFLOW_FIRING_HISTORY, WorkflowAction,
+    WorkflowActionResult, WorkflowBlocker, WorkflowClockTime, WorkflowCondition,
+    WorkflowDefinition, WorkflowError, WorkflowFiring, WorkflowFiringOutcome, WorkflowInvalid,
+    WorkflowLayout, WorkflowLimits, WorkflowNode, WorkflowNodeId, WorkflowNodePosition,
+    WorkflowProtection, WorkflowRepeat, WorkflowState, WorkflowStep, WorkflowStepOutcome,
+    WorkflowStepResult, WorkflowTimeZone, WorkflowTrigger, WorkflowView,
+};
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
 use aeris_trading::venue::{BROKER_VENUE_ID, BracketSide, VenueCapabilities};
@@ -735,6 +748,9 @@ pub(crate) struct TradingCore {
     /// In-memory stamp bumped by quote-only mark changes; revision-changing steps subsume it.
     mark_revision: u64,
     publication: publication::PublicationState,
+    /// Accepted workflows by identity, at most [`MAXIMUM_WORKFLOWS`]. Outside `StoredState`
+    /// because quote planning clones that state and workflows never fire inside a plan.
+    workflows: BTreeMap<String, workflow_owner::WorkflowEntry>,
     #[cfg(test)]
     timer_calls: usize,
 }
@@ -1523,6 +1539,7 @@ impl TradingCore {
             next_subscriber_id: 0,
             mark_revision: 0,
             publication: publication::PublicationState::default(),
+            workflows: BTreeMap::new(),
             #[cfg(test)]
             timer_calls: 0,
         };
@@ -1553,6 +1570,8 @@ impl TradingCore {
         // Expire durable DAY deadlines before the service acknowledges startup
         // or accepts a quote. A failed transaction leaves recovery retryable.
         core.expire_due_day_orders().map_err(StoreError::Other)?;
+        core.load_workflow_entries()
+            .map_err(|error| StoreError::Other(error.to_string()))?;
         Ok(core)
     }
 
@@ -1762,6 +1781,7 @@ impl TradingCore {
             Command::PutUserRecord(record, reply) => {
                 respond(&reply, self.put_user_record(&record));
             }
+            Command::Workflow(command) => self.handle_workflow_command(command),
             #[cfg(any(test, feature = "test-support"))]
             Command::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
@@ -1825,9 +1845,19 @@ impl TradingCore {
                 }
             }
         }
+        self.evaluate_price_workflows();
         if let Err(error) = self.recompute_quote_interest() {
             self.market_observation_error = Some(error.to_string());
         }
+    }
+
+    /// The next wall-clock instant timer work is due: an order deadline, a workflow time
+    /// trigger or a workflow expiry.
+    pub(crate) fn next_wall_deadline_unix_nanos(&self) -> Option<i64> {
+        self.next_order_deadline_unix_nanos()
+            .into_iter()
+            .chain(self.next_workflow_deadline_unix_nanos())
+            .min()
     }
 
     /// Runs due timer work only at a due deadline, never on an idle command wake.
@@ -1864,6 +1894,7 @@ impl TradingCore {
                 .saturating_add(ledger::EQUITY_SAMPLE_INTERVAL_NANOS);
             self.run_equity_timer(self.command_now);
         }
+        self.run_workflow_timer();
         if let Err(error) = self.recompute_quote_interest() {
             self.market_observation_error = Some(error.to_string());
         }

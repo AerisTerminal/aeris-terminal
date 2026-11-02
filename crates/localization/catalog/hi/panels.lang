@@ -89,6 +89,7 @@ context_in_minutes = {minutes}m में
 ## Market screener
 app_view_terminal = टर्मिनल
 app_view_screener = स्क्रीनर
+app_view_workflows = वर्कफ़्लो
 screener_kind_perp = Perp
 screener_kind_spot = स्पॉट
 screener_category_all = सभी मार्केट

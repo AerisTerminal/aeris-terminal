@@ -91,6 +91,7 @@ context_in_minutes = через {minutes} мин
 ## Скринер рынка
 app_view_terminal = Терминал
 app_view_screener = Скринер
+app_view_workflows = Сценарии
 screener_kind_perp = Перп
 screener_kind_spot = Спот
 screener_category_all = Все рынки

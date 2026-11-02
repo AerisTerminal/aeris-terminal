@@ -778,6 +778,7 @@ impl TerminalApp {
             self.request_history_page(cx);
         }
         self.post_trading_announcements(&announcements, &snapshot, cx);
+        self.observe_workflow_publication(cx);
         for workspace in self.tabs.iter() {
             for pane in &workspace.panes {
                 let state = pane.surface.read(cx);

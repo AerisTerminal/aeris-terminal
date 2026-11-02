@@ -13,6 +13,7 @@ mod schema;
 mod trade_history;
 mod user_records;
 mod venue_sync;
+mod workflows;
 #[cfg(test)]
 use export::write_atomic;
 #[cfg(test)]
@@ -823,7 +824,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 30);
+        assert_eq!(SCHEMA_VERSION, 31);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

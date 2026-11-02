@@ -1,0 +1,170 @@
+# 取引ワークフロー：「ワークフロー」ページ、そのボードとインスペクター、ワークフロー操作の結果表示。
+
+# ページと一覧
+count[other] = {count} 件のワークフロー
+new_button = 新しいワークフロー
+new_aria = 新しい取引ワークフローを作成
+list_empty = ワークフローはまだありません。
+empty_title = ワークフローを作成
+empty_body = ボード上でトリガーをチェックとアクションにつなぎます。Aeris は保存したブロックだけを、自身の検証済み価格と時計に基づいて実行し、すべての注文は手動注文と同じリスクチェックを通ります。
+untitled = 無題のワークフロー
+state_paused = 一時停止中
+state_armed = 有効
+state_completed = 完了
+state_expired = 期限切れ
+state_armed_waiting = 有効 · {reasons}
+status_new = 未保存
+status_changed = 未保存の変更あり
+ready = 保存できます
+fired_value = このセッション {session} 回 · 合計 {total} 回
+never_fired = まだ実行されていません
+recent_firings = 最近の実行
+environment_practice = 練習
+environment_demo = デモ
+environment_live = ライブ
+live_warning = ライブ口座：注文はブローカーに送信されます
+symbol_unset = 銘柄なし
+
+# 操作
+save = 保存
+arm = 有効にする
+pause = 一時停止
+arm_aria = {name} を有効にする
+pause_aria = {name} を一時停止
+arm_hint = 有効にする前に変更を保存してください
+delete = 削除
+delete_confirm = 削除を確定
+close_aria = ワークフローを閉じる
+saved_note = 保存したワークフローは、有効にするまで一時停止のままです。変更したワークフローを保存すると、再び一時停止になります。
+
+# ボード
+add_block = ブロックを追加
+palette_hint = 新しいブロックは選択中のブロックの後に続きます。
+palette_checks = チェック
+palette_actions = アクション
+block_trigger = トリガー
+block_if_position = ポジション条件
+block_if_time = 時間帯条件
+block_if_price = 価格条件
+block_buy = 買い
+block_sell = 売り
+block_flatten = ポジションを決済
+block_cancel_orders = 注文を取り消す
+block_lock_account = 口座をロック
+port_yes = はい
+port_no = いいえ
+board_hint = 点からドラッグしてブロックをつなぐ · リンクを空いた場所にドロップして削除 · ボードをドラッグして移動 · {key}+スクロールでズーム
+zoom_in_aria = 拡大
+zoom_out_aria = 縮小
+zoom_reset_aria = 表示をリセット
+too_many_blocks = ワークフローに含められるブロックは最大 {maximum} 個です
+link_loop = このリンクでは、ワークフローが同じブロックを 2 回実行してしまいます
+value_unset = 未設定
+
+# インスペクター
+inspector_workflow = ワークフロー
+field_name = 名前
+field_account = 口座
+no_accounts = 取引口座がまだありません。口座パネルで練習口座を追加してください。
+field_symbol = 銘柄
+symbol_hint = チャートで開いている銘柄がここに表示されます。追加するには、その銘柄のチャートを開いてください。
+field_repeat = 繰り返し
+repeat_choice_once = 1 回
+repeat_choice_session = セッションごと
+field_session_maximum = セッションあたりの上限
+field_cooldown = 実行の間隔（秒）
+field_trigger = 条件
+trigger_choice_above = 価格が上昇して到達
+trigger_choice_below = 価格が下落して到達
+trigger_choice_time = 時刻
+field_level = 価格
+field_time = 時刻（HH:MM）
+field_zone = タイムゾーン
+trigger_price_hint = ワークフローを有効にした後、検証済み価格がこの水準をまたいだときに実行されます。
+trigger_time_hint = ワークフローが有効な間、毎日この時刻に実行されます。
+field_check = チェック
+field_position = ポジション
+choice_flat = ポジションなし
+choice_long = 買い
+choice_short = 売り
+choice_open = 任意の保有ポジション
+field_start = 開始（HH:MM）
+field_end = 終了（HH:MM）
+field_direction = 価格が
+choice_above = 上
+choice_below = 下
+if_hint = チェックが成り立つと「はい」、成り立たないと「いいえ」が実行されます。リンクのない出力では、そこで実行が終わります。
+field_action = アクション
+field_quantity = 数量
+field_stop_ticks = ストップ（ティック）
+field_target_ticks = ターゲット（ティック）
+protection_hint = ブラケットなしで建てるには、ストップとターゲットを空欄にしてください。
+lock_hint = 口座をロックした後は何も実行されません。
+remove_block = ブロックを削除
+
+# ワークフローのブロックの読み上げ
+trigger_price_above = {symbol} が {price} まで上昇
+trigger_price_below = {symbol} が {price} まで下落
+trigger_time = 毎日 {zone} {time}
+zone_chicago = シカゴ時間
+zone_utc = UTC
+condition_flat = ポジションなし
+condition_long = 買いポジション
+condition_short = 売りポジション
+condition_open = ポジションを保有中
+condition_between = 時刻が {zone} {start}–{end}
+condition_price_above = 価格が {price} より上
+condition_price_below = 価格が {price} より下
+action_buy = 成行で {quantity} を買う
+action_sell = 成行で {quantity} を売る
+action_protection = {entry}、ストップ {stop} ティック、ターゲット {target} ティック
+action_flatten = ポジションを決済する
+action_cancel_orders = 有効な注文を取り消す
+action_lock = 口座をロックする
+
+# 実行結果
+outcome_yes = はい
+outcome_no = いいえ
+outcome_placed = 注文 {id} を送信しました
+outcome_flattened = ポジションを決済しました
+outcome_cancelled = {orders} 件の注文を取り消しました
+outcome_locked = 口座をロックしました
+outcome_refused = 拒否されました：{detail}
+outcome_blocked = 送信されませんでした：{reasons}
+outcome_interrupted = この実行が終わる前に Aeris が停止しました。再実行はされません
+blocker_account_missing = 口座が削除されました
+blocker_terms_missing = この銘柄の取引条件がありません
+blocker_account_locked = 口座がロックされています
+blocker_broker_unreachable = ブローカーに接続されていません
+blocker_quote_unavailable = 検証済みの気配を待っています
+
+# 下書きの問題
+problem_name = 80 文字以内の名前を入力してください
+problem_account = 口座を選択してください
+problem_symbol = 取引条件のある銘柄を選択してください
+problem_level = 小数点以下 {decimals} 桁以内の正の価格を入力してください
+problem_time = 時刻を HH:MM 形式（00:00〜23:59）で入力してください
+problem_window = 時間帯を異なる 2 つの時刻（HH:MM）で入力してください
+problem_no_start = トリガーを最初のブロックにつないでください
+problem_unconnected = すべてのブロックをつなぐか、不要なブロックを削除してください
+problem_no_action = アクションを 1 つ以上追加してください
+problem_quantity = この市場で受け付けられる正の数量を入力してください
+problem_protection = ストップとターゲットを両方 1〜10000 ティックで入力するか、両方空欄にしてください
+problem_session_maximum = 1〜50 の数値を入力してください
+problem_cooldown = 0〜86400 の秒数を入力してください
+
+# 操作の結果
+saved = {name} を保存しました。実行するには有効にしてください
+armed = {name} を有効にしました
+paused = {name} を一時停止しました
+deleted = {name} を削除しました
+error_invalid = ワークフローが不完全か、範囲外の値があります
+error_too_many = ワークフローは最大 {maximum} 件までです
+error_unknown = このワークフローはもう存在しません
+error_unknown_account = ワークフローの口座が登録されていません
+error_unknown_instrument = ワークフローの銘柄に取引条件がありません
+error_revision = このワークフローは変更されました。もう一度確認してください
+error_completed = このワークフローは完了しています。再度実行するには新しく作成してください
+error_expired = このワークフローは期限切れです
+error_not_ready = ワークフローを実行できません：{reasons}
+error_owner = 取引エンジンがワークフローを適用できませんでした：{detail}

@@ -371,7 +371,7 @@ violations and missing verification explicitly, and never describe them as satis
   second container or a direct writer, `.bak` or `read_to_string` path in the workspace
   file's owner and any container or file writer in `chart_chrome.rs`.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V30 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V31 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
@@ -417,6 +417,19 @@ violations and missing verification explicitly, and never describe them as satis
   keyset pages; migrated exits without recorded P&L are identified by a
   reduction of the position's prior signed quantity and keep unknown P&L.
   Old P&L tables and per-fill columns remain unread until their deferred removal migration.
+  V31 adds `workflows` and `workflow_firings`: user-accepted trading workflows (at most 64,
+  each a trigger and an acyclic graph of at most 32 If and action blocks from a closed set,
+  with required limits) owned by `trading_runtime::workflow`. Each row also keeps the board
+  layout (block positions) apart from the definition: a layout change keeps the revision, state
+  and firings. Every accepted revision starts paused; only the owner evaluates an armed
+  workflow, against its own verified quotes and injected clock, takes the branch each If
+  answers, and sends its actions through the same admission, risk and venue paths as a manual
+  command. The desktop Workflows page (a header page beside Terminal and Screener) edits a draft
+  board and sends only the definition and layout the user saved. A firing is committed
+  before its first action runs, so a stop in between leaves it `Interrupted` and a restart never
+  repeats it. Armed price workflows join the owner's quote interest, and every workflow's
+  instrument is in the working set's registered terms. No model or remote service evaluates
+  or fires a workflow.
   Store-open preflight scratch cleanup may remove only exact preflight directories containing
   solely the expected database copy and SQLite sidecars, and exact readiness directories
   containing solely that copy, its migration backups and its preflight scratch; preserve
@@ -447,7 +460,7 @@ violations and missing verification explicitly, and never describe them as satis
   500 fills per historical cycle prefix, and carry the registered terms of the instruments
   they reference. Exact average entry and exit prices are presented at the instrument's
   price-grid precision (`PriceGrid::display_decimals`); an unknown grid shows the exact value. The working set projects registered terms only for
-  open orders, open positions, its fills window and ticket interests; its newest event and fill windows each
+  open orders, open positions, its fills window, ticket interests and workflows; its newest event and fill windows each
   have a 500-row limit, and round trips use at most 500 fills plus open positions. Every
   closed round trip carries its durable exit fill ID, distinct even for partial exits of
   one cycle; an open round trip has no exit fill ID. Active
@@ -494,7 +507,9 @@ the check.
 - Live market probes run only from `tools/aeris_probes` on an isolated validation root with an
   exclusive instance lock. The optional `probe` feature's bounded Hyperliquid fault control
   interrupts only its WebSocket; never use a process-wide proxy that blocks catalog HTTP.
-  `paper_trading_probe` exercises the practice trading lifecycle on the public Hyperliquid feed.
+  `paper_trading_probe` exercises the practice trading lifecycle on the public Hyperliquid feed,
+  and `workflow_probe` drives saved workflows through the owner on that feed (a live price cross,
+  a time-of-day close and a trading restart that fires nothing again).
 - Live market gate evidence (`aeris_platform_runtime::LiveMarketGateRecorder`) compiles only under
   `cfg(test)` or the `aeris_platform_runtime/live-gates` feature. Only dev-dependencies, the Rithmic
   adapter's `live-gates` feature (required by `rithmic_test_smoke`) and the desktop `diagnostics`

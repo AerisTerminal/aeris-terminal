@@ -1,0 +1,172 @@
+# Trading workflows: the Workflows page, its board and inspector, and the feedback of
+# workflow commands.
+
+# Page and list
+count[one] = {count} workflow
+count[other] = {count} workflows
+new_button = New workflow
+new_aria = Build a new trading workflow
+list_empty = No workflows yet.
+empty_title = Build a workflow
+empty_body = Wire a trigger to checks and actions on a board. Aeris runs exactly the blocks you save, on its own verified prices and clock, and every order passes the same risk checks as a manual order.
+untitled = Untitled workflow
+state_paused = Paused
+state_armed = Armed
+state_completed = Completed
+state_expired = Expired
+state_armed_waiting = Armed · {reasons}
+status_new = Not saved
+status_changed = Unsaved changes
+ready = Ready to save
+fired_value = {session} this session · {total} total
+never_fired = Not fired yet
+recent_firings = Recent firings
+environment_practice = Practice
+environment_demo = Demo
+environment_live = Live
+live_warning = Live account: orders go to your broker
+symbol_unset = No symbol
+
+# Commands
+save = Save
+arm = Arm
+pause = Pause
+arm_aria = Arm {name}
+pause_aria = Pause {name}
+arm_hint = Save your changes before arming
+delete = Delete
+delete_confirm = Confirm delete
+close_aria = Close the workflow
+saved_note = A saved workflow stays paused until you arm it. Saving a changed workflow pauses it again.
+
+# Board
+add_block = Add a block
+palette_hint = A new block follows the selected one.
+palette_checks = Checks
+palette_actions = Actions
+block_trigger = Trigger
+block_if_position = If position
+block_if_time = If time window
+block_if_price = If price
+block_buy = Buy
+block_sell = Sell
+block_flatten = Close position
+block_cancel_orders = Cancel orders
+block_lock_account = Lock account
+port_yes = Yes
+port_no = No
+board_hint = Drag from a dot to link blocks · drop a link on empty space to remove it · drag the board to pan · {key}+scroll to zoom
+zoom_in_aria = Zoom in
+zoom_out_aria = Zoom out
+zoom_reset_aria = Reset the view
+too_many_blocks = A workflow holds at most {maximum} blocks
+link_loop = That link would let the workflow run a block twice
+value_unset = not set
+
+# Inspector
+inspector_workflow = Workflow
+field_name = Name
+field_account = Account
+no_accounts = No trading account yet. Add a practice account in the Accounts panel.
+field_symbol = Symbol
+symbol_hint = Symbols open in a chart are listed here; open a chart of a symbol to add it.
+field_repeat = Repeat
+repeat_choice_once = Once
+repeat_choice_session = Each session
+field_session_maximum = Most per session
+field_cooldown = Seconds between firings
+field_trigger = When
+trigger_choice_above = Price rises to
+trigger_choice_below = Price falls to
+trigger_choice_time = Time of day
+field_level = Price
+field_time = Time (HH:MM)
+field_zone = Time zone
+trigger_price_hint = Fires when the verified price crosses this level after the workflow is armed.
+trigger_time_hint = Fires every day at this time while the workflow is armed.
+field_check = Check
+field_position = Position
+choice_flat = Flat
+choice_long = Long
+choice_short = Short
+choice_open = Any open position
+field_start = From (HH:MM)
+field_end = To (HH:MM)
+field_direction = Price is
+choice_above = Above
+choice_below = Below
+if_hint = Yes runs when the check holds and No when it does not. An output left unlinked ends the run there.
+field_action = Action
+field_quantity = Quantity
+field_stop_ticks = Stop (ticks)
+field_target_ticks = Target (ticks)
+protection_hint = Leave stop and target empty to enter without a bracket.
+lock_hint = Nothing runs after the account is locked.
+remove_block = Remove block
+
+# Readback of a workflow's blocks
+trigger_price_above = {symbol} rises to {price}
+trigger_price_below = {symbol} falls to {price}
+trigger_time = Every day at {time} {zone}
+zone_chicago = Chicago time
+zone_utc = UTC
+condition_flat = Position is flat
+condition_long = Position is long
+condition_short = Position is short
+condition_open = A position is open
+condition_between = Time is {start}–{end} {zone}
+condition_price_above = Price is above {price}
+condition_price_below = Price is below {price}
+action_buy = Buy {quantity} at market
+action_sell = Sell {quantity} at market
+action_protection = {entry}, {stop}-tick stop, {target}-tick target
+action_flatten = Close the position
+action_cancel_orders = Cancel the working orders
+action_lock = Lock the account
+
+# Firing outcomes
+outcome_yes = yes
+outcome_no = no
+outcome_placed = order {id} sent
+outcome_flattened = position closed
+outcome_cancelled = {orders} orders cancelled
+outcome_locked = account locked
+outcome_refused = refused: {detail}
+outcome_blocked = not sent: {reasons}
+outcome_interrupted = Aeris stopped before this firing finished; it is not repeated
+blocker_account_missing = the account was removed
+blocker_terms_missing = no trading terms for the symbol
+blocker_account_locked = the account is locked
+blocker_broker_unreachable = the broker is not connected
+blocker_quote_unavailable = waiting for a verified quote
+
+# Draft problems
+problem_name = Enter a name of at most 80 characters
+problem_account = Choose an account
+problem_symbol = Choose a symbol with trading terms
+problem_level = Enter a positive price with at most {decimals} decimals
+problem_time = Enter the time as HH:MM, from 00:00 to 23:59
+problem_window = Enter the window as two different times, HH:MM
+problem_no_start = Link the trigger to the first block
+problem_unconnected = Link every block, or remove the ones you do not need
+problem_no_action = Add at least one action
+problem_quantity = Enter a positive quantity this market accepts
+problem_protection = Enter both stop and target from 1 to 10000 ticks, or leave both empty
+problem_session_maximum = Enter a number from 1 to 50
+problem_cooldown = Enter a number of seconds from 0 to 86400
+
+# Command feedback
+saved = Saved {name}; arm it to run it
+armed = Armed {name}
+paused = Paused {name}
+deleted = Deleted {name}
+error_invalid = The workflow is incomplete or out of range
+error_too_many = At most {maximum} workflows are allowed
+error_unknown = This workflow no longer exists
+error_unknown_account = The workflow's account is not registered
+error_unknown_instrument = The workflow's symbol has no trading terms
+error_revision = This workflow changed; review it again
+error_completed = This workflow has completed; build a new one to run it again
+error_expired = This workflow has expired
+error_not_ready = The workflow cannot run: {reasons}
+error_owner = The trading engine could not apply the workflow: {detail}

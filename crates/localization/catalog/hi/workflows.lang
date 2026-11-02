@@ -1,0 +1,171 @@
+# ट्रेडिंग वर्कफ़्लो: वर्कफ़्लो पेज, उसका बोर्ड और इंस्पेक्टर, और वर्कफ़्लो कमांड के जवाब।
+
+# पेज और सूची
+count[one] = {count} वर्कफ़्लो
+count[other] = {count} वर्कफ़्लो
+new_button = नया वर्कफ़्लो
+new_aria = नया ट्रेडिंग वर्कफ़्लो बनाएँ
+list_empty = अभी कोई वर्कफ़्लो नहीं है।
+empty_title = वर्कफ़्लो बनाएँ
+empty_body = बोर्ड पर ट्रिगर को जाँचों और कार्रवाइयों से जोड़ें। Aeris ठीक वही ब्लॉक चलाता है जो आप सहेजते हैं, अपनी सत्यापित कीमतों और अपनी घड़ी पर, और हर ऑर्डर उन्हीं जोखिम जाँचों से गुज़रता है जिनसे मैन्युअल ऑर्डर।
+untitled = बिना नाम का वर्कफ़्लो
+state_paused = रुका हुआ
+state_armed = सक्रिय
+state_completed = पूरा हुआ
+state_expired = समाप्त
+state_armed_waiting = सक्रिय · {reasons}
+status_new = सहेजा नहीं गया
+status_changed = बिना सहेजे बदलाव
+ready = सहेजने के लिए तैयार
+fired_value = इस सत्र में {session} · कुल {total}
+never_fired = अभी तक नहीं चला
+recent_firings = हाल में चले
+environment_practice = प्रैक्टिस
+environment_demo = डेमो
+environment_live = लाइव
+live_warning = लाइव खाता: ऑर्डर आपके ब्रोकर को जाते हैं
+symbol_unset = कोई सिंबल नहीं
+
+# कमांड
+save = सहेजें
+arm = सक्रिय करें
+pause = रोकें
+arm_aria = {name} सक्रिय करें
+pause_aria = {name} रोकें
+arm_hint = सक्रिय करने से पहले अपने बदलाव सहेजें
+delete = हटाएँ
+delete_confirm = हटाने की पुष्टि करें
+close_aria = वर्कफ़्लो बंद करें
+saved_note = सहेजा गया वर्कफ़्लो तब तक रुका रहता है जब तक आप उसे सक्रिय न करें। बदले गए वर्कफ़्लो को सहेजने पर वह फिर से रुक जाता है।
+
+# बोर्ड
+add_block = ब्लॉक जोड़ें
+palette_hint = नया ब्लॉक चुने गए ब्लॉक के बाद आता है।
+palette_checks = जाँचें
+palette_actions = कार्रवाइयाँ
+block_trigger = ट्रिगर
+block_if_position = अगर पोज़िशन
+block_if_time = अगर समय सीमा
+block_if_price = अगर कीमत
+block_buy = खरीदें
+block_sell = बेचें
+block_flatten = पोज़िशन बंद करें
+block_cancel_orders = ऑर्डर रद्द करें
+block_lock_account = खाता लॉक करें
+port_yes = हाँ
+port_no = नहीं
+board_hint = ब्लॉक जोड़ने के लिए किसी बिंदु से खींचें · लिंक हटाने के लिए उसे खाली जगह पर छोड़ें · बोर्ड खिसकाने के लिए उसे खींचें · ज़ूम के लिए {key}+स्क्रॉल
+zoom_in_aria = ज़ूम इन
+zoom_out_aria = ज़ूम आउट
+zoom_reset_aria = व्यू रीसेट करें
+too_many_blocks = एक वर्कफ़्लो में अधिकतम {maximum} ब्लॉक हो सकते हैं
+link_loop = इस लिंक से वर्कफ़्लो एक ब्लॉक को दो बार चला सकता है
+value_unset = सेट नहीं
+
+# इंस्पेक्टर
+inspector_workflow = वर्कफ़्लो
+field_name = नाम
+field_account = खाता
+no_accounts = अभी कोई ट्रेडिंग खाता नहीं है। अकाउंट पैनल में एक प्रैक्टिस खाता जोड़ें।
+field_symbol = सिंबल
+symbol_hint = चार्ट में खुले सिंबल यहाँ दिखते हैं; किसी सिंबल को जोड़ने के लिए उसका चार्ट खोलें।
+field_repeat = दोहराएँ
+repeat_choice_once = एक बार
+repeat_choice_session = हर सत्र
+field_session_maximum = हर सत्र में अधिकतम
+field_cooldown = दो बार चलने के बीच सेकंड
+field_trigger = जब
+trigger_choice_above = कीमत बढ़कर पहुँचे
+trigger_choice_below = कीमत गिरकर पहुँचे
+trigger_choice_time = दिन का समय
+field_level = कीमत
+field_time = समय (HH:MM)
+field_zone = समय क्षेत्र
+trigger_price_hint = वर्कफ़्लो सक्रिय होने के बाद सत्यापित कीमत इस स्तर को पार करे तब चलता है।
+trigger_time_hint = वर्कफ़्लो सक्रिय रहने तक हर दिन इस समय चलता है।
+field_check = जाँच
+field_position = पोज़िशन
+choice_flat = कोई पोज़िशन नहीं
+choice_long = लॉन्ग
+choice_short = शॉर्ट
+choice_open = कोई भी खुली पोज़िशन
+field_start = से (HH:MM)
+field_end = तक (HH:MM)
+field_direction = कीमत है
+choice_above = ऊपर
+choice_below = नीचे
+if_hint = जाँच सही होने पर हाँ चलता है और न होने पर नहीं। बिना लिंक वाला आउटपुट वहीं चलना खत्म कर देता है।
+field_action = कार्रवाई
+field_quantity = मात्रा
+field_stop_ticks = स्टॉप (टिक)
+field_target_ticks = टारगेट (टिक)
+protection_hint = ब्रैकेट के बिना एंट्री के लिए स्टॉप और टारगेट खाली छोड़ें।
+lock_hint = खाता लॉक होने के बाद कुछ नहीं चलता।
+remove_block = ब्लॉक हटाएँ
+
+# वर्कफ़्लो के ब्लॉक का विवरण
+trigger_price_above = {symbol} बढ़कर {price} पर पहुँचे
+trigger_price_below = {symbol} गिरकर {price} पर पहुँचे
+trigger_time = हर दिन {time} {zone}
+zone_chicago = शिकागो समय
+zone_utc = UTC
+condition_flat = कोई पोज़िशन नहीं है
+condition_long = पोज़िशन लॉन्ग है
+condition_short = पोज़िशन शॉर्ट है
+condition_open = एक पोज़िशन खुली है
+condition_between = समय {start}–{end} {zone} है
+condition_price_above = कीमत {price} से ऊपर है
+condition_price_below = कीमत {price} से नीचे है
+action_buy = मार्केट पर {quantity} खरीदें
+action_sell = मार्केट पर {quantity} बेचें
+action_protection = {entry}, {stop} टिक स्टॉप, {target} टिक टारगेट
+action_flatten = पोज़िशन बंद करें
+action_cancel_orders = चालू ऑर्डर रद्द करें
+action_lock = खाता लॉक करें
+
+# चलने के नतीजे
+outcome_yes = हाँ
+outcome_no = नहीं
+outcome_placed = ऑर्डर {id} भेजा गया
+outcome_flattened = पोज़िशन बंद हुई
+outcome_cancelled = {orders} ऑर्डर रद्द हुए
+outcome_locked = खाता लॉक हुआ
+outcome_refused = अस्वीकार: {detail}
+outcome_blocked = नहीं भेजा गया: {reasons}
+outcome_interrupted = यह चलना पूरा होने से पहले Aeris बंद हो गया; इसे दोहराया नहीं जाता
+blocker_account_missing = खाता हटा दिया गया
+blocker_terms_missing = सिंबल के लिए ट्रेडिंग शर्तें नहीं हैं
+blocker_account_locked = खाता लॉक है
+blocker_broker_unreachable = ब्रोकर कनेक्ट नहीं है
+blocker_quote_unavailable = सत्यापित कोट का इंतज़ार है
+
+# ड्राफ़्ट की समस्याएँ
+problem_name = अधिकतम 80 अक्षरों का नाम दर्ज करें
+problem_account = एक खाता चुनें
+problem_symbol = ट्रेडिंग शर्तों वाला सिंबल चुनें
+problem_level = अधिकतम {decimals} दशमलव स्थानों वाली धनात्मक कीमत दर्ज करें
+problem_time = समय HH:MM के रूप में दर्ज करें, 00:00 से 23:59 तक
+problem_window = समय सीमा दो अलग-अलग समय के रूप में दर्ज करें, HH:MM
+problem_no_start = ट्रिगर को पहले ब्लॉक से जोड़ें
+problem_unconnected = हर ब्लॉक जोड़ें, या जिनकी ज़रूरत नहीं उन्हें हटाएँ
+problem_no_action = कम से कम एक कार्रवाई जोड़ें
+problem_quantity = ऐसी धनात्मक मात्रा दर्ज करें जिसे यह मार्केट स्वीकार करे
+problem_protection = स्टॉप और टारगेट दोनों 1 से 10000 टिक के बीच दर्ज करें, या दोनों खाली छोड़ें
+problem_session_maximum = 1 से 50 तक की संख्या दर्ज करें
+problem_cooldown = 0 से 86400 तक सेकंड की संख्या दर्ज करें
+
+# कमांड के जवाब
+saved = {name} सहेजा गया; चलाने के लिए इसे सक्रिय करें
+armed = {name} सक्रिय किया गया
+paused = {name} रोका गया
+deleted = {name} हटाया गया
+error_invalid = वर्कफ़्लो अधूरा है या सीमा से बाहर है
+error_too_many = अधिकतम {maximum} वर्कफ़्लो की अनुमति है
+error_unknown = यह वर्कफ़्लो अब मौजूद नहीं है
+error_unknown_account = वर्कफ़्लो का खाता पंजीकृत नहीं है
+error_unknown_instrument = वर्कफ़्लो के सिंबल की कोई ट्रेडिंग शर्तें नहीं हैं
+error_revision = यह वर्कफ़्लो बदल गया है; इसकी फिर से समीक्षा करें
+error_completed = यह वर्कफ़्लो पूरा हो चुका है; फिर से चलाने के लिए नया बनाएँ
+error_expired = यह वर्कफ़्लो समाप्त हो चुका है
+error_not_ready = वर्कफ़्लो नहीं चल सकता: {reasons}
+error_owner = ट्रेडिंग इंजन वर्कफ़्लो लागू नहीं कर सका: {detail}

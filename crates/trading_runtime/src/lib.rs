@@ -11,6 +11,7 @@ mod service;
 mod store;
 mod strategy;
 pub mod venue;
+mod workflow;
 
 #[cfg(test)]
 pub(crate) use aeris_instruments::{ContractMetadata, InstrumentId};

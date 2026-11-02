@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 30;
+pub const SCHEMA_VERSION: u32 = 31;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -392,6 +392,29 @@ pub(super) const MIGRATION_V29: &str = "
 pub(super) const MIGRATION_V30: &str = "
  CREATE INDEX fills_account_trade_history
      ON fills(account_id, execution_unix_nanos DESC, id DESC);";
+/// User-accepted trading workflows and the newest firings of each.
+pub(super) const MIGRATION_V31: &str = "
+ CREATE TABLE workflows (
+     workflow_id TEXT PRIMARY KEY,
+     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+     revision INTEGER NOT NULL CHECK (revision > 0),
+     state TEXT NOT NULL,
+     definition_json TEXT NOT NULL,
+     layout_json TEXT NOT NULL,
+     session_start_unix_nanos INTEGER NOT NULL,
+     session_firings INTEGER NOT NULL CHECK (session_firings >= 0),
+     total_firings INTEGER NOT NULL CHECK (total_firings >= 0),
+     last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+     last_attempt_unix_nanos INTEGER
+ ) STRICT;
+ CREATE TABLE workflow_firings (
+     workflow_id TEXT NOT NULL REFERENCES workflows(workflow_id) ON DELETE CASCADE,
+     sequence INTEGER NOT NULL CHECK (sequence > 0),
+     revision INTEGER NOT NULL CHECK (revision > 0),
+     fired_unix_nanos INTEGER NOT NULL,
+     outcome_json TEXT NOT NULL,
+     PRIMARY KEY (workflow_id, sequence)
+ ) STRICT;";
 
 pub(super) const MIGRATION_V26: &str = "
  CREATE TABLE position_checkpoints (
@@ -572,6 +595,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 29,
         to: 30,
         sql: MIGRATION_V30,
+    },
+    Migration {
+        from: 30,
+        to: 31,
+        sql: MIGRATION_V31,
     },
 ];
 

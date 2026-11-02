@@ -33,7 +33,8 @@ use aeris_release_packager::{
     write_channel_pointer,
 };
 use aeris_trading_runtime::{
-    ExecutionPolicy, TradingRetention, TradingService, TradingServiceConfig, clock::SystemClock,
+    ExecutionPolicy, SCHEMA_VERSION, TradingRetention, TradingService, TradingServiceConfig,
+    clock::SystemClock,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use directory_source::{DirectorySource, Request};
@@ -44,7 +45,7 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The event log the fixture writes beside the install root.
 const EVENTS_FILE: &str = "fixture-events.log";
 /// The trading store schema of every fixture release except the one that migrates past it.
-const STORE_SCHEMA: u32 = 30;
+const STORE_SCHEMA: u32 = SCHEMA_VERSION;
 /// The launcher's probation bound for a new release's desktop to finish starting.
 const STARTUP_COMPLETE_TIMEOUT: Duration = Duration::from_secs(60);
 

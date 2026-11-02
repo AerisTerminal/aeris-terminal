@@ -1,0 +1,557 @@
+use super::*;
+use crate::clock::Clock;
+
+fn account() -> TradingAccountId {
+    TradingAccountId::try_new("aeris-sim-1").expect("account")
+}
+
+fn price(units: i64) -> FixedPoint {
+    FixedPoint::try_new(units, 2).expect("price")
+}
+
+fn one() -> FixedPoint {
+    FixedPoint::try_new(1, 0).expect("quantity")
+}
+
+const IF_NODE: WorkflowNodeId = WorkflowNodeId(1);
+const THEN_NODE: WorkflowNodeId = WorkflowNodeId(2);
+const ELSE_NODE: WorkflowNodeId = WorkflowNodeId(3);
+
+fn bracketed_buy() -> WorkflowAction {
+    WorkflowAction::Enter {
+        side: OrderSide::Buy,
+        quantity: one(),
+        protection: Some(WorkflowProtection {
+            stop_ticks: 8,
+            target_ticks: 16,
+        }),
+    }
+}
+
+fn action_node(id: WorkflowNodeId, action: WorkflowAction) -> WorkflowNode {
+    WorkflowNode {
+        id,
+        step: WorkflowStep::Action { action, next: None },
+    }
+}
+
+/// When the price crosses above `level`: if flat, buy one with a bracket.
+fn breakout(workflow_id: &str, level: i64) -> WorkflowDefinition {
+    WorkflowDefinition {
+        workflow_id: workflow_id.into(),
+        revision: 1,
+        name: "Breakout long".into(),
+        account_id: account(),
+        instrument_id: instrument().instrument_id,
+        trigger: WorkflowTrigger::PriceCrosses {
+            direction: PriceDirection::Above,
+            level: price(level),
+        },
+        start: IF_NODE,
+        nodes: vec![
+            WorkflowNode {
+                id: IF_NODE,
+                step: WorkflowStep::If {
+                    condition: WorkflowCondition::Position(PositionRequirement::Flat),
+                    then: Some(THEN_NODE),
+                    otherwise: None,
+                },
+            },
+            action_node(THEN_NODE, bracketed_buy()),
+        ],
+        limits: WorkflowLimits {
+            repeat: WorkflowRepeat::Once,
+            cooldown_seconds: 0,
+            expires_unix_nanos: None,
+        },
+    }
+}
+
+/// The same trigger running a single action.
+fn single(workflow_id: &str, level: i64, action: WorkflowAction) -> WorkflowDefinition {
+    WorkflowDefinition {
+        start: THEN_NODE,
+        nodes: vec![action_node(THEN_NODE, action)],
+        ..breakout(workflow_id, level)
+    }
+}
+
+fn register(service: &TradingService, definition: WorkflowDefinition) -> WorkflowView {
+    service
+        .register_workflow(definition, WorkflowLayout::default())
+        .expect("accepted")
+}
+
+fn working_set(service: &TradingService) -> WorkingSet {
+    service.request(Command::WorkingSet).expect("working set")
+}
+
+fn workflow(service: &TradingService, workflow_id: &str) -> WorkflowView {
+    working_set(service)
+        .workflows
+        .into_iter()
+        .find(|view| view.definition.workflow_id == workflow_id)
+        .expect("workflow is published")
+}
+
+fn executed(view: &WorkflowView) -> Vec<WorkflowStepResult> {
+    match &view.recent_firings[0].outcome {
+        WorkflowFiringOutcome::Executed(steps) => steps.clone(),
+        outcome => panic!("executed: {outcome:?}"),
+    }
+}
+
+fn resting_limit(client_id: &str, time: i64) -> PlaceOrder {
+    PlaceOrder {
+        order_type: OrderType::Limit,
+        time_in_force: TimeInForce::GoodTillCancelled,
+        limit_price: Some(price(9_000)),
+        ..market_order(client_id, OrderSide::Buy, 1, time)
+    }
+}
+
+#[test]
+fn a_price_cross_fires_once_and_enters_with_protection() {
+    let directory = TestDirectory::new("workflow-cross");
+    let instrument = instrument();
+    let (service, _clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let registered = register(&service, breakout("es-breakout", 10_050));
+    assert_eq!(registered.state, WorkflowState::Paused);
+    let armed = service
+        .arm_workflow("es-breakout".into(), 1)
+        .expect("armed");
+    assert_eq!(armed.state, WorkflowState::Armed);
+    assert!(armed.blockers.is_empty(), "{:?}", armed.blockers);
+
+    // The first quote after arming only records the side of the level.
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument, 2, 10_000, 10_025),
+        []
+    );
+    assert_eq!(workflow(&service, "es-breakout").recent_firings, []);
+    deliver_quote(&service, &feed, &instrument, 3, 10_050, 10_075);
+    // A bracket entry waits for the quote after its acceptance, as a manual one does.
+    let fills = deliver_quote(&service, &feed, &instrument, 4, 10_050, 10_075);
+    assert_eq!(fills.len(), 1, "the entry fills at the ask");
+    assert_eq!(fills[0].price, price(10_075));
+
+    let view = workflow(&service, "es-breakout");
+    assert_eq!(view.state, WorkflowState::Completed);
+    assert_eq!(view.total_firings, 1);
+    assert_eq!(view.recent_firings.len(), 1);
+    let steps = executed(&view);
+    let [
+        WorkflowStepResult {
+            node: IF_NODE,
+            outcome: WorkflowStepOutcome::Branch(true),
+        },
+        WorkflowStepResult {
+            node: THEN_NODE,
+            outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Placed { client_order_id }),
+        },
+    ] = steps.as_slice()
+    else {
+        panic!("if flat, then placed: {steps:?}");
+    };
+    let set = working_set(&service);
+    assert!(
+        set.managed_brackets
+            .iter()
+            .any(|bracket| &bracket.entry_client_order_id == client_order_id),
+        "the entry carries its stop and target"
+    );
+    assert_eq!(set.positions.len(), 1);
+
+    // A completed workflow never fires again.
+    deliver_quote(&service, &feed, &instrument, 5, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 6, 10_050, 10_075);
+    assert_eq!(workflow(&service, "es-breakout").recent_firings.len(), 1);
+    assert_eq!(
+        service.arm_workflow("es-breakout".into(), 1),
+        Err(WorkflowError::Completed)
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn the_false_branch_runs_its_own_actions() {
+    let directory = TestDirectory::new("workflow-else");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    service
+        .place_order(resting_limit("resting-buy", clock.wall_unix_nanos()), false)
+        .expect("resting order");
+    // If long, flatten; otherwise cancel the working orders.
+    let mut definition = breakout("long-or-cancel", 10_050);
+    definition.nodes = vec![
+        WorkflowNode {
+            id: IF_NODE,
+            step: WorkflowStep::If {
+                condition: WorkflowCondition::Position(PositionRequirement::Long),
+                then: Some(THEN_NODE),
+                otherwise: Some(ELSE_NODE),
+            },
+        },
+        action_node(THEN_NODE, WorkflowAction::Flatten),
+        action_node(ELSE_NODE, WorkflowAction::CancelOrders),
+    ];
+    register(&service, definition);
+    service
+        .arm_workflow("long-or-cancel".into(), 1)
+        .expect("armed");
+    deliver_quote(&service, &feed, &instrument, 2, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 3, 10_050, 10_075);
+
+    assert_eq!(
+        executed(&workflow(&service, "long-or-cancel")),
+        vec![
+            WorkflowStepResult {
+                node: IF_NODE,
+                outcome: WorkflowStepOutcome::Branch(false),
+            },
+            WorkflowStepResult {
+                node: ELSE_NODE,
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Cancelled { orders: 1 }),
+            },
+        ]
+    );
+    assert_eq!(working_set(&service).orders, []);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn a_branch_without_an_action_is_not_a_firing() {
+    let directory = TestDirectory::new("workflow-empty-branch");
+    let instrument = instrument();
+    let (service, _clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    // Only while the bid is at or above 101.00, which it is not at the first cross.
+    let mut definition = breakout("dip-only", 10_050);
+    definition.nodes[0].step = WorkflowStep::If {
+        condition: WorkflowCondition::Price {
+            direction: PriceDirection::Above,
+            level: price(10_100),
+        },
+        then: Some(THEN_NODE),
+        otherwise: None,
+    };
+    register(&service, definition);
+    service.arm_workflow("dip-only".into(), 1).expect("armed");
+    deliver_quote(&service, &feed, &instrument, 2, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 3, 10_050, 10_075);
+    let view = workflow(&service, "dip-only");
+    assert_eq!(view.recent_firings, []);
+    assert_eq!(view.state, WorkflowState::Armed, "a once workflow waits on");
+    assert_eq!(view.last_attempt_unix_nanos, None);
+
+    // The bid then crosses above the condition's level too.
+    deliver_quote(&service, &feed, &instrument, 4, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 5, 10_100, 10_125);
+    let view = workflow(&service, "dip-only");
+    assert_eq!(view.state, WorkflowState::Completed);
+    assert!(matches!(
+        executed(&view).as_slice(),
+        [
+            WorkflowStepResult {
+                outcome: WorkflowStepOutcome::Branch(true),
+                ..
+            },
+            WorkflowStepResult {
+                outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Placed { .. }),
+                ..
+            },
+        ]
+    ));
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn a_time_trigger_cancels_working_orders_and_reschedules() {
+    let directory = TestDirectory::new("workflow-time");
+    let instrument = instrument();
+    let (service, clock, _feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    service
+        .place_order(resting_limit("resting-buy", clock.wall_unix_nanos()), false)
+        .expect("resting order");
+    // The fixture clock is 00:16:40 UTC; the trigger is due at 00:17.
+    let due = 17 * 60 * 1_000_000_000;
+    let mut definition = single("cancel-at-1700", 10_050, WorkflowAction::CancelOrders);
+    definition.trigger = WorkflowTrigger::TimeOfDay(WorkflowClockTime {
+        zone: WorkflowTimeZone::Utc,
+        minute_of_day: 17,
+    });
+    definition.limits.repeat = WorkflowRepeat::PerSession { maximum: 3 };
+    register(&service, definition);
+    let armed = service
+        .arm_workflow("cancel-at-1700".into(), 1)
+        .expect("armed");
+    assert_eq!(armed.next_due_unix_nanos, Some(due));
+
+    clock.advance(Duration::from_secs(25));
+    service.status().expect("owner runs the due timer");
+    let view = workflow(&service, "cancel-at-1700");
+    assert_eq!(view.state, WorkflowState::Armed);
+    assert_eq!(
+        executed(&view),
+        vec![WorkflowStepResult {
+            node: THEN_NODE,
+            outcome: WorkflowStepOutcome::Action(WorkflowActionResult::Cancelled { orders: 1 }),
+        }]
+    );
+    assert_eq!(view.next_due_unix_nanos, Some(due + 86_400_000_000_000));
+    assert_eq!(working_set(&service).orders, []);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn a_locked_account_blocks_the_firing_and_the_session_cap_holds() {
+    let directory = TestDirectory::new("workflow-limits");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let mut definition = breakout("capped", 10_050);
+    definition.limits.repeat = WorkflowRepeat::PerSession { maximum: 1 };
+    register(&service, definition);
+    service.arm_workflow("capped".into(), 1).expect("armed");
+    service
+        .lock_account(account(), "manual".into(), clock.wall_unix_nanos())
+        .expect("locked");
+    assert_eq!(
+        workflow(&service, "capped").blockers,
+        vec![WorkflowBlocker::AccountLocked]
+    );
+
+    deliver_quote(&service, &feed, &instrument, 2, 10_000, 10_025);
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument, 3, 10_050, 10_075),
+        []
+    );
+    let view = workflow(&service, "capped");
+    assert_eq!(
+        view.recent_firings[0].outcome,
+        WorkflowFiringOutcome::Blocked(vec![WorkflowBlocker::AccountLocked])
+    );
+    assert_eq!(
+        view.session_firings, 0,
+        "a blocked firing spends no session firing"
+    );
+    assert_eq!(working_set(&service).orders, []);
+
+    service.unlock_account(account()).expect("unlocked");
+    deliver_quote(&service, &feed, &instrument, 4, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 5, 10_050, 10_075);
+    assert_eq!(
+        deliver_quote(&service, &feed, &instrument, 6, 10_050, 10_075).len(),
+        1
+    );
+    service
+        .flatten(FlattenScope::default())
+        .expect("flat again");
+    deliver_quote(&service, &feed, &instrument, 7, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 8, 10_050, 10_075);
+    assert!(
+        working_set(&service).positions.is_empty(),
+        "the session cap of one is spent"
+    );
+    let view = workflow(&service, "capped");
+    assert_eq!(view.session_firings, 1);
+    assert_eq!(view.recent_firings.len(), 2);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn revisions_are_fenced_and_every_new_revision_starts_paused() {
+    let directory = TestDirectory::new("workflow-revisions");
+    let instrument = instrument();
+    let (service, _clock, _feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    register(&service, breakout("revisioned", 10_050));
+    service.arm_workflow("revisioned".into(), 1).expect("armed");
+    assert_eq!(
+        service.register_workflow(breakout("revisioned", 10_100), WorkflowLayout::default()),
+        Err(WorkflowError::RevisionMustAdvance { current: 1 })
+    );
+    let mut next = breakout("revisioned", 10_100);
+    next.revision = 2;
+    assert_eq!(register(&service, next).state, WorkflowState::Paused);
+    assert_eq!(
+        service.arm_workflow("revisioned".into(), 1),
+        Err(WorkflowError::StaleRevision { current: 2 })
+    );
+    let mut stranger = breakout("stranger", 10_050);
+    stranger.account_id = TradingAccountId::try_new("aeris-sim-9").expect("account");
+    assert_eq!(
+        service.register_workflow(stranger, WorkflowLayout::default()),
+        Err(WorkflowError::UnknownAccount)
+    );
+    let mut off_scale = breakout("off-scale", 10_050);
+    off_scale.nodes[0].step = WorkflowStep::If {
+        condition: WorkflowCondition::Price {
+            direction: PriceDirection::Above,
+            level: FixedPoint::try_new(100_500, 3).expect("level"),
+        },
+        then: Some(THEN_NODE),
+        otherwise: None,
+    };
+    assert_eq!(
+        service.register_workflow(off_scale, WorkflowLayout::default()),
+        Err(WorkflowError::Invalid(WorkflowInvalid::Level))
+    );
+    let mut cyclic = breakout("cyclic", 10_050);
+    cyclic.nodes[1].step = WorkflowStep::Action {
+        action: WorkflowAction::Flatten,
+        next: Some(IF_NODE),
+    };
+    assert_eq!(
+        service.register_workflow(cyclic, WorkflowLayout::default()),
+        Err(WorkflowError::Invalid(WorkflowInvalid::Cycle))
+    );
+    service
+        .delete_workflow("revisioned".into())
+        .expect("deleted");
+    assert_eq!(working_set(&service).workflows, []);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn moving_nodes_keeps_the_revision_and_survives_a_restart() {
+    let directory = TestDirectory::new("workflow-layout");
+    let instrument = instrument();
+    let (service, clock, _feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let at = |node, x, y| WorkflowNodePosition { node, x, y };
+    let placed = service
+        .register_workflow(
+            breakout("laid-out", 10_050),
+            WorkflowLayout {
+                positions: vec![at(WorkflowNodeId::TRIGGER, 0, 0)],
+            },
+        )
+        .expect("accepted");
+    service.arm_workflow("laid-out".into(), 1).expect("armed");
+    let moved = WorkflowLayout {
+        positions: vec![
+            at(WorkflowNodeId::TRIGGER, -40, 20),
+            at(IF_NODE, 260, 20),
+            at(THEN_NODE, 520, -60),
+        ],
+    };
+    let view = service
+        .set_workflow_layout("laid-out".into(), 1, moved.clone())
+        .expect("moved");
+    assert_eq!(view.layout, moved);
+    assert_eq!(view.definition, placed.definition);
+    assert_eq!(view.state, WorkflowState::Armed, "moving never pauses");
+    assert_eq!(
+        service.set_workflow_layout(
+            "laid-out".into(),
+            1,
+            WorkflowLayout {
+                positions: vec![at(ELSE_NODE, 0, 0)],
+            },
+        ),
+        Err(WorkflowError::Invalid(WorkflowInvalid::Layout))
+    );
+    assert_eq!(
+        service.set_workflow_layout("laid-out".into(), 2, moved.clone()),
+        Err(WorkflowError::StaleRevision { current: 1 })
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+
+    let (restarted, _feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument, market_feed::route());
+    let after = workflow(&restarted, "laid-out");
+    assert_eq!(after.layout, moved);
+    assert_eq!(after.definition.revision, 1);
+    assert_eq!(after.state, WorkflowState::Armed);
+    restarted
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn workflows_and_their_firings_survive_a_restart() {
+    let directory = TestDirectory::new("workflow-restart");
+    let instrument = instrument();
+    let (service, clock, feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let mut definition = single("durable", 10_050, WorkflowAction::CancelOrders);
+    definition.limits.repeat = WorkflowRepeat::PerSession { maximum: 5 };
+    register(&service, definition);
+    service.arm_workflow("durable".into(), 1).expect("armed");
+    deliver_quote(&service, &feed, &instrument, 2, 10_000, 10_025);
+    deliver_quote(&service, &feed, &instrument, 3, 10_050, 10_075);
+    let before = workflow(&service, "durable");
+    assert_eq!(before.recent_firings.len(), 1);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+
+    let (restarted, feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument, market_feed::route());
+    let after = workflow(&restarted, "durable");
+    assert_eq!(after.state, WorkflowState::Armed);
+    assert_eq!(after.recent_firings, before.recent_firings);
+    assert_eq!(after.session_firings, 1);
+    // The first quote after the restart only records the side, even past the level.
+    deliver_quote(&restarted, &feed, &instrument, 4, 10_050, 10_075);
+    assert_eq!(workflow(&restarted, "durable").recent_firings.len(), 1);
+    restarted
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}
+
+#[test]
+fn deleting_a_practice_account_removes_its_workflows() {
+    let directory = TestDirectory::new("workflow-account-delete");
+    let instrument = instrument();
+    let (service, clock, _feed) =
+        quoted_fixture(&directory, &instrument, market_feed::route(), 9_975, 10_000);
+    let practice = service
+        .create_practice_account(CreatePracticeAccount {
+            display_name: "Workflow".into(),
+            starting_equity: FixedPoint::try_new(1_000_000, 2).expect("equity"),
+        })
+        .expect("practice account");
+    let mut definition = breakout("practice-breakout", 10_050);
+    definition.account_id = practice.id.clone();
+    register(&service, definition);
+    register(&service, breakout("kept", 10_050));
+    service
+        .delete_practice_account(practice.id)
+        .expect("account deleted");
+    let ids = |service: &TradingService| {
+        working_set(service)
+            .workflows
+            .into_iter()
+            .map(|view| view.definition.workflow_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&service), vec!["kept".to_string()]);
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+    let (restarted, _feed) =
+        reopen_awaiting_quote(&directory, &clock, &instrument, market_feed::route());
+    assert_eq!(ids(&restarted), vec!["kept".to_string()]);
+    restarted
+        .shutdown_after_owner_exit_for_test()
+        .expect("shutdown");
+}

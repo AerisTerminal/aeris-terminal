@@ -92,6 +92,9 @@ mod volume_dialog;
 mod window_state;
 use window_state::{ActivityChange, WindowState};
 mod watchlist_panel;
+mod workflow_board;
+mod workflow_canvas;
+mod workflows_page;
 mod workspace_layout;
 
 use aeris_application::ReplayStreamUpdate;

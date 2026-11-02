@@ -1,0 +1,172 @@
+# Fluxos de trading: a página Fluxos, seu quadro e seu inspetor, e os retornos dos comandos
+# de fluxo.
+
+# Página e lista
+count[one] = {count} fluxo
+count[other] = {count} fluxos
+new_button = Novo fluxo
+new_aria = Criar um novo fluxo de trading
+list_empty = Nenhum fluxo ainda.
+empty_title = Crie um fluxo
+empty_body = Conecte um gatilho a verificações e ações em um quadro. A Aeris executa exatamente os blocos que você salva, com seus próprios preços verificados e seu próprio relógio, e cada ordem passa pelas mesmas verificações de risco de uma ordem manual.
+untitled = Fluxo sem nome
+state_paused = Pausado
+state_armed = Armado
+state_completed = Concluído
+state_expired = Expirado
+state_armed_waiting = Armado · {reasons}
+status_new = Não salvo
+status_changed = Alterações não salvas
+ready = Pronto para salvar
+fired_value = {session} nesta sessão · {total} no total
+never_fired = Ainda não disparou
+recent_firings = Disparos recentes
+environment_practice = Simulado
+environment_demo = Demo
+environment_live = Real
+live_warning = Conta real: as ordens vão para a sua corretora
+symbol_unset = Nenhum símbolo
+
+# Comandos
+save = Salvar
+arm = Armar
+pause = Pausar
+arm_aria = Armar {name}
+pause_aria = Pausar {name}
+arm_hint = Salve suas alterações antes de armar
+delete = Excluir
+delete_confirm = Confirmar exclusão
+close_aria = Fechar o fluxo
+saved_note = Um fluxo salvo fica pausado até você armá-lo. Salvar um fluxo alterado o pausa novamente.
+
+# Quadro
+add_block = Adicionar um bloco
+palette_hint = Um novo bloco vem depois do selecionado.
+palette_checks = Verificações
+palette_actions = Ações
+block_trigger = Gatilho
+block_if_position = Se posição
+block_if_time = Se janela de horário
+block_if_price = Se preço
+block_buy = Comprar
+block_sell = Vender
+block_flatten = Encerrar posição
+block_cancel_orders = Cancelar ordens
+block_lock_account = Bloquear conta
+port_yes = Sim
+port_no = Não
+board_hint = Arraste de um ponto para ligar blocos · solte uma ligação em um espaço vazio para removê-la · arraste o quadro para movê-lo · {key}+rolagem para dar zoom
+zoom_in_aria = Aumentar zoom
+zoom_out_aria = Diminuir zoom
+zoom_reset_aria = Redefinir a visualização
+too_many_blocks = Um fluxo comporta no máximo {maximum} blocos
+link_loop = Essa ligação faria o fluxo executar um bloco duas vezes
+value_unset = não definido
+
+# Inspetor
+inspector_workflow = Fluxo
+field_name = Nome
+field_account = Conta
+no_accounts = Ainda não há conta de trading. Adicione uma conta simulada no painel Contas.
+field_symbol = Símbolo
+symbol_hint = Os símbolos abertos em um gráfico aparecem aqui; abra um gráfico de um símbolo para adicioná-lo.
+field_repeat = Repetir
+repeat_choice_once = Uma vez
+repeat_choice_session = A cada sessão
+field_session_maximum = Máximo por sessão
+field_cooldown = Segundos entre disparos
+field_trigger = Quando
+trigger_choice_above = O preço sobe para
+trigger_choice_below = O preço cai para
+trigger_choice_time = Horário do dia
+field_level = Preço
+field_time = Horário (HH:MM)
+field_zone = Fuso horário
+trigger_price_hint = Dispara quando o preço verificado cruza este nível depois que o fluxo é armado.
+trigger_time_hint = Dispara todo dia neste horário enquanto o fluxo estiver armado.
+field_check = Verificação
+field_position = Posição
+choice_flat = Sem posição
+choice_long = Comprada
+choice_short = Vendida
+choice_open = Qualquer posição aberta
+field_start = De (HH:MM)
+field_end = Até (HH:MM)
+field_direction = O preço está
+choice_above = Acima
+choice_below = Abaixo
+if_hint = Sim é executado quando a verificação é atendida e Não quando não é. Uma saída sem ligação encerra a execução ali.
+field_action = Ação
+field_quantity = Quantidade
+field_stop_ticks = Stop (ticks)
+field_target_ticks = Alvo (ticks)
+protection_hint = Deixe stop e alvo vazios para entrar sem bracket.
+lock_hint = Nada é executado depois que a conta é bloqueada.
+remove_block = Remover bloco
+
+# Leitura dos blocos de um fluxo
+trigger_price_above = {symbol} sobe para {price}
+trigger_price_below = {symbol} cai para {price}
+trigger_time = Todo dia às {time} {zone}
+zone_chicago = horário de Chicago
+zone_utc = UTC
+condition_flat = Sem posição
+condition_long = A posição está comprada
+condition_short = A posição está vendida
+condition_open = Há uma posição aberta
+condition_between = O horário está entre {start}–{end} {zone}
+condition_price_above = O preço está acima de {price}
+condition_price_below = O preço está abaixo de {price}
+action_buy = Comprar {quantity} a mercado
+action_sell = Vender {quantity} a mercado
+action_protection = {entry}, stop de {stop} ticks, alvo de {target} ticks
+action_flatten = Encerrar a posição
+action_cancel_orders = Cancelar as ordens ativas
+action_lock = Bloquear a conta
+
+# Resultados de um disparo
+outcome_yes = sim
+outcome_no = não
+outcome_placed = ordem {id} enviada
+outcome_flattened = posição encerrada
+outcome_cancelled = {orders} ordens canceladas
+outcome_locked = conta bloqueada
+outcome_refused = recusado: {detail}
+outcome_blocked = não enviado: {reasons}
+outcome_interrupted = A Aeris parou antes de concluir este disparo; ele não é repetido
+blocker_account_missing = a conta foi removida
+blocker_terms_missing = não há condições de negociação para o símbolo
+blocker_account_locked = a conta está bloqueada
+blocker_broker_unreachable = a corretora não está conectada
+blocker_quote_unavailable = aguardando uma cotação verificada
+
+# Problemas do rascunho
+problem_name = Digite um nome com no máximo 80 caracteres
+problem_account = Escolha uma conta
+problem_symbol = Escolha um símbolo com condições de negociação
+problem_level = Digite um preço positivo com no máximo {decimals} casas decimais
+problem_time = Digite o horário como HH:MM, de 00:00 a 23:59
+problem_window = Digite a janela como dois horários diferentes, HH:MM
+problem_no_start = Ligue o gatilho ao primeiro bloco
+problem_unconnected = Ligue todos os blocos ou remova os que você não precisa
+problem_no_action = Adicione pelo menos uma ação
+problem_quantity = Digite uma quantidade positiva aceita por este mercado
+problem_protection = Digite stop e alvo de 1 a 10000 ticks, ou deixe ambos vazios
+problem_session_maximum = Digite um número de 1 a 50
+problem_cooldown = Digite um número de segundos de 0 a 86400
+
+# Retornos dos comandos
+saved = {name} salvo; arme-o para executá-lo
+armed = {name} armado
+paused = {name} pausado
+deleted = {name} excluído
+error_invalid = O fluxo está incompleto ou fora do intervalo
+error_too_many = São permitidos no máximo {maximum} fluxos
+error_unknown = Este fluxo não existe mais
+error_unknown_account = A conta do fluxo não está registrada
+error_unknown_instrument = O símbolo do fluxo não tem condições de negociação
+error_revision = Este fluxo mudou; revise-o novamente
+error_completed = Este fluxo foi concluído; crie um novo para executá-lo de novo
+error_expired = Este fluxo expirou
+error_not_ready = O fluxo não pode ser executado: {reasons}
+error_owner = O motor de trading não conseguiu aplicar o fluxo: {detail}

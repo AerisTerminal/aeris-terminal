@@ -606,6 +606,9 @@ impl Render for TerminalApp {
             market_screener::AppView::Screener => {
                 self.rendered_screener_page(&terminal, window, cx)
             }
+            market_screener::AppView::Workflows => {
+                self.rendered_workflows_page(&terminal, window, cx)
+            }
         };
         let execution_glow = self
             .notices
@@ -684,6 +687,36 @@ impl TerminalApp {
             .child(market_screener_view::market_screener_page(
                 terminal,
                 &self.pages.screener,
+                &self.theme,
+            ))
+            .children(fullscreen_hint_layer(
+                self.window.fullscreen_hint(),
+                &self.theme,
+            ))
+            .children(frameless_reveal_zone)
+            .children(self.platform_menu_overlay(terminal, window.viewport_size(), cx))
+            .children(self.app_navigation_overlay(terminal, window.viewport_size()))
+            .children(self.keyboard_shortcuts_layer(terminal))
+            .children(self.rendered_command_palette(terminal, cx))
+            .children(self.trading_confirmation_layer(terminal))
+            .children(self.layouts_dialog_layer(terminal, cx))
+    }
+
+    /// The Workflows page under the title bar. Only shell-level overlays apply on this page.
+    fn rendered_workflows_page(&self, terminal: &Entity<Self>, window: &Window, cx: &App) -> Div {
+        let placement = title_bar_placement(
+            window.is_fullscreen(),
+            self.chrome.preferences().window_frame,
+        );
+        let (title_bar, frameless_reveal_zone) =
+            self.rendered_title_bars(terminal, window, placement, Instant::now(), cx);
+        let store = self.services.trading_store().read(cx);
+        self.page_root()
+            .children(title_bar)
+            .child(workflow_canvas::workflows_page(
+                terminal,
+                &self.pages.workflows,
+                store.current(),
                 &self.theme,
             ))
             .children(fullscreen_hint_layer(

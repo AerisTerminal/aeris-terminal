@@ -15,6 +15,7 @@ const APP_NAVIGATION_ICON_SIZE: f32 = 16.0;
 pub(super) struct AppPages {
     pub(super) view: AppView,
     pub(super) screener: MarketScreener,
+    pub(super) workflows: workflows_page::WorkflowsPage,
     pub(super) bottom_panel: bottom_panel::BottomPanelState,
     pub(super) layouts: layouts_view::LayoutsUi,
 }
@@ -166,6 +167,10 @@ impl TerminalApp {
                 self.close_drawing_tool_menu(cx);
                 self.activate_market_screener(window, cx);
                 cx.notify();
+            }
+            AppView::Workflows => {
+                self.show_workflows_page(cx);
+                self.window.chrome_focus().focus(window, cx);
             }
             AppView::Terminal => {
                 self.show_terminal_view(cx);

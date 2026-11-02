@@ -20,7 +20,7 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
         let equity_due = now >= next_equity;
         let wall_now = core.clock.wall_unix_nanos();
         let order_due = core
-            .next_order_deadline_unix_nanos()
+            .next_wall_deadline_unix_nanos()
             .is_some_and(|deadline| wall_now >= deadline);
         if retention_due || equity_due || order_due {
             core.on_timer(core.clock.wall_unix_nanos());
@@ -39,7 +39,7 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
         }
         let wait = deadline.saturating_sub(core.clock.monotonic());
         let wait = core
-            .next_order_deadline_unix_nanos()
+            .next_wall_deadline_unix_nanos()
             .map_or(wait, |deadline| {
                 let until_deadline = deadline.saturating_sub(core.clock.wall_unix_nanos());
                 // A failed SQLite commit leaves the deadline due. Retry on a bounded
@@ -61,11 +61,11 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
         let Some(command) = command else {
             break;
         };
-        // A command can wake the receiver exactly as an order deadline becomes
+        // A command can wake the receiver exactly as a deadline becomes
         // due. Expire first so a snapshot or a late quote cannot observe/fill it.
         let command_now = core.clock.wall_unix_nanos();
         if core
-            .next_order_deadline_unix_nanos()
+            .next_wall_deadline_unix_nanos()
             .is_some_and(|deadline| command_now >= deadline)
         {
             core.on_timer(command_now);

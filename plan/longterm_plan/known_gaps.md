@@ -10,7 +10,7 @@ an entry in the commit that closes it.
   - update and rollback on an installed app
   - macOS signing and notarization
   - code-signing certificate and key custody
-  - Rithmic live qualification and conformance approval before production order routing
+  - qualification of the T2 features on live Rithmic accounts (conformance is complete)
 - **Lifecycle installer findings (M8.6 sandbox run):** fixed in `aeris_setup.iss` and checked on
   the maintainer's machine with staging generations 1 and 2. The launcher's `--install` used to
   fail after Inno had finished (an `ssPostInstall` exception is only displayed), so a silent install

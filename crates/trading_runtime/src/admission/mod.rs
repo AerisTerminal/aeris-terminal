@@ -658,6 +658,7 @@ impl TradingCore {
             &dispatch.target_account_id != account_id
                 && !account_client_order_ids.contains(&dispatch.source_client_order_id)
         });
+        self.purge_account_workflows(account_id);
     }
 
     pub(super) fn register_instrument(

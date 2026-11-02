@@ -207,7 +207,7 @@ offers 40% off a yearly plan instead. Settle it before launching a founder offer
    - Tokens stored in the operating system's keychain.
    - Signed releases and updates.
    - Order confirmations, size limits, a kill switch and rate limits.
-   - A statement that the AI never places orders.
+   - A statement that the AI never decides a trade: only workflows the user reviewed and accepted place orders, through the same risk checks as manual orders.
    - A named security contact.
 5. **White-label demo:** one installer branded with the target firm's logo, sent with the first email.
 6. **Proof points:** Rithmic conformance once passed, user counts and zero incidents.

@@ -88,6 +88,7 @@ context_in_minutes = {minutes}분 후
 ## 시장 스크리너
 app_view_terminal = 터미널
 app_view_screener = 스크리너
+app_view_workflows = 워크플로
 screener_kind_perp = 무기한
 screener_kind_spot = 현물
 screener_category_all = 모든 시장

@@ -725,6 +725,7 @@ mod tests {
                     market_observation_error: None,
                     recovery_notices: vec![],
                     venue_notices: vec![],
+                    workflows: vec![],
                 }),
             },
         }

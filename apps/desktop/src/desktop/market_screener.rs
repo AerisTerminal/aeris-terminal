@@ -27,15 +27,17 @@ pub(super) enum AppView {
     #[default]
     Terminal,
     Screener,
+    Workflows,
 }
 
 impl AppView {
-    pub(super) const ALL: [Self; 2] = [Self::Terminal, Self::Screener];
+    pub(super) const ALL: [Self; 3] = [Self::Terminal, Self::Screener, Self::Workflows];
 
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Terminal => tr!(panels::APP_VIEW_TERMINAL),
             Self::Screener => tr!(panels::APP_VIEW_SCREENER),
+            Self::Workflows => tr!(panels::APP_VIEW_WORKFLOWS),
         }
     }
 
@@ -43,6 +45,7 @@ impl AppView {
         match self {
             Self::Terminal => HugeIcon::Chart,
             Self::Screener => HugeIcon::DataPanel,
+            Self::Workflows => HugeIcon::Template,
         }
     }
 }

@@ -11,7 +11,7 @@ use super::{
     PlaceInlineBracket, PlaceOco, PlaceOrder, PlaceProtection, PlacementOutcome, PlannedLeg, Reply,
     RevisionedCancelOrder, RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan,
     TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus,
-    UserRecord,
+    UserRecord, WorkflowDefinition, WorkflowError, WorkflowLayout, WorkflowView,
 };
 #[cfg(test)]
 use crate::SimulatedMarketObservation;
@@ -82,6 +82,7 @@ pub(crate) enum Command {
     SetTicketInterest(Vec<MarketRoute>, Reply<()>),
     DrainMarketFeed,
     PutUserRecord(UserRecord, Reply<()>),
+    Workflow(WorkflowCommand),
     #[cfg(any(test, feature = "test-support"))]
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
@@ -95,4 +96,21 @@ pub(crate) enum Command {
     #[cfg(test)]
     OwnerDiagnostics(Reply<(String, usize)>),
     Shutdown(Reply<()>),
+}
+
+/// A workflow command; its own error rides inside the owner reply.
+pub(crate) enum WorkflowCommand {
+    Register(
+        Box<(WorkflowDefinition, WorkflowLayout)>,
+        Reply<Result<WorkflowView, WorkflowError>>,
+    ),
+    SetLayout(
+        String,
+        u32,
+        WorkflowLayout,
+        Reply<Result<WorkflowView, WorkflowError>>,
+    ),
+    Arm(String, u32, Reply<Result<WorkflowView, WorkflowError>>),
+    Pause(String, u32, Reply<Result<WorkflowView, WorkflowError>>),
+    Delete(String, Reply<Result<(), WorkflowError>>),
 }

@@ -88,6 +88,7 @@ context_in_minutes = {minutes} 分钟后
 ## 市场筛选器
 app_view_terminal = 终端
 app_view_screener = 筛选器
+app_view_workflows = 工作流
 screener_kind_perp = 永续
 screener_kind_spot = 现货
 screener_category_all = 所有市场

@@ -1,0 +1,172 @@
+# Workflows de trading : la page Workflows, son tableau et son inspecteur, et les retours des
+# commandes de workflow.
+
+# Page et liste
+count[one] = {count} workflow
+count[other] = {count} workflows
+new_button = Nouveau workflow
+new_aria = Créer un nouveau workflow de trading
+list_empty = Aucun workflow pour l'instant.
+empty_title = Créer un workflow
+empty_body = Reliez un déclencheur à des vérifications et à des actions sur un tableau. Aeris exécute exactement les blocs que vous enregistrez, avec ses propres prix vérifiés et sa propre horloge, et chaque ordre passe les mêmes contrôles de risque qu'un ordre manuel.
+untitled = Workflow sans titre
+state_paused = En pause
+state_armed = Armé
+state_completed = Terminé
+state_expired = Expiré
+state_armed_waiting = Armé · {reasons}
+status_new = Non enregistré
+status_changed = Modifications non enregistrées
+ready = Prêt à enregistrer
+fired_value = {session} cette session · {total} au total
+never_fired = Pas encore déclenché
+recent_firings = Déclenchements récents
+environment_practice = Entraînement
+environment_demo = Démo
+environment_live = Réel
+live_warning = Compte réel : les ordres partent chez votre courtier
+symbol_unset = Aucun symbole
+
+# Commandes
+save = Enregistrer
+arm = Armer
+pause = Mettre en pause
+arm_aria = Armer {name}
+pause_aria = Mettre {name} en pause
+arm_hint = Enregistrez vos modifications avant d'armer
+delete = Supprimer
+delete_confirm = Confirmer la suppression
+close_aria = Fermer le workflow
+saved_note = Un workflow enregistré reste en pause jusqu'à ce que vous l'armiez. Enregistrer un workflow modifié le remet en pause.
+
+# Tableau
+add_block = Ajouter un bloc
+palette_hint = Un nouveau bloc suit le bloc sélectionné.
+palette_checks = Vérifications
+palette_actions = Actions
+block_trigger = Déclencheur
+block_if_position = Si position
+block_if_time = Si plage horaire
+block_if_price = Si prix
+block_buy = Acheter
+block_sell = Vendre
+block_flatten = Clôturer la position
+block_cancel_orders = Annuler les ordres
+block_lock_account = Verrouiller le compte
+port_yes = Oui
+port_no = Non
+board_hint = Faites glisser depuis un point pour relier des blocs · déposez un lien dans le vide pour le supprimer · faites glisser le tableau pour le déplacer · {key}+molette pour zoomer
+zoom_in_aria = Zoom avant
+zoom_out_aria = Zoom arrière
+zoom_reset_aria = Réinitialiser la vue
+too_many_blocks = Un workflow contient au plus {maximum} blocs
+link_loop = Ce lien permettrait au workflow d'exécuter un bloc deux fois
+value_unset = non défini
+
+# Inspecteur
+inspector_workflow = Workflow
+field_name = Nom
+field_account = Compte
+no_accounts = Aucun compte de trading pour l'instant. Ajoutez un compte d'entraînement dans le panneau Comptes.
+field_symbol = Symbole
+symbol_hint = Les symboles ouverts dans un graphique apparaissent ici ; ouvrez un graphique d'un symbole pour l'ajouter.
+field_repeat = Répéter
+repeat_choice_once = Une fois
+repeat_choice_session = Chaque session
+field_session_maximum = Maximum par session
+field_cooldown = Secondes entre les déclenchements
+field_trigger = Quand
+trigger_choice_above = Le prix monte à
+trigger_choice_below = Le prix descend à
+trigger_choice_time = Heure de la journée
+field_level = Prix
+field_time = Heure (HH:MM)
+field_zone = Fuseau horaire
+trigger_price_hint = Se déclenche quand le prix vérifié franchit ce niveau après l'armement du workflow.
+trigger_time_hint = Se déclenche chaque jour à cette heure tant que le workflow est armé.
+field_check = Vérification
+field_position = Position
+choice_flat = Sans position
+choice_long = Longue
+choice_short = Courte
+choice_open = Toute position ouverte
+field_start = De (HH:MM)
+field_end = À (HH:MM)
+field_direction = Le prix est
+choice_above = Au-dessus
+choice_below = En dessous
+if_hint = Oui s'exécute quand la vérification est remplie et Non sinon. Une sortie non reliée termine l'exécution à cet endroit.
+field_action = Action
+field_quantity = Quantité
+field_stop_ticks = Stop (ticks)
+field_target_ticks = Objectif (ticks)
+protection_hint = Laissez le stop et l'objectif vides pour entrer sans bracket.
+lock_hint = Rien ne s'exécute après le verrouillage du compte.
+remove_block = Supprimer le bloc
+
+# Relecture des blocs d'un workflow
+trigger_price_above = {symbol} monte à {price}
+trigger_price_below = {symbol} descend à {price}
+trigger_time = Chaque jour à {time} {zone}
+zone_chicago = heure de Chicago
+zone_utc = UTC
+condition_flat = Aucune position
+condition_long = La position est longue
+condition_short = La position est courte
+condition_open = Une position est ouverte
+condition_between = L'heure est {start}–{end} {zone}
+condition_price_above = Le prix est au-dessus de {price}
+condition_price_below = Le prix est en dessous de {price}
+action_buy = Acheter {quantity} au marché
+action_sell = Vendre {quantity} au marché
+action_protection = {entry}, stop de {stop} ticks, objectif de {target} ticks
+action_flatten = Clôturer la position
+action_cancel_orders = Annuler les ordres actifs
+action_lock = Verrouiller le compte
+
+# Résultats d'un déclenchement
+outcome_yes = oui
+outcome_no = non
+outcome_placed = ordre {id} envoyé
+outcome_flattened = position clôturée
+outcome_cancelled = {orders} ordres annulés
+outcome_locked = compte verrouillé
+outcome_refused = refusé : {detail}
+outcome_blocked = non envoyé : {reasons}
+outcome_interrupted = Aeris s'est arrêté avant la fin de ce déclenchement ; il n'est pas répété
+blocker_account_missing = le compte a été supprimé
+blocker_terms_missing = aucune condition de négociation pour le symbole
+blocker_account_locked = le compte est verrouillé
+blocker_broker_unreachable = le courtier n'est pas connecté
+blocker_quote_unavailable = en attente d'un cours vérifié
+
+# Problèmes du brouillon
+problem_name = Saisissez un nom de 80 caractères au maximum
+problem_account = Choisissez un compte
+problem_symbol = Choisissez un symbole avec des conditions de négociation
+problem_level = Saisissez un prix positif avec au plus {decimals} décimales
+problem_time = Saisissez l'heure au format HH:MM, de 00:00 à 23:59
+problem_window = Saisissez la plage sous forme de deux heures différentes, HH:MM
+problem_no_start = Reliez le déclencheur au premier bloc
+problem_unconnected = Reliez chaque bloc ou supprimez ceux dont vous n'avez pas besoin
+problem_no_action = Ajoutez au moins une action
+problem_quantity = Saisissez une quantité positive acceptée par ce marché
+problem_protection = Saisissez un stop et un objectif de 1 à 10000 ticks, ou laissez les deux vides
+problem_session_maximum = Saisissez un nombre de 1 à 50
+problem_cooldown = Saisissez un nombre de secondes de 0 à 86400
+
+# Retours des commandes
+saved = {name} enregistré ; armez-le pour l'exécuter
+armed = {name} armé
+paused = {name} en pause
+deleted = {name} supprimé
+error_invalid = Le workflow est incomplet ou hors limites
+error_too_many = {maximum} workflows au maximum sont autorisés
+error_unknown = Ce workflow n'existe plus
+error_unknown_account = Le compte du workflow n'est pas enregistré
+error_unknown_instrument = Le symbole du workflow n'a pas de conditions de négociation
+error_revision = Ce workflow a changé ; relisez-le
+error_completed = Ce workflow est terminé ; créez-en un nouveau pour l'exécuter à nouveau
+error_expired = Ce workflow a expiré
+error_not_ready = Le workflow ne peut pas s'exécuter : {reasons}
+error_owner = Le moteur de trading n'a pas pu appliquer le workflow : {detail}
