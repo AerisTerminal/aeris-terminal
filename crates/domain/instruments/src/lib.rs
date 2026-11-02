@@ -112,6 +112,38 @@ impl PriceGrid {
             _ => Ok(()),
         }
     }
+
+    /// Decimal places a price near `price_units` at `price_scale` carries on this grid, so a
+    /// derived price such as an average entry reads like a traded one. `None` for an unknown
+    /// grid or a non-positive price; never more than `price_scale`.
+    #[must_use]
+    pub fn display_decimals(self, price_units: i64, price_scale: u8) -> Option<u8> {
+        if price_units <= 0 {
+            return None;
+        }
+        let decimals = match self {
+            Self::Unknown => return None,
+            Self::Fixed(tick) => {
+                let (mut units, mut scale) = (tick.units, tick.scale);
+                while scale > 0 && units % 10 == 0 {
+                    units /= 10;
+                    scale -= 1;
+                }
+                scale
+            }
+            Self::SignificantFigures {
+                figures,
+                max_decimals,
+            } => {
+                // Figures beyond the integer digits are decimals; a price below one has
+                // non-positive integer digits, so its leading fractional zeros count too.
+                let digits = i64::from(price_units.ilog10()) + 1 - i64::from(price_scale);
+                let decimals = (i64::from(figures) - digits).clamp(0, i64::from(max_decimals));
+                u8::try_from(decimals).unwrap_or(max_decimals)
+            }
+        };
+        Some(decimals.min(price_scale))
+    }
 }
 
 /// The lifecycle state of an instrument revision.
@@ -419,4 +451,60 @@ impl Error for InstrumentValidationError {}
 
 const fn is_leap_year(year: u16) -> bool {
     year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fixed_grid_shows_its_tick_decimals_at_every_price() {
+        let quarter = PriceGrid::Fixed(InstrumentDecimal::try_new(25, 2).expect("tick"));
+        assert_eq!(quarter.display_decimals(689_625, 2), Some(2));
+        assert_eq!(quarter.display_decimals(689_612_500, 5), Some(2));
+        let whole = PriceGrid::Fixed(InstrumentDecimal::try_new(500, 2).expect("tick"));
+        assert_eq!(whole.display_decimals(510_000, 2), Some(0));
+        let fine = PriceGrid::Fixed(InstrumentDecimal::try_new(1, 6).expect("tick"));
+        assert_eq!(
+            fine.display_decimals(1_234, 4),
+            Some(4),
+            "never more decimals than the price carries"
+        );
+    }
+
+    #[test]
+    fn significant_figures_give_the_decimals_left_after_the_integer_digits() {
+        let grid = PriceGrid::SignificantFigures {
+            figures: 5,
+            max_decimals: 6,
+        };
+        assert_eq!(grid.display_decimals(9_552_046_429, 8), Some(3));
+        assert_eq!(grid.display_decimals(7_654_512_345_678, 8), Some(0));
+        assert_eq!(
+            grid.display_decimals(12_345_678_901, 8),
+            Some(2),
+            "123.45678901 keeps five figures"
+        );
+        assert_eq!(
+            grid.display_decimals(1_234_567, 8),
+            Some(6),
+            "0.01234567 counts its leading fractional zero, capped at six decimals"
+        );
+        let capped = PriceGrid::SignificantFigures {
+            figures: 5,
+            max_decimals: 1,
+        };
+        assert_eq!(capped.display_decimals(9_552_046_429, 8), Some(1));
+    }
+
+    #[test]
+    fn an_unknown_grid_or_non_positive_price_has_no_display_precision() {
+        assert_eq!(PriceGrid::Unknown.display_decimals(9_552_046_429, 8), None);
+        let grid = PriceGrid::SignificantFigures {
+            figures: 5,
+            max_decimals: 6,
+        };
+        assert_eq!(grid.display_decimals(0, 8), None);
+        assert_eq!(grid.display_decimals(-1, 8), None);
+    }
 }

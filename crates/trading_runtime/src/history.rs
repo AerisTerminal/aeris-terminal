@@ -58,6 +58,9 @@ pub struct TradeHistoryCursor {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TradeHistoryPage {
     pub trades: Vec<TradeRoundTrip>,
+    /// The registered terms of every instrument the page's trades reference, so a reader can
+    /// name and price trades whose instruments have left the owner's working set.
+    pub instruments: Vec<crate::TradingInstrument>,
     pub next: Option<TradeHistoryCursor>,
 }
 

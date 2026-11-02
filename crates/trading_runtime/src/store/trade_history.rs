@@ -3,7 +3,8 @@
 use super::{Connection, Fill, FillId, TradingAccountId, database_error, fixed, params};
 use crate::core::ledger::FillAccounting;
 use crate::history::{TradeHistoryCursor, TradeHistoryPage, TradeHistoryQuery};
-use std::collections::BTreeMap;
+use rusqlite::OptionalExtension;
+use std::collections::{BTreeMap, BTreeSet};
 
 const EXIT_SELECTION: &str = "SELECT f.id, f.execution_unix_nanos, f.rowid, a.cycle_id
          FROM fills f INDEXED BY fills_account_trade_history
@@ -104,8 +105,46 @@ pub(crate) fn trade_history_page(
     } else {
         None
     };
+    let rows = page_instrument_rows(&transaction, &trades).map_err(database_error)?;
+    let mut instruments = Vec::with_capacity(rows.len());
+    for (instrument_id, price_scale, quantity_scale, contract) in rows {
+        instruments.push(crate::TradingInstrument {
+            instrument_id,
+            price_scale,
+            quantity_scale,
+            contract: super::orders::decode_contract(&contract)?,
+        });
+    }
     transaction.commit().map_err(database_error)?;
-    Ok(TradeHistoryPage { trades, next })
+    Ok(TradeHistoryPage {
+        trades,
+        instruments,
+        next,
+    })
+}
+
+/// The stored scales and encoded contract of each distinct instrument the page references.
+fn page_instrument_rows(
+    connection: &Connection,
+    trades: &[crate::TradeRoundTrip],
+) -> rusqlite::Result<Vec<(aeris_instruments::InstrumentId, u8, u8, String)>> {
+    let ids = trades
+        .iter()
+        .map(|trade| &trade.instrument_id)
+        .collect::<BTreeSet<_>>();
+    let mut statement = connection.prepare(
+        "SELECT price_scale, quantity_scale, contract_json FROM instruments WHERE id = ?1",
+    )?;
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let row = statement
+            .query_row(params![id.as_str()], |row| {
+                Ok((id.clone(), row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .optional()?;
+        rows.extend(row);
+    }
+    Ok(rows)
 }
 
 fn project_exit(

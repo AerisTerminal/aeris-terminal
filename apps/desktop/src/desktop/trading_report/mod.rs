@@ -12,6 +12,7 @@ mod output;
 mod period;
 mod statistics;
 
+use super::bottom_panel::InstrumentLabel;
 use super::*;
 use aeris_localization::{panels, tr};
 
@@ -45,7 +46,8 @@ impl ReportError {
 /// Everything a background report run needs, captured on the UI thread.
 struct ReportRequest {
     accounts: Vec<aeris_trading::TradingAccount>,
-    symbols: std::sync::Arc<BTreeMap<aeris_instruments::InstrumentId, String>>,
+    /// The working set's instruments; each page read adds the instruments it references.
+    instruments: std::sync::Arc<BTreeMap<aeris_instruments::InstrumentId, InstrumentLabel>>,
     zone: period::ReportZone,
     span: period::ReportSpan,
     period: period::ReportPeriod,
@@ -74,10 +76,14 @@ fn generate(
         .map(|account| account.id.clone())
         .collect::<Vec<_>>();
     let collected = collect::collect_closed_trades(service, &account_ids, request.span)?;
+    let mut instruments = (*request.instruments).clone();
+    for (id, label) in collected.instruments {
+        instruments.entry(id).or_insert(label);
+    }
     let summary = statistics::build_report(
         &collected.trades,
         &request.accounts,
-        &request.symbols,
+        &instruments,
         request.zone,
     )?;
     let document = html::ReportDocument {

@@ -1,9 +1,10 @@
 //! Closed-trade pages of the report's accounts, read newest first through the trading owner's
 //! read-only history worker until the report period starts.
 
-use super::ReportError;
 use super::period::ReportSpan;
+use super::{InstrumentLabel, ReportError};
 use aeris_trading_runtime::{TradeHistoryPage, TradeHistoryQuery, TradeRoundTrip};
+use std::collections::BTreeMap;
 
 /// One report reads at most this many 500-trade pages across all of its accounts, so a report
 /// never holds more than 50,000 trades.
@@ -23,6 +24,8 @@ impl ClosedTradePages for aeris_trading_runtime::TradingService {
 /// The closed trades whose exit falls inside the span, newest first per account.
 pub(super) struct CollectedTrades {
     pub(super) trades: Vec<TradeRoundTrip>,
+    /// The instruments the read pages referenced.
+    pub(super) instruments: BTreeMap<aeris_instruments::InstrumentId, InstrumentLabel>,
     /// The page bound stopped reading before the period start was reached.
     pub(super) truncated: bool,
 }
@@ -33,6 +36,7 @@ pub(super) fn collect_closed_trades(
     span: ReportSpan,
 ) -> Result<CollectedTrades, ReportError> {
     let mut trades = Vec::new();
+    let mut instruments = BTreeMap::new();
     let mut remaining_pages = MAXIMUM_REPORT_PAGES;
     let mut truncated = false;
     for account in accounts {
@@ -48,6 +52,11 @@ pub(super) fn collect_closed_trades(
                 after,
                 limit: Some(aeris_trading_runtime::MAXIMUM_HISTORY_PAGE),
             })?;
+            for instrument in &page.instruments {
+                instruments
+                    .entry(instrument.instrument_id.clone())
+                    .or_insert_with(|| InstrumentLabel::of(instrument));
+            }
             let mut reached_start = false;
             for trade in page.trades {
                 let Some(exit) = trade.exit.filter(|_| trade.closed) else {
@@ -67,7 +76,11 @@ pub(super) fn collect_closed_trades(
             }
         }
     }
-    Ok(CollectedTrades { trades, truncated })
+    Ok(CollectedTrades {
+        trades,
+        instruments,
+        truncated,
+    })
 }
 
 #[cfg(test)]
@@ -129,7 +142,11 @@ pub(super) mod tests {
                     exit_unix_nanos: i64::try_from(offset + self.size).expect("fixture offset"),
                     exit_fill_id: aeris_trading::FillId::try_new("cursor").expect("cursor"),
                 });
-            Ok(TradeHistoryPage { trades, next })
+            Ok(TradeHistoryPage {
+                trades,
+                instruments: Vec::new(),
+                next,
+            })
         }
     }
 

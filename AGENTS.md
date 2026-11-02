@@ -444,7 +444,9 @@ violations and missing verification explicitly, and never describe them as satis
   read-only SQLite connection with at most 500-row keyset pages. Trade pages are scoped
   to one account and use exit time and exit fill ID as the stable cursor; they project
   exact per-exit P&L through the same round-trip projection as the owner, using at most
-  500 fills per historical cycle prefix. The working set projects registered terms only for
+  500 fills per historical cycle prefix, and carry the registered terms of the instruments
+  they reference. Exact average entry and exit prices are presented at the instrument's
+  price-grid precision (`PriceGrid::display_decimals`); an unknown grid shows the exact value. The working set projects registered terms only for
   open orders, open positions, its fills window and ticket interests; its newest event and fill windows each
   have a 500-row limit, and round trips use at most 500 fills plus open positions. Every
   closed round trip carries its durable exit fill ID, distinct even for partial exits of

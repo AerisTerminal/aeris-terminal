@@ -5,12 +5,12 @@
 
 use super::super::assets::BrandAsset;
 use super::charts;
-use super::market_price_text;
 use super::output::fingerprint;
 use super::period::{ReportPeriod, ReportSpan, ReportZone, date_text, offset_text};
 use super::statistics::{
     AccountLine, Breakdown, CurrencyGroup, ReportSource, ReportSummary, ReportTrade, Summary,
 };
+use super::{grid_price_text, market_price_text};
 use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeMode, brand_font_family, platform_font_family,
     platform_font_stack,
@@ -533,7 +533,8 @@ fn write_trade_row(
     group: &CurrencyGroup,
     times: TradeTimes,
 ) -> fmt::Result {
-    let price = |value: FixedPoint| market_price_text(value.units(), u32::from(value.scale()));
+    let price = |value: FixedPoint| grid_price_text(value, trade.price_grid);
+    let quantity = |value: FixedPoint| market_price_text(value.units(), u32::from(value.scale()));
     writeln!(
         out,
         "<tr><td class=\"number\">{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"number\">{}</td><td>{}</td><td class=\"number\">{}</td><td>{}</td><td class=\"number\">{}</td><td class=\"number\">{}</td></tr>",
@@ -544,7 +545,7 @@ fn write_trade_row(
             OrderSide::Buy => tr!(panels::REPORT_LONG),
             OrderSide::Sell => tr!(panels::REPORT_SHORT),
         },
-        price(trade.exit.quantity),
+        quantity(trade.exit.quantity),
         trade.entry.map_or_else(
             || "—".to_string(),
             |entry| times.text(entry.first_unix_nanos)

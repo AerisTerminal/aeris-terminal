@@ -3,8 +3,8 @@
 //! breakdowns. Trades whose P&L the owner does not know are counted and listed but left out of
 //! every total.
 
-use super::ReportError;
 use super::period::ReportZone;
+use super::{InstrumentLabel, ReportError};
 use aeris_trading::{AccountEnvironment, OrderSide, TradingAccount, TradingAccountId};
 use aeris_trading_runtime::{TradeLeg, TradeRoundTrip};
 use chrono::{Datelike, NaiveDate, Timelike};
@@ -33,6 +33,8 @@ impl ReportSource {
 pub(super) struct ReportTrade {
     pub(super) account: String,
     pub(super) symbol: String,
+    /// The instrument's price grid, when its terms are known, for presenting average prices.
+    pub(super) price_grid: Option<aeris_instruments::PriceGrid>,
     pub(super) side: OrderSide,
     pub(super) entry: Option<TradeLeg>,
     pub(super) exit: TradeLeg,
@@ -164,7 +166,7 @@ pub(super) struct ReportSummary {
 pub(super) fn build_report(
     trades: &[TradeRoundTrip],
     accounts: &[TradingAccount],
-    symbols: &BTreeMap<aeris_instruments::InstrumentId, String>,
+    instruments: &BTreeMap<aeris_instruments::InstrumentId, InstrumentLabel>,
     zone: ReportZone,
 ) -> Result<ReportSummary, ReportError> {
     let account_of = |id: &TradingAccountId| accounts.iter().find(|account| account.id == *id);
@@ -222,15 +224,17 @@ pub(super) fn build_report(
             .iter()
             .filter_map(|(trade, _)| {
                 let exit = trade.exit?;
+                let label = instruments.get(&trade.instrument_id);
                 Some(Ok(ReportTrade {
                     account: account_of(&trade.account_id).map_or_else(
                         || trade.account_id.as_str().to_string(),
                         |account| account.display_name.clone(),
                     ),
-                    symbol: symbols
-                        .get(&trade.instrument_id)
-                        .cloned()
-                        .unwrap_or_else(|| trade.instrument_id.as_str().to_string()),
+                    symbol: label.map_or_else(
+                        || trade.instrument_id.as_str().to_string(),
+                        |label| label.symbol.clone(),
+                    ),
+                    price_grid: label.map(|label| label.price_grid),
                     side: trade.side,
                     entry: trade.entry,
                     exit,

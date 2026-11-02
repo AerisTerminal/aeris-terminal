@@ -80,6 +80,22 @@ struct AccountSummary {
     unrealized: Option<aeris_trading::FixedPoint>,
 }
 
+/// How the panels and reports name and price one instrument's trades.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct InstrumentLabel {
+    pub(super) symbol: String,
+    pub(super) price_grid: aeris_instruments::PriceGrid,
+}
+
+impl InstrumentLabel {
+    pub(super) fn of(instrument: &aeris_trading_runtime::TradingInstrument) -> Self {
+        Self {
+            symbol: instrument.contract.provenance.display_symbol.clone(),
+            price_grid: instrument.contract.price_grid,
+        }
+    }
+}
+
 /// Shared presentation copy of the trading owner's executed round trips.
 #[derive(Clone, Default)]
 pub(super) struct TradeHistory {
@@ -90,7 +106,11 @@ pub(super) struct TradeHistory {
     accounts: Arc<[aeris_trading::TradingAccount]>,
     /// The owner's balance and P&L of every account.
     account_pnl: Arc<[aeris_trading::AccountPnl]>,
-    symbols: Arc<BTreeMap<aeris_instruments::InstrumentId, String>>,
+    /// The working set's registered instruments.
+    instruments: Arc<BTreeMap<aeris_instruments::InstrumentId, InstrumentLabel>>,
+    /// Instruments of the loaded historical pages that may have left the working set; cleared
+    /// with those pages.
+    older_instruments: Arc<BTreeMap<aeris_instruments::InstrumentId, InstrumentLabel>>,
     /// Indices into `round_trips` of the closed trades that pass the current account filter.
     rows: Arc<[usize]>,
     /// Descending closed trades from the owner's historical reader, not reconstructed orders.
@@ -114,6 +134,7 @@ impl TradeHistory {
         self.request_token = self.request_token.wrapping_add(1);
         self.older_trades = Arc::from([]);
         self.older_rows = Arc::from([]);
+        self.older_instruments = Arc::default();
         self.cursors.clear();
         self.exhausted.clear();
         self.pending_accounts.clear();
@@ -178,6 +199,14 @@ impl TradeHistory {
                     .collect::<Vec<_>>();
                 candidates.sort_by(|left, right| trade_exit_key(right).cmp(&trade_exit_key(left)));
                 candidates.truncate(aeris_trading_runtime::MAXIMUM_HISTORY_PAGE);
+                let mut older_instruments = (*self.older_instruments).clone();
+                for instrument in pages.iter().flat_map(|page| &page.instruments) {
+                    older_instruments.insert(
+                        instrument.instrument_id.clone(),
+                        InstrumentLabel::of(instrument),
+                    );
+                }
+                self.older_instruments = Arc::new(older_instruments);
                 for (account, page) in self.pending_accounts.iter().zip(pages) {
                     if let Some(last) = candidates
                         .iter()
@@ -267,11 +296,28 @@ impl TradeHistory {
             )
     }
 
-    fn symbol(&self, instrument_id: &aeris_instruments::InstrumentId) -> String {
-        self.symbols
+    fn label(&self, instrument_id: &aeris_instruments::InstrumentId) -> Option<&InstrumentLabel> {
+        self.instruments
             .get(instrument_id)
-            .cloned()
-            .unwrap_or_else(|| instrument_id.as_str().to_string())
+            .or_else(|| self.older_instruments.get(instrument_id))
+    }
+
+    fn symbol(&self, instrument_id: &aeris_instruments::InstrumentId) -> String {
+        self.label(instrument_id).map_or_else(
+            || instrument_id.as_str().to_string(),
+            |label| label.symbol.clone(),
+        )
+    }
+
+    fn price(
+        &self,
+        instrument_id: &aeris_instruments::InstrumentId,
+        price: aeris_trading::FixedPoint,
+    ) -> String {
+        grid_price_text(
+            price,
+            self.label(instrument_id).map(|label| label.price_grid),
+        )
     }
 }
 
@@ -467,14 +513,14 @@ impl BottomPanelState {
                 self.history.reset_pages();
             }
             self.history.accounts = snapshot.accounts().to_vec().into();
-            self.history.symbols = Arc::new(
+            self.history.instruments = Arc::new(
                 snapshot
                     .instruments()
                     .iter()
                     .map(|instrument| {
                         (
                             instrument.instrument_id.clone(),
-                            instrument.contract.provenance.display_symbol.clone(),
+                            InstrumentLabel::of(instrument),
                         )
                     })
                     .collect(),
@@ -547,8 +593,10 @@ impl BottomPanelState {
         &self.history.accounts
     }
 
-    pub(super) fn report_symbols(&self) -> Arc<BTreeMap<aeris_instruments::InstrumentId, String>> {
-        Arc::clone(&self.history.symbols)
+    pub(super) fn report_instruments(
+        &self,
+    ) -> Arc<BTreeMap<aeris_instruments::InstrumentId, InstrumentLabel>> {
+        Arc::clone(&self.history.instruments)
     }
 
     fn shows_account_column(&self) -> bool {
@@ -1436,10 +1484,10 @@ fn trade_history_row(
         .map(|leg| trade_history_decimal(leg.quantity));
     let entry_price = trip
         .entry
-        .map(|leg| trade_history_decimal(leg.average_price));
+        .map(|leg| history.price(&trip.instrument_id, leg.average_price));
     let exit_price = trip
         .exit
-        .map(|leg| trade_history_decimal(leg.average_price));
+        .map(|leg| history.price(&trip.instrument_id, leg.average_price));
     let currency = history.account_currency(trip.account_id.as_str());
     table_row_frame(theme)
         .id(("trade_history_row", index))
@@ -1612,7 +1660,7 @@ fn position_row(
         aeris_trading::OrderSide::Sell => (tr!(trading::SIDE_SHORT), colors.text_negative),
     };
     let price = |value: Option<aeris_trading::FixedPoint>| {
-        trade_history_text(value.map(trade_history_decimal))
+        trade_history_text(value.map(|value| history.price(&position.instrument_id, value)))
     };
     let opened = position
         .opened_unix_nanos
@@ -1896,6 +1944,7 @@ mod tests {
                 request_token,
                 Ok(vec![TradeHistoryPage {
                         trades,
+                        instruments: Vec::new(),
                         next: Some(TradeHistoryCursor {
                             exit_unix_nanos: i64::try_from(start - 499).expect("cursor"),
                             exit_fill_id: aeris_trading::FillId::try_new(format!(
@@ -1928,6 +1977,7 @@ mod tests {
             old_request_token,
             Ok(vec![TradeHistoryPage {
                 trades: vec![historical_trip("a", 1)],
+                instruments: Vec::new(),
                 next: None
             }]),
             &filter
@@ -1977,10 +2027,12 @@ mod tests {
             Ok(vec![
                 TradeHistoryPage {
                     trades: vec![historical_trip("a", 10)],
+                    instruments: Vec::new(),
                     next: None
                 },
                 TradeHistoryPage {
                     trades: vec![historical_trip("b", 9)],
+                    instruments: Vec::new(),
                     next: None
                 },
             ]),
@@ -1990,6 +2042,7 @@ mod tests {
             token,
             Ok(vec![TradeHistoryPage {
                 trades: vec![historical_trip("b", 9)],
+                instruments: Vec::new(),
                 next: None,
             }]),
             &only_b
@@ -2004,6 +2057,7 @@ mod tests {
             Ok(vec![
                 TradeHistoryPage {
                     trades: vec![historical_trip("a", 10), historical_trip("a", 8)],
+                    instruments: Vec::new(),
                     next: Some(TradeHistoryCursor {
                         exit_unix_nanos: 8,
                         exit_fill_id: aeris_trading::FillId::try_new("exit-8").expect("id"),
@@ -2011,6 +2065,7 @@ mod tests {
                 },
                 TradeHistoryPage {
                     trades: vec![historical_trip("b", 9)],
+                    instruments: Vec::new(),
                     next: None
                 },
             ]),
@@ -2037,6 +2092,73 @@ mod tests {
     }
 
     #[test]
+    fn older_page_instruments_name_and_price_trades_that_left_the_working_set() {
+        use aeris_trading_runtime::TradeHistoryPage;
+        let mut trip = historical_trip("a", 5);
+        trip.entry.as_mut().expect("entry").average_price =
+            aeris_trading::FixedPoint::try_new(9_552_046_429, 8).expect("average");
+        let instrument = aeris_trading_runtime::TradingInstrument {
+            instrument_id: trip.instrument_id.clone(),
+            price_scale: 8,
+            quantity_scale: 8,
+            contract: aeris_instruments::ContractMetadata {
+                tick_size: None,
+                price_grid: aeris_instruments::PriceGrid::SignificantFigures {
+                    figures: 5,
+                    max_decimals: 6,
+                },
+                instrument_class: aeris_instruments::InstrumentClass::CryptoPerpetual,
+                point_value: None,
+                order_quantity_increment: None,
+                currency: "USDC".to_string(),
+                expiry: None,
+                first_notice: None,
+                last_trade: None,
+                session_hours: Vec::new(),
+                provenance: aeris_instruments::InstrumentMetadataProvenance {
+                    provider_id: "fixture".to_string(),
+                    provider_symbol: "SOL".to_string(),
+                    display_symbol: "SOL-USDC".to_string(),
+                    session_generation: 1,
+                },
+            },
+        };
+        let mut history = TradeHistory {
+            accounts: vec![trading_account(
+                "a",
+                aeris_trading::AccountEnvironment::Simulated,
+            )]
+            .into(),
+            ..TradeHistory::default()
+        };
+        let filter = TradeHistoryAccountFilter::All;
+        let entry = trip.entry.expect("entry").average_price;
+        assert_eq!(
+            history.price(&trip.instrument_id, entry),
+            "95.52046429",
+            "without terms the exact average shows"
+        );
+        let (token, _) = history.request_page(&filter).expect("page request");
+        assert!(history.receive_page(
+            token,
+            Ok(vec![TradeHistoryPage {
+                trades: vec![trip.clone()],
+                instruments: vec![instrument],
+                next: None,
+            }]),
+            &filter
+        ));
+        assert_eq!(history.symbol(&trip.instrument_id), "SOL-USDC");
+        assert_eq!(history.price(&trip.instrument_id, entry), "95.520");
+        history.reset_pages();
+        assert_eq!(
+            history.symbol(&trip.instrument_id),
+            trip.instrument_id.as_str(),
+            "a resync drops the terms with their pages"
+        );
+    }
+
+    #[test]
     fn changed_accounts_reload_trade_pages_and_reject_old_completion() {
         use aeris_trading_runtime::TradeHistoryPage;
         let mut panel = BottomPanelState::default();
@@ -2058,6 +2180,7 @@ mod tests {
             token,
             Ok(vec![TradeHistoryPage {
                 trades: vec![historical_trip("practice", 1)],
+                instruments: Vec::new(),
                 next: None,
             }]),
             &panel.filter

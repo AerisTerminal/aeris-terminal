@@ -685,6 +685,25 @@ fn desktop_history_pages_start_at_recent_orders_and_advance_older_without_duplic
         .expect("shutdown");
 }
 
+fn assert_page_carries_its_instruments(page: &crate::TradeHistoryPage) {
+    let referenced = page
+        .trades
+        .iter()
+        .map(|trade| &trade.instrument_id)
+        .collect::<BTreeSet<_>>();
+    let carried = page
+        .instruments
+        .iter()
+        .map(|instrument| &instrument.instrument_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        carried.iter().copied().collect::<BTreeSet<_>>(),
+        referenced,
+        "a page carries the terms of exactly the instruments its trades reference"
+    );
+    assert_eq!(carried.len(), referenced.len(), "each instrument once");
+}
+
 #[test]
 fn closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl() {
     let directory = TestDirectory::new("closed-trade-pages");
@@ -723,6 +742,8 @@ fn closed_trade_history_pages_are_bounded_disjoint_and_match_owner_pnl() {
         .expect("second trade page");
     assert_eq!(second.trades.len(), 101);
     assert!(second.next.is_none());
+    assert_page_carries_its_instruments(&first);
+    assert_page_carries_its_instruments(&second);
     assert!(
         first.trades.last().expect("last").last_fill_unix_nanos()
             > second.trades.first().expect("first").last_fill_unix_nanos()

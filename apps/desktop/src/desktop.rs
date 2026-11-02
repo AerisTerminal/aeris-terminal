@@ -3163,6 +3163,40 @@ pub(crate) fn market_price_text(value: i64, scale: u32) -> String {
     format!("{sign}{whole}.{fraction}")
 }
 
+/// A trading price at its instrument's price-grid precision, rounded half away from zero, so an
+/// average entry or exit reads like a traded price instead of the owner's exact average. A
+/// price without a known grid shows its exact value.
+pub(crate) fn grid_price_text(
+    price: aeris_trading::FixedPoint,
+    grid: Option<aeris_instruments::PriceGrid>,
+) -> String {
+    let exact = || market_price_text(price.units(), u32::from(price.scale()));
+    let Some(decimals) = grid.and_then(|grid| grid.display_decimals(price.units(), price.scale()))
+    else {
+        return exact();
+    };
+    // Rounding to at most the price's own scale cannot overflow; the exact value stays the
+    // fallback rather than a guessed one.
+    aeris_trading::fixed_point_from_i128_rounded(i128::from(price.units()), price.scale(), decimals)
+        .map_or_else(
+            |_| exact(),
+            |rounded| fixed_decimal_text(i128::from(rounded.units()), u32::from(decimals)),
+        )
+}
+
+/// Units at `decimals` places written with exactly that many fraction digits.
+fn fixed_decimal_text(units: i128, decimals: u32) -> String {
+    let sign = if units < 0 { "-" } else { "" };
+    let factor = 10_i128.pow(decimals.min(18));
+    let whole = units.abs() / factor;
+    if decimals == 0 {
+        return format!("{sign}{whole}");
+    }
+    let fraction = units.abs() % factor;
+    let width = usize::try_from(decimals).unwrap_or(18);
+    format!("{sign}{whole}.{fraction:0width$}")
+}
+
 /// Fixed decimal places for an instrument's summary prices: the precision of its tick when the
 /// provider supplies one, else its maximum price decimals. A fixed count keeps the column from
 /// changing width as prints land on and off the grid.
@@ -3201,16 +3235,7 @@ fn market_summary_price(value: i64, instrument: &InstallProviderInstrument) -> S
     let Some(decimals) = market_summary_price_decimals(instrument) else {
         return market_price_text(value, instrument.price_scale);
     };
-    let units = market_summary_presented_units(value, instrument);
-    let factor = 10_i128.pow(decimals);
-    let sign = if units < 0 { "-" } else { "" };
-    let whole = units.abs() / factor;
-    if decimals == 0 {
-        return format!("{sign}{whole}");
-    }
-    let fraction = units.abs() % factor;
-    let width = usize::try_from(decimals).unwrap_or(18);
-    format!("{sign}{whole}.{fraction:0width$}")
+    fixed_decimal_text(market_summary_presented_units(value, instrument), decimals)
 }
 
 fn market_summary_change(value: i64, instrument: &InstallProviderInstrument) -> String {

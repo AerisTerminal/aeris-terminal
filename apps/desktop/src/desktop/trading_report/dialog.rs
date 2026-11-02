@@ -144,7 +144,7 @@ impl TerminalApp {
         };
         let request = ReportRequest {
             accounts,
-            symbols: self.pages.bottom_panel.report_symbols(),
+            instruments: self.pages.bottom_panel.report_instruments(),
             zone,
             span,
             period,

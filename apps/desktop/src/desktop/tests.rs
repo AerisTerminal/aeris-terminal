@@ -5187,6 +5187,48 @@ fn market_price_presentation_trims_storage_padding_without_losing_precision() {
     assert_eq!(super::market_price_text(123, 0), "123");
 }
 
+#[test]
+fn average_prices_show_at_the_instrument_grid_precision() {
+    let price = |units, scale| aeris_trading::FixedPoint::try_new(units, scale).expect("price");
+    let crypto = Some(aeris_instruments::PriceGrid::SignificantFigures {
+        figures: 5,
+        max_decimals: 6,
+    });
+    assert_eq!(
+        super::grid_price_text(price(9_552_046_429, 8), crypto),
+        "95.520"
+    );
+    assert_eq!(
+        super::grid_price_text(price(9_558_500_000, 8), crypto),
+        "95.585",
+        "a traded price on the grid is unchanged"
+    );
+    assert_eq!(
+        super::grid_price_text(price(7_654_550_000_000, 8), crypto),
+        "76546"
+    );
+    let quarter = Some(aeris_instruments::PriceGrid::Fixed(
+        aeris_instruments::InstrumentDecimal::try_new(25, 2).expect("tick"),
+    ));
+    assert_eq!(
+        super::grid_price_text(price(689_612_500, 5), quarter),
+        "6896.13",
+        "an average between ticks rounds half away from zero"
+    );
+    assert_eq!(
+        super::grid_price_text(
+            price(9_552_046_429, 8),
+            Some(aeris_instruments::PriceGrid::Unknown)
+        ),
+        "95.52046429",
+        "an unknown grid keeps the exact value"
+    );
+    assert_eq!(
+        super::grid_price_text(price(9_552_046_429, 8), None),
+        "95.52046429"
+    );
+}
+
 fn tick_grid_instrument(price_increment: i64) -> InstallProviderInstrument {
     let mut instrument = super::local_state::fixture_workspace().watchlist_entries[0]
         .instrument
