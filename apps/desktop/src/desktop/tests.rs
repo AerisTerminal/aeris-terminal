@@ -3267,38 +3267,78 @@ mod timeframe_input {
     }
 
     #[gpui::test]
-    fn the_layout_menu_links_and_unlinks_only_the_active_pane(cx: &mut TestAppContext) {
-        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+    fn the_layout_menu_syncs_each_change_between_the_tabs_charts_on_its_own(
+        cx: &mut TestAppContext,
+    ) {
+        let lifecycle = DesktopLifecycle::new_for_test();
+        let (factory, _additions) =
+            engine_market_worker::WorkspaceMarketFactory::unstarted(lifecycle.market().clone());
+        let product = local_state::fixture_workspace().watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("default instrument");
+        let (_publications, messages) = market_projection_channel(NonZeroUsize::MIN);
+        let (terminal, _requests, cx) =
+            terminal_harness_with_requests(cx, lifecycle, Some(factory), product, messages);
         let first = cx.read(|cx| terminal.read(cx).active_surface());
         update_terminal(&terminal, cx, |terminal, window, cx| {
-            terminal.add_workspace("Second", window, cx)
-        })
-        .expect("a second tab");
+            terminal.split_pane_horizontal(&SplitPaneHorizontal, window, cx);
+        });
         let second = cx.read(|cx| terminal.read(cx).active_surface());
-        let group = |surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext| {
-            cx.read(|cx| surface.read(cx).chart_link_group)
-        };
-        let menu_open =
-            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).pages.layouts.menu_open());
-
-        update_terminal(&terminal, cx, |terminal, _, cx| {
-            terminal.toggle_layout_menu(cx);
-        });
-        update_terminal(&terminal, cx, |terminal, _, cx| {
-            terminal.set_active_chart_link_group(2, cx);
-        });
-        assert_eq!(group(&second, cx), 2, "the active pane joins group B");
-        assert_eq!(
-            group(&first, cx),
-            0,
-            "another tab's pane keeps its own choice"
+        assert_ne!(
+            first.entity_id(),
+            second.entity_id(),
+            "the tab has two charts"
         );
-        assert!(!menu_open(cx), "choosing a group closes the menu");
+        let followed = |cx: &mut VisualTestContext| {
+            cx.read(|cx| second.read(cx).chart_pane_controller.pending_interval())
+        };
+        let choose = |interval: ChartInterval, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                first.update(cx, |surface, cx| {
+                    assert!(surface.select_interval(interval, cx));
+                });
+            });
+            update_terminal(&terminal, cx, |terminal, _, cx| {
+                terminal.synchronize_linked_charts(cx);
+            });
+        };
+        let saved_sync = |cx: &mut VisualTestContext| {
+            cx.read(|cx| workspace_tab_state(terminal.read(cx).tabs.active(), cx).chart_sync)
+        };
+
+        choose(ChartInterval::Minute5, cx);
+        assert_eq!(
+            followed(cx),
+            None,
+            "nothing is synced until the user turns it on"
+        );
 
         update_terminal(&terminal, cx, |terminal, _, cx| {
-            terminal.set_active_chart_link_group(0, cx);
+            terminal.toggle_active_chart_sync(chart_sync::ChartSyncKind::Timeframe, cx);
         });
-        assert_eq!(group(&second, cx), 0, "Off unlinks the pane");
+        assert_eq!(
+            saved_sync(cx),
+            Some(0b0010),
+            "the tab saves only the timeframe switch"
+        );
+        choose(ChartInterval::Minute15, cx);
+        assert_eq!(
+            followed(cx),
+            Some(ChartInterval::Minute15),
+            "the other chart follows the timeframe"
+        );
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.toggle_active_chart_sync(chart_sync::ChartSyncKind::Timeframe, cx);
+        });
+        assert_eq!(saved_sync(cx), Some(0));
+        choose(ChartInterval::Minute5, cx);
+        assert_eq!(
+            followed(cx),
+            Some(ChartInterval::Minute15),
+            "turning timeframe sync off stops following"
+        );
     }
 
     #[gpui::test]

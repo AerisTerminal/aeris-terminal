@@ -161,9 +161,11 @@ update_download = Baixar
 ## Legenda da janela e moldura do cabeçalho
 caption_maximize = Maximizar janela
 caption_restore = Restaurar janela
-chart_link = Vincular gráficos
-chart_link_off = Desativado
-chart_link_group = Grupo {group}
+chart_sync = Sincronizar gráficos
+chart_sync_symbol = Símbolo
+chart_sync_timeframe = Tempo gráfico
+chart_sync_crosshair = Mira
+chart_sync_time = Tempo
 select_chart_timeframe = Selecionar tempo gráfico
 select_chart_type = Selecionar tipo de gráfico
 chart_time_zone = Fuso horário do gráfico · {time_zone}

@@ -161,9 +161,11 @@ update_download = Скачать
 ## Заголовок окна и элементы шапки
 caption_maximize = Развернуть окно
 caption_restore = Восстановить окно
-chart_link = Связать графики
-chart_link_off = Выкл.
-chart_link_group = Группа {group}
+chart_sync = Синхронизация графиков
+chart_sync_symbol = Символ
+chart_sync_timeframe = Таймфрейм
+chart_sync_crosshair = Перекрестие
+chart_sync_time = Время
 select_chart_timeframe = Выбрать таймфрейм графика
 select_chart_type = Выбрать тип графика
 chart_time_zone = Часовой пояс графика · {time_zone}

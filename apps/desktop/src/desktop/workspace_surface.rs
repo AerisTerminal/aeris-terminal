@@ -57,17 +57,6 @@ fn restored_chart_time_zone(restored: Option<&WorkspaceChartState>) -> String {
         .to_string()
 }
 
-fn restored_link_state(restored: Option<&WorkspaceChartState>) -> (u8, u8) {
-    let link_group = restored
-        .and_then(|state| u8::try_from(state.chart_link_group).ok())
-        .filter(|group| *group <= 4)
-        .unwrap_or(0);
-    let link_flags = restored
-        .and_then(|state| u8::try_from(state.chart_link_flags).ok())
-        .map_or(0b11, |flags| flags & 0b11);
-    (link_group, link_flags)
-}
-
 pub(super) fn restored_chart_trading_visibility(
     restored: Option<&WorkspaceChartState>,
 ) -> ChartTradingVisibilitySettings {
@@ -102,8 +91,6 @@ struct WorkspaceSurfaceInitialization {
     bridge_label: String,
     order_book: Entity<ReadOnlyOrderBookView>,
     context_panel: ContextPanelController,
-    chart_link_group: u8,
-    chart_link_flags: u8,
     chart_time_zone: String,
     chart_trading_visibility: ChartTradingVisibilitySettings,
     chrome_focus: FocusHandle,
@@ -138,11 +125,10 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         order_book: init.order_book,
         order_flow: OrderFlowPresenter::default(),
         context_panel: init.context_panel,
-        chart_link_group: init.chart_link_group,
-        chart_link_flags: init.chart_link_flags,
         chart_time_zone: init.chart_time_zone,
         pending_chart_sync_events: VecDeque::new(),
         pending_linked_instrument: None,
+        pending_linked_interval: None,
         chrome: PaneChromeState::default(),
         scrolls: WorkspaceScrollHandles::default(),
         chart_state: init.startup.chart_state,
@@ -1715,8 +1701,6 @@ impl WorkspaceSurface {
         state.show_execution_marks = Some(self.chart_trading_visibility.show_execution_marks);
         state.extend_order_lines_left = Some(self.chart_trading_visibility.extend_order_lines_left);
         self.context_panel.persist_into(state);
-        state.chart_link_group = u32::from(self.chart_link_group);
-        state.chart_link_flags = u32::from(self.chart_link_flags);
     }
 
     fn pane_presentation(&self, saved: Option<&WorkspaceChartState>) -> PanePresentation {
@@ -1922,8 +1906,6 @@ impl WorkspaceSurface {
             lifecycle.context_view(),
             restored_chart_state.as_ref(),
         );
-        let (chart_link_group, chart_link_flags) =
-            restored_link_state(restored_chart_state.as_ref());
         let chart_time_zone = restored_chart_time_zone(restored_chart_state.as_ref());
         let chart_trading_visibility =
             restored_chart_trading_visibility(restored_chart_state.as_ref());
@@ -1945,8 +1927,6 @@ impl WorkspaceSurface {
             bridge_label,
             order_book,
             context_panel,
-            chart_link_group,
-            chart_link_flags,
             chart_time_zone,
             chart_trading_visibility,
             chrome_focus: cx.focus_handle().tab_stop(true),
@@ -2422,6 +2402,7 @@ impl WorkspaceSurface {
                 cx.notify();
                 return false;
             };
+            self.pending_linked_interval = Some(interval);
             self.chart_pane_controller.request(sequence);
             self.chart_pane_controller
                 .set_pending_target(sequence, interval, None);
@@ -6554,16 +6535,6 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// Group 0 unlinks the pane; groups 1 to 4 are the layout menu's A to D.
-    pub(super) fn set_chart_link_group(&mut self, group: u8, cx: &mut Context<Self>) {
-        if group > 4 || group == self.chart_link_group {
-            return;
-        }
-        self.chart_link_group = group;
-        self.persistence.mark_dirty();
-        cx.notify();
-    }
-
     pub(super) fn take_chart_sync_events(
         &mut self,
     ) -> Vec<aeris_chart_integration::ChartSyncEvent> {
@@ -6574,13 +6545,33 @@ impl WorkspaceSurface {
         self.pending_linked_instrument.take()
     }
 
+    pub(super) fn take_linked_interval(&mut self) -> Option<ChartInterval> {
+        self.pending_linked_interval.take()
+    }
+
+    /// Follows another pane's timeframe. A pane without a market, or whose provider does not
+    /// offer the timeframe, keeps its own instead of reporting a failure the user did not cause.
+    pub(super) fn apply_linked_interval(
+        &mut self,
+        interval: ChartInterval,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.product.is_none() || !self.available_intervals().contains(&interval) {
+            return false;
+        }
+        let selected = self.select_interval(interval, cx);
+        // A relayed timeframe must never bounce back through the tab's sync.
+        self.pending_linked_interval = None;
+        selected
+    }
+
     pub(super) fn apply_linked_instrument(
         &mut self,
         instrument: &InstallProviderInstrument,
         cx: &mut Context<Self>,
     ) -> bool {
         let selected = self.select_installed_instrument(instrument, cx);
-        // A coordinator-applied selection must never bounce back through the group.
+        // A relayed selection must never bounce back through the tab's sync.
         self.pending_linked_instrument = None;
         selected
     }
@@ -6593,21 +6584,6 @@ impl WorkspaceSurface {
         let Some(chart) = self.chart.as_ref() else {
             return false;
         };
-        let allowed = match kind {
-            aeris_chart_integration::ChartSyncEventKind::Crosshair { .. }
-            | aeris_chart_integration::ChartSyncEventKind::ClearCrosshair => {
-                self.chart_link_flags & 0b01 != 0
-            }
-            aeris_chart_integration::ChartSyncEventKind::VisibleTimeRange { .. } => {
-                self.chart_link_flags & 0b10 != 0
-            }
-            // Terminal links financial charts only, which never publish general-chart events.
-            aeris_chart_integration::ChartSyncEventKind::GeneralAxisView { .. }
-            | aeris_chart_integration::ChartSyncEventKind::GeneralCrosshair { .. } => false,
-        };
-        if !allowed {
-            return false;
-        }
         let changed = chart.update(cx, |chart, _| chart.apply_external_sync_event(kind));
         if changed {
             cx.notify();

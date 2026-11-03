@@ -162,9 +162,11 @@ update_download = Télécharger
 ## Légende de la fenêtre et habillage de l'en-tête
 caption_maximize = Agrandir la fenêtre
 caption_restore = Restaurer la fenêtre
-chart_link = Lier les graphiques
-chart_link_off = Désactivé
-chart_link_group = Groupe {group}
+chart_sync = Synchroniser les graphiques
+chart_sync_symbol = Symbole
+chart_sync_timeframe = Unité de temps
+chart_sync_crosshair = Réticule
+chart_sync_time = Temps
 select_chart_timeframe = Choisir l'unité de temps du graphique
 select_chart_type = Choisir le type de graphique
 chart_time_zone = Fuseau horaire du graphique · {time_zone}

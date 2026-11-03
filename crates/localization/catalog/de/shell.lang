@@ -161,9 +161,11 @@ update_download = Herunterladen
 ## Fenstertitel und Kopfzeile
 caption_maximize = Fenster maximieren
 caption_restore = Fenster wiederherstellen
-chart_link = Charts verknüpfen
-chart_link_off = Aus
-chart_link_group = Gruppe {group}
+chart_sync = Charts synchronisieren
+chart_sync_symbol = Symbol
+chart_sync_timeframe = Zeitrahmen
+chart_sync_crosshair = Fadenkreuz
+chart_sync_time = Zeit
 select_chart_timeframe = Zeiteinheit des Charts wählen
 select_chart_type = Charttyp wählen
 chart_time_zone = Zeitzone des Charts · {time_zone}

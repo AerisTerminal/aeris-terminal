@@ -1793,7 +1793,6 @@ mod instrument_drawings {
             chart_type: "bars".into(),
             time_zone: "Etc/UTC".into(),
             context_panel_tab: 1,
-            chart_link_group: 1,
             show_order_management_lines: Some(true),
             show_execution_marks: Some(true),
             extend_order_lines_left: Some(true),
@@ -1810,8 +1809,6 @@ mod instrument_drawings {
             surface.context_panel.set_visible(true);
             surface.context_panel.set_tab(ContextPanelTab::Energy);
             surface.context_panel.set_height(320.0);
-            surface.chart_link_group = 2;
-            surface.chart_link_flags = 1;
         });
         let pending = cx
             .read(|cx| surface.read(cx).workspace_chart_state(cx))
@@ -1827,8 +1824,6 @@ mod instrument_drawings {
             ContextPanelTab::Energy.persisted()
         );
         assert_eq!(pending.context_panel_height, 320);
-        assert_eq!(pending.chart_link_group, 2);
-        assert_eq!(pending.chart_link_flags, 1);
 
         let decoded = WorkspaceChartState::decode(pending.encode_to_vec().as_slice())
             .expect("pending presentation survives protobuf");
@@ -1857,8 +1852,6 @@ mod instrument_drawings {
             reopened_state.context_panel_height,
             pending.context_panel_height
         );
-        assert_eq!(reopened_state.chart_link_group, pending.chart_link_group);
-        assert_eq!(reopened_state.chart_link_flags, pending.chart_link_flags);
 
         show(&surface, "A", cx);
         let loaded = saved(&surface, cx);
@@ -1875,8 +1868,6 @@ mod instrument_drawings {
         assert_eq!(loaded.context_panel_visible, pending.context_panel_visible);
         assert_eq!(loaded.context_panel_tab, pending.context_panel_tab);
         assert_eq!(loaded.context_panel_height, pending.context_panel_height);
-        assert_eq!(loaded.chart_link_group, pending.chart_link_group);
-        assert_eq!(loaded.chart_link_flags, pending.chart_link_flags);
     }
 
     #[gpui::test]
@@ -1918,8 +1909,6 @@ mod instrument_drawings {
         original.context_panel_visible = true;
         original.context_panel_tab = ContextPanelTab::Energy.persisted();
         original.context_panel_height = 320;
-        original.chart_link_group = 2;
-        original.chart_link_flags = 1;
 
         let (surface, _requests, cx) = open_surface(cx, instrument("A"), Some(original.clone()));
         let pending = cx
@@ -1949,8 +1938,6 @@ mod instrument_drawings {
         assert!(loaded.context_panel_visible);
         assert_eq!(loaded.context_panel_tab, original.context_panel_tab);
         assert_eq!(loaded.context_panel_height, original.context_panel_height);
-        assert_eq!(loaded.chart_link_group, original.chart_link_group);
-        assert_eq!(loaded.chart_link_flags, original.chart_link_flags);
     }
 
     #[gpui::test]

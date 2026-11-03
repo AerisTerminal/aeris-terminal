@@ -442,6 +442,7 @@ pub(super) fn normalized_layout_tab(tab: &WorkspaceTabState) -> WorkspaceTabStat
             .as_ref()
             .and_then(|layout| remapped_layout(layout, &ordinal)),
         saved_layout_id: 0,
+        chart_sync: tab.chart_sync,
     }
 }
 
@@ -734,6 +735,7 @@ mod tests {
                 second: Some(Box::new(leaf(first))),
             }),
             saved_layout_id: 0,
+            chart_sync: None,
         }
     }
 

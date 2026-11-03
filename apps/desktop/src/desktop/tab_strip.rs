@@ -408,6 +408,7 @@ mod tests {
             page: super::super::market_screener::AppView::Terminal,
             generation: 1,
             focus: cx.focus_handle(),
+            chart_sync: super::super::chart_sync::ChartSync::default(),
         }
     }
 

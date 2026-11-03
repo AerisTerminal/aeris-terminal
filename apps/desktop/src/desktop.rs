@@ -20,6 +20,7 @@ mod chart_context_menus;
 mod chart_menus;
 use chart_menus::{ChartMenus, ChartSettingsPanel, ChartSettingsTemplateOverlay};
 mod chart_pane_controller;
+mod chart_sync;
 mod context_panel_controller;
 use context_panel_controller::{ContextCredentialDialogState, ContextPanelTab};
 mod chart_surface;
@@ -886,13 +887,13 @@ struct WorkspaceSurface {
     order_book: Entity<ReadOnlyOrderBookView>,
     order_flow: order_flow_presenter::OrderFlowPresenter,
     context_panel: context_panel_controller::ContextPanelController,
-    chart_link_group: u8,
-    chart_link_flags: u8,
     /// The trader's selected IANA chart time zone. The surface owns it so every chart this
     /// pane creates (restore, symbol or timeframe swap) and every save use the same value.
     chart_time_zone: String,
     pending_chart_sync_events: VecDeque<aeris_chart_integration::ChartSyncEvent>,
     pending_linked_instrument: Option<InstallProviderInstrument>,
+    /// The timeframe this pane's user last chose, until the tab's sync relays it.
+    pending_linked_interval: Option<ChartInterval>,
     chrome: pane_chrome_state::PaneChromeState,
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
@@ -5044,6 +5045,7 @@ struct WorkspaceTab {
     /// The page the tab showed when it was last left; selecting the tab shows it again.
     /// Not persisted: every tab starts on the terminal page.
     page: market_screener::AppView,
+    chart_sync: chart_sync::ChartSync,
 }
 
 /// The color a newly set watchlist flag starts with, as the hex value the flag stores.
@@ -5453,6 +5455,7 @@ fn workspace_tab_state(workspace: &WorkspaceTab, cx: &App) -> WorkspaceTabState 
         generation: workspace.generation.max(1),
         layout: Some(workspace_layout_state(&layout)),
         saved_layout_id: workspace.saved_layout_id,
+        chart_sync: Some(workspace.chart_sync.bits()),
     }
 }
 

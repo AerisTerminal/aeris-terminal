@@ -161,9 +161,11 @@ update_download = 下载
 ## 窗口标题栏和顶部框架
 caption_maximize = 最大化窗口
 caption_restore = 还原窗口
-chart_link = 图表联动
-chart_link_off = 关闭
-chart_link_group = {group} 组
+chart_sync = 同步图表
+chart_sync_symbol = 品种
+chart_sync_timeframe = 周期
+chart_sync_crosshair = 十字光标
+chart_sync_time = 时间
 select_chart_timeframe = 选择图表周期
 select_chart_type = 选择图表类型
 chart_time_zone = 图表时区 · {time_zone}

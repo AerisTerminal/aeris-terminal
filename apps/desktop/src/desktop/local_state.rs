@@ -384,6 +384,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
             second: None,
         }),
         saved_layout_id: 1,
+        chart_sync: Some(0),
     };
     let saved_layout = WorkspaceSavedLayoutState {
         layout_id: 1,
@@ -532,10 +533,13 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         if chart.context_panel_height != 0 {
             chart.context_panel_height = chart.context_panel_height.clamp(140, 640);
         }
-        if chart.chart_link_group > 4 {
-            chart.chart_link_group = 0;
-        }
-        chart.chart_link_flags &= 0b11;
+    }
+    let saved_layout_tabs = workspace
+        .saved_layouts
+        .iter_mut()
+        .filter_map(|layout| layout.tab.as_mut());
+    for tab in workspace.workspace_tabs.iter_mut().chain(saved_layout_tabs) {
+        super::chart_sync::adopt_legacy_link_groups(tab);
     }
     super::layout_library::sanitize_saved_layouts(&mut workspace);
     workspace
@@ -1148,8 +1152,8 @@ mod tests {
             order_flow: Some(round_trip_order_flow()),
             context_panel_visible: true,
             context_panel_tab: 2,
-            chart_link_group: 2,
-            chart_link_flags: 3,
+            chart_link_group: 0,
+            chart_link_flags: 0,
             context_panel_height: 320,
             time_zone: "America/New_York".to_string(),
             show_order_management_lines: Some(false),

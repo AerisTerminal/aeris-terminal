@@ -107,6 +107,7 @@ fn workspace_tab() -> WorkspaceTabState {
             ..WorkspaceLayoutState::default()
         }),
         saved_layout_id: 0,
+        chart_sync: Some(0b0110),
     }
 }
 

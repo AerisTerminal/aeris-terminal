@@ -161,9 +161,11 @@ update_download = ダウンロード
 ## ウィンドウのキャプションとヘッダー
 caption_maximize = ウィンドウを最大化
 caption_restore = ウィンドウを元に戻す
-chart_link = チャートをリンク
-chart_link_off = オフ
-chart_link_group = グループ {group}
+chart_sync = チャートを同期
+chart_sync_symbol = 銘柄
+chart_sync_timeframe = 時間足
+chart_sync_crosshair = クロスヘア
+chart_sync_time = 時間
 select_chart_timeframe = チャートの時間足を選択
 select_chart_type = チャートタイプを選択
 chart_time_zone = チャートのタイムゾーン · {time_zone}

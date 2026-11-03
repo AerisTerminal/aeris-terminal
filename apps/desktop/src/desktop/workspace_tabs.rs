@@ -1,5 +1,6 @@
 //! Workspace tabs.
 
+use super::chart_sync::ChartSyncKind;
 use super::market_watch::{DragMove, FlagPress, PickerColor};
 use super::*;
 use aeris_localization::{shell, tr};
@@ -368,60 +369,69 @@ impl TerminalApp {
         workspace.panes[workspace.active_pane].surface.clone()
     }
 
+    /// Relays each change a pane's user made to the other panes of its tab, for the kinds the
+    /// tab syncs. Every pane's pending changes are drained either way, so none waits for a
+    /// later sync choice.
     pub(super) fn synchronize_linked_charts(&mut self, cx: &mut Context<Self>) {
-        let mut pending = Vec::new();
-        let mut pending_instruments = Vec::new();
-        for workspace in self.tabs.iter() {
+        enum LinkedChange {
+            Instrument(InstallProviderInstrument),
+            Interval(ChartInterval),
+            Chart(aeris_chart_integration::ChartSyncEvent),
+        }
+        let mut relays = Vec::new();
+        for (tab_index, workspace) in self.tabs.iter().enumerate() {
+            let sync = workspace.chart_sync;
             for pane in &workspace.panes {
-                let (group, events, instrument) = pane.surface.update(cx, |surface, _| {
+                let (events, instrument, interval) = pane.surface.update(cx, |surface, _| {
                     (
-                        surface.chart_link_group,
                         surface.take_chart_sync_events(),
                         surface.take_linked_instrument(),
+                        surface.take_linked_interval(),
                     )
                 });
-                if group == 0 {
+                if workspace.panes.len() < 2 {
                     continue;
                 }
-                if let Some(instrument) = instrument {
-                    pending_instruments.push((workspace.id, pane.id, group, instrument));
+                if let Some(instrument) = instrument
+                    && sync.contains(ChartSyncKind::Symbol)
+                {
+                    relays.push((tab_index, pane.id, LinkedChange::Instrument(instrument)));
                 }
-                pending.extend(
+                if let Some(interval) = interval
+                    && sync.contains(ChartSyncKind::Timeframe)
+                {
+                    relays.push((tab_index, pane.id, LinkedChange::Interval(interval)));
+                }
+                relays.extend(
                     events
                         .into_iter()
-                        .map(|event| (workspace.id, pane.id, group, event)),
+                        .filter(|event| sync.shares(&event.kind))
+                        .map(|event| (tab_index, pane.id, LinkedChange::Chart(event))),
                 );
             }
         }
-        for (source_workspace, source_pane, group, instrument) in pending_instruments {
-            for workspace in self.tabs.iter() {
-                for pane in &workspace.panes {
-                    if (workspace.id, pane.id) == (source_workspace, source_pane) {
-                        continue;
-                    }
-                    pane.surface.update(cx, |surface, surface_cx| {
-                        if surface.chart_link_group == group {
-                            surface.apply_linked_instrument(&instrument, surface_cx);
-                        }
-                    });
-                }
-            }
-        }
-        for (source_workspace, source_pane, group, event) in pending {
-            if !self.tabs.accept_linked_sync(&event.source, event.revision) {
+        for (tab_index, source_pane, change) in relays {
+            if let LinkedChange::Chart(event) = &change
+                && !self.tabs.accept_linked_sync(&event.source, event.revision)
+            {
                 continue;
             }
-            for workspace in self.tabs.iter() {
-                for pane in &workspace.panes {
-                    if (workspace.id, pane.id) == (source_workspace, source_pane) {
-                        continue;
-                    }
-                    pane.surface.update(cx, |surface, surface_cx| {
-                        if surface.chart_link_group == group {
+            let Some(workspace) = self.tabs.get(tab_index) else {
+                continue;
+            };
+            for pane in workspace.panes.iter().filter(|pane| pane.id != source_pane) {
+                pane.surface
+                    .update(cx, |surface, surface_cx| match &change {
+                        LinkedChange::Instrument(instrument) => {
+                            surface.apply_linked_instrument(instrument, surface_cx);
+                        }
+                        LinkedChange::Interval(interval) => {
+                            surface.apply_linked_interval(*interval, surface_cx);
+                        }
+                        LinkedChange::Chart(event) => {
                             surface.apply_linked_chart_event(&event.kind, surface_cx);
                         }
                     });
-                }
             }
         }
     }
@@ -3036,6 +3046,7 @@ impl TerminalApp {
             page: market_screener::AppView::Terminal,
             generation: 1,
             focus: cx.focus_handle(),
+            chart_sync: chart_sync::ChartSync::default(),
         };
         if let Err(error) = self.assign_new_layout(&mut workspace, name, cx) {
             surface.update(cx, |surface, surface_cx| {

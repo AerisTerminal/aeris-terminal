@@ -371,10 +371,12 @@ pub struct WorkspaceChartState {
     /// Stable host-owned context-panel tab identifier.
     #[prost(uint32, tag = "12")]
     pub context_panel_tab: u32,
-    /// Zero disables linking; 1-4 identify bounded desktop link groups A-D.
+    /// Legacy link group (zero unlinked, 1-4 groups A-D) of workspaces saved before
+    /// `WorkspaceTabState::chart_sync`; read once to derive the tab's sync, then cleared.
     #[prost(uint32, tag = "13")]
     pub chart_link_group: u32,
-    /// Bit 0 synchronizes crosshairs and bit 1 synchronizes visible time ranges.
+    /// Legacy link flags (bit 0 crosshair, bit 1 visible time range) read with
+    /// `chart_link_group`.
     #[prost(uint32, tag = "14")]
     pub chart_link_flags: u32,
     /// Logical-pixel height of the bottom context panel; zero (and absent in
@@ -832,6 +834,11 @@ pub struct WorkspaceTabState {
     /// The saved layout the tab shows. Zero in workspaces saved before the layout library.
     #[prost(uint64, tag = "8")]
     pub saved_layout_id: u64,
+    /// Changes every chart of the tab shares: bit 0 symbol, bit 1 timeframe, bit 2 crosshair,
+    /// bit 3 visible time range. Absent in workspaces saved before it, which derive it from
+    /// their panes' legacy link groups.
+    #[prost(uint32, optional, tag = "9")]
+    pub chart_sync: Option<u32>,
 }
 
 /// Provider-neutral identity of one demanded bar series.

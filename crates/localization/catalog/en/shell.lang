@@ -161,9 +161,11 @@ update_download = Download
 ## Window caption and header chrome
 caption_maximize = Maximize window
 caption_restore = Restore window
-chart_link = Link charts
-chart_link_off = Off
-chart_link_group = Group {group}
+chart_sync = Sync charts
+chart_sync_symbol = Symbol
+chart_sync_timeframe = Timeframe
+chart_sync_crosshair = Crosshair
+chart_sync_time = Time
 select_chart_timeframe = Select chart timeframe
 select_chart_type = Select chart type
 chart_time_zone = Chart time zone · {time_zone}

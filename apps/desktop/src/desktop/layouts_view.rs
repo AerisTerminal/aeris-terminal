@@ -5,6 +5,7 @@
 use super::*;
 use aeris_desktop::command_registry::CommandId;
 use aeris_localization::{common, shell, tr, tr_count};
+use chart_sync::ChartSyncKind;
 use layout_library::MAXIMUM_SAVED_LAYOUTS;
 
 const START_PAGE_WIDTH: f32 = 720.0;
@@ -727,12 +728,7 @@ impl TerminalApp {
     }
 
     /// The layout button of the chart header and, while open, its menu.
-    pub(super) fn layout_menu_button(
-        &self,
-        terminal: &Entity<Self>,
-        unsaved: bool,
-        chart_link_group: u8,
-    ) -> AnyElement {
+    pub(super) fn layout_menu_button(&self, terminal: &Entity<Self>, unsaved: bool) -> AnyElement {
         let theme = self.theme;
         let workspace = self.tabs.active();
         let open = self.pages.layouts.layout_menu_open;
@@ -755,7 +751,7 @@ impl TerminalApp {
                 toggle.update(cx, TerminalApp::toggle_layout_menu);
             });
         let menu = MenuAnchor::new("layout_menu_anchor", button)
-            .menu(open.then(|| self.layout_menu(terminal, unsaved, chart_link_group)))
+            .menu(open.then(|| self.layout_menu(terminal, unsaved)))
             .on_dismiss(move |_, cx| {
                 dismiss.update(cx, TerminalApp::close_layout_menus);
             });
@@ -787,43 +783,32 @@ impl TerminalApp {
             .collect()
     }
 
-    /// The active pane's link group choices: Off, then groups A to D.
-    fn chart_link_rows(&self, terminal: &Entity<Self>, chart_link_group: u8) -> Vec<MenuRow> {
-        (0..=4u8)
-            .map(|group| {
-                let label = match group {
-                    0 => tr!(shell::CHART_LINK_OFF).to_string(),
-                    _ => tr!(
-                        shell::CHART_LINK_GROUP,
-                        group = char::from(b'A' + group - 1).to_string()
-                    ),
-                };
+    /// One switch per change the active tab's charts can share.
+    fn chart_sync_rows(&self, terminal: &Entity<Self>) -> Vec<MenuRow> {
+        let sync = self.tabs.active().chart_sync;
+        ChartSyncKind::ALL
+            .into_iter()
+            .map(|kind| {
                 let terminal = terminal.clone();
-                MenuRow::compact(("layout_menu_link", u64::from(group)), label, &self.theme)
-                    .checked(group == chart_link_group)
+                MenuRow::compact(kind.id(), tr!(kind.label()), &self.theme)
+                    .checked(sync.contains(kind))
                     .on_click(move |_, _, cx| {
                         terminal.update(cx, |terminal, cx| {
-                            terminal.set_active_chart_link_group(group, cx);
+                            terminal.toggle_active_chart_sync(kind, cx);
                         });
                     })
             })
             .collect()
     }
 
-    pub(super) fn set_active_chart_link_group(&mut self, group: u8, cx: &mut Context<Self>) {
-        self.pages.layouts.layout_menu_open = false;
-        self.active_surface().update(cx, |surface, cx| {
-            surface.set_chart_link_group(group, cx);
-        });
+    pub(super) fn toggle_active_chart_sync(&mut self, kind: ChartSyncKind, cx: &mut Context<Self>) {
+        let workspace = self.tabs.active_mut();
+        workspace.chart_sync = workspace.chart_sync.toggled(kind);
+        self.record_layout_change(cx);
         cx.notify();
     }
 
-    fn layout_menu(
-        &self,
-        terminal: &Entity<Self>,
-        unsaved: bool,
-        chart_link_group: u8,
-    ) -> MenuPanel {
+    fn layout_menu(&self, terminal: &Entity<Self>, unsaved: bool) -> MenuPanel {
         let theme = self.theme;
         let active_layout = self.tabs.active().saved_layout_id;
         let autosave = self
@@ -873,8 +858,8 @@ impl TerminalApp {
             .checked(autosave),
         )
         .separator()
-        .child(menu_section_heading(tr!(shell::CHART_LINK), &theme))
-        .children(self.chart_link_rows(terminal, chart_link_group))
+        .child(menu_section_heading(tr!(shell::CHART_SYNC), &theme))
+        .children(self.chart_sync_rows(terminal))
         .separator()
         .child(action(
             "layout_menu_rename",

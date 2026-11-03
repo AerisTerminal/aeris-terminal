@@ -161,9 +161,11 @@ update_download = डाउनलोड करें
 ## Window caption and header chrome
 caption_maximize = विंडो बड़ी करें
 caption_restore = विंडो पुनःस्थापित करें
-chart_link = चार्ट लिंक करें
-chart_link_off = बंद
-chart_link_group = ग्रुप {group}
+chart_sync = चार्ट सिंक करें
+chart_sync_symbol = सिंबल
+chart_sync_timeframe = टाइमफ़्रेम
+chart_sync_crosshair = क्रॉसहेयर
+chart_sync_time = समय
 select_chart_timeframe = चार्ट टाइमफ़्रेम चुनें
 select_chart_type = चार्ट टाइप चुनें
 chart_time_zone = चार्ट टाइम ज़ोन · {time_zone}

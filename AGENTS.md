@@ -149,6 +149,11 @@ violations and missing verification explicitly, and never describe them as satis
   the chart chrome (`drawings_hidden`, off for documents written before it existed) and applies it
   to every pane and every chart built later. Arming a drawing tool shows drawings in the engine,
   so the desktop reads the chart back after arming instead of mirroring that rule.
+- Chart sync belongs to the workspace tab (`WorkspaceTabState::chart_sync`, saved with its
+  layout): the layout menu switches symbol, timeframe, crosshair and time sync on and off one by
+  one, and `TerminalApp::synchronize_linked_charts` relays each change a user made in one pane
+  to the other panes of that tab only. Panes keep no link state; a pane's legacy link group is
+  read once by the sanitizer to derive its tab's sync and then cleared.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;

@@ -580,7 +580,6 @@ impl TerminalApp {
         let layout_menu = self.layout_menu_button(
             terminal,
             self.layout_tab_has_unsaved_changes(self.tabs.active_index(), cx),
-            workspace.chart_link_group,
         );
         terminal_header(
             surface,
@@ -1581,6 +1580,7 @@ pub(super) fn terminal_root(
                 page: market_screener::AppView::Terminal,
                 generation: 1,
                 focus: cx.focus_handle(),
+                chart_sync: chart_sync::ChartSync::default(),
             }],
             active_workspace_id: Some(1),
             // The window shell never starts the workspace writer; the seed is inert.
@@ -1763,6 +1763,7 @@ pub(super) fn restored_workspace_tab(
         page: market_screener::AppView::Terminal,
         generation: tab.generation,
         focus: cx.focus_handle(),
+        chart_sync: chart_sync::ChartSync::from_bits(tab.chart_sync.unwrap_or(0)),
     })
 }
 
