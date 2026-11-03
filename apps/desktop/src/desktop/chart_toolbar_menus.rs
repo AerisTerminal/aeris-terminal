@@ -1001,6 +1001,8 @@ fn timeframe_favorite_star(
         Icon::new(HugeIcon::Star.path())
     };
     Button::new(("timeframe_favorite_star", index), theme)
+        .debug_selector(|| "timeframe_favorite_star".into())
+        .shares_container_hover()
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .icon(star)

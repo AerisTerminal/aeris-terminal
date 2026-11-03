@@ -2134,6 +2134,54 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn hovering_and_starring_a_timeframe_keeps_the_flyout_open(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_chrome_overlay(ChromeOverlay::Timeframe, window, cx);
+                surface.open_timeframe_group(TimeframeMenuGroup::Minutes, false, cx);
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let star = cx
+            .debug_bounds("timeframe_favorite_star")
+            .expect("the flyout rows show their stars");
+
+        cx.simulate_mouse_move(
+            point(star.origin.x - px(40.0), star.center().y),
+            None,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        cx.simulate_mouse_move(star.center(), None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read(|cx| surface.read(cx).chrome.timeframe_flyout()),
+            Some(TimeframeMenuGroup::Minutes),
+            "the star sits inside its row, so the pointer never left the menu"
+        );
+
+        let favorites = |cx: &mut VisualTestContext| {
+            cx.read(|cx| surface.read(cx).chart_chrome.timeframe_favorites)
+        };
+        let before = favorites(cx);
+        cx.simulate_click(star.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_ne!(favorites(cx), before, "the press stars the timeframe");
+        cx.read(|cx| {
+            let chrome = &surface.read(cx).chrome;
+            assert_eq!(chrome.overlay(), Some(ChromeOverlay::Timeframe));
+            assert_eq!(chrome.timeframe_flyout(), Some(TimeframeMenuGroup::Minutes));
+        });
+    }
+
+    #[gpui::test]
     fn trading_shortcuts_ask_first_and_send_once_per_press(cx: &mut TestAppContext) {
         let (terminal, cx) = terminal_harness(cx);
         let surface = cx.read(|cx| terminal.read(cx).active_surface());
