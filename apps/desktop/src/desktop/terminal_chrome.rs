@@ -1297,7 +1297,8 @@ pub(super) fn series_selector(
             .label(label)
             .caret(header_icon(HugeIcon::ChevronDown)),
         None => button
-            .icon(header_icon(HugeIcon::ChevronDown))
+            .w(design_rems(TIMEFRAME_CHEVRON_WIDTH))
+            .icon(header_icon(HugeIcon::ChevronDown).with_size(px(TIMEFRAME_CHEVRON_ICON)))
             .aria_label(tr!(shell::SELECT_CHART_TIMEFRAME)),
     };
     let button = button
@@ -1349,6 +1350,11 @@ pub(super) fn series_selector(
 /// The favorites and the timeframe menu trigger sit side by side as one strip, so they keep a
 /// narrower inset than the header's other buttons.
 const TIMEFRAME_STRIP_PADDING_X: f32 = 8.0;
+
+/// The lone chevron is a narrow strip at the strip's height, with a glyph the size of the
+/// labelled trigger's caret, so it reads as part of the favorites rather than a header button.
+const TIMEFRAME_CHEVRON_WIDTH: f32 = 20.0;
+const TIMEFRAME_CHEVRON_ICON: f32 = 14.0;
 
 fn timeframe_strip(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> Div {
     div()
