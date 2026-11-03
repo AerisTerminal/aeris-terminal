@@ -1,6 +1,7 @@
 use super::app_navigation::app_navigation_button;
 use super::platform_menu::account_avatar_button;
 use super::*;
+use crate::desktop::native_ui::rem_scale::design_rems;
 use crate::desktop::native_ui::tooltip::TooltipPlacement;
 use aeris_localization::{Text, panels, shell, tr};
 use aeris_market_runtime::{MarketSessionPhase, MarketSessionStatus};
@@ -557,14 +558,20 @@ pub(super) fn header_controls(
             },
             &state.theme,
         ))
-        .child(series_selector(
-            app.clone(),
-            state.series_label,
-            state.pending.series,
-            &state.theme,
-            state.controls.enabled(HeaderControls::SERIES),
-        ))
-        .children(timeframe_favorites)
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .children(timeframe_favorites)
+                .child(series_selector(
+                    app.clone(),
+                    state.series_label,
+                    state.pending.series,
+                    &state.theme,
+                    state.controls.enabled(HeaderControls::SERIES),
+                )),
+        )
         .child(chart_type_selector(
             app.clone(),
             state.chart_type,
@@ -1294,6 +1301,7 @@ pub(super) fn series_selector(
     let button = Button::new("series_selector", theme)
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
+        .px(design_rems(TIMEFRAME_STRIP_PADDING_X))
         .label(label)
         .loading_icon(header_icon(HugeIcon::Loader))
         .caret(header_icon(HugeIcon::ChevronDown))
@@ -1342,6 +1350,10 @@ pub(super) fn series_selector(
     )
 }
 
+/// The favorites and the timeframe menu trigger sit side by side as one strip, so they keep a
+/// narrower inset than the header's other buttons.
+const TIMEFRAME_STRIP_PADDING_X: f32 = 8.0;
+
 /// The starred timeframes' quick buttons: one press selects a timeframe, like its menu row.
 fn timeframe_favorite_buttons(
     app: &Entity<WorkspaceSurface>,
@@ -1358,6 +1370,7 @@ fn timeframe_favorite_buttons(
             Button::new(("timeframe_favorite_button", index), &state.theme)
                 .variant(ButtonVariant::Ghost)
                 .button_size(ButtonSize::Lg)
+                .px(design_rems(TIMEFRAME_STRIP_PADDING_X))
                 .label(interval.label())
                 .selected(interval == state.interval)
                 .disabled(!enabled)
