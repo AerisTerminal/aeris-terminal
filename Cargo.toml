@@ -92,8 +92,8 @@ schemars = "=1.2.2"
 smallvec = "=1.16.2"
 sum-tree = { version = "=0.2.0", package = "zed-sum-tree" }
 unicode-segmentation = "=1.13.3"
-gpui = { git = "https://github.com/AerisTerminal/zed", rev = "5d2536a8e586e0b29f2b388a083dde933255d02e", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
-gpui_platform = { git = "https://github.com/AerisTerminal/zed", rev = "5d2536a8e586e0b29f2b388a083dde933255d02e", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui = { git = "https://github.com/AerisTerminal/zed", rev = "ed1eb21a4016254db5a342d4f1f9eb6ec4a5d6a2", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+gpui_platform = { git = "https://github.com/AerisTerminal/zed", rev = "ed1eb21a4016254db5a342d4f1f9eb6ec4a5d6a2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "6eade79d109397bfa8796138140ab2424cf2757f", version = "=0.3.0" }
 aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "6eade79d109397bfa8796138140ab2424cf2757f", version = "=0.3.0" }
@@ -105,10 +105,10 @@ aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git
 # both with the exact same reviewed fork revision used by the desktop so GPUI types cannot split
 # across sources. See "GPUI fork" in AGENTS.md before changing any of the four revisions.
 [patch.crates-io]
-gpui = { git = "https://github.com/AerisTerminal/zed", rev = "5d2536a8e586e0b29f2b388a083dde933255d02e", version = "=0.2.2" }
+gpui = { git = "https://github.com/AerisTerminal/zed", rev = "ed1eb21a4016254db5a342d4f1f9eb6ec4a5d6a2", version = "=0.2.2" }
 
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/AerisTerminal/zed", rev = "5d2536a8e586e0b29f2b388a083dde933255d02e", version = "=0.2.2" }
+gpui = { git = "https://github.com/AerisTerminal/zed", rev = "ed1eb21a4016254db5a342d4f1f9eb6ec4a5d6a2", version = "=0.2.2" }
 
 [profile.release]
 codegen-units = 1

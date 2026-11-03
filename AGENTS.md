@@ -765,13 +765,16 @@ The fork is a liability we carry deliberately, so keep it small and easy to reba
 
 - The fork's `aeris-patches` branch is upstream Zed at a chosen revision plus only the commits Aeris
   needs. Every pinned revision also has an `aeris-pin-<short rev>` tag, so older Aeris commits keep
-  building after the branch moves on. Current series, on upstream `56934ec0`, pinned at `5d2536a8`:
+  building after the branch moves on. Current series, on upstream `56934ec0`, pinned at `ed1eb21a`:
   1. `gpui_windows: Match Chromium text weight on Windows`: glyphs apply DirectWrite enhanced
      contrast at every text brightness (upstream scales it to zero for light text), and the
      enhanced contrast is floored at 1.0. Upstream discussion: zed-industries/zed#66484.
   2. `gpui_windows: Draw SVG masks with their exact coverage`: `MonochromeSprite.pad` becomes
      `is_glyph`, and the Windows shader applies the text contrast and gamma correction only to font
      glyphs. Upstream pull request: zed-industries/zed#66483.
+  3. `gpui: Snap hard shadow edges to their element's device pixels`: box shadows offset and
+     dilate the element's snapped bounds by whole device pixels, so a 1px spread ring stays as
+     wide as the element's 1px border at fractional scale factors. Not yet proposed upstream.
 - A fork commit must be a change Zed itself could merge: titled in Zed's `crate: Description` style,
   with no Aeris names, product code or measurement programs. Product behavior stays in this
   repository.
