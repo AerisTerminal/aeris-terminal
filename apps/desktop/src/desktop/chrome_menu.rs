@@ -7,6 +7,8 @@ pub(super) const CHROME_MENU_LIST_HEIGHT: f32 = 520.0;
 pub(super) const CHROME_MENU_MAX_HEIGHT: f32 = 744.0;
 pub(super) const CHROME_MENU_ROW_ICON_WELL: f32 = 24.0;
 pub(super) const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 16.0;
+/// Height of the inset search field inside the menu header.
+const CHROME_MENU_SEARCH_FIELD_HEIGHT: f32 = 32.0;
 
 /// Outer width and scrolling-list height the symbol and indicator menus are drawn at.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -121,19 +123,12 @@ pub(super) fn chrome_menu_search_header(
         .flex()
         .items_center()
         .gap_2()
-        .px(px(12.0))
+        .px(px(8.0))
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .text_sm()
         .text_color(gpui_color(colors.text_default))
-        .child(header_icon(HugeIcon::Search).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
-        .child(
-            Input::new(input)
-                .appearance(false)
-                .bordered(false)
-                .focus_bordered(false)
-                .flex_1(),
-        )
+        .child(chrome_menu_search_field(input, theme))
         .child(
             div()
                 .text_size(px(11.0))
@@ -141,6 +136,22 @@ pub(super) fn chrome_menu_search_header(
                 .child(hint.into()),
         )
         .child(chrome_menu_close_button(app, theme))
+}
+
+/// The inset search field of the symbol and indicator menu headers: the platform text field
+/// with the search mark inside it.
+pub(super) fn chrome_menu_search_field(input: &Entity<InputState>, theme: &AerisTheme) -> Div {
+    div()
+        .flex_1()
+        .min_w(px(0.0))
+        .h(px(CHROME_MENU_SEARCH_FIELD_HEIGHT))
+        .flex()
+        .child(
+            Input::new(input)
+                .platform(theme)
+                .leading(header_icon(HugeIcon::Search).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
+                .flex_1(),
+        )
 }
 
 pub(super) fn chrome_menu_close_button(

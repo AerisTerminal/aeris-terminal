@@ -1,7 +1,7 @@
 use aeris_design_system::{AerisTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
-    App, BoxShadow, Entity, Focusable, Hsla, IntoElement, Pixels, RenderOnce, Window, div,
-    prelude::*, px,
+    AnyElement, App, BoxShadow, Entity, Focusable, Hsla, IntoElement, Pixels, RenderOnce, Window,
+    div, prelude::*, px,
 };
 use gpui_base::input::{Input as BaseInput, InputEditorStyle, Textarea as BaseTextarea};
 
@@ -31,6 +31,7 @@ pub(crate) struct Input {
     invalid_ring_color: Option<Hsla>,
     muted_text_color: Option<Hsla>,
     border_width: Option<Pixels>,
+    leading: Option<AnyElement>,
 }
 
 impl Input {
@@ -52,6 +53,7 @@ impl Input {
             invalid_ring_color: None,
             muted_text_color: None,
             border_width: None,
+            leading: None,
         }
     }
 
@@ -66,6 +68,12 @@ impl Input {
         self.invalid_ring_color = Some(gpui_color(appearance.invalid_ring));
         self.muted_text_color = Some(gpui_color(theme.colors.text_secondary));
         self.border_width = Some(platform_border_width(theme));
+        self
+    }
+
+    /// Shows `leading` (a search mark, for example) inside the field before the text.
+    pub(crate) fn leading(mut self, leading: impl IntoElement) -> Self {
+        self.leading = Some(leading.into_any_element());
         self
     }
 
@@ -167,7 +175,18 @@ impl RenderOnce for Input {
                     BoxShadow::new(px(0.0), px(0.0), ring_color).spread_radius(px(width)),
                 ])
             })
-            .child(BaseInput::new(&self.state))
+            .map(|element| match self.leading {
+                Some(leading) => element.gap_2().child(leading).child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .child(BaseInput::new(&self.state)),
+                ),
+                None => element.child(BaseInput::new(&self.state)),
+            })
     }
 }
 

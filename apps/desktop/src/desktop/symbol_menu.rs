@@ -3,7 +3,7 @@ use super::*;
 use super::chrome_menu::{
     CHROME_MENU_ROW_ICON_WELL, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_SEARCH_ICON_SIZE,
     ChromeMenuExtent, chrome_menu_close_button, chrome_menu_empty, chrome_menu_scroll_body,
-    chrome_menu_surface, compact_menu_add_button, scrollable_menu_body,
+    chrome_menu_search_field, chrome_menu_surface, compact_menu_add_button, scrollable_menu_body,
 };
 use aeris_localization::{panels, tr};
 
@@ -507,7 +507,7 @@ pub(super) fn instrument_search_header(
         .flex()
         .items_center()
         .gap_2()
-        .px(px(12.0))
+        .px(px(8.0))
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .text_sm()
@@ -528,13 +528,7 @@ pub(super) fn instrument_search_header(
                     toggle_app.update(cx, WorkspaceSurface::toggle_symbol_provider_menu);
                 })
         })
-        .child(
-            Input::new(input)
-                .appearance(false)
-                .bordered(false)
-                .focus_bordered(false)
-                .flex_1(),
-        )
+        .child(chrome_menu_search_field(input, theme))
         .child(chrome_menu_close_button(app, theme))
 }
 
