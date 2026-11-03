@@ -1,7 +1,7 @@
 use super::*;
 
 use super::chrome_menu::{
-    CHROME_MENU_ROW_ICON_WELL, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_SEARCH_ICON_SIZE,
+    CHROME_MENU_ROW_ICON_WELL, CHROME_MENU_SCOPE_MARK_SIZE, CHROME_MENU_SEARCH_HEIGHT,
     ChromeMenuExtent, chrome_menu_close_button, chrome_menu_empty, chrome_menu_scroll_body,
     chrome_menu_search_field, chrome_menu_surface, compact_menu_add_button, scrollable_menu_body,
 };
@@ -522,7 +522,7 @@ pub(super) fn instrument_search_header(
                 .aria_label(tr!(panels::SYMBOL_MENU_CHOOSE_MARKETS))
                 .leading(scope_mark(
                     state.scope,
-                    px(CHROME_MENU_SEARCH_ICON_SIZE),
+                    px(CHROME_MENU_SCOPE_MARK_SIZE),
                     &colors,
                 ))
                 .on_press(move |_, _, cx| {

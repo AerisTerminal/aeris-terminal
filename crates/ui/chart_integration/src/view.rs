@@ -2,10 +2,10 @@
 
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
 use crate::engine_bridge::{
-    ProductPriceBars, apply_merged_chart_data, apply_product_series_markers,
-    chart_data_queue_capacity, install_product_price_series, install_replay, install_volume_series,
-    price_display_precision, replay_display_precision, replay_legend_title, replay_price_divisor,
-    replay_quantity_divisor, sync_chart_language,
+    ProductPriceBars, ProductSeries, apply_merged_chart_data, apply_product_series_markers,
+    chart_data_queue_capacity, install_product_price_series, install_product_series,
+    install_replay, price_display_precision, replay_display_precision, replay_legend_title,
+    replay_price_divisor, replay_quantity_divisor, sync_chart_language,
 };
 use crate::provenance::DisplayedProvenance;
 use aeris_application::ReplayRecoveryCommand;
@@ -1007,9 +1007,9 @@ pub struct AerisChartView {
     displayed_provenance: DisplayedProvenance,
     price_divisor: f64,
     quantity_divisor: f64,
-    /// Product volume weights, always allocated and never drawn: the volume indicator, volume
-    /// profile and data-bound drawings read it.
-    volume_series: u32,
+    /// Product volume weights and OHLC bars, always allocated and never drawn: the volume
+    /// indicator, volume profile and data-bound drawings read them.
+    product_series: ProductSeries,
     volume: Option<VolumeIndicator>,
     /// Settings of removed volume indicators the undo history can bring back, by the binding
     /// each had.
@@ -1122,8 +1122,8 @@ impl AerisChartView {
         register_drawing_stamps(&mut engine, &theme);
         apply_platform_chrome_contract(&mut engine, TimeAxisLabels::INTRADAY);
         apply_platform_interaction(&mut engine);
-        let volume_series = install_volume_series(&mut engine);
-        sync_chart_language(&mut engine, volume_series);
+        let product_series = install_product_series(&mut engine);
+        sync_chart_language(&mut engine, product_series.volume);
         let mut chart = Self {
             engine,
             platform: theme,
@@ -1133,7 +1133,7 @@ impl AerisChartView {
             displayed_provenance: DisplayedProvenance::empty(),
             price_divisor: 1.0,
             quantity_divisor: 1.0,
-            volume_series,
+            product_series,
             volume: None,
             retired_volumes: std::collections::VecDeque::new(),
             asset_legend_title: String::new(),
@@ -1225,12 +1225,12 @@ impl AerisChartView {
         apply_replay_contract(&mut engine, replay);
         apply_platform_interaction(&mut engine);
         apply_replay_time_scale_defaults(&mut engine, replay);
-        let volume_series = install_volume_series(&mut engine);
-        sync_chart_language(&mut engine, volume_series);
+        let product_series = install_product_series(&mut engine);
+        sync_chart_language(&mut engine, product_series.volume);
         let mut product_bars = ProductPriceBars::default();
         install_replay(
             &mut engine,
-            volume_series,
+            product_series,
             replay,
             ChartType::Candles,
             &mut product_bars,
@@ -1246,7 +1246,7 @@ impl AerisChartView {
             displayed_provenance: DisplayedProvenance::from_snapshot(replay),
             price_divisor: replay_price_divisor(replay),
             quantity_divisor: replay_quantity_divisor(replay),
-            volume_series,
+            product_series,
             volume: None,
             retired_volumes: std::collections::VecDeque::new(),
             asset_legend_title: replay_legend_title(replay, None),
@@ -1330,7 +1330,7 @@ impl AerisChartView {
         }
         install_replay(
             &mut self.engine,
-            self.volume_series,
+            self.product_series,
             replay,
             self.chart_type,
             &mut self.product_bars,
@@ -1628,7 +1628,7 @@ impl AerisChartView {
         }
         install_replay(
             &mut self.engine,
-            self.volume_series,
+            self.product_series,
             replay,
             self.chart_type,
             &mut self.product_bars,
@@ -1723,7 +1723,7 @@ impl AerisChartView {
                 self.displayed_provenance.extend(update.accepted_deltas());
                 apply_merged_chart_data(
                     &mut self.engine,
-                    self.volume_series,
+                    self.product_series,
                     &mut self.price_divisor,
                     &mut self.quantity_divisor,
                     self.chart_type,
@@ -2654,7 +2654,7 @@ impl Default for AerisChartView {
 impl Render for AerisChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A display-language switch refreshes the window, so the next render follows it.
-        sync_chart_language(&mut self.engine, self.volume_series);
+        sync_chart_language(&mut self.engine, self.product_series.volume);
         self.schedule_clock_tick(cx);
         // Kinetic coasts, held keyboard pans, and animated scrolls advance once per frame.
         if self.engine.input_animating() {

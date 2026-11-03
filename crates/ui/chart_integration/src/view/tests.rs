@@ -1608,7 +1608,7 @@ fn host_chart_type_survives_snapshot_install() {
         aeris_charts_engine::SeriesKind::Line
     );
     assert_eq!(
-        series_entry(&chart, chart.volume_series).kind,
+        series_entry(&chart, chart.product_series.volume).kind,
         aeris_charts_engine::SeriesKind::Histogram
     );
 }
@@ -2233,7 +2233,10 @@ fn visible_time_range_extrapolates_past_loaded_history_for_backfill() {
 fn chart_series_retention_is_owned_by_market_runtime() {
     let chart = interactive_chart();
     assert_eq!(chart.engine.series_max_points(0), None);
-    assert_eq!(chart.engine.series_max_points(chart.volume_series), None);
+    assert_eq!(
+        chart.engine.series_max_points(chart.product_series.volume),
+        None
+    );
 }
 
 #[test]
@@ -2454,7 +2457,7 @@ fn price_axis_menu_controls_aeris_charts_series_chrome_and_scale() {
     let sma = chart
         .add_indicator(ChartIndicator::Sma)
         .expect("sma is available");
-    let volume_precision = series_entry(&chart, chart.volume_series)
+    let volume_precision = series_entry(&chart, chart.product_series.volume)
         .price_format
         .precision;
     let state = chart
@@ -2522,7 +2525,7 @@ fn price_axis_menu_controls_aeris_charts_series_chrome_and_scale() {
     assert_eq!(series_entry(&chart, 0).price_format.precision, 0);
     assert_eq!(series_entry(&chart, sma[0]).price_format.precision, 0);
     assert_eq!(
-        series_entry(&chart, chart.volume_series)
+        series_entry(&chart, chart.product_series.volume)
             .price_format
             .precision,
         volume_precision,
@@ -2855,7 +2858,7 @@ fn aeris_charts_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators
     let volume_data = chart
         .engine
         .data_layer()
-        .series_data(chart.volume_series)
+        .series_data(chart.product_series.volume)
         .map(|(times, columns)| (times.to_vec(), columns.map(<[f64]>::to_vec)))
         .expect("volume data");
     let spacing = chart.engine.bar_spacing();
@@ -2880,7 +2883,7 @@ fn aeris_charts_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators
         chart
             .engine
             .data_layer()
-            .series_data(chart.volume_series)
+            .series_data(chart.product_series.volume)
             .map(|(times, columns)| { (times.to_vec(), columns.map(<[f64]>::to_vec)) }),
         Some(volume_data)
     );
@@ -3753,6 +3756,57 @@ fn legend_values_follow_volume_direction_and_indicator_series_colors() {
 }
 
 #[test]
+fn footprint_volume_keeps_each_bars_candle_direction_and_its_title() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is created");
+    assert_eq!(
+        volume_binding(&chart).source,
+        chart.product_series.price_bars,
+        "volume is computed over the complete product bars"
+    );
+    let volume_row = |chart: &AerisChartView, index: usize| {
+        chart
+            .legend_rows_at(Some(i64::try_from(index).expect("small index")))
+            .into_iter()
+            .find(|row| row.item == LegendItem::Volume)
+            .expect("volume legend")
+    };
+    let (_, [open, _, _, close]) = chart.engine.data_layer().series_data(0).unwrap();
+    let up = (0..close.len())
+        .find(|&index| close[index] > open[index])
+        .expect("an up bar");
+    let down = (0..close.len())
+        .find(|&index| close[index] < open[index])
+        .expect("a down bar");
+    let title = volume_row(&chart, up).title;
+    let up_color = volume_row(&chart, up).values[0].color.clone();
+    let down_color = volume_row(&chart, down).values[0].color.clone();
+    assert_ne!(up_color, down_color);
+
+    // Turning the average on and off reinstalls the indicator, which reuses storage slots.
+    let mut settings = chart.volume_settings().expect("volume settings");
+    settings.average.enabled = true;
+    assert!(chart.set_volume_settings(settings.clone()));
+    settings.average.enabled = false;
+    assert!(chart.set_volume_settings(settings));
+    chart.set_chart_type(ChartType::Footprint);
+
+    assert_eq!(
+        volume_row(&chart, up).title,
+        title,
+        "the row is titled after the columns, not the hidden average"
+    );
+    assert_eq!(volume_row(&chart, up).values[0].color, up_color);
+    assert_eq!(
+        volume_row(&chart, down).values[0].color,
+        down_color,
+        "a bar the tape does not cover keeps its candle direction"
+    );
+}
+
+#[test]
 fn legend_options_hide_rows_or_their_values_without_hiding_series() {
     let mut chart = interactive_chart();
     let ema = chart
@@ -4210,7 +4264,7 @@ fn clear_indicators_removes_every_native_output_including_volume() {
         chart
             .engine
             .data_layer()
-            .series_data(chart.volume_series)
+            .series_data(chart.product_series.volume)
             .is_some_and(|(times, _)| !times.is_empty()),
         "the product volume weights stay for the other readers"
     );
@@ -4232,7 +4286,9 @@ fn product_series_are_protected_and_volume_remains_reusable() {
     assert_eq!(chart.remove_selection(), SelectionRemoval::Protected);
     assert!(series_entry(&chart, 0).visible);
 
-    chart.engine.set_selected_series(Some(chart.volume_series));
+    chart
+        .engine
+        .set_selected_series(Some(chart.product_series.volume));
     assert_eq!(chart.remove_selection(), SelectionRemoval::Protected);
 
     let volume = chart
@@ -4263,7 +4319,7 @@ fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
     let (_, volume_columns) = chart
         .engine
         .data_layer()
-        .series_data(chart.volume_series)
+        .series_data(chart.product_series.volume)
         .expect("parallel volume series");
     let expected_volume = replay
         .bars()
@@ -4276,17 +4332,17 @@ fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
         })
         .collect::<Vec<_>>();
     assert_eq!(volume_columns[3], expected_volume);
-    assert!(!series_entry(&chart, chart.volume_series).visible);
-    assert!(series_entry(&chart, chart.volume_series).histogram_updown);
+    assert!(!series_entry(&chart, chart.product_series.volume).visible);
+    assert!(series_entry(&chart, chart.product_series.volume).histogram_updown);
     assert_eq!(
-        series_entry(&chart, chart.volume_series).price_scale_target,
+        series_entry(&chart, chart.product_series.volume).price_scale_target,
         PriceScaleTarget::Overlay
     );
 
     let volume = chart
         .add_indicator(ChartIndicator::Volume)
         .expect("volume histogram");
-    assert!(!series_entry(&chart, chart.volume_series).visible);
+    assert!(!series_entry(&chart, chart.product_series.volume).visible);
     let (_, columns) = chart
         .engine
         .data_layer()
@@ -5030,7 +5086,7 @@ fn data_bound_profile_tools_read_the_product_price_and_volume_series() {
             profile.source,
             aeris_charts_engine::ProfileSource::Candles {
                 price_series: 0,
-                volume_series: chart.volume_series,
+                volume_series: chart.product_series.volume,
             }
         );
         assert!(profile.tick_size > 0.0 && profile.tick_size.is_finite());

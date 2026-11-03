@@ -1276,9 +1276,11 @@ pub(super) fn chrome_tooltip(
     .into_any_element()
 }
 
+/// The timeframe menu trigger. Without a label it is a lone chevron, used while a highlighted
+/// favorite already shows the selected timeframe.
 pub(super) fn series_selector(
     app: Entity<WorkspaceSurface>,
-    label: String,
+    label: Option<String>,
     pending: bool,
     theme: &AerisTheme,
     enabled: bool,
@@ -1288,10 +1290,17 @@ pub(super) fn series_selector(
     let button = Button::new("series_selector", theme)
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
-        .px(design_rems(TIMEFRAME_STRIP_PADDING_X))
-        .label(label)
-        .loading_icon(header_icon(HugeIcon::Loader))
-        .caret(header_icon(HugeIcon::ChevronDown))
+        .loading_icon(header_icon(HugeIcon::Loader));
+    let button = match label {
+        Some(label) => button
+            .px(design_rems(TIMEFRAME_STRIP_PADDING_X))
+            .label(label)
+            .caret(header_icon(HugeIcon::ChevronDown)),
+        None => button
+            .icon(header_icon(HugeIcon::ChevronDown))
+            .aria_label(tr!(shell::SELECT_CHART_TIMEFRAME)),
+    };
+    let button = button
         .disabled(!enabled)
         .loading(pending)
         .on_click(move |event, window, cx| {
@@ -1350,7 +1359,8 @@ fn timeframe_strip(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> Div {
         .children(timeframe_favorite_buttons(app, state))
         .child(series_selector(
             app.clone(),
-            state.series_label.clone(),
+            (!state.timeframe_favorites.contains(&state.interval))
+                .then(|| state.series_label.clone()),
             state.pending.series,
             &state.theme,
             state.controls.enabled(HeaderControls::SERIES),

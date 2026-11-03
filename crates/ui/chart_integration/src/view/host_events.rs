@@ -101,10 +101,13 @@ impl AerisChartView {
     }
 
     /// Removes one selected product series. Studies are runtime-owned and only their host can
-    /// remove them; the price series, the footprint presentation and the volume weights are
-    /// protected.
+    /// remove them; the price series, the footprint presentation and the product volume weights
+    /// and price bars are protected.
     pub(super) fn remove_series_selection(&mut self, series: u32) -> SelectionRemoval {
-        if series == 0 || series == self.volume_series || self.footprint_series_id() == Some(series)
+        if series == 0
+            || series == self.product_series.volume
+            || series == self.product_series.price_bars
+            || self.footprint_series_id() == Some(series)
         {
             return SelectionRemoval::Protected;
         }

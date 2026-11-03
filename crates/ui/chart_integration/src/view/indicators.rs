@@ -33,7 +33,7 @@ impl AerisChartView {
             // binds it to the product price series and the always-allocated volume weights.
             let Some(id) = self.engine.add_volume_profile_indicator(
                 0,
-                self.volume_series,
+                self.product_series.volume,
                 aeris_charts_engine::VolumeProfileIndicatorOptions::default(),
             ) else {
                 return Err(ChartIndicatorError::CreationRejected(indicator));
@@ -52,8 +52,11 @@ impl AerisChartView {
                 ChartIndicator::Builtin(builtin) => builtin.reads_volume(),
                 _ => false,
             };
-            self.engine
-                .add_indicator_kind(0, kind, reads_volume.then_some(self.volume_series))
+            self.engine.add_indicator_kind(
+                0,
+                kind,
+                reads_volume.then_some(self.product_series.volume),
+            )
         };
         if ids.is_empty() {
             return Err(ChartIndicatorError::CreationRejected(indicator));
@@ -470,15 +473,15 @@ impl AerisChartView {
             self.retire_volume(previous);
             let _ = self.engine.remove_indicator_binding(previous);
         }
-        // The weights are both the source and the volume input, so the columns follow traded
-        // volume even where a footprint leaves the price row as whitespace.
+        // The product price bars stay complete where a footprint leaves the shown price row as
+        // whitespace, so every column has a bar to take its candle direction from.
         let outputs = self.engine.add_indicator_kind(
-            self.volume_series,
+            self.product_series.price_bars,
             IndicatorKind::Volume {
                 period: usize::from(settings.average.length),
                 exponential: settings.average.kind == VolumeAverageKind::Exponential,
             },
-            Some(self.volume_series),
+            Some(self.product_series.volume),
         );
         let [columns, average] = outputs[..] else {
             if let Some(&binding) = outputs.first() {

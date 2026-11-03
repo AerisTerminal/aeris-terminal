@@ -100,7 +100,7 @@ impl IndicatorSpec {
         self.location.description()
     }
 
-    fn matches(self, normalized_query: &str) -> bool {
+    fn matches(self, query_key: &str) -> bool {
         [
             self.kind.identifier(),
             self.label,
@@ -108,7 +108,7 @@ impl IndicatorSpec {
             self.location_description(),
         ]
         .into_iter()
-        .any(|value| value.to_ascii_lowercase().contains(normalized_query))
+        .any(|value| indicator_search_key(value).contains(query_key))
     }
 }
 
@@ -202,12 +202,22 @@ pub const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     },
 ];
 
+/// The form indicator search compares: lowercase letters and digits only, so case, spacing and
+/// punctuation never decide a match ("orderbook" finds "Order book on chart (DOM)").
+#[must_use]
+pub fn indicator_search_key(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 #[must_use]
 pub fn filter_indicator_specs(query: &str) -> Vec<&'static IndicatorSpec> {
-    let normalized_query = query.trim().to_ascii_lowercase();
+    let query_key = indicator_search_key(query);
     INDICATOR_SPECS
         .iter()
-        .filter(|spec| spec.matches(&normalized_query))
+        .filter(|spec| spec.matches(&query_key))
         .collect()
 }
 
@@ -844,7 +854,8 @@ mod tests {
         ChartChromePreferences, ChromeVisibility, DesktopPersistence, DrawingFavorites,
         ExchangeCode, INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
         InstrumentSearchCategories, SymbolSearchScope, TimeframeFavorites, TradingShortcutMode,
-        WindowFrame, chart_chrome_path, filter_indicator_specs, parse_chart_chrome_preferences,
+        WindowFrame, chart_chrome_path, filter_indicator_specs, indicator_search_key,
+        parse_chart_chrome_preferences,
     };
     use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
     use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
@@ -997,6 +1008,31 @@ mod tests {
             ]
         );
         assert_eq!(filter_indicator_specs("").len(), INDICATOR_SPECS.len());
+        assert_eq!(
+            filter_indicator_specs("moving-average")
+                .into_iter()
+                .map(|spec| spec.kind)
+                .collect::<Vec<_>>(),
+            vec![IndicatorKind::Sma, IndicatorKind::Ema, IndicatorKind::Wma]
+        );
+    }
+
+    #[test]
+    fn indicator_search_ignores_case_spacing_and_punctuation() {
+        let label = indicator_search_key("Order book on chart (DOM)");
+        for query in [
+            "Orderbook",
+            "order book",
+            "ORDER-BOOK",
+            "book on chart",
+            "(dom)",
+        ] {
+            assert!(
+                label.contains(&indicator_search_key(query)),
+                "{query:?} finds the order book"
+            );
+        }
+        assert!(!label.contains(&indicator_search_key("heatmap")));
     }
 
     #[test]

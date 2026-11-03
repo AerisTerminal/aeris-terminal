@@ -2344,6 +2344,85 @@ mod timeframe_input {
         );
     }
 
+    #[gpui::test]
+    fn order_flow_indicators_on_the_chart_stay_in_the_indicator_menu(cx: &mut TestAppContext) {
+        use workspace_surface::{IndicatorMenuEntry, OrderFlowMenuStudy};
+
+        let (surface, _requests, _publications, cx) = harness(cx);
+        install_chart(&surface, None, cx);
+        let listed = |study, cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                surface
+                    .read(cx)
+                    .indicator_menu_entries(cx)
+                    .contains(&IndicatorMenuEntry::OrderFlow(study))
+            })
+        };
+        let studies = [
+            OrderFlowMenuStudy::OrderBookDepth,
+            OrderFlowMenuStudy::BigTrades,
+        ];
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                for study in studies {
+                    assert!(surface.add_order_flow_study(study, cx));
+                }
+            });
+        });
+        for study in studies {
+            assert!(
+                listed(study, cx),
+                "{study:?} stays listed once on the chart"
+            );
+        }
+
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                let settings = surface.chart_order_flow_settings(cx).expect("chart");
+                surface.set_chart_order_flow_settings(
+                    OrderFlowSettings {
+                        order_book_depth: settings.order_book_depth.map(|book| {
+                            OrderBookDepthSettings {
+                                visible: false,
+                                ..book
+                            }
+                        }),
+                        big_trades: settings.big_trades.map(|big_trades| BigTradesSettings {
+                            visible: false,
+                            ..big_trades
+                        }),
+                        ..settings
+                    },
+                    cx,
+                );
+            });
+        });
+        for study in studies {
+            assert!(listed(study, cx), "{study:?} stays listed while hidden");
+        }
+
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                for study in studies {
+                    assert!(surface.add_order_flow_study(study, cx));
+                }
+            });
+        });
+        let settings = cx
+            .read(|cx| surface.read(cx).chart_order_flow_settings(cx))
+            .expect("chart");
+        assert!(
+            settings.order_book_depth.is_some_and(|book| book.visible),
+            "choosing the hidden order book shows it again"
+        );
+        assert!(
+            settings
+                .big_trades
+                .is_some_and(|big_trades| big_trades.visible),
+            "choosing the hidden big trades shows them again"
+        );
+    }
+
     fn order_book_demands(requests: &mpsc::Receiver<MarketWorkerCommand>) -> Vec<OrderBookDetail> {
         requests
             .try_iter()

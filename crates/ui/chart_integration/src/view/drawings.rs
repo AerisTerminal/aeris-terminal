@@ -229,7 +229,7 @@ impl AerisChartView {
                 let profile = ProfileDrawingOptions {
                     source: ProfileSource::Candles {
                         price_series: 0,
-                        volume_series: self.volume_series,
+                        volume_series: self.product_series.volume,
                     },
                     tick_size: self.price_tick_size(),
                     ..ProfileDrawingOptions::default()

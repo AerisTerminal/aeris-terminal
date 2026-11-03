@@ -6,7 +6,8 @@ pub(super) const CHROME_MENU_SEARCH_HEIGHT: f32 = 44.0;
 pub(super) const CHROME_MENU_LIST_HEIGHT: f32 = 520.0;
 pub(super) const CHROME_MENU_MAX_HEIGHT: f32 = 744.0;
 pub(super) const CHROME_MENU_ROW_ICON_WELL: f32 = 24.0;
-pub(super) const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 16.0;
+/// Size of the market-scope mark on the symbol menu header's provider switcher.
+pub(super) const CHROME_MENU_SCOPE_MARK_SIZE: f32 = 16.0;
 /// Height of the inset search field inside the menu header.
 const CHROME_MENU_SEARCH_FIELD_HEIGHT: f32 = 32.0;
 
@@ -132,7 +133,7 @@ pub(super) fn chrome_menu_search_header(
 }
 
 /// The inset search field of the symbol and indicator menu headers: the platform text field
-/// on `surface-secondary` with the search mark inside it. Focus keeps the resting border.
+/// on `surface-secondary`, without a search mark. Focus keeps the resting border.
 pub(super) fn chrome_menu_search_field(input: &Entity<InputState>, theme: &AerisTheme) -> Div {
     div()
         .flex_1()
@@ -144,7 +145,6 @@ pub(super) fn chrome_menu_search_field(input: &Entity<InputState>, theme: &Aeris
                 .platform(theme)
                 .fill(gpui_color(theme.colors.surface_secondary))
                 .focus_bordered(false)
-                .leading(header_icon(HugeIcon::Search).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
                 .flex_1(),
         )
 }

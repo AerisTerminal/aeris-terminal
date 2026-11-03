@@ -224,7 +224,32 @@ pub(crate) fn sync_chart_language(engine: &mut ChartEngine, volume_series: u32) 
     }
 }
 
-pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
+/// The never-drawn product series every chart allocates: the volume weights, and the product's
+/// OHLC bars, which stay complete while the shown price series is whitespace (a footprint), so
+/// the volume columns built from them keep each bar's candle direction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProductSeries {
+    pub(crate) volume: u32,
+    pub(crate) price_bars: u32,
+}
+
+pub(crate) fn install_product_series(engine: &mut ChartEngine) -> ProductSeries {
+    let volume = install_volume_series(engine);
+    let price_bars = engine.add_series(SeriesKind::Candlestick);
+    if let Some(series) = engine
+        .series
+        .iter_mut()
+        .find(|series| series.id == price_bars && !series.removed)
+    {
+        series.visible = false;
+    } else {
+        debug_assert!(false, "new Aeris Charts series identity must resolve");
+    }
+    engine.set_series_price_scale(price_bars, PriceScaleTarget::Overlay);
+    ProductSeries { volume, price_bars }
+}
+
+fn install_volume_series(engine: &mut ChartEngine) -> u32 {
     let id = engine.add_series(SeriesKind::Histogram);
     if let Some(series) = engine
         .series
@@ -247,7 +272,7 @@ pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
 
 pub(crate) fn apply_merged_chart_data(
     engine: &mut ChartEngine,
-    volume_series: u32,
+    product_series: ProductSeries,
     price_divisor: &mut f64,
     quantity_divisor: &mut f64,
     chart_type: ChartType,
@@ -259,7 +284,7 @@ pub(crate) fn apply_merged_chart_data(
         *quantity_divisor = replay_quantity_divisor(snapshot);
         install_replay_with_deltas(
             engine,
-            volume_series,
+            product_series,
             snapshot,
             update.accepted_deltas(),
             chart_type,
@@ -300,19 +325,33 @@ pub(crate) fn apply_merged_chart_data(
             .map(|(time, ohlc, _)| (*time, chart_type.primary_values(*ohlc))),
     );
     debug_assert_eq!(accepted, update.accepted_deltas().len());
-    let accepted_volume =
-        engine.update_series_bars(volume_series, rows.into_iter().map(|(_, _, volume)| volume));
+    let accepted_bars = engine.update_series_bars(
+        product_series.price_bars,
+        rows.iter().map(|(time, ohlc, _)| (*time, *ohlc)),
+    );
+    debug_assert_eq!(accepted_bars, update.accepted_deltas().len());
+    let accepted_volume = engine.update_series_bars(
+        product_series.volume,
+        rows.into_iter().map(|(_, _, volume)| volume),
+    );
     debug_assert_eq!(accepted_volume, update.accepted_deltas().len());
 }
 
 pub(crate) fn install_replay(
     engine: &mut ChartEngine,
-    volume_series: u32,
+    product_series: ProductSeries,
     replay: &ReplaySnapshot,
     chart_type: ChartType,
     product_bars: &mut ProductPriceBars,
 ) {
-    install_replay_with_deltas(engine, volume_series, replay, &[], chart_type, product_bars);
+    install_replay_with_deltas(
+        engine,
+        product_series,
+        replay,
+        &[],
+        chart_type,
+        product_bars,
+    );
 }
 
 pub(crate) fn install_product_price_series(
@@ -365,7 +404,7 @@ pub(crate) fn apply_product_series_markers(engine: &mut ChartEngine, chart_type:
 
 pub(crate) fn install_replay_with_deltas(
     engine: &mut ChartEngine,
-    volume_series: u32,
+    product_series: ProductSeries,
     replay: &ReplaySnapshot,
     deltas: &[ProvenancedMarketBar],
     chart_type: ChartType,
@@ -401,8 +440,17 @@ pub(crate) fn install_replay_with_deltas(
     apply_time_projection(engine, replay);
     install_product_price_series(engine, chart_type, product_bars);
     apply_price_series_chrome(engine, replay.instrument().symbol.as_str());
+    let installed_bars = engine.set_series_data(
+        product_series.price_bars,
+        &product_bars.times,
+        &product_bars.open,
+        &product_bars.high,
+        &product_bars.low,
+        &product_bars.close,
+    );
+    debug_assert!(installed_bars.is_ok());
     let _ = engine.set_series_data(
-        volume_series,
+        product_series.volume,
         &product_bars.times,
         &volume,
         &volume,

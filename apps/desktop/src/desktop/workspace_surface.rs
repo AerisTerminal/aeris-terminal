@@ -412,7 +412,8 @@ fn restored_theme_color(color: &str) -> ChartAppearanceColor {
     }
 }
 
-/// Tape-derived order-flow indicators the indicator menu can add back after removal.
+/// Order-flow indicators the indicator menu lists. Each is one per chart, so choosing one already
+/// on the chart shows it again rather than adding a second.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OrderFlowMenuStudy {
     CumulativeDelta,
@@ -441,16 +442,6 @@ impl OrderFlowMenuStudy {
         }
     }
 
-    pub(super) const fn is_shown(self, settings: OrderFlowSettings) -> bool {
-        match self {
-            Self::CumulativeDelta => settings.show_cumulative_delta,
-            Self::Delta => settings.show_delta_histogram,
-            Self::BigTrades => settings.big_trades.is_some(),
-            Self::OrderBookDepth => settings.order_book_depth.is_some(),
-            Self::DepthHeatmap => settings.depth_heatmap.is_some(),
-        }
-    }
-
     /// Whether the study is built from trade prints rather than the resting book.
     pub(super) const fn needs_trades(self) -> bool {
         !matches!(self, Self::OrderBookDepth | Self::DepthHeatmap)
@@ -458,7 +449,7 @@ impl OrderFlowMenuStudy {
 }
 
 /// One addable row of the indicator menu. Rendering, arrow keys, Enter and scrolling all index
-/// the same list: hidden order-flow studies first, then the matching native indicators.
+/// the same list: the matching order-flow studies first, then the matching native indicators.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum IndicatorMenuEntry {
     OrderFlow(OrderFlowMenuStudy),
@@ -5507,22 +5498,16 @@ impl WorkspaceSurface {
     /// The indicator menu's addable rows for the current search, in display order.
     pub(super) fn indicator_menu_entries(&self, cx: &App) -> Vec<IndicatorMenuEntry> {
         let query = self.indicator_input.read(cx).value().to_string();
-        let normalized_query = query.trim().to_ascii_lowercase();
+        let query_key = chart_chrome::indicator_search_key(&query);
         let trades = super::provider_trades_available(self.provider);
         let order_flow = self
-            .chart_order_flow_settings(cx)
+            .chart
+            .is_some()
+            .then_some(OrderFlowMenuStudy::ALL)
             .into_iter()
-            .flat_map(|settings| {
-                OrderFlowMenuStudy::ALL.into_iter().filter(move |study| {
-                    (trades || !study.needs_trades()) && !study.is_shown(settings)
-                })
-            })
-            .filter(|study| {
-                study
-                    .label()
-                    .to_ascii_lowercase()
-                    .contains(&normalized_query)
-            })
+            .flatten()
+            .filter(|study| trades || !study.needs_trades())
+            .filter(|study| chart_chrome::indicator_search_key(study.label()).contains(&query_key))
             .map(IndicatorMenuEntry::OrderFlow);
         let indicators = chart_chrome::filter_indicator_specs(&query)
             .into_iter()
@@ -5536,7 +5521,7 @@ impl WorkspaceSurface {
                     indicator.parameters(),
                 ]
                 .into_iter()
-                .any(|value| value.to_ascii_lowercase().contains(&normalized_query))
+                .any(|value| chart_chrome::indicator_search_key(value).contains(&query_key))
             })
             .map(IndicatorMenuEntry::Builtin);
         order_flow.chain(indicators).chain(builtins).collect()
@@ -5574,7 +5559,10 @@ impl WorkspaceSurface {
             OrderFlowMenuStudy::CumulativeDelta => settings.show_cumulative_delta = true,
             OrderFlowMenuStudy::Delta => settings.show_delta_histogram = true,
             OrderFlowMenuStudy::BigTrades => {
-                settings.big_trades = Some(settings.big_trades.unwrap_or_default());
+                settings.big_trades = Some(BigTradesSettings {
+                    visible: true,
+                    ..settings.big_trades.unwrap_or_default()
+                });
             }
             OrderFlowMenuStudy::OrderBookDepth => {
                 settings.order_book_depth = Some(OrderBookDepthSettings {
