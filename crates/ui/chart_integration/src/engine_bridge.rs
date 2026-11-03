@@ -109,6 +109,34 @@ impl ProductPriceBars {
             }
         }
     }
+
+    /// Open time (UTC seconds) of the oldest price bar.
+    pub(crate) fn first_time(&self) -> Option<f64> {
+        self.times.first().copied()
+    }
+
+    /// Bars opening from `from` through `through` (UTC seconds, both inclusive), each with
+    /// the next bar's open as its end; the newest bar has no known end.
+    pub(crate) fn bars_between(
+        &self,
+        from: f64,
+        through: f64,
+    ) -> impl Iterator<Item = (f64, Option<f64>, [f64; 4])> + '_ {
+        let start = self.times.partition_point(|&time| time < from);
+        let end = self.times.partition_point(|&time| time <= through);
+        (start..end.max(start)).map(|index| {
+            (
+                self.times[index],
+                self.times.get(index + 1).copied(),
+                [
+                    self.open[index],
+                    self.high[index],
+                    self.low[index],
+                    self.close[index],
+                ],
+            )
+        })
+    }
 }
 
 pub(crate) fn chart_data_queue_capacity() -> NonZeroUsize {

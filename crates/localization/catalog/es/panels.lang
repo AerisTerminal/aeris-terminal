@@ -160,6 +160,24 @@ replay_step = Paso de repetición
 replay_jump_leave = Ir al tiempo real y salir de la repetición
 replay_jump = Ir al tiempo real
 replay_exit_button = Salir
+replay_history_start_title = La repetición pasó a la barra más antigua
+replay_history_start_detail = El historial de este gráfico no llega hasta la fecha de la repetición, así que la repetición continúa desde su barra más antigua.
+replay_trades_reset_title = Operaciones de la repetición borradas
+replay_trades_reset_detail = La repetición retrocedió antes de sus operaciones o cambió de símbolo, así que se borraron sus órdenes y su posición.
+replay_balance = Saldo {amount}
+replay_order_placed = Orden de repetición colocada.
+replay_order_moved = Orden de repetición movida.
+replay_order_cancelled = Orden de repetición cancelada.
+replay_protection_placed = Stop loss o take profit de repetición colocado.
+replay_position_closed = Posición de repetición cerrada.
+replay_trading_no_terms = Operar en la repetición requiere los términos del contrato de este símbolo, que llegan con sus cotizaciones en vivo. Vuelva a intentarlo en un momento.
+replay_trading_no_point_value = Operar en la repetición requiere el valor del punto del símbolo para calcular las pérdidas y ganancias.
+replay_trading_no_bar = Elija una barra de inicio de la repetición antes de operar.
+replay_trading_wrong_side = El stop loss o el take profit está en el lado equivocado del precio.
+replay_trading_order_limit = La repetición ya tiene el máximo de órdenes activas.
+replay_trading_unknown_order = Esa orden de repetición ya no está activa.
+replay_trading_no_position = La repetición no tiene una posición abierta.
+replay_trading_failed = La repetición no pudo contabilizar esa operación.
 
 ## Avisos de comandos de trading
 trading_command_failed = El comando de trading falló

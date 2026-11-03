@@ -867,16 +867,21 @@ pub(super) fn apply_trading_snapshot(
     let instrument = state.product.as_ref().and_then(|product| {
         aeris_instruments::InstrumentId::try_new(product.instrument_id.clone()).ok()
     });
-    let chart_snapshot = selected_account_id
-        .as_ref()
-        .zip(instrument.as_ref())
-        .and_then(|(account, instrument)| {
-            crate::desktop::chart_trading_snapshot(
-                snapshot,
-                &store.pane_view(account, instrument),
-                state.product.as_ref(),
-                Some(account),
-            )
+    // A replaying chart shows the replay's own trading in place of the account's.
+    let chart_snapshot = state
+        .bar_replay_chart_trading(state_cx)
+        .or_else(|| {
+            selected_account_id
+                .as_ref()
+                .zip(instrument.as_ref())
+                .and_then(|(account, instrument)| {
+                    crate::desktop::chart_trading_snapshot(
+                        snapshot,
+                        &store.pane_view(account, instrument),
+                        state.product.as_ref(),
+                        Some(account),
+                    )
+                })
         })
         .map(|snapshot| apply_chart_trading_visibility(snapshot, state.chart_trading_visibility));
     let host_overlay =

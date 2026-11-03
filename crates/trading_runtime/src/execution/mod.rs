@@ -5,6 +5,7 @@ use super::{
     TradingAccountId, TradingCore, TradingInstrument, VenueRoute, is_simulated,
 };
 use aeris_trading::Liquidity as LiquiditySide;
+use aeris_trading::OrderSide;
 
 // The simulated venue's execution boundary has only one implementation of each policy:
 // full size and the observed touch. Neither policy models depth or slippage.
@@ -29,6 +30,43 @@ pub(crate) struct TouchPrice;
 impl FillPrice for TouchPrice {
     fn price(&self, touch: FixedPoint) -> FixedPoint {
         touch
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RestingKind {
+    Limit,
+    Stop,
+}
+
+/// The touch at which one bar reaches a resting order, or `None` when its range does not.
+/// A bar that opens through the price touches it at the open; otherwise at the price.
+pub(crate) const fn bar_touch(
+    side: OrderSide,
+    kind: RestingKind,
+    price: FixedPoint,
+    open: FixedPoint,
+    high: FixedPoint,
+    low: FixedPoint,
+) -> Option<FixedPoint> {
+    let buys_below = matches!(
+        (side, kind),
+        (OrderSide::Buy, RestingKind::Limit) | (OrderSide::Sell, RestingKind::Stop)
+    );
+    if buys_below {
+        if low.units() > price.units() {
+            None
+        } else if open.units() <= price.units() {
+            Some(open)
+        } else {
+            Some(price)
+        }
+    } else if high.units() < price.units() {
+        None
+    } else if open.units() >= price.units() {
+        Some(open)
+    } else {
+        Some(price)
     }
 }
 
@@ -804,5 +842,38 @@ mod touch_tests {
         let requested = FixedPoint::try_new(3, 0).expect("quantity");
         assert_eq!(TouchPrice.price(touch), touch);
         assert_eq!(TouchLiquidity.executable_quantity(requested), requested);
+    }
+
+    #[test]
+    fn a_bar_touches_a_resting_order_at_its_price_or_at_a_gapped_open() {
+        let price = |units| FixedPoint::try_new(units, 2).expect("price");
+        let touch = |side, kind, open, high, low| {
+            bar_touch(side, kind, price(100), price(open), price(high), price(low))
+        };
+        assert_eq!(
+            touch(OrderSide::Buy, RestingKind::Limit, 105, 106, 99),
+            Some(price(100))
+        );
+        assert_eq!(
+            touch(OrderSide::Buy, RestingKind::Limit, 98, 99, 97),
+            Some(price(98))
+        );
+        assert_eq!(
+            touch(OrderSide::Buy, RestingKind::Limit, 105, 106, 101),
+            None
+        );
+        assert_eq!(
+            touch(OrderSide::Sell, RestingKind::Stop, 98, 99, 97),
+            Some(price(98))
+        );
+        assert_eq!(
+            touch(OrderSide::Buy, RestingKind::Stop, 95, 101, 94),
+            Some(price(100))
+        );
+        assert_eq!(
+            touch(OrderSide::Buy, RestingKind::Stop, 103, 104, 102),
+            Some(price(103))
+        );
+        assert_eq!(touch(OrderSide::Sell, RestingKind::Limit, 95, 99, 94), None);
     }
 }

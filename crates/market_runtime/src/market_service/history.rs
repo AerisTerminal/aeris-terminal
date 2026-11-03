@@ -858,6 +858,8 @@ impl Coordinator<'_> {
         };
         let range = if let Some(requested) = range {
             let Some(missing) = self.uncovered_history_range(series, epoch, requested) else {
+                // The provider already answered this older range empty; repeat that answer.
+                self.broadcast_history_start_for(series);
                 return Ok(());
             };
             Some(missing)
@@ -1349,6 +1351,7 @@ impl Coordinator<'_> {
                     none @ None => *none = Some(range),
                 }
             }
+            self.broadcast_history_start_for(series);
             self.dispatch_deferred_history(ticket, generation);
             return;
         }

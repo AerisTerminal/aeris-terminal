@@ -125,6 +125,91 @@ impl PaneHarness {
         })
     }
 
+    /// A covering snapshot of the fixture bars after the first `skip`, as a provider whose
+    /// history starts later serves it.
+    fn fixture_snapshot_after(
+        &mut self,
+        product: &InstallProviderInstrument,
+        interval: ChartInterval,
+        generation: u64,
+        bar_count: usize,
+        skip: usize,
+    ) -> PaneProjectionEvent {
+        let series = engine_market_worker::series_key(product, interval).expect("fixture series");
+        let route = FixtureSeries {
+            series,
+            provider_generation: product.session_generation,
+            price_scale: u8::try_from(product.price_scale).expect("price scale"),
+            quantity_scale: u8::try_from(product.quantity_scale).expect("quantity scale"),
+        };
+        let bootstrap = self
+            .market
+            .publish_snapshot(bar_count)
+            .expect("fixture bars");
+        let bars: Vec<_> = bootstrap
+            .snapshot
+            .bars()
+            .iter()
+            .skip(skip)
+            .map(|item| *item.value())
+            .collect();
+        let event = self.market_events.snapshot(
+            &route,
+            generation,
+            bootstrap.generation.publication_generation(),
+            bars,
+        );
+        PaneProjectionEvent::RuntimeProjection(aeris_desktop::market_worker::RuntimeProjection {
+            event,
+            received_unix_nanos: Some(301_000_000_000),
+            recovery_request_id: None,
+            selection_generation: None,
+        })
+    }
+
+    /// Switches the pane's interval and commits the selection; returns its generation.
+    fn commit_interval_switch(
+        &mut self,
+        interval: ChartInterval,
+        cx: &mut VisualTestContext,
+    ) -> u64 {
+        self.pane.update(cx, |pane, cx| {
+            assert!(pane.select_interval(interval, cx));
+        });
+        let sequence = self
+            .commands
+            .as_ref()
+            .expect("commands")
+            .try_iter()
+            .find_map(|command| match command {
+                MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+                _ => None,
+            })
+            .expect("interval selection");
+        self.publications
+            .send(PaneProjectionEvent::LocalCommandOutcome(
+                LocalCommandOutcome::EngineSelection {
+                    sequence,
+                    succeeded: true,
+                },
+            ))
+            .expect("selection commit");
+        self.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        sequence
+    }
+
+    fn deliver(&self, event: PaneProjectionEvent, cx: &mut VisualTestContext) {
+        self.publications
+            .send(event)
+            .expect("mailbox accepts event");
+        self.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        cx.run_until_parked();
+    }
+
     fn fixture_readiness(
         &self,
         generation: u64,
@@ -485,9 +570,10 @@ fn pane_harness_chart_buy_intent_fills_through_owner_and_projects_position(
 
 /// Bar replay through the real pane: the header Replay button arms the trim cursor and the
 /// docked panel cancels it, a GPUI click on the chart chooses the start bar, the panel drives a
-/// step, and the chart's own order entry stays paused until replay exits.
+/// step, and the chart's Buy trades the replay's own session, never the account, until replay
+/// exits.
 #[gpui::test]
-fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut TestAppContext) {
+fn pane_harness_bar_replay_trims_on_click_and_trades_the_replay_session(cx: &mut TestAppContext) {
     use aeris_chart_integration::ChartReplayPhase;
 
     let (owner, root, account, _, instrument, _) =
@@ -575,18 +661,7 @@ fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut 
         "the panel steps the replay forward"
     );
 
-    click_debug_selector(cx, "chart_trade_buy");
-    assert!(
-        subscription
-            .recv_timeout(Duration::from_millis(300))
-            .is_none(),
-        "a replaying chart places no order"
-    );
-
-    click_debug_selector(cx, "bar_replay_exit");
-    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
-    assert_eq!(state.phase, ChartReplayPhase::Off);
-    assert_eq!(state.clock_micros, None, "exit shows all data again");
+    assert_replay_buy_trades_the_session_until_exit(&harness, &subscription, cx);
     cx.update(|window, _| window.refresh());
     assert!(cx.debug_bounds("bar_replay_panel").is_none());
     assert!(cx.debug_bounds("bar_replay_toggle").is_some());
@@ -594,6 +669,181 @@ fn pane_harness_bar_replay_trims_on_click_and_pauses_chart_order_entry(cx: &mut 
         .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
         .expect("owner stopped");
     std::fs::remove_dir_all(root).expect("remove test root");
+}
+
+/// The chart's Buy on a replaying chart fills in the replay session, not the account, and the
+/// chart shows the account again once replay exits.
+fn assert_replay_buy_trades_the_session_until_exit(
+    harness: &PaneHarness,
+    subscription: &aeris_trading_runtime::TradingSubscription,
+    cx: &mut VisualTestContext,
+) {
+    let chart_positions = |pane: &WorkspaceSurface, cx: &App| {
+        pane.chart
+            .as_ref()
+            .expect("chart")
+            .read(cx)
+            .trading_snapshot()
+            .positions
+    };
+    click_debug_selector(cx, "chart_trade_buy");
+    assert!(
+        subscription
+            .recv_timeout(Duration::from_millis(300))
+            .is_none(),
+        "a replaying chart places no account order"
+    );
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        let session = pane.bar_replay.trading.as_ref().expect("replay session");
+        assert_eq!(
+            session.fills().count(),
+            1,
+            "the Buy filled at the replay close"
+        );
+        assert_eq!(
+            chart_positions(pane, cx).len(),
+            1,
+            "the replay position is on the chart"
+        );
+        assert!(pane.bar_replay_balance_label().is_some());
+    });
+    cx.update(|window, _| window.refresh());
+    assert!(cx.debug_bounds("bar_replay_panel").is_some());
+
+    click_debug_selector(cx, "bar_replay_exit");
+    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
+    assert_eq!(state.phase, aeris_chart_integration::ChartReplayPhase::Off);
+    assert_eq!(state.clock_micros, None, "exit shows all data again");
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert!(
+            pane.bar_replay.trading.is_none(),
+            "the session ends with replay"
+        );
+        assert_eq!(
+            chart_positions(pane, cx),
+            [],
+            "the account shows again, without the replay trade"
+        );
+    });
+}
+
+/// Starts replay at the first fixture bar and steps `bars` forward; returns the replay clock.
+fn start_bar_replay_after(harness: &PaneHarness, bars: usize, cx: &mut VisualTestContext) -> i64 {
+    use aeris_chart_integration::ChartReplayCommand;
+
+    harness.pane.update(cx, |pane, cx| {
+        pane.run_bar_replay(ChartReplayCommand::SelectStart, cx);
+        pane.run_bar_replay(ChartReplayCommand::SelectTime { micros: 0 }, cx);
+        for _ in 0..bars {
+            pane.run_bar_replay(ChartReplayCommand::StepForward, cx);
+        }
+    });
+    cx.run_until_parked();
+    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
+    assert_eq!(
+        state.phase,
+        aeris_chart_integration::ChartReplayPhase::Paused
+    );
+    state.clock_micros.expect("replay clock")
+}
+
+/// A timeframe switch carries the replay to the rebuilt chart at the same moment instead of
+/// showing all data again.
+#[gpui::test]
+fn pane_harness_bar_replay_survives_an_interval_switch(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(120, cx);
+    let clock = start_bar_replay_after(&harness, 20, cx);
+    let original = cx.read(|cx| harness.pane.read(cx).chart.as_ref().map(Entity::entity_id));
+
+    let sequence = harness.commit_interval_switch(ChartInterval::Minute5, cx);
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let snapshot = harness.fixture_snapshot(&product, ChartInterval::Minute5, sequence, 120);
+    harness.deliver(snapshot, cx);
+
+    let rebuilt = cx.read(|cx| harness.pane.read(cx).chart.as_ref().map(Entity::entity_id));
+    assert_ne!(rebuilt, original, "the interval switch rebuilt the chart");
+    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
+    assert_eq!(
+        state.phase,
+        aeris_chart_integration::ChartReplayPhase::Paused
+    );
+    assert_eq!(
+        state.clock_micros,
+        Some(clock),
+        "replay continues at the same moment"
+    );
+    assert!(state.can_step_forward, "later bars stay hidden");
+}
+
+/// A replay carried onto history that starts after its clock asks for older history and, when
+/// the provider has none, moves to the earliest bar with one notice.
+#[gpui::test]
+fn pane_harness_bar_replay_before_the_new_history_moves_to_its_first_bar(cx: &mut TestAppContext) {
+    use aeris_localization::{panels, tr};
+    use aeris_market_runtime::MarketDemandErrorScope;
+
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(120, cx);
+    let clock = start_bar_replay_after(&harness, 20, cx);
+
+    let sequence = harness.commit_interval_switch(ChartInterval::Minute5, cx);
+    let product = cx.read(|cx| harness.pane.read(cx).product.clone().expect("product"));
+    let snapshot =
+        harness.fixture_snapshot_after(&product, ChartInterval::Minute5, sequence, 120, 60);
+    harness.deliver(snapshot, cx);
+
+    let viewport = harness.pane.update(cx, |pane, cx| {
+        assert!(
+            pane.chart
+                .as_ref()
+                .expect("chart")
+                .read(cx)
+                .bar_replay_waits_for_history()
+        );
+        pane.bar_replay_history_viewport(cx)
+    });
+    let (start, end) = viewport.expect("history before the replay clock is requested");
+    assert_eq!(end, clock * 1_000);
+    assert!(start < end);
+
+    let error = PaneProjectionEvent::RuntimeProjection(
+        aeris_desktop::market_worker::RuntimeProjection::event(harness.market_events.demand_error(
+            sequence,
+            MarketDemandErrorScope::HistoryStart,
+            "no older history",
+        )),
+    );
+    harness.deliver(error, cx);
+
+    let (state, _) = bar_replay_chart_state(&harness.pane, cx);
+    assert_eq!(
+        state.phase,
+        aeris_chart_integration::ChartReplayPhase::Paused
+    );
+    assert!(
+        state.clock_micros.expect("replay clock") > clock,
+        "replay moved to the first bar the provider has"
+    );
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert!(
+            !pane
+                .chart
+                .as_ref()
+                .expect("chart")
+                .read(cx)
+                .bar_replay_waits_for_history()
+        );
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, tr!(panels::REPLAY_HISTORY_START_TITLE));
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.bar_replay_history_viewport(cx), None);
+    });
 }
 
 fn bar_replay_chart_state(

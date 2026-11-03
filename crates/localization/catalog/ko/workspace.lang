@@ -144,7 +144,6 @@ intent_not_on_chart = 해당 주문 또는 포지션은 다른 계좌나 종목�
 intent_invalid_price = 이 종목에 유효하지 않은 가격입니다.
 intent_invalid_quantity = 이 종목에 유효하지 않은 수량입니다.
 intent_planned_leg_kept = 대기 중인 브래킷은 스톱과 목표가를 유지합니다. 드래그하여 옮기거나 진입 주문을 취소하세요.
-intent_replay_active = 봉 리플레이 중에는 이 차트에서 신규 주문이 일시 중지됩니다. 여기서 거래하려면 리플레이를 종료하세요.
 intent_unsupported = 이 주문에는 해당 차트 동작을 사용할 수 없습니다.
 stale_order_detail = 현재 주문이 차트에 표시됩니다.
 bracket_placed = 브래킷 주문 등록됨

@@ -293,6 +293,10 @@ pub enum MarketDemandErrorScope {
     /// Only history older than the published series could not be loaded. The
     /// current series, its forming candle and live updates remain valid.
     OlderHistory,
+    /// No history older than the published series will be loaded: the provider
+    /// answered the older range empty, and paging stops there. The published
+    /// series stays valid.
+    HistoryStart,
 }
 
 /// Direct structured failure for one canonical series demand.

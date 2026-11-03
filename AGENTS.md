@@ -161,6 +161,17 @@ violations and missing verification explicitly, and never describe them as satis
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;
   the current `TouchPrice` and `TouchLiquidity` implementations use the touch and full order quantity.
+- Bar replay trading is one isolated in-memory `trading_runtime::BarReplayTrading` session per
+  replaying pane (`desktop/bar_replay_trading.rs`), built on the chart instrument's registered
+  terms. It fills only against the bars the chart's replay reveals, through the `execution` touch
+  policies and the owner's position and P&L math, and never reaches the trading owner, an account,
+  a venue or the store. While a chart replays, its order entry and trade bar trade that session and
+  the chart shows it in place of the account; the session ends with the replay and resets with a
+  notice when replay steps back before its newest trade or changes instrument. A timeframe or
+  symbol switch carries the engine's `ChartReplaySession` to the rebuilt chart at the same clock;
+  history that starts after the clock is requested through the reported chart viewport, and the
+  runtime's `MarketDemandErrorScope::HistoryStart` (no older history exists) moves replay to the
+  earliest bar with a notice.
 - Broker order submissions and transitions reserve capacity in the bounded venue request queue before
   committing their SQLite facts; the relay sees the request only after a successful commit. A full
   or disconnected queue rejects without a database write or compensating undo.

@@ -8569,6 +8569,72 @@ mod tests {
         );
     }
 
+    /// An older range answered empty is where paging stops, so the series consumer
+    /// hears it as the start of history, and again for every repeat of that request.
+    #[test]
+    fn an_empty_older_range_reports_the_start_of_history_to_the_series_consumer() {
+        let mut coordinator = coordinator();
+        let consumer_id = consumer(1);
+        register(&mut coordinator, consumer_id);
+        coordinator
+            .events
+            .insert(consumer_id, ConsumerEvents::default());
+        let selected = series();
+        let provider_generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", provider_generation)
+            .expect("provider session begins");
+        let current = minute_bars(10, 2);
+        let first_timestamp = current[0].exchange_timestamp_unix_nanos;
+        coordinator
+            .engine
+            .install_history(provider_generation, &selected, 2, 0, current)
+            .expect("current history installs");
+        coordinator
+            .engine
+            .set_series_demand(consumer_id, generation(1), &selected)
+            .expect("foreground demand subscribes");
+        let range = HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: first_timestamp,
+        };
+        let take_scope = |coordinator: &mut Coordinator<'_>| match coordinator
+            .events
+            .get_mut(&consumer_id)
+            .and_then(|events| events.demand_error.take())
+        {
+            Some(MarketRuntimeEvent::DemandError(error)) => {
+                assert_eq!(error.generation, generation(1));
+                assert_eq!(error.series.as_ref(), Some(&selected));
+                Some(error.scope)
+            }
+            _ => None,
+        };
+
+        finish_history(
+            &mut coordinator,
+            &selected,
+            provider_generation,
+            Some(range),
+            Ok(empty_history_snapshot(first_timestamp)),
+        );
+        assert_eq!(
+            take_scope(&mut coordinator),
+            Some(crate::MarketDemandErrorScope::HistoryStart)
+        );
+        assert_eq!(take_series_state(&mut coordinator, consumer_id), None);
+
+        coordinator
+            .enqueue_history_request(&selected, provider_generation, Some(range))
+            .expect("a confirmed-empty range is answered without provider work");
+        assert_eq!(
+            take_scope(&mut coordinator),
+            Some(crate::MarketDemandErrorScope::HistoryStart)
+        );
+        assert!(coordinator.engine.has_subscription(&selected));
+    }
+
     #[test]
     fn fresh_depth_demand_publishes_identified_awaiting_snapshot_frame() {
         let mut coordinator = coordinator();

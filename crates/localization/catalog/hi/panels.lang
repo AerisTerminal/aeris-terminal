@@ -159,6 +159,24 @@ replay_step = रीप्ले स्टेप
 replay_jump_leave = रियल टाइम पर जाएँ और रीप्ले छोड़ें
 replay_jump = रियल टाइम पर जाएँ
 replay_exit_button = बाहर निकलें
+replay_history_start_title = रीप्ले सबसे पुराने बार पर चला गया
+replay_history_start_detail = इस चार्ट का इतिहास रीप्ले की तारीख तक नहीं पहुँचता, इसलिए रीप्ले उसके सबसे पुराने बार से जारी रहता है।
+replay_trades_reset_title = रीप्ले ट्रेड साफ़ किए गए
+replay_trades_reset_detail = रीप्ले अपने ट्रेड से पहले या किसी दूसरे सिंबल पर चला गया, इसलिए उसके ऑर्डर और पोज़िशन साफ़ कर दिए गए।
+replay_balance = बैलेंस {amount}
+replay_order_placed = रीप्ले ऑर्डर लगाया गया।
+replay_order_moved = रीप्ले ऑर्डर खिसकाया गया।
+replay_order_cancelled = रीप्ले ऑर्डर रद्द किया गया।
+replay_protection_placed = रीप्ले स्टॉप लॉस या टेक प्रॉफ़िट लगाया गया।
+replay_position_closed = रीप्ले पोज़िशन बंद की गई।
+replay_trading_no_terms = रीप्ले ट्रेडिंग के लिए इस सिंबल की कॉन्ट्रैक्ट शर्तें ज़रूरी हैं, जो इसके लाइव कोट के साथ आती हैं। थोड़ी देर में फिर से आज़माएँ।
+replay_trading_no_point_value = लाभ और हानि की गणना के लिए रीप्ले ट्रेडिंग को सिंबल की पॉइंट वैल्यू चाहिए।
+replay_trading_no_bar = ट्रेड करने से पहले रीप्ले का शुरुआती बार चुनें।
+replay_trading_wrong_side = स्टॉप लॉस या टेक प्रॉफ़िट कीमत की गलत तरफ़ है।
+replay_trading_order_limit = रीप्ले में पहले से ही अधिकतम सक्रिय ऑर्डर हैं।
+replay_trading_unknown_order = वह रीप्ले ऑर्डर अब सक्रिय नहीं है।
+replay_trading_no_position = रीप्ले में कोई खुली पोज़िशन नहीं है।
+replay_trading_failed = रीप्ले उस ट्रेड का हिसाब नहीं रख सका।
 
 ## Trading command notices
 trading_command_failed = ट्रेडिंग कमांड विफल रहा

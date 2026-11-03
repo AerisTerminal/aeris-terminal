@@ -2747,7 +2747,10 @@ pub use drawings::{
     ChartDrawingAnchorError, ChartDrawingAnchorText, ChartDrawingSettings, drawing_color_hex,
 };
 mod bar_replay;
-pub use bar_replay::{ChartReplayCommand, ChartReplayError, ChartReplayState};
+pub use bar_replay::{
+    ChartReplayBar, ChartReplayCommand, ChartReplayError, ChartReplayResume, ChartReplaySession,
+    ChartReplayState,
+};
 mod builtin_indicators;
 pub use builtin_indicators::BuiltinIndicator;
 mod export;

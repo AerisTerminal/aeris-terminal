@@ -162,6 +162,24 @@ replay_step = Шаг реплея
 replay_jump_leave = Перейти к реальному времени и выйти из реплея
 replay_jump = Перейти к реальному времени
 replay_exit_button = Выйти
+replay_history_start_title = Реплей перешёл к самому раннему бару
+replay_history_start_detail = История этого графика не доходит до даты реплея, поэтому реплей продолжается с самого раннего бара.
+replay_trades_reset_title = Сделки реплея очищены
+replay_trades_reset_detail = Реплей вернулся назад до своих сделок или перешёл на другой символ, поэтому его ордера и позиция очищены.
+replay_balance = Баланс {amount}
+replay_order_placed = Ордер реплея выставлен.
+replay_order_moved = Ордер реплея перемещён.
+replay_order_cancelled = Ордер реплея отменён.
+replay_protection_placed = Стоп-лосс или тейк-профит реплея выставлен.
+replay_position_closed = Позиция реплея закрыта.
+replay_trading_no_terms = Для торговли в реплее нужны условия контракта этого символа, которые приходят вместе с его котировками. Попробуйте ещё раз через мгновение.
+replay_trading_no_point_value = Для расчёта прибыли и убытка торговле в реплее нужна стоимость пункта символа.
+replay_trading_no_bar = Перед торговлей выберите начальный бар реплея.
+replay_trading_wrong_side = Стоп-лосс или тейк-профит находится не с той стороны цены.
+replay_trading_order_limit = В реплее уже максимальное число активных ордеров.
+replay_trading_unknown_order = Этот ордер реплея больше не активен.
+replay_trading_no_position = В реплее нет открытой позиции.
+replay_trading_failed = Реплею не удалось учесть эту сделку.
 
 ## Уведомления о торговых командах
 trading_command_failed = Торговая команда не выполнена

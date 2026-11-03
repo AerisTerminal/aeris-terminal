@@ -301,17 +301,19 @@ impl Render for ChartTradeBar {
             .selected_account_id
             .as_ref()
             .map(|id| id.as_str().to_string());
-        // A replaying chart shows past prices, so its bar places no order at today's.
+        // A replaying chart shows past prices, so its bar trades the replay's own session
+        // instead of the account.
+        let replaying = state.bar_replay_on(cx);
         let ready = product.is_some()
-            && account.is_some()
-            && state.selected_account_lock_reason(cx).is_none()
-            && !state.bar_replay_on(cx);
+            && (replaying
+                || (account.is_some() && state.selected_account_lock_reason(cx).is_none()));
         let order = MarketOrderTarget {
             surface: surface.clone(),
             product,
             account,
             quantity: trading.order_entry.quantity,
             ready,
+            replaying,
         };
         div()
             .flex()
@@ -348,6 +350,7 @@ struct MarketOrderTarget {
     account: Option<String>,
     quantity: OrderQuantity,
     ready: bool,
+    replaying: bool,
 }
 
 fn trade_bar_order_button(
@@ -361,6 +364,7 @@ fn trade_bar_order_button(
     let surface = order.surface.clone();
     let account = order.account.clone();
     let quantity = order.quantity;
+    let replaying = order.replaying;
     div().w(px(TRADE_BAR_BUTTON_WIDTH)).child(
         Button::new(id, theme)
             .debug_selector(|| id.into())
@@ -370,7 +374,11 @@ fn trade_bar_order_button(
             .label(label)
             .disabled(!order.ready)
             .on_click(move |_, _, cx| {
-                if let Some(product) = product.as_ref() {
+                if replaying {
+                    surface.update(cx, |surface, surface_cx| {
+                        surface.place_bar_replay_market_order(side, quantity, surface_cx);
+                    });
+                } else if let Some(product) = product.as_ref() {
                     let service = surface.read(cx).lifecycle.trading().clone();
                     let feedback = surface.read(cx).lifecycle.trading_feedback().clone();
                     let pane = surface.read(cx).trading_pane_token.clone();

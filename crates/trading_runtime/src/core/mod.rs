@@ -8,6 +8,8 @@ use crate::round_trip;
 use crate::{clock, service, venue};
 #[path = "../admission/mod.rs"]
 mod admission;
+#[path = "../bar_replay.rs"]
+mod bar_replay;
 #[path = "../emergency.rs"]
 mod emergency;
 #[path = "../execution/mod.rs"]
@@ -35,6 +37,11 @@ mod broker_sync;
 mod scales;
 #[path = "../workflow/owner.rs"]
 mod workflow_owner;
+pub use bar_replay::{
+    BarReplayTrading, BarReplayTradingError, MAXIMUM_REPLAY_FILLS, MAXIMUM_REPLAY_WORKING_ORDERS,
+    ReplayBar, ReplayEntry, ReplayFill, ReplayOrder, ReplayOrderRequest, ReplayOrderRole,
+    ReplayOrderType, ReplayPosition,
+};
 pub use broker_sync::{ReverseCancelCause, UnaccountedCause, VENUE_NOTICE_LIMIT, VenueNoticeKind};
 
 use self::ledger::{CostBasis, FillAccounting, TradeCycle};

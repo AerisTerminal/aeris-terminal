@@ -826,7 +826,7 @@ impl TradingCore {
 /// Unrealized P&L from the exact cost basis when one is stored: signed mark value minus
 /// basis, times point value, rounded once into the account currency. A position without a
 /// basis row (a defensive legacy projection) keeps the average-price computation.
-fn unrealized_pnl(
+pub(crate) fn unrealized_pnl(
     basis: Option<crate::core::ledger::CostBasis>,
     current: &Position,
     mark: FixedPoint,

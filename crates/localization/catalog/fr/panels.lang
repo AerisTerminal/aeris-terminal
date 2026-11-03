@@ -160,6 +160,24 @@ replay_step = Pas de relecture
 replay_jump_leave = Revenir au temps réel et quitter la relecture
 replay_jump = Revenir au temps réel
 replay_exit_button = Quitter
+replay_history_start_title = Relecture déplacée vers la barre la plus ancienne
+replay_history_start_detail = L'historique de ce graphique ne remonte pas jusqu'à la date de la relecture ; la relecture reprend donc à sa barre la plus ancienne.
+replay_trades_reset_title = Transactions de la relecture effacées
+replay_trades_reset_detail = La relecture est revenue avant ses transactions ou a changé de symbole ; ses ordres et sa position ont donc été effacés.
+replay_balance = Solde {amount}
+replay_order_placed = Ordre de relecture placé.
+replay_order_moved = Ordre de relecture déplacé.
+replay_order_cancelled = Ordre de relecture annulé.
+replay_protection_placed = Stop loss ou take profit de relecture placé.
+replay_position_closed = Position de relecture clôturée.
+replay_trading_no_terms = Le trading en relecture nécessite les conditions du contrat de ce symbole, qui arrivent avec ses cotations en direct. Réessayez dans un instant.
+replay_trading_no_point_value = Le trading en relecture nécessite la valeur du point du symbole pour calculer les gains et pertes.
+replay_trading_no_bar = Choisissez une barre de départ de la relecture avant de trader.
+replay_trading_wrong_side = Le stop loss ou le take profit est du mauvais côté du prix.
+replay_trading_order_limit = La relecture détient déjà le nombre maximal d'ordres actifs.
+replay_trading_unknown_order = Cet ordre de relecture n'est plus actif.
+replay_trading_no_position = La relecture n'a pas de position ouverte.
+replay_trading_failed = La relecture n'a pas pu comptabiliser cette transaction.
 
 ## Notifications des commandes de trading
 trading_command_failed = Échec de la commande de trading

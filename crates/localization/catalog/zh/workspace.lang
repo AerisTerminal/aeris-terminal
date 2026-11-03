@@ -144,7 +144,6 @@ intent_not_on_chart = 该订单或持仓属于其他账户或品种。
 intent_invalid_price = 该价格对此品种无效。
 intent_invalid_quantity = 该数量对此品种无效。
 intent_planned_leg_kept = 待成交的括号单会保留其止损和止盈。可拖动它们，或撤销入场单。
-intent_replay_active = K 线回放期间此图表暂停新订单。退出回放后即可在此交易。
 intent_unsupported = 此订单不支持该图表操作。
 stale_order_detail = 图表上显示的是当前订单。
 bracket_placed = 括号单已下达

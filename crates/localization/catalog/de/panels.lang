@@ -159,6 +159,24 @@ replay_step = Replay-Schritt
 replay_jump_leave = Zur Echtzeit springen und Replay beenden
 replay_jump = Zur Echtzeit springen
 replay_exit_button = Beenden
+replay_history_start_title = Replay zum frühesten Balken verschoben
+replay_history_start_detail = Der Verlauf dieses Charts reicht nicht bis zum Replay-Datum zurück, daher läuft das Replay ab seinem frühesten Balken weiter.
+replay_trades_reset_title = Replay-Trades gelöscht
+replay_trades_reset_detail = Das Replay ist vor seine Trades oder zu einem anderen Symbol gewechselt, daher wurden seine Orders und seine Position gelöscht.
+replay_balance = Kontostand {amount}
+replay_order_placed = Replay-Order platziert.
+replay_order_moved = Replay-Order verschoben.
+replay_order_cancelled = Replay-Order storniert.
+replay_protection_placed = Replay-Stop-Loss oder -Take-Profit platziert.
+replay_position_closed = Replay-Position geschlossen.
+replay_trading_no_terms = Replay-Trading benötigt die Kontraktdaten dieses Symbols, die mit seinen Live-Kursen eintreffen. Versuchen Sie es gleich noch einmal.
+replay_trading_no_point_value = Replay-Trading benötigt den Punktwert des Symbols, um Gewinn und Verlust zu berechnen.
+replay_trading_no_bar = Wählen Sie vor dem Handeln einen Startbalken für das Replay.
+replay_trading_wrong_side = Stop-Loss oder Take-Profit liegt auf der falschen Seite des Kurses.
+replay_trading_order_limit = Das Replay hält bereits die maximale Anzahl aktiver Orders.
+replay_trading_unknown_order = Diese Replay-Order ist nicht mehr aktiv.
+replay_trading_no_position = Das Replay hat keine offene Position.
+replay_trading_failed = Das Replay konnte diesen Trade nicht verbuchen.
 
 ## Hinweise zu Handelsbefehlen
 trading_command_failed = Handelsbefehl fehlgeschlagen

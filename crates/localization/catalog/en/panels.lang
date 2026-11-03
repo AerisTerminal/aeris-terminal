@@ -159,6 +159,24 @@ replay_step = Replay step
 replay_jump_leave = Jump to real time and leave replay
 replay_jump = Jump to real time
 replay_exit_button = Exit
+replay_history_start_title = Replay moved to the earliest bar
+replay_history_start_detail = This chart's history doesn't reach back to the replay date, so replay continues from its earliest bar.
+replay_trades_reset_title = Replay trades cleared
+replay_trades_reset_detail = Replay moved back before its trades or to another symbol, so its orders and position were cleared.
+replay_balance = Balance {amount}
+replay_order_placed = Replay order placed.
+replay_order_moved = Replay order moved.
+replay_order_cancelled = Replay order cancelled.
+replay_protection_placed = Replay stop loss or take profit placed.
+replay_position_closed = Replay position closed.
+replay_trading_no_terms = Replay trading needs this symbol's contract terms, which arrive with its live quotes. Try again in a moment.
+replay_trading_no_point_value = Replay trading needs the symbol's point value to compute profit and loss.
+replay_trading_no_bar = Choose a replay start bar before trading.
+replay_trading_wrong_side = The stop loss or take profit is on the wrong side of the price.
+replay_trading_order_limit = The replay already holds as many working orders as it can.
+replay_trading_unknown_order = That replay order is no longer working.
+replay_trading_no_position = The replay has no open position.
+replay_trading_failed = The replay could not account for that trade.
 
 ## Trading command notices
 trading_command_failed = Trading command failed

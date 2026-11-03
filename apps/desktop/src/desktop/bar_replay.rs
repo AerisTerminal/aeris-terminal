@@ -2,14 +2,22 @@
 //! docked below the chart layout. Aeris Charts owns the replay mode (trim cursor, start click,
 //! stepping, playback cadence and the Shift+arrow keys); these controls only send its commands
 //! and show its state. While a chart replays history, its own order entry is paused so a chart
-//! showing the past never places an order at today's prices.
+//! showing the past trades the replay's own practice session (`bar_replay_trading`) instead
+//! of an account.
+//!
+//! A replay outlives the chart showing it: a timeframe or symbol switch carries it to the
+//! replacement chart at the same moment. When that chart's history does not reach back to the
+//! replay clock yet, the pane asks the market runtime for the history before the clock and, if
+//! the provider has none, moves replay to the earliest bar with a notice.
 
 use super::*;
 use crate::desktop::native_ui::tooltip::TooltipPlacement;
 use aeris_chart_integration::{
-    ChartReplayCommand, ChartReplayPhase, ChartReplayState, ChartReplayStep,
+    ChartReplayCommand, ChartReplayPhase, ChartReplayResume, ChartReplaySession, ChartReplayState,
+    ChartReplayStep,
 };
 use aeris_localization::{Text, common, panels, tr};
+use aeris_trading_runtime::BarReplayTrading;
 
 const MICROS_PER_SECOND: i64 = 1_000_000;
 /// Playback steps per second the speed menu offers.
@@ -25,6 +33,31 @@ const REPLAY_INTERVALS: [(i64, Text); 5] = [
 const REPLAY_MENU_WIDTH: f32 = 140.0;
 const REPLAY_PANEL_HEIGHT: f32 = 40.0;
 const REPLAY_NOTICE_LIFETIME: Duration = Duration::from_secs(6);
+const NANOS_PER_MICRO: i64 = 1_000;
+/// The history span requested before the replay clock when the replaced chart showed no range.
+const DEFAULT_HISTORY_SPAN_NANOS: i64 = 24 * 60 * 60 * 1_000_000_000;
+
+/// A surface's bar replay state beside the replay the chart owns.
+#[derive(Default)]
+pub(super) struct BarReplayHost {
+    menu: Option<BarReplayMenu>,
+    history_wait: Option<HistoryWait>,
+    /// The practice session the replay trades; `None` until the first replay order.
+    pub(super) trading: Option<BarReplayTrading>,
+}
+
+/// A carried replay whose clock precedes every bar the chart holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HistoryWait {
+    clock_micros: i64,
+    span_nanos: i64,
+}
+
+/// The replay of a chart being replaced, with the time span that chart showed.
+pub(super) struct CarriedBarReplay {
+    session: ChartReplaySession,
+    span_nanos: Option<i64>,
+}
 
 /// The replay menu a surface has open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +71,8 @@ pub(super) struct BarReplayView {
     /// `None` while the pane has no chart.
     state: Option<ChartReplayState>,
     clock: Option<String>,
+    /// The replay trading session's balance, once it exists.
+    balance: Option<String>,
     menu: Option<BarReplayMenu>,
 }
 
@@ -60,8 +95,92 @@ impl WorkspaceSurface {
         BarReplayView {
             state: chart.map(AerisChartView::bar_replay_state),
             clock: chart.and_then(AerisChartView::bar_replay_clock_label),
-            menu: self.bar_replay_menu,
+            balance: self.bar_replay_balance_label(),
+            menu: self.bar_replay.menu,
         }
+    }
+
+    /// The replay to carry from the current chart to the one replacing it.
+    pub(super) fn carry_bar_replay(&self, cx: &App) -> Option<CarriedBarReplay> {
+        let chart = self.chart.as_ref()?.read(cx);
+        Some(CarriedBarReplay {
+            session: chart.bar_replay_session()?,
+            span_nanos: chart
+                .visible_time_range_unix_nanos()
+                .map(|(start, end)| end.saturating_sub(start))
+                .filter(|span| *span > 0),
+        })
+    }
+
+    /// Continues a carried replay on the newly installed chart. A clock before the chart's
+    /// history waits for older history; see [`Self::bar_replay_history_viewport`].
+    pub(super) fn resume_carried_bar_replay(
+        &mut self,
+        carried: Option<CarriedBarReplay>,
+        cx: &mut Context<Self>,
+    ) {
+        self.bar_replay.history_wait = None;
+        if let (Some(carried), Some(chart)) = (carried, self.chart.clone()) {
+            let clock = carried.session.clock_micros();
+            let span_nanos = carried.span_nanos.unwrap_or(DEFAULT_HISTORY_SPAN_NANOS);
+            match chart.update(cx, |chart, chart_cx| {
+                chart.resume_bar_replay(carried.session, chart_cx)
+            }) {
+                Ok(ChartReplayResume::AtClock) => {}
+                Ok(ChartReplayResume::BeforeHistory) => {
+                    self.bar_replay.history_wait = clock.map(|clock_micros| HistoryWait {
+                        clock_micros,
+                        span_nanos,
+                    });
+                }
+                Err(error) => diagnostic!("A carried bar replay could not resume: {error}"),
+            }
+        }
+        self.sync_bar_replay_trading(cx);
+    }
+
+    /// The viewport to report while a carried replay waits for history before its clock: the
+    /// span the replaced chart showed, ending at the clock. The chart itself shows no bars
+    /// then, so it has no viewport of its own to report.
+    pub(super) fn bar_replay_history_viewport(&mut self, cx: &App) -> Option<(i64, i64)> {
+        let wait = self.bar_replay.history_wait?;
+        if !self
+            .chart
+            .as_ref()
+            .is_some_and(|chart| chart.read(cx).bar_replay_waits_for_history())
+        {
+            self.bar_replay.history_wait = None;
+            return None;
+        }
+        let end = wait.clock_micros.saturating_mul(NANOS_PER_MICRO);
+        Some((end.saturating_sub(wait.span_nanos), end))
+    }
+
+    /// The runtime loads no history older than the chart holds. A replay still waiting for
+    /// history before its clock moves to the earliest bar instead.
+    pub(super) fn bar_replay_history_exhausted(&mut self, cx: &mut Context<Self>) {
+        let Some(wait) = self.bar_replay.history_wait.take() else {
+            return;
+        };
+        if !self
+            .chart
+            .as_ref()
+            .is_some_and(|chart| chart.read(cx).bar_replay_waits_for_history())
+        {
+            return;
+        }
+        self.run_bar_replay(
+            ChartReplayCommand::SelectTime {
+                micros: wait.clock_micros,
+            },
+            cx,
+        );
+        post_bar_replay_notice(
+            "bar_replay_history_start",
+            tr!(panels::REPLAY_HISTORY_START_TITLE),
+            tr!(panels::REPLAY_HISTORY_START_DETAIL),
+            cx,
+        );
     }
 
     /// The header's Replay button: arms the trim cursor, cancels an armed one, or leaves a
@@ -75,35 +194,42 @@ impl WorkspaceSurface {
         let Some(chart) = self.chart.clone() else {
             return;
         };
-        self.bar_replay_menu = None;
+        self.bar_replay.menu = None;
         let result = chart.update(cx, |chart, chart_cx| {
             chart.apply_bar_replay(command, chart_cx)
         });
         if let Err(error) = result {
             diagnostic!("Bar replay command {command:?} was refused: {error}");
             if command == ChartReplayCommand::SelectStart {
-                post_bar_replay_unavailable_notice(cx);
+                post_bar_replay_notice(
+                    "bar_replay_unavailable",
+                    tr!(panels::REPLAY_UNAVAILABLE_TITLE),
+                    tr!(panels::REPLAY_UNAVAILABLE_DETAIL),
+                    cx,
+                );
             }
         }
         cx.notify();
     }
 
     /// A replay change from the chart. The header and the replay panel show the replay state,
-    /// and a menu left open when replay ends would reopen with the next replay.
+    /// a menu left open when replay ends would reopen with the next replay, and the replay's
+    /// trading session follows the clock.
     pub(super) fn observe_bar_replay_change(&mut self, cx: &mut Context<Self>) {
         if !self.bar_replay_on(cx) {
-            self.bar_replay_menu = None;
+            self.bar_replay.menu = None;
         }
+        self.sync_bar_replay_trading(cx);
         cx.notify();
     }
 
     fn toggle_bar_replay_menu(&mut self, menu: BarReplayMenu, cx: &mut Context<Self>) {
-        self.bar_replay_menu = (self.bar_replay_menu != Some(menu)).then_some(menu);
+        self.bar_replay.menu = (self.bar_replay.menu != Some(menu)).then_some(menu);
         cx.notify();
     }
 
     fn close_bar_replay_menu(&mut self, cx: &mut Context<Self>) {
-        if self.bar_replay_menu.take().is_some() {
+        if self.bar_replay.menu.take().is_some() {
             cx.notify();
         }
     }
@@ -125,17 +251,22 @@ fn header_tooltip(phase: ChartReplayPhase) -> &'static str {
     }
 }
 
-fn post_bar_replay_unavailable_notice(cx: &mut Context<WorkspaceSurface>) {
+pub(super) fn post_bar_replay_notice(
+    kind: &'static str,
+    title: &'static str,
+    detail: &str,
+    cx: &mut Context<WorkspaceSurface>,
+) {
     cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
         key: notification_center::NoticeKey {
             scope: cx.entity_id().as_u64(),
-            kind: "bar_replay_unavailable",
+            kind,
         },
         severity: notification_center::NoticeSeverity::Warning,
         tone: notification_center::NoticeTone::Warning,
         source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
-        title: tr!(panels::REPLAY_UNAVAILABLE_TITLE),
-        detail: tr!(panels::REPLAY_UNAVAILABLE_DETAIL).to_string(),
+        title,
+        detail: detail.to_string(),
         action: None,
         lifetime: notification_center::NoticeLifetime::Timed(REPLAY_NOTICE_LIFETIME),
     }));
@@ -173,7 +304,12 @@ pub(super) fn bar_replay_panel(
     theme: &AerisTheme,
     cx: &App,
 ) -> Option<AnyElement> {
-    let BarReplayView { state, clock, menu } = surface.read(cx).bar_replay_view(cx);
+    let BarReplayView {
+        state,
+        clock,
+        balance,
+        menu,
+    } = surface.read(cx).bar_replay_view(cx);
     let state = state.filter(|state| state.phase != ChartReplayPhase::Off)?;
     let controls = if state.phase == ChartReplayPhase::Selecting {
         selecting_controls(surface, theme)
@@ -195,6 +331,10 @@ pub(super) fn bar_replay_panel(
         controls.push(separator(theme).into_any_element());
         controls.push(speed_menu(surface, state.speed, menu, theme).into_any_element());
         controls.push(step_menu(surface, state.step, menu, theme).into_any_element());
+        if let Some(balance) = balance {
+            controls.push(separator(theme).into_any_element());
+            controls.push(panel_text(balance, theme).into_any_element());
+        }
         controls.extend(realtime_controls(surface, clock, theme));
         controls
     };
@@ -368,6 +508,15 @@ fn replay_menu(
         })
 }
 
+fn panel_text(text: String, theme: &AerisTheme) -> Div {
+    div()
+        .px_1()
+        .text_sm()
+        .whitespace_nowrap()
+        .text_color(gpui_color(theme.colors.text_default))
+        .child(text)
+}
+
 fn separator(theme: &AerisTheme) -> Div {
     div()
         .flex_none()
@@ -499,13 +648,7 @@ fn realtime_controls(
 ) -> Vec<AnyElement> {
     vec![
         separator(theme).into_any_element(),
-        div()
-            .px_1()
-            .text_sm()
-            .whitespace_nowrap()
-            .text_color(gpui_color(theme.colors.text_default))
-            .child(clock.unwrap_or_default())
-            .into_any_element(),
+        panel_text(clock.unwrap_or_default(), theme).into_any_element(),
         separator(theme).into_any_element(),
         command_button(
             surface,

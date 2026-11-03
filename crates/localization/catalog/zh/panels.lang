@@ -157,6 +157,24 @@ replay_step = 回放步长
 replay_jump_leave = 跳转到实时并退出回放
 replay_jump = 跳转到实时
 replay_exit_button = 退出
+replay_history_start_title = 回放已移至最早的 K 线
+replay_history_start_detail = 此图表的历史数据无法追溯到回放日期，因此回放从最早的 K 线继续。
+replay_trades_reset_title = 回放交易已清除
+replay_trades_reset_detail = 回放已退回到其交易之前或切换到其他品种，因此其订单和持仓已清除。
+replay_balance = 余额 {amount}
+replay_order_placed = 回放订单已下达。
+replay_order_moved = 回放订单已移动。
+replay_order_cancelled = 回放订单已撤销。
+replay_protection_placed = 回放止损或止盈已下达。
+replay_position_closed = 回放持仓已平仓。
+replay_trading_no_terms = 回放交易需要此品种的合约条款，条款会随其实时报价到达。请稍后再试。
+replay_trading_no_point_value = 回放交易需要品种的每点价值来计算盈亏。
+replay_trading_no_bar = 交易前请先选择回放起始 K 线。
+replay_trading_wrong_side = 止损或止盈位于价格的错误一侧。
+replay_trading_order_limit = 回放的挂单数量已达上限。
+replay_trading_unknown_order = 该回放订单已不再有效。
+replay_trading_no_position = 回放没有持仓。
+replay_trading_failed = 回放无法计入该笔交易。
 
 ## 交易命令通知
 trading_command_failed = 交易命令失败

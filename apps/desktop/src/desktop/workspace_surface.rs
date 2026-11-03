@@ -172,7 +172,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         chart_pane_controller,
         persistence: init.persistence,
         observed_chart: ObservedChart::default(),
-        bar_replay_menu: None,
+        bar_replay: bar_replay::BarReplayHost::default(),
         pending_chart_context_menu: None,
         pending_pane_activate: PaneActivationRequest::None,
         pending_settings_request: None,
@@ -3155,6 +3155,9 @@ impl WorkspaceSurface {
             });
         }
         self.apply_chart_chrome_to_chart(&chart, cx);
+        // A replay continues on the replacing chart at the same moment, as across a
+        // timeframe or symbol switch.
+        let carried_replay = self.carry_bar_replay(cx);
         // An open settings session previews unconfirmed edits; restore the drawing before
         // its state is carried into the new chart.
         self.close_drawing_settings_dialog(false, cx);
@@ -3218,6 +3221,7 @@ impl WorkspaceSurface {
         }
         self.apply_order_book_to_chart(cx);
         self.synchronize_runtime_studies(cx);
+        self.resume_carried_bar_replay(carried_replay, cx);
     }
 
     /// A provider without trade prints has nothing to draw a footprint or tape study from,
@@ -4756,9 +4760,17 @@ impl WorkspaceSurface {
         {
             return;
         }
-        if error.scope == aeris_market_runtime::MarketDemandErrorScope::OlderHistory {
-            diagnostic!("Aeris chart older history is unavailable");
-            return;
+        match error.scope {
+            aeris_market_runtime::MarketDemandErrorScope::Series => {}
+            aeris_market_runtime::MarketDemandErrorScope::OlderHistory => {
+                diagnostic!("Aeris chart older history is unavailable");
+                self.bar_replay_history_exhausted(cx);
+                return;
+            }
+            aeris_market_runtime::MarketDemandErrorScope::HistoryStart => {
+                self.bar_replay_history_exhausted(cx);
+                return;
+            }
         }
         let state = if error.code == aeris_market_runtime::EngineFaultCode::Retryable {
             ChartState::Recovering

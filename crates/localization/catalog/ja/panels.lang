@@ -157,6 +157,24 @@ replay_step = リプレイのステップ
 replay_jump_leave = リアルタイムに戻ってリプレイを終了
 replay_jump = リアルタイムに戻る
 replay_exit_button = 終了
+replay_history_start_title = リプレイを最も古いバーに移動しました
+replay_history_start_detail = このチャートの履歴はリプレイの日付までさかのぼれないため、最も古いバーからリプレイを続けます。
+replay_trades_reset_title = リプレイの取引をクリアしました
+replay_trades_reset_detail = リプレイが取引より前に戻ったか別の銘柄に切り替わったため、注文とポジションをクリアしました。
+replay_balance = 残高 {amount}
+replay_order_placed = リプレイ注文を発注しました。
+replay_order_moved = リプレイ注文を移動しました。
+replay_order_cancelled = リプレイ注文を取り消しました。
+replay_protection_placed = リプレイのストップロスまたはテイクプロフィットを設定しました。
+replay_position_closed = リプレイのポジションを決済しました。
+replay_trading_no_terms = リプレイ取引にはこの銘柄の契約条件が必要です。条件はリアルタイム気配とともに届きます。しばらくしてからもう一度お試しください。
+replay_trading_no_point_value = 損益を計算するには、この銘柄のポイント価値が必要です。
+replay_trading_no_bar = 取引する前にリプレイの開始バーを選択してください。
+replay_trading_wrong_side = ストップロスまたはテイクプロフィットが価格の反対側にあります。
+replay_trading_order_limit = リプレイの有効注文数が上限に達しています。
+replay_trading_unknown_order = そのリプレイ注文はすでに有効ではありません。
+replay_trading_no_position = リプレイに保有ポジションがありません。
+replay_trading_failed = リプレイでその取引を計上できませんでした。
 
 ## 取引コマンドの通知
 trading_command_failed = 取引コマンドに失敗しました

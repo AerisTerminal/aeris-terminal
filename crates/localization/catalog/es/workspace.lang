@@ -148,7 +148,6 @@ intent_not_on_chart = Esa orden o posición pertenece a otra cuenta o instrument
 intent_invalid_price = Ese precio no es válido para este instrumento.
 intent_invalid_quantity = Ese tamaño no es válido para este instrumento.
 intent_planned_leg_kept = Un bracket pendiente conserva su stop y su objetivo. Arrástrelos o cancele la entrada.
-intent_replay_active = Las órdenes nuevas están en pausa en este gráfico durante la repetición de barras. Salga de la repetición para operar aquí.
 intent_unsupported = Esa acción del gráfico no está disponible para esta orden.
 stale_order_detail = La orden actual se muestra en el gráfico.
 bracket_placed = Bracket colocado

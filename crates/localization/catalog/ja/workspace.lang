@@ -144,7 +144,6 @@ intent_not_on_chart = その注文またはポジションは別の口座また�
 intent_invalid_price = その価格はこの銘柄では無効です。
 intent_invalid_quantity = その数量はこの銘柄では無効です。
 intent_planned_leg_kept = 待機中のブラケットは損切りと利確を維持します。ドラッグして動かすか、エントリーを取り消してください。
-intent_replay_active = バーリプレイ中はこのチャートでの新規注文が一時停止されます。ここで取引するにはリプレイを終了してください。
 intent_unsupported = この注文ではそのチャート操作は利用できません。
 stale_order_detail = 現在の注文がチャートに表示されています。
 bracket_placed = ブラケットを発注しました

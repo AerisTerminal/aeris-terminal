@@ -157,6 +157,24 @@ replay_step = 리플레이 단계
 replay_jump_leave = 실시간으로 이동하고 리플레이 종료
 replay_jump = 실시간으로 이동
 replay_exit_button = 종료
+replay_history_start_title = 리플레이가 가장 오래된 봉으로 이동했습니다
+replay_history_start_detail = 이 차트의 기록이 리플레이 날짜까지 거슬러 올라가지 않아 가장 오래된 봉부터 리플레이를 이어갑니다.
+replay_trades_reset_title = 리플레이 거래가 지워졌습니다
+replay_trades_reset_detail = 리플레이가 거래 이전으로 돌아갔거나 다른 종목으로 바뀌어 주문과 포지션을 지웠습니다.
+replay_balance = 잔고 {amount}
+replay_order_placed = 리플레이 주문을 넣었습니다.
+replay_order_moved = 리플레이 주문을 옮겼습니다.
+replay_order_cancelled = 리플레이 주문을 취소했습니다.
+replay_protection_placed = 리플레이 손절 또는 익절 주문을 넣었습니다.
+replay_position_closed = 리플레이 포지션을 청산했습니다.
+replay_trading_no_terms = 리플레이 거래에는 이 종목의 계약 조건이 필요하며, 조건은 실시간 호가와 함께 도착합니다. 잠시 후 다시 시도하세요.
+replay_trading_no_point_value = 손익을 계산하려면 리플레이 거래에 종목의 포인트 가치가 필요합니다.
+replay_trading_no_bar = 거래하기 전에 리플레이 시작 봉을 선택하세요.
+replay_trading_wrong_side = 손절 또는 익절 가격이 현재가의 반대쪽에 있습니다.
+replay_trading_order_limit = 리플레이에 이미 가능한 최대 수의 대기 주문이 있습니다.
+replay_trading_unknown_order = 해당 리플레이 주문은 더 이상 대기 중이 아닙니다.
+replay_trading_no_position = 리플레이에 보유 포지션이 없습니다.
+replay_trading_failed = 리플레이에서 해당 거래를 정산하지 못했습니다.
 
 ## 트레이딩 명령 알림
 trading_command_failed = 트레이딩 명령 실패

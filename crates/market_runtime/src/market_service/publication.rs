@@ -800,6 +800,39 @@ impl Coordinator<'_> {
         }
     }
 
+    /// Tells the series' consumers that no history exists before their earliest bar. A
+    /// pending series failure keeps its slot, because it outranks this notice.
+    pub(super) fn broadcast_history_start_for(&mut self, selected: &BarSeriesKey) {
+        let stage = FailureStage::ProviderHistory;
+        for (consumer_id, events) in &mut self.events {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
+            else {
+                continue;
+            };
+            let series_failure_pending = matches!(
+                &events.demand_error,
+                Some(MarketRuntimeEvent::DemandError(error))
+                    if error.scope == MarketDemandErrorScope::Series
+            );
+            if series == selected && !series_failure_pending {
+                events.demand_error = Some(MarketRuntimeEvent::DemandError(MarketDemandError {
+                    consumer_id: *consumer_id,
+                    generation,
+                    scope: MarketDemandErrorScope::HistoryStart,
+                    code: EngineFaultCode::Permanent,
+                    stage,
+                    detail: "No older market history is available".to_string(),
+                    series: Some(series.clone()),
+                    cause: failure_stage_cause(stage).to_string(),
+                    elapsed_millis: None,
+                }));
+            }
+        }
+    }
+
     pub(super) fn broadcast_series_resolution_for(
         &mut self,
         selected: &BarSeriesKey,

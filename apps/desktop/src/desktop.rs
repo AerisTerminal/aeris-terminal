@@ -14,6 +14,7 @@ mod app_services;
 use app_services::AppServices;
 mod assets;
 mod bar_replay;
+mod bar_replay_trading;
 mod big_trades_dialog;
 mod bottom_panel;
 mod chart_context_menus;
@@ -939,7 +940,7 @@ struct WorkspaceSurface {
     chart_pane_controller: chart_pane_controller::ChartPaneController,
     persistence: pane_persistence::PanePersistence,
     observed_chart: ObservedChart,
-    bar_replay_menu: Option<bar_replay::BarReplayMenu>,
+    bar_replay: bar_replay::BarReplayHost,
     pending_chart_context_menu: Option<ChartContextRequest>,
     pending_pane_activate: PaneActivationRequest,
     pending_settings_request: Option<LegendSettingsRequest>,
@@ -1817,12 +1818,35 @@ fn chart_trading_snapshot(
 ) -> Option<ChartTradingSnapshot> {
     let product = product?;
     let account_id = selected_account?;
-    let price_scale = u8::try_from(product.price_scale).ok()?;
     let account = snapshot
         .accounts
         .iter()
         .find(|account| &account.id == account_id)?;
     let instrument_id = product.instrument_id.as_str();
+    let instrument = chart_instrument_metadata(product, &account.currency)?;
+    let price_increment = instrument.tick_size;
+
+    let orders = chart_working_orders_from_pane(pane, account_id, instrument_id, price_increment);
+
+    let positions = chart_positions_from_pane(pane, account_id, instrument_id, &account.currency);
+
+    let executions = chart_executions(snapshot, account_id, instrument_id);
+
+    Some(ChartTradingSnapshot {
+        instrument,
+        positions,
+        orders,
+        executions,
+        round_trips: Vec::new(),
+    })
+}
+
+/// The chart's trading metadata for an instrument whose P&L is shown in `currency`.
+fn chart_instrument_metadata(
+    product: &InstallProviderInstrument,
+    currency: &str,
+) -> Option<ChartInstrumentMetadata> {
+    let price_scale = u8::try_from(product.price_scale).ok()?;
     let price_increment = product
         .price_increment
         .and_then(|units| chart_decimal(units, price_scale));
@@ -1840,27 +1864,13 @@ fn chart_trading_snapshot(
     // Fixed-point scales are storage precision (some feeds store every value at eight places),
     // not display precision. Leaving both unset lets the chart format trading prices with its
     // price-axis formatter and show sizes without trailing zeros.
-    let instrument = ChartInstrumentMetadata {
+    Some(ChartInstrumentMetadata {
         tick_size: price_increment,
         price_precision: None,
         quantity_precision: None,
         minimum_quantity: None,
         point_value,
-        currency: Some(account.currency.clone()),
-    };
-
-    let orders = chart_working_orders_from_pane(pane, account_id, instrument_id, price_increment);
-
-    let positions = chart_positions_from_pane(pane, account_id, instrument_id, &account.currency);
-
-    let executions = chart_executions(snapshot, account_id, instrument_id);
-
-    Some(ChartTradingSnapshot {
-        instrument,
-        positions,
-        orders,
-        executions,
-        round_trips: Vec::new(),
+        currency: Some(currency.to_string()),
     })
 }
 
@@ -1980,7 +1990,6 @@ enum ChartIntentRejection {
     InvalidPrice,
     InvalidQuantity,
     PlannedLegKept,
-    ReplayActive,
     Unsupported,
 }
 
@@ -1995,7 +2004,6 @@ impl ChartIntentRejection {
             Self::InvalidPrice => tr!(workspace::INTENT_INVALID_PRICE),
             Self::InvalidQuantity => tr!(workspace::INTENT_INVALID_QUANTITY),
             Self::PlannedLegKept => tr!(workspace::INTENT_PLANNED_LEG_KEPT),
-            Self::ReplayActive => tr!(workspace::INTENT_REPLAY_ACTIVE),
             Self::Unsupported => tr!(workspace::INTENT_UNSUPPORTED),
         }
     }
@@ -2544,13 +2552,19 @@ fn dispatch_chart_close_position(
 fn dispatch_chart_trading_intent(
     chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
-    app: &WorkspaceSurface,
+    app: &mut WorkspaceSurface,
     cx: &mut Context<WorkspaceSurface>,
 ) {
     let sequence = intent.sequence;
     let action = intent.action;
     if !chart_intent_has_confirmation_evidence(intent) {
         reject_chart_intent(&chart, sequence, ChartIntentRejection::Incomplete, app, cx);
+        return;
+    }
+    // A replaying chart shows past prices, so it trades the replay's own session, never the
+    // account.
+    if chart.read(cx).bar_replay_on() {
+        app.dispatch_bar_replay_intent(&chart, intent, cx);
         return;
     }
     if app.selected_account_lock_reason(cx).is_some()
@@ -2563,25 +2577,6 @@ fn dispatch_chart_trading_intent(
             &chart,
             sequence,
             ChartIntentRejection::AccountLocked,
-            app,
-            cx,
-        );
-        return;
-    }
-    // A replaying chart shows past prices, so it places nothing new; managing live orders
-    // and positions stays available.
-    if chart.read(cx).bar_replay_on()
-        && matches!(
-            action,
-            ChartTradingIntentAction::PlaceBracketOrder
-                | ChartTradingIntentAction::CreateStopLoss
-                | ChartTradingIntentAction::CreateTakeProfit
-        )
-    {
-        reject_chart_intent(
-            &chart,
-            sequence,
-            ChartIntentRejection::ReplayActive,
             app,
             cx,
         );
@@ -2850,7 +2845,9 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                     chart.read(cx).selected_price_precision();
             }
             if provider_presentation(app.provider).is_some()
-                && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
+                && let Some(viewport) = app
+                    .bar_replay_history_viewport(cx)
+                    .or_else(|| chart.read(cx).visible_time_range_unix_nanos())
             {
                 let market_worker = &app.market_worker;
                 app.persistence.report_viewport(viewport, |(start, end)| {
