@@ -5,6 +5,7 @@ reset_view = Réinitialiser la vue
 copy_price = Copier le prix
 capture_chart = Capturer le graphique
 remove_drawings = Supprimer les dessins
+show_hidden_drawings = Afficher les dessins masqués
 remove_indicators = Supprimer les indicateurs
 split_side_by_side = Diviser côte à côte
 split_top_and_bottom = Diviser en haut et en bas

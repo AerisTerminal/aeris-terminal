@@ -5322,6 +5322,7 @@ impl WorkspaceSurface {
                 self.chart_chrome.indicator_price_lines_visible,
             );
             chart.set_chart_type(self.chart_chrome.chart_type);
+            chart.set_drawings_hidden(!self.chart_chrome.drawings.shown());
             // A false result means unchanged or no target series on an empty chart,
             // not a failed settings write; retained precision remains authoritative.
             chart.apply_price_axis_menu_action(
@@ -6705,6 +6706,42 @@ impl WorkspaceSurface {
             chart.update(cx, |chart, chart_cx| {
                 let locked = chart.selected_drawing_locked();
                 if chart.set_selected_drawing_locked(!locked) {
+                    chart_cx.notify();
+                }
+            });
+            cx.notify();
+        }
+    }
+
+    /// Hides or shows every drawing on this pane's chart and on any chart it shows later.
+    pub(super) fn set_drawings_visibility(
+        &mut self,
+        visibility: chart_chrome::ChromeVisibility,
+        cx: &mut Context<Self>,
+    ) {
+        self.chart_chrome.drawings = visibility;
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                if chart.set_drawings_hidden(!visibility.shown()) {
+                    chart_cx.notify();
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// Whether this pane's chart shows its drawings. Arming a tool shows them in Aeris Charts,
+    /// so the workspace reads this back after arming to keep its choice in step.
+    pub(super) fn chart_drawings_shown(&self, cx: &App) -> bool {
+        self.chart
+            .as_ref()
+            .is_some_and(|chart| !chart.read(cx).drawings_hidden())
+    }
+
+    pub(super) fn show_hidden_drawings(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                if chart.show_hidden_drawings() != 0 {
                     chart_cx.notify();
                 }
             });

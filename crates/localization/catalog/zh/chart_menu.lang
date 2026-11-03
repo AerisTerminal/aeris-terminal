@@ -4,6 +4,7 @@ reset_view = 重置视图
 copy_price = 复制价格
 capture_chart = 截取图表
 remove_drawings = 移除绘图
+show_hidden_drawings = 显示隐藏的绘图
 remove_indicators = 移除指标
 split_side_by_side = 左右分屏
 split_top_and_bottom = 上下分屏

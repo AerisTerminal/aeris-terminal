@@ -4,6 +4,7 @@ reset_view = 보기 초기화
 copy_price = 가격 복사
 capture_chart = 차트 캡처
 remove_drawings = 드로잉 삭제
+show_hidden_drawings = 숨긴 드로잉 표시
 remove_indicators = 지표 삭제
 split_side_by_side = 좌우로 분할
 split_top_and_bottom = 상하로 분할

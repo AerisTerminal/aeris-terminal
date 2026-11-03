@@ -830,6 +830,7 @@ struct DrawingToolSlot {
 pub(super) struct DrawingSidebar<'a> {
     pub(super) menu: &'a DrawingToolMenu,
     pub(super) favorites: chart_chrome::DrawingFavorites,
+    pub(super) drawings: chart_chrome::ChromeVisibility,
 }
 
 pub(super) fn drawing_toolbar(
@@ -883,7 +884,13 @@ pub(super) fn drawing_toolbar(
                         .min_h(px(0.0))
                         .map(|body| tracked_overflow_y_scrollbar(body, scroll))
                         .children(tools)
-                        .child(drawing_toolbar_actions(app, state, theme)),
+                        .child(drawing_toolbar_actions(
+                            terminal,
+                            app,
+                            state,
+                            sidebar.drawings,
+                            theme,
+                        )),
                 )
                 .child(ThinScrollbar::new(
                     scroll,
@@ -1396,9 +1403,46 @@ fn drawing_favorites_toggle(
     )
 }
 
+/// Hides or shows every drawing on every chart; arming a drawing tool shows them again.
+fn drawings_visibility_toggle(
+    terminal: &Entity<TerminalApp>,
+    drawings: chart_chrome::ChromeVisibility,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let hidden = !drawings.shown();
+    let label = if hidden {
+        tr!(drawing::SHOW_ALL_DRAWINGS)
+    } else {
+        tr!(drawing::HIDE_ALL_DRAWINGS)
+    };
+    let toggle = terminal.clone();
+    sidebar_tooltip(
+        "drawings_visibility_toggle",
+        label,
+        drawing_toolbar_button(
+            "drawings_visibility_toggle",
+            header_icon(if hidden {
+                HugeIcon::ViewOff
+            } else {
+                HugeIcon::View
+            }),
+            label,
+            20.0,
+            theme,
+            hidden,
+        )
+        .on_click(move |_, _, cx| {
+            toggle.update(cx, TerminalApp::toggle_drawings_hidden);
+        }),
+        theme,
+    )
+}
+
 fn drawing_toolbar_actions(
+    terminal: &Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
+    drawings: chart_chrome::ChromeVisibility,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     div()
@@ -1436,6 +1480,7 @@ fn drawing_toolbar_actions(
             app.clone(),
             theme,
         ))
+        .child(drawings_visibility_toggle(terminal, drawings, theme))
         .child(drawing_action_control(
             DrawingActionSpec::new(
                 "drawing_clear_all",

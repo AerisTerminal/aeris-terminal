@@ -340,6 +340,38 @@ impl AerisChartView {
         true
     }
 
+    /// Whether every drawing is hidden at once. Arming a drawing tool shows them again, so a
+    /// host that keeps the choice reads it back after arming.
+    #[must_use]
+    pub fn drawings_hidden(&self) -> bool {
+        self.engine.drawings_hidden()
+    }
+
+    /// Hides or shows every drawing at once; each drawing keeps its own visibility. Hiding ends
+    /// any drawing gesture or text edit, disarms the tool and clears the drawing selection.
+    pub fn set_drawings_hidden(&mut self, hidden: bool) -> bool {
+        let changed = self.engine.set_drawings_hidden(hidden);
+        if changed {
+            self.invalidate_series_frame();
+        }
+        changed
+    }
+
+    /// How many drawings are hidden on their own, whether or not every drawing is hidden.
+    #[must_use]
+    pub fn hidden_drawing_count(&self) -> usize {
+        self.engine.hidden_drawing_count()
+    }
+
+    /// Shows every drawing hidden on its own, as one undo step; returns how many changed.
+    pub fn show_hidden_drawings(&mut self) -> usize {
+        let shown = self.engine.show_hidden_drawings();
+        if shown != 0 {
+            self.invalidate_series_frame();
+        }
+        shown
+    }
+
     /// Duplicates every selected drawing in place, as one undo step; the copies become the
     /// selection.
     pub fn clone_selected_drawings(&mut self) -> Vec<DrawingId> {

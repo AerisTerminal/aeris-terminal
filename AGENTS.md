@@ -144,6 +144,11 @@ violations and missing verification explicitly, and never describe them as satis
   revisions; panes never own or remember drawings, and no pane-to-pane drawing sync may return.
   Pane chart state persists no drawings. A layout with autosave off changes only on an explicit
   save and reopens at its last saved version after a restart.
+- Hiding every drawing at once is the engine's view switch (`set_drawings_hidden`), not a drawing
+  edit: it never enters the layout's drawings or undo history. The desktop keeps the one choice in
+  the chart chrome (`drawings_hidden`, off for documents written before it existed) and applies it
+  to every pane and every chart built later. Arming a drawing tool shows drawings in the engine,
+  so the desktop reads the chart back after arming instead of mirroring that rule.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;

@@ -4,6 +4,7 @@ reset_view = 表示をリセット
 copy_price = 価格をコピー
 capture_chart = チャートをキャプチャ
 remove_drawings = 描画を削除
+show_hidden_drawings = 非表示の描画を表示
 remove_indicators = インジケーターを削除
 split_side_by_side = 左右に分割
 split_top_and_bottom = 上下に分割

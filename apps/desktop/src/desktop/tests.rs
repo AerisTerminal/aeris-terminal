@@ -3203,6 +3203,149 @@ mod timeframe_input {
         );
     }
 
+    #[gpui::test]
+    fn hiding_drawings_reaches_every_pane_of_every_tab_and_arming_a_tool_shows_them(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let first = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&first, cx);
+        let hidden = |surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext| {
+            cx.read(|cx| !surface.read(cx).chart_drawings_shown(cx))
+        };
+        let saved_hidden = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .chrome
+                    .preferences()
+                    .to_workspace_chrome()
+                    .drawings_hidden
+            })
+        };
+        assert!(!hidden(&first, cx), "drawings start shown");
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.toggle_drawings_hidden(cx);
+        });
+        assert!(hidden(&first, cx));
+        assert!(
+            saved_hidden(cx),
+            "the choice is saved with the workspace chrome"
+        );
+
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.add_workspace("Second", window, cx)
+        })
+        .expect("a second tab");
+        let second = cx.read(|cx| terminal.read(cx).active_surface());
+        let snapshot = aeris_application::EmbeddedReplaySource
+            .load_snapshot(aeris_application::LoadEmbeddedReplay { bar_count: 8 })
+            .expect("embedded replay");
+        cx.update(|_, cx| {
+            second.update(cx, |surface, cx| {
+                surface.install_snapshot_chart(&snapshot, cx);
+            });
+        });
+        assert!(
+            hidden(&second, cx),
+            "a chart opened in a new tab adopts the hidden drawings"
+        );
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.select_drawing_tool_on_active_workspace(
+                DrawingToolChoice::Kind(ChartDrawingKind::HorizontalLine),
+                cx,
+            );
+        });
+        assert!(
+            !hidden(&second, cx),
+            "arming a tool shows the drawings it draws among"
+        );
+        assert!(!hidden(&first, cx), "the other tab shows its drawings too");
+        assert!(!saved_hidden(cx));
+    }
+
+    #[gpui::test]
+    fn show_hidden_drawings_is_offered_while_a_drawing_is_hidden_on_its_own(
+        cx: &mut TestAppContext,
+    ) {
+        const ONE_HIDDEN: &str = r#"{"schema":"aeris_charts-drawings","schema_version":1,"drawings":[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":2.0,"price":100.0}]},{"id":2,"kind":"horizontal_line","pane_index":0,"points":[{"logical":4.0,"price":110.0}],"visible":false}]}"#;
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        let menu = cx.read(|cx| {
+            let workspace = terminal.read(cx).tabs.active();
+            ChartContextMenu {
+                workspace_id: workspace.id,
+                pane_id: workspace.panes[0].id,
+                position: point(px(20.0), px(20.0)),
+                kind: ChartContextKind::Pane,
+                flyout: PriceAxisMenuFlyout::None,
+                capture_flyout_open: false,
+                copy_price: None,
+                copy_feedback: None,
+            }
+        });
+        let offered = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                terminal.read(cx).context_menu_chart_object_flags(&menu, cx)
+                    & ChartContextMenuState::HIDDEN_DRAWINGS
+                    != 0
+            })
+        };
+        let counts = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                let chart = surface.read(cx).chart.clone().expect("chart");
+                let chart = chart.read(cx);
+                (chart.drawing_count(), chart.hidden_drawing_count())
+            })
+        };
+        assert!(
+            !offered(cx),
+            "a chart without drawings offers nothing to show"
+        );
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                let chart = surface.chart.clone().expect("chart");
+                chart.update(cx, |chart, _| {
+                    chart
+                        .import_drawings_json(ONE_HIDDEN)
+                        .expect("drawings import");
+                });
+            });
+        });
+        assert_eq!(counts(cx), (2, 1));
+        assert!(offered(cx));
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.toggle_drawings_hidden(cx);
+        });
+        assert!(
+            offered(cx),
+            "a drawing hidden on its own stays offered while every drawing is hidden"
+        );
+
+        let action_menu = menu.clone();
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.finish_chart_context_menu(
+                action_menu,
+                ChartContextAction::ShowHiddenDrawings,
+                window,
+                cx,
+            );
+        });
+        assert_eq!(
+            counts(cx),
+            (2, 0),
+            "every drawing is shown on its own again"
+        );
+        assert!(!offered(cx));
+        assert!(
+            cx.read(|cx| surface.read(cx).chart_drawings_shown(cx)),
+            "showing hidden drawings also shows every drawing"
+        );
+    }
     const TICKET_WORKFLOW: &str = "wf-ticket";
 
     /// A real trading owner holding one paused workflow on its fixture account and

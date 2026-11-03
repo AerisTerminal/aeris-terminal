@@ -193,6 +193,10 @@ pub struct WorkspaceChromeState {
     /// pins it. Empty or unknown identifiers follow the system.
     #[prost(string, tag = "17")]
     pub language: String,
+    /// Hides every chart drawing at once. Stored as an opt-in so documents written before the
+    /// switch existed keep their drawings shown.
+    #[prost(bool, tag = "18")]
+    pub drawings_hidden: bool,
 }
 
 /// A window-relative logical position in the chrome preferences.

@@ -556,6 +556,7 @@ impl TerminalApp {
                     .then_some(DrawingSidebar {
                         menu: self.chrome.tool_menu(),
                         favorites: self.chrome.preferences().drawing_favorites,
+                        drawings: self.chrome.preferences().drawings,
                     }),
                 watchlist,
                 toaster: self.notices.toaster(),

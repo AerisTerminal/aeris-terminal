@@ -367,6 +367,9 @@ pub struct ChartChromePreferences {
     pub fill_glow: ChromeVisibility,
     /// The display-language choice; `System` follows the operating system.
     pub language: LanguagePreference,
+    /// Every chart drawing at once, on every pane of every tab. Arming a drawing tool shows
+    /// them again.
+    pub drawings: ChromeVisibility,
 }
 
 const STAMP_FAVORITE_PREFIX: &str = "stamp:";
@@ -578,6 +581,7 @@ impl Default for ChartChromePreferences {
             drawing_context_toolbar_origin: None,
             fill_glow: ChromeVisibility::Shown,
             language: LanguagePreference::System,
+            drawings: ChromeVisibility::Shown,
         }
     }
 }
@@ -615,6 +619,7 @@ impl ChartChromePreferences {
             ),
             fill_glow_off: !self.fill_glow.shown(),
             language: self.language.identifier().to_string(),
+            drawings_hidden: !self.drawings.shown(),
         }
     }
 
@@ -662,6 +667,7 @@ impl ChartChromePreferences {
             chrome_point_origin(state.drawing_context_toolbar_origin.as_ref());
         preferences.fill_glow = ChromeVisibility::from_shown(!state.fill_glow_off);
         preferences.language = LanguagePreference::from_identifier(&state.language);
+        preferences.drawings = ChromeVisibility::from_shown(!state.drawings_hidden);
         preferences
     }
 }
@@ -993,6 +999,7 @@ mod tests {
             drawing_context_toolbar_origin: Some((640.0, 96.5)),
             fill_glow: ChromeVisibility::Shown,
             language: crate::language::LanguagePreference::System,
+            drawings: ChromeVisibility::Shown,
         }
     }
 
@@ -1077,6 +1084,24 @@ mod tests {
     }
 
     #[test]
+    fn drawings_stay_shown_for_documents_written_before_they_could_be_hidden() {
+        let restored =
+            ChartChromePreferences::from_workspace_chrome(Some(&WorkspaceChromeState::default()));
+        assert!(restored.drawings.shown());
+        assert!(ChartChromePreferences::default().drawings.shown());
+        let hidden = ChartChromePreferences {
+            drawings: ChromeVisibility::Hidden,
+            ..ChartChromePreferences::default()
+        };
+        let state = hidden.to_workspace_chrome();
+        assert!(state.drawings_hidden);
+        assert_eq!(
+            ChartChromePreferences::from_workspace_chrome(Some(&state)).drawings,
+            ChromeVisibility::Hidden
+        );
+    }
+
+    #[test]
     fn chart_chrome_preferences_convert_to_and_from_the_workspace_document() {
         let hidden = hidden_chrome_preferences();
         let state = hidden.to_workspace_chrome();
@@ -1100,6 +1125,7 @@ mod tests {
                 drawing_context_toolbar_origin: Some(WorkspaceChromePoint { x: 640.0, y: 96.5 }),
                 fill_glow_off: false,
                 language: "system".to_string(),
+                drawings_hidden: false,
             },
             "the document form keeps the legacy identifiers"
         );

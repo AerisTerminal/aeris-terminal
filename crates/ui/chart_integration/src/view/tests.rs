@@ -5548,6 +5548,61 @@ fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
     assert!(!key(&mut chart, ChartKey::Backspace));
 }
 
+#[test]
+fn hiding_every_drawing_keeps_each_visibility_and_arming_a_tool_shows_them() {
+    let mut chart = interactive_chart();
+    for y in [180.0, 240.0] {
+        chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+        click(&mut chart, 300.0, y);
+    }
+    assert_eq!(chart.drawing_count(), 2);
+    let ids = chart
+        .engine
+        .drawings()
+        .iter()
+        .map(|drawing| drawing.id)
+        .collect::<Vec<_>>();
+    chart.engine.set_selected_drawings(&ids[..1]);
+    assert!(chart.set_selected_drawings_visible(false));
+    assert_eq!(chart.hidden_drawing_count(), 1);
+    chart.engine.set_selected_drawings(&ids[1..]);
+    chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+
+    let revision = chart.drawing_revision();
+    assert!(chart.set_drawings_hidden(true));
+    assert!(!chart.set_drawings_hidden(true));
+    assert!(chart.drawings_hidden());
+    assert_eq!(chart.drawing_tool(), None, "hiding disarms the tool");
+    assert_eq!(chart.selected_drawing_count(), 0);
+    assert_eq!(
+        chart.drawing_revision(),
+        revision,
+        "hiding every drawing is view state, not a drawing edit"
+    );
+    assert_eq!(chart.hidden_drawing_count(), 1);
+
+    chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+    assert!(
+        !chart.drawings_hidden(),
+        "arming a tool shows every drawing"
+    );
+    chart.set_drawing_tool(None);
+
+    assert_eq!(chart.show_hidden_drawings(), 1);
+    assert_eq!(chart.hidden_drawing_count(), 0);
+    assert!(
+        chart.drawing_revision() > revision,
+        "the shown drawing syncs"
+    );
+    assert_eq!(chart.show_hidden_drawings(), 0);
+    assert!(undo_chart(&mut chart));
+    assert_eq!(
+        chart.hidden_drawing_count(),
+        1,
+        "showing them is one undo step"
+    );
+}
+
 fn step_chart_history(chart: &mut AerisChartView, undo: bool) -> (bool, Vec<ChartHostEvent>) {
     let stepped = chart.apply_history_step(undo);
     (stepped, chart.process_input_events())

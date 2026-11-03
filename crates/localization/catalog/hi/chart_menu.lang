@@ -4,6 +4,7 @@ reset_view = व्यू रीसेट करें
 copy_price = कीमत कॉपी करें
 capture_chart = चार्ट कैप्चर करें
 remove_drawings = ड्रॉइंग हटाएँ
+show_hidden_drawings = छिपी हुई ड्रॉइंग दिखाएँ
 remove_indicators = इंडिकेटर हटाएँ
 split_side_by_side = अगल-बगल बाँटें
 split_top_and_bottom = ऊपर-नीचे बाँटें

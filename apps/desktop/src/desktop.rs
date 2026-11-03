@@ -5132,6 +5132,7 @@ impl ChartContextMenuState {
     const DRAWINGS: u8 = 4;
     const INDICATORS: u8 = 8;
     const COPY_PRICE: u8 = 16;
+    const HIDDEN_DRAWINGS: u8 = 32;
 
     const fn enabled(self, flag: u8) -> bool {
         self.flags & flag != 0
@@ -5156,6 +5157,7 @@ enum ChartContextAction {
     SaveCapture,
     Reset,
     ClearDrawings,
+    ShowHiddenDrawings,
     ClearIndicators,
     Split(ChartSplitDirection),
     Close,

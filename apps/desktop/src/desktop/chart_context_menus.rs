@@ -61,7 +61,7 @@ pub(super) fn clamp_chart_context_menu_origin(
     )
 }
 
-const CHART_CONTEXT_MENU_ROWS: f32 = 9.0;
+const CHART_CONTEXT_MENU_ROWS: f32 = 10.0;
 const CHART_CONTEXT_MENU_SEPARATORS: f32 = 5.0;
 /// The "Capture chart" row: third row, below one separator.
 const CAPTURE_CHART_ROW: f32 = 2.0;
@@ -256,7 +256,7 @@ pub(super) fn chart_context_menu_panel(
         .scale(scale)
         .width(scale.px(CHART_CONTEXT_MENU_WIDTH));
     for (index, item) in chart_context_menu_items(state).into_iter().enumerate() {
-        if matches!(index, 1 | 3 | 5 | 7 | 8) {
+        if matches!(index, 1 | 3 | 6 | 8 | 9) {
             panel = panel.separator();
         }
         panel = panel.child(chart_context_menu_item(
@@ -270,7 +270,7 @@ pub(super) fn chart_context_menu_panel(
     panel
 }
 
-pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 9] {
+pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 10] {
     [
         ChartContextMenuItem {
             id: "chart_context_reset_view",
@@ -299,6 +299,13 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
             label: tr!(chart_menu::REMOVE_DRAWINGS),
             enabled: state.enabled(ChartContextMenuState::DRAWINGS),
             action: ChartContextAction::ClearDrawings,
+        },
+        ChartContextMenuItem {
+            id: "chart_context_show_hidden_drawings",
+            icon: HugeIcon::View,
+            label: tr!(chart_menu::SHOW_HIDDEN_DRAWINGS),
+            enabled: state.enabled(ChartContextMenuState::HIDDEN_DRAWINGS),
+            action: ChartContextAction::ShowHiddenDrawings,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_indicators",

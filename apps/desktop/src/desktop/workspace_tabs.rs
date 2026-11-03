@@ -1064,10 +1064,18 @@ impl TerminalApp {
             .iter()
             .map(|pane| pane.surface.clone())
             .collect();
-        for surface in panes {
+        for surface in &panes {
             surface.update(cx, |surface, surface_cx| {
                 surface.select_drawing_tool(tool, surface_cx);
             });
+        }
+        if tool != DrawingToolChoice::Cursor
+            && !self.chrome.preferences().drawings.shown()
+            && panes
+                .iter()
+                .any(|surface| surface.read(cx).chart_drawings_shown(cx))
+        {
+            self.set_drawings_visibility(chart_chrome::ChromeVisibility::Shown, cx);
         }
     }
 
@@ -2405,6 +2413,10 @@ impl TerminalApp {
                 self.chart_menus.close_context();
                 self.update_context_menu_pane(&menu, WorkspaceSurface::clear_drawings, cx);
             }
+            ChartContextAction::ShowHiddenDrawings => {
+                self.chart_menus.close_context();
+                self.show_context_menu_hidden_drawings(&menu, cx);
+            }
             ChartContextAction::ClearIndicators => {
                 self.chart_menus.close_context();
                 self.update_context_menu_pane(&menu, WorkspaceSurface::clear_indicators, cx);
@@ -2472,18 +2484,28 @@ impl TerminalApp {
         }
     }
 
-    fn context_menu_chart_objects(&self, menu: &ChartContextMenu, cx: &App) -> (bool, bool) {
+    /// The `ChartContextMenuState` flags for the drawings and indicators the pane can act on.
+    pub(super) fn context_menu_chart_object_flags(&self, menu: &ChartContextMenu, cx: &App) -> u8 {
         self.tabs
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
-            .map_or((false, false), |pane| {
+            .map_or(0, |pane| {
                 let surface = pane.surface.read(cx);
-                let drawings = surface
-                    .chart
-                    .as_ref()
-                    .is_some_and(|chart| chart.read(cx).drawing_count() > 0);
-                (drawings, surface.has_removable_indicators(cx))
+                let mut flags = 0;
+                if let Some(chart) = &surface.chart {
+                    let chart = chart.read(cx);
+                    if chart.drawing_count() > 0 {
+                        flags |= ChartContextMenuState::DRAWINGS;
+                    }
+                    if chart.hidden_drawing_count() > 0 {
+                        flags |= ChartContextMenuState::HIDDEN_DRAWINGS;
+                    }
+                }
+                if surface.has_removable_indicators(cx) {
+                    flags |= ChartContextMenuState::INDICATORS;
+                }
+                flags
             })
     }
 
@@ -3329,6 +3351,47 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Hides or shows every drawing on every pane of every tab and saves the choice; panes and
+    /// charts opened later follow it.
+    pub(super) fn set_drawings_visibility(
+        &mut self,
+        visibility: chart_chrome::ChromeVisibility,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chrome.preferences().drawings == visibility {
+            return;
+        }
+        self.chrome.preferences_mut().drawings = visibility;
+        if !visibility.shown() {
+            self.chrome.tool_menu_mut().close();
+        }
+        for workspace in self.tabs.iter() {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, surface_cx| {
+                    surface.set_drawings_visibility(visibility, surface_cx);
+                });
+            }
+        }
+        self.save_chart_chrome_preferences(cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_drawings_hidden(&mut self, cx: &mut Context<Self>) {
+        let shown = self.chrome.preferences().drawings.shown();
+        self.set_drawings_visibility(chart_chrome::ChromeVisibility::from_shown(!shown), cx);
+    }
+
+    /// Shows the drawings of the chart the menu opened on that were hidden one by one, and every
+    /// drawing when all of them are hidden.
+    fn show_context_menu_hidden_drawings(
+        &mut self,
+        menu: &ChartContextMenu,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_drawings_visibility(chart_chrome::ChromeVisibility::Shown, cx);
+        self.update_context_menu_pane(menu, WorkspaceSurface::show_hidden_drawings, cx);
+    }
+
     /// Shows or hides the drawing tools sidebar for every workspace and saves the choice.
     pub(super) fn set_drawing_toolbar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         let visibility = chart_chrome::ChromeVisibility::from_shown(visible);
@@ -3922,8 +3985,7 @@ impl TerminalApp {
                     });
                 return price_axis_menu_layer(terminal, &menu, state, viewport, &self.theme);
             }
-            let (has_drawings, has_indicators) = self.context_menu_chart_objects(&menu, cx);
-            let mut flags = 0;
+            let mut flags = self.context_menu_chart_object_flags(&menu, cx);
             if menu.copy_price.is_some() {
                 flags |= ChartContextMenuState::COPY_PRICE;
             }
@@ -3932,12 +3994,6 @@ impl TerminalApp {
             }
             if self.services.market_factory().is_some() && pane_count < CHART_PANE_CAPACITY {
                 flags |= ChartContextMenuState::SPLIT;
-            }
-            if has_drawings {
-                flags |= ChartContextMenuState::DRAWINGS;
-            }
-            if has_indicators {
-                flags |= ChartContextMenuState::INDICATORS;
             }
             chart_context_menu_layer(
                 terminal,
