@@ -16,8 +16,8 @@ pub(crate) mod tooltip;
 
 use std::sync::Arc;
 
-use aeris_design_system::{TypographyRole, platform_typography};
-use gpui::{FontFeatures, FontWeight};
+use aeris_design_system::{TypographyRole, platform_numeric_font_family, platform_typography};
+use gpui::{FontFeatures, FontWeight, Styled};
 
 /// GPUI adapter for the semantic weights owned by `platform.css`.
 pub(crate) fn platform_font_weight(role: TypographyRole) -> FontWeight {
@@ -30,4 +30,12 @@ pub(crate) fn platform_tabular_numerals() -> FontFeatures {
         platform_typography().tabular_numerals_feature().to_owned(),
         1,
     )]))
+}
+
+/// Numeric readouts (prices, quantities, P&L, times) set in the platform numeric face, so
+/// figures read in fixed columns while labels and symbol names stay in the text face.
+pub(crate) fn numeric_readout<E: Styled>(element: E) -> E {
+    element
+        .font_family(platform_numeric_font_family())
+        .font_features(platform_tabular_numerals())
 }

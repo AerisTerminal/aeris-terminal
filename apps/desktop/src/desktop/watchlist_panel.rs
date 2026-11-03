@@ -244,6 +244,7 @@ fn watchlist_value_frame(width: f32) -> Div {
         .text_right()
         .whitespace_nowrap()
         .text_ellipsis()
+        .map(numeric_readout)
 }
 
 fn watchlist_value_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div {

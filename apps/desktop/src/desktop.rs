@@ -143,7 +143,7 @@ use aeris_contracts::{
     workspace_study_setting_state,
 };
 use aeris_design_system::{
-    AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
+    AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_FACES, RadiusToken, ThemeColor, TypographyRole,
 };
 use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
@@ -245,7 +245,7 @@ use native_ui::{
         MenuPlacement, MenuRow, MenuScale, MenuSide, PopupAnimationOrigin,
         animate_popup_from_origin, menu_panel_chrome_height, menu_panel_height,
     },
-    platform_font_weight, platform_tabular_numerals,
+    numeric_readout, platform_font_weight, platform_tabular_numerals,
     rem_scale::{ROOT_REM_PX, design_rems, rem_scaled},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     switch::{Switch, SwitchRow},
@@ -6086,9 +6086,9 @@ fn prepare_application(cx: &mut App) {
         );
     }
     if let Err(error) = cx.text_system().add_fonts(
-        PLATFORM_FONT_BYTES
+        PLATFORM_FONT_FACES
             .iter()
-            .map(|font| Cow::Borrowed(*font))
+            .map(|face| Cow::Borrowed(face.bytes))
             .chain(std::iter::once(Cow::Borrowed(BRAND_FONT_BYTES)))
             .collect(),
     ) {

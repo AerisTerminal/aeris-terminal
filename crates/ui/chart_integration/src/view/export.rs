@@ -15,7 +15,7 @@ use aeris_charts_native::{
 use aeris_charts_render::color::Color;
 use aeris_charts_render::draw_list::{ImageSampling, Prim, RasterImage, TextAlign};
 use aeris_design_system::{
-    BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, ThemeColor, TypographyRole, brand_font_family,
+    BRAND_FONT_BYTES, PLATFORM_FONT_FACES, ThemeColor, TypographyRole, brand_font_family,
     platform_font_stack, platform_typography,
 };
 use aeris_localization::{chart_ui, tr};
@@ -280,7 +280,11 @@ fn register_export_fonts() -> Result<(), String> {
     static REGISTERED: OnceLock<Result<(), String>> = OnceLock::new();
     REGISTERED
         .get_or_init(|| {
-            for face in PLATFORM_FONT_BYTES.iter().chain([&BRAND_FONT_BYTES]) {
+            for face in PLATFORM_FONT_FACES
+                .iter()
+                .map(|face| face.bytes)
+                .chain([BRAND_FONT_BYTES])
+            {
                 register_font_data(face.to_vec())?;
             }
             Ok(())

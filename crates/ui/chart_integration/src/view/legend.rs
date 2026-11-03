@@ -220,6 +220,7 @@ fn chart_legend_row(
             .flex()
             .items_center()
             .whitespace_nowrap()
+            .font_family(platform_typography().numeric_family())
             .font_features(platform_tabular_numerals())
             .text_color(color)
             .child(value.text)

@@ -14,13 +14,49 @@ include!(concat!(env!("OUT_DIR"), "/platform_tokens.rs"));
 /// Canonical portable stylesheet shared with the native presentation layer.
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
-/// The bundled platform faces referenced by `platform.css`: Inter (`--font-sans`)
-/// at the regular, medium and bold weights. Inter covers Latin and Cyrillic, so every
-/// supported display language renders in one face.
-pub static PLATFORM_FONT_BYTES: [&[u8]; 3] = [
-    include_bytes!("../assets/fonts/inter_regular.ttf"),
-    include_bytes!("../assets/fonts/inter_medium.ttf"),
-    include_bytes!("../assets/fonts/inter_bold.ttf"),
+/// One bundled platform face: the family and weight its `platform.css` `@font-face` declares.
+#[derive(Clone, Copy)]
+pub struct PlatformFontFace {
+    pub family: &'static str,
+    pub weight: u16,
+    pub bytes: &'static [u8],
+}
+
+/// The bundled platform faces referenced by `platform.css`, each at the regular, medium and
+/// bold weights: Inter (`--font-sans`) for text, which covers Latin and Cyrillic so every
+/// supported display language renders in one face, and `JetBrains Mono NL` (`--font-mono`)
+/// for numeric readouts.
+pub static PLATFORM_FONT_FACES: [PlatformFontFace; 6] = [
+    PlatformFontFace {
+        family: FONT_FAMILY,
+        weight: 400,
+        bytes: include_bytes!("../assets/fonts/inter_regular.ttf"),
+    },
+    PlatformFontFace {
+        family: FONT_FAMILY,
+        weight: 500,
+        bytes: include_bytes!("../assets/fonts/inter_medium.ttf"),
+    },
+    PlatformFontFace {
+        family: FONT_FAMILY,
+        weight: 700,
+        bytes: include_bytes!("../assets/fonts/inter_bold.ttf"),
+    },
+    PlatformFontFace {
+        family: NUMERIC_FONT_FAMILY,
+        weight: 400,
+        bytes: include_bytes!("../assets/fonts/jetbrains_mono_nl_regular.ttf"),
+    },
+    PlatformFontFace {
+        family: NUMERIC_FONT_FAMILY,
+        weight: 500,
+        bytes: include_bytes!("../assets/fonts/jetbrains_mono_nl_medium.ttf"),
+    },
+    PlatformFontFace {
+        family: NUMERIC_FONT_FAMILY,
+        weight: 700,
+        bytes: include_bytes!("../assets/fonts/jetbrains_mono_nl_bold.ttf"),
+    },
 ];
 
 /// Bundled Aeris brand face. It is intentionally separate from the platform
@@ -48,6 +84,8 @@ pub enum TypographyRole {
 pub struct PlatformTypography {
     stack: &'static str,
     family: &'static str,
+    numeric_stack: &'static str,
+    numeric_family: &'static str,
     normal_weight: u16,
     emphasis_weight: u16,
     strong_weight: u16,
@@ -63,6 +101,17 @@ impl PlatformTypography {
     #[must_use]
     pub const fn family(self) -> &'static str {
         self.family
+    }
+
+    /// The `--font-mono` stack numeric readouts (prices, quantities, times) are set in.
+    #[must_use]
+    pub const fn numeric_stack(self) -> &'static str {
+        self.numeric_stack
+    }
+
+    #[must_use]
+    pub const fn numeric_family(self) -> &'static str {
+        self.numeric_family
     }
 
     #[must_use]
@@ -86,6 +135,8 @@ pub fn platform_typography() -> PlatformTypography {
     PlatformTypography {
         stack: FONT_STACK,
         family: FONT_FAMILY,
+        numeric_stack: NUMERIC_FONT_STACK,
+        numeric_family: NUMERIC_FONT_FAMILY,
         normal_weight: FONT_WEIGHT_NORMAL,
         emphasis_weight: FONT_WEIGHT_EMPHASIS,
         strong_weight: FONT_WEIGHT_STRONG,
@@ -106,6 +157,12 @@ pub fn platform_font_stack() -> &'static str {
 #[must_use]
 pub fn platform_font_family() -> &'static str {
     platform_typography().family()
+}
+
+/// Returns the primary family from the canonical `--font-mono` CSS value.
+#[must_use]
+pub fn platform_numeric_font_family() -> &'static str {
+    platform_typography().numeric_family()
 }
 
 /// Returns the dedicated Aeris brand font family.
@@ -597,9 +654,9 @@ impl RadiusToken {
 #[cfg(test)]
 mod tests {
     use super::{
-        AerisTheme, ColorToken, RadiusToken, ThemeColor, ThemeMode, ThemePreset, TypographyRole,
-        brand_font_family, platform_date_label, platform_font_family, platform_font_stack,
-        platform_typography,
+        AerisTheme, ColorToken, PLATFORM_FONT_FACES, RadiusToken, ThemeColor, ThemeMode,
+        ThemePreset, TypographyRole, brand_font_family, platform_date_label, platform_font_family,
+        platform_font_stack, platform_numeric_font_family, platform_typography,
     };
 
     #[test]
@@ -1144,9 +1201,32 @@ mod tests {
         bundled_fonts.sort();
         assert_eq!(
             bundled_fonts,
-            ["inter_bold.ttf", "inter_medium.ttf", "inter_regular.ttf",]
+            [
+                "inter_bold.ttf",
+                "inter_medium.ttf",
+                "inter_regular.ttf",
+                "jetbrains_mono_nl_bold.ttf",
+                "jetbrains_mono_nl_medium.ttf",
+                "jetbrains_mono_nl_regular.ttf",
+            ]
         );
         assert!(font_dir.join("inter_license.txt").is_file());
+        assert!(font_dir.join("jetbrains_mono_license.txt").is_file());
+        let faces = PLATFORM_FONT_FACES
+            .iter()
+            .map(|face| (face.family, face.weight))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            faces,
+            [
+                ("Inter", 400),
+                ("Inter", 500),
+                ("Inter", 700),
+                ("JetBrains Mono NL", 400),
+                ("JetBrains Mono NL", 500),
+                ("JetBrains Mono NL", 700),
+            ]
+        );
         let brand_font = font_dir.join("faculty-glyphic/FacultyGlyphic-Regular.ttf");
         let brand_license = font_dir.join("faculty-glyphic/OFL.txt");
         assert!(brand_font.is_file());
@@ -1220,6 +1300,11 @@ mod tests {
         let css = include_str!("../platform.css");
         for required in [
             "--font-sans: \"Inter\", sans-serif;",
+            "--font-mono: \"JetBrains Mono NL\", monospace;",
+            "jetbrains_mono_nl_regular.ttf",
+            "jetbrains_mono_nl_medium.ttf",
+            "jetbrains_mono_nl_bold.ttf",
+            "font-family: var(--font-mono);",
             "--font-weight-normal: 400;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 700;",
@@ -1244,7 +1329,6 @@ mod tests {
             assert!(css.contains(required), "CSS is missing `{required}`");
         }
         assert!(!css.contains("HK Grotesk"));
-        assert!(!css.contains("--font-mono"));
         assert!(!css.contains("font-weight: 600;"));
         assert!(!css.contains("border-color: var(--primary);"));
         assert!(!css.contains("transform: scale("));
@@ -1259,6 +1343,11 @@ mod tests {
         );
         assert_eq!(platform_font_family(), "Inter");
         assert_eq!(platform_font_stack(), "\"Inter\", sans-serif");
+        assert_eq!(platform_numeric_font_family(), "JetBrains Mono NL");
+        assert_eq!(
+            platform_typography().numeric_stack(),
+            "\"JetBrains Mono NL\", monospace"
+        );
 
         let typography = platform_typography();
         assert_eq!(typography.weight(TypographyRole::Normal), 400);

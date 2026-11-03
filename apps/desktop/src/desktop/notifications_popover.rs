@@ -152,7 +152,7 @@ fn row_time(time: String, theme: &AerisTheme) -> Div {
         .text_xs()
         .line_height(px(ROW_TITLE_LINE_HEIGHT))
         .text_color(gpui_color(theme.colors.text_muted))
-        .font_features(platform_tabular_numerals())
+        .map(numeric_readout)
         .child(time)
 }
 

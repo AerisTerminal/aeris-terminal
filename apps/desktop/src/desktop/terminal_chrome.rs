@@ -960,8 +960,7 @@ fn connection_tooltip_row(
         )
         .child(if numeric {
             div()
-                .font_family(aeris_design_system::platform_font_family())
-                .font_features(platform_tabular_numerals())
+                .map(numeric_readout)
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_default))
                 .child(value)
@@ -1438,7 +1437,7 @@ pub(super) fn time_zone_selector(
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .label(clock)
-        .tabular_numerals()
+        .numeric_label()
         .caret(header_icon(HugeIcon::ChevronDown))
         .on_click(move |event, window, cx| {
             open_app.update(cx, |app, app_cx| {

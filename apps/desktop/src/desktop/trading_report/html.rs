@@ -12,8 +12,7 @@ use super::statistics::{
 };
 use super::{grid_price_text, market_price_text};
 use aeris_design_system::{
-    AerisTheme, RadiusToken, ThemeMode, brand_font_family, platform_font_family,
-    platform_font_stack,
+    AerisTheme, RadiusToken, ThemeMode, brand_font_family, platform_font_stack, platform_typography,
 };
 use aeris_localization::{Text, panels, tr, tr_count};
 use aeris_trading::{AccountEnvironment, FixedPoint, OrderSide};
@@ -646,30 +645,17 @@ pub(super) fn escape(text: &str) -> String {
     out
 }
 
-/// The platform and brand faces, embedded so the report looks the same on any computer.
-fn font_faces() -> Result<String, fmt::Error> {
-    let fonts = [
-        (
-            platform_font_family(),
-            400,
-            aeris_design_system::PLATFORM_FONT_BYTES[0],
-        ),
-        (
-            platform_font_family(),
-            500,
-            aeris_design_system::PLATFORM_FONT_BYTES[1],
-        ),
-        (
-            platform_font_family(),
-            700,
-            aeris_design_system::PLATFORM_FONT_BYTES[2],
-        ),
-        (
+/// The platform and brand faces, embedded so the report looks the same on any computer, and
+/// the platform families for text and numbers.
+fn typography() -> Result<String, fmt::Error> {
+    let fonts = aeris_design_system::PLATFORM_FONT_FACES
+        .iter()
+        .map(|face| (face.family, face.weight, face.bytes))
+        .chain([(
             brand_font_family(),
             400,
             aeris_design_system::BRAND_FONT_BYTES,
-        ),
-    ];
+        )]);
     let mut faces = String::new();
     for (family, weight, bytes) in fonts {
         writeln!(
@@ -678,6 +664,12 @@ fn font_faces() -> Result<String, fmt::Error> {
             data_uri("font/ttf", bytes)
         )?;
     }
+    writeln!(
+        faces,
+        "body {{ font-family: {}; }}\n.number {{ font-family: {}; }}",
+        platform_font_stack(),
+        platform_typography().numeric_stack()
+    )?;
     Ok(faces)
 }
 
@@ -696,10 +688,10 @@ fn stylesheet(theme: &AerisTheme) -> Result<String, fmt::Error> {
     );
     let radius = RadiusToken::Default.logical_pixels();
     let small_radius = RadiusToken::Compact.logical_pixels();
-    let faces = font_faces()?;
+    let typography = typography()?;
     Ok(format!(
-        "{faces}:root {{ color-scheme: {scheme}; print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
-body {{ margin: 0 auto; padding: 32px; max-width: 1160px; background: {surface}; color: {text}; font-family: {font}; font-size: 14px; line-height: 1.45; }}
+        "{typography}:root {{ color-scheme: {scheme}; print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
+body {{ margin: 0 auto; padding: 32px; max-width: 1160px; background: {surface}; color: {text}; font-size: 14px; line-height: 1.45; }}
 h1 {{ margin: 4px 0 16px; font-size: 28px; }}
 h2 {{ margin: 0 0 4px; font-size: 20px; }}
 h3 {{ margin: 24px 0 12px; font-size: 16px; }}
@@ -776,7 +768,6 @@ details.trades summary {{ cursor: pointer; font-weight: 700; margin-bottom: 8px;
         positive = colors.positive.css_hex(),
         negative = colors.negative.css_hex(),
         negative_subtle = colors.negative_subtle.css_hex(),
-        font = platform_font_stack(),
         brand = brand_font_family(),
         scheme = match theme.mode {
             ThemeMode::Light => "light",
@@ -859,6 +850,10 @@ mod tests {
         );
         assert!(html.contains("<svg class=\"chart columns\""), "daily chart");
         assert!(html.contains("font/ttf"), "embedded font");
+        assert!(
+            html.contains(".number { font-family: \"JetBrains Mono NL\", monospace; }"),
+            "numbers use the numeric face"
+        );
         assert!(html.contains("Practice &lt;one&gt;"));
         assert!(!html.contains("Practice <one>"));
         assert!(html.contains(

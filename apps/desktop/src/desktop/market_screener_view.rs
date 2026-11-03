@@ -83,7 +83,11 @@ fn column_cell(spec: ColumnSpec, theme: &AerisTheme) -> Div {
     let last = spec.column == COLUMNS[COLUMNS.len() - 1].column;
     let cell = table_cell(theme, !last);
     match spec.width {
-        Some(width) => cell.w(px(width)).flex_none().justify_end(),
+        Some(width) => cell
+            .w(px(width))
+            .flex_none()
+            .justify_end()
+            .map(numeric_readout),
         None => cell.min_w(px(MARKET_MIN_WIDTH)).flex_1(),
     }
 }
@@ -95,7 +99,10 @@ fn table_inner_radius(theme: &AerisTheme) -> Pixels {
 }
 
 fn rank_cell(theme: &AerisTheme) -> Div {
-    table_cell(theme, true).w(px(RANK_WIDTH)).flex_none()
+    table_cell(theme, true)
+        .w(px(RANK_WIDTH))
+        .flex_none()
+        .map(numeric_readout)
 }
 
 fn table_row_frame(height: f32) -> Div {

@@ -77,6 +77,13 @@ fn compile_tokens() -> Result<(), String> {
         "FONT_FAMILY",
         primary_family(&stack, "font-sans")?,
     );
+    let numeric_stack = resolve(&root, "font-mono")?;
+    emit_string(&mut output, "NUMERIC_FONT_STACK", &numeric_stack);
+    emit_string(
+        &mut output,
+        "NUMERIC_FONT_FAMILY",
+        primary_family(&numeric_stack, "font-mono")?,
+    );
     emit_u16(
         &mut output,
         "FONT_WEIGHT_NORMAL",
