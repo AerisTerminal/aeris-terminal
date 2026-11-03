@@ -154,7 +154,6 @@ interval_1_day = 1 日
 interval_3_days = 3 日
 interval_1_week = 1 周
 interval_1_month = 1 月
-native_indicators[other] = {count} 个内置指标
 no_matching_indicators = 没有匹配的指标
 no_matching_indicators_hint = 试试“均线”“通道”或 SMA 等类型。
 order_flow = 订单流

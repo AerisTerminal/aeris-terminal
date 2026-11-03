@@ -47,6 +47,10 @@ pub(super) fn chrome_overlay_layer(
         ChromeOverlayPanelStyle {
             interval_popup: compact_panel,
             frameless: menu_overlay,
+            primary_surface: matches!(
+                overlay,
+                ChromeOverlay::Instrument | ChromeOverlay::Indicator
+            ),
         },
         closing,
         generation,
@@ -333,6 +337,8 @@ pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
     /// The content is one or more `MenuPanel`s that draw their own surface.
     frameless: bool,
+    /// The symbol and indicator menus sit on `surface` instead of `surface-popover`.
+    primary_surface: bool,
 }
 
 pub(super) fn chrome_overlay_panel(
@@ -352,6 +358,9 @@ pub(super) fn chrome_overlay_panel(
         .flex_none()
         .when(!style.frameless, |panel| {
             popover_surface(panel, theme, radius)
+        })
+        .when(style.primary_surface, |panel| {
+            panel.bg(gpui_color(theme.colors.surface))
         })
         .when(style.frameless, Styled::max_h_full)
         .when(style.interval_popup && !style.frameless, |panel| {

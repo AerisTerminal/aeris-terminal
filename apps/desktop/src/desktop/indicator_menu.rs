@@ -1,6 +1,6 @@
 use super::*;
 use crate::desktop::workspace_surface::IndicatorMenuEntry;
-use aeris_localization::{chart_menu, tr, tr_count};
+use aeris_localization::{chart_menu, tr};
 
 use super::chrome_menu::{
     ChromeMenuExtent, chrome_menu_empty, chrome_menu_group_heading, chrome_menu_scroll_body,
@@ -55,6 +55,7 @@ fn indicator_menu_row(
     let row_app = app.clone();
     let add_app = app.clone();
     MenuRow::search_result(("indicator_dialog_row", index), entry.label(), theme)
+        .resting_fill(theme.colors.surface)
         .highlighted(highlighted)
         .on_click(move |_, window, cx| {
             if row_app.update(cx, |app, cx| app.add_indicator_menu_entry(entry, cx)) {
@@ -86,7 +87,6 @@ pub(super) fn indicator_dialog_content(
     let colors = theme.colors;
     let entries = app.read(cx).indicator_menu_entries(cx);
     let native_count = entries.iter().filter(|entry| entry.is_indicator()).count();
-    let hint = tr_count!(chart_menu::NATIVE_INDICATORS, native_count);
     let highlighted = state.keyboard_active.then_some(state.keyboard_selection);
     let mut list = chrome_menu_scroll_body();
     if entries.is_empty() {
@@ -115,7 +115,7 @@ pub(super) fn indicator_dialog_content(
         ));
     }
     chrome_menu_surface(&colors, state.extent)
-        .child(chrome_menu_search_header(state.input, theme, app, hint))
+        .child(chrome_menu_search_header(state.input, theme, app))
         .child(scrollable_menu_body(
             list,
             state.scroll,

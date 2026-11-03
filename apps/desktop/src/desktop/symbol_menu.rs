@@ -439,6 +439,7 @@ pub(super) fn instrument_dialog_row(
         instrument.label.clone(),
         theme,
     )
+    .resting_fill(theme.colors.surface)
     .highlighted(instrument_row_highlighted(
         checked,
         index,

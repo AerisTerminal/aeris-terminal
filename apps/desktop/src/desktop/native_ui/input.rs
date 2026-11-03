@@ -71,6 +71,13 @@ impl Input {
         self
     }
 
+    /// Fills the field with `fill` at rest, on hover and while focused.
+    pub(crate) fn fill(mut self, fill: Hsla) -> Self {
+        self.fill = Some(fill);
+        self.hover_fill = Some(fill);
+        self
+    }
+
     /// Shows `leading` (a search mark, for example) inside the field before the text.
     pub(crate) fn leading(mut self, leading: impl IntoElement) -> Self {
         self.leading = Some(leading.into_any_element());

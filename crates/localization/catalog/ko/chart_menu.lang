@@ -154,7 +154,6 @@ interval_1_day = 1일
 interval_3_days = 3일
 interval_1_week = 1주
 interval_1_month = 1개월
-native_indicators[other] = 기본 지표 {count}개
 no_matching_indicators = 일치하는 지표 없음
 no_matching_indicators_hint = “이동평균”, “밴드” 또는 SMA 같은 유형으로 검색해 보세요.
 order_flow = 오더 플로우

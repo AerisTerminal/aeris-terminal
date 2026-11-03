@@ -154,7 +154,6 @@ interval_1_day = 日足
 interval_3_days = 3 日
 interval_1_week = 週足
 interval_1_month = 月足
-native_indicators[other] = 標準搭載 {count} 件
 no_matching_indicators = 一致するインジケーターはありません
 no_matching_indicators_hint = 「移動平均」「バンド」や SMA などの種類で検索してください。
 order_flow = オーダーフロー

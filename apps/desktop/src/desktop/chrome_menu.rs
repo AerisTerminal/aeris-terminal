@@ -42,8 +42,8 @@ pub(super) fn chrome_menu_extent(
     ChromeMenuExtent { width, list_height }
 }
 
-/// The symbol and indicator menu body. The chrome overlay panel around it draws the shared
-/// popover surface, so the body has no fill of its own.
+/// The symbol and indicator menu body. The chrome overlay panel around it draws the primary
+/// `surface` with the popover edges, so the body has no fill of its own.
 pub(super) fn chrome_menu_surface(
     colors: &aeris_design_system::ThemeColors,
     extent: ChromeMenuExtent,
@@ -114,7 +114,6 @@ pub(super) fn chrome_menu_search_header(
     input: &Entity<InputState>,
     theme: &AerisTheme,
     app: &Entity<WorkspaceSurface>,
-    hint: impl Into<gpui::SharedString>,
 ) -> Div {
     let colors = theme.colors;
     div()
@@ -129,17 +128,11 @@ pub(super) fn chrome_menu_search_header(
         .text_sm()
         .text_color(gpui_color(colors.text_default))
         .child(chrome_menu_search_field(input, theme))
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(gpui_color(colors.text_muted))
-                .child(hint.into()),
-        )
         .child(chrome_menu_close_button(app, theme))
 }
 
 /// The inset search field of the symbol and indicator menu headers: the platform text field
-/// with the search mark inside it.
+/// on `surface-secondary` with the search mark inside it. Focus keeps the resting border.
 pub(super) fn chrome_menu_search_field(input: &Entity<InputState>, theme: &AerisTheme) -> Div {
     div()
         .flex_1()
@@ -149,6 +142,8 @@ pub(super) fn chrome_menu_search_field(input: &Entity<InputState>, theme: &Aeris
         .child(
             Input::new(input)
                 .platform(theme)
+                .fill(gpui_color(theme.colors.surface_secondary))
+                .focus_bordered(false)
                 .leading(header_icon(HugeIcon::Search).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
                 .flex_1(),
         )

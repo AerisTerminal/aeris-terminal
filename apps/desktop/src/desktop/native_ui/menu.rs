@@ -308,6 +308,13 @@ impl MenuRow {
         }
     }
 
+    /// The surface the row sits on, which its hover and highlight fills are blended over.
+    /// Rows default to `surface-popover`.
+    pub(crate) fn resting_fill(mut self, fill: ThemeColor) -> Self {
+        self.resting_fill = fill;
+        self
+    }
+
     /// Sizes the row, its text and its spacing for a screen-aware menu.
     pub(crate) fn scale(mut self, scale: MenuScale) -> Self {
         self.scale = scale;
