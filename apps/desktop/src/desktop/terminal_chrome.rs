@@ -520,7 +520,7 @@ pub(super) fn header_controls(
     // infer a stable intrinsic width for this mixed Button/avatar group, which
     // previously let the flex item collapse to zero even on wide windows.
     let connection = header_connection_presentation(&state);
-    let timeframe_favorites = timeframe_favorite_buttons(app, &state);
+    let timeframe_strip = timeframe_strip(app, &state);
     let market_controls = div()
         .h_full()
         .min_w_0()
@@ -558,20 +558,7 @@ pub(super) fn header_controls(
             },
             &state.theme,
         ))
-        .child(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .children(timeframe_favorites)
-                .child(series_selector(
-                    app.clone(),
-                    state.series_label,
-                    state.pending.series,
-                    &state.theme,
-                    state.controls.enabled(HeaderControls::SERIES),
-                )),
-        )
+        .child(timeframe_strip)
         .child(chart_type_selector(
             app.clone(),
             state.chart_type,
@@ -1353,6 +1340,22 @@ pub(super) fn series_selector(
 /// The favorites and the timeframe menu trigger sit side by side as one strip, so they keep a
 /// narrower inset than the header's other buttons.
 const TIMEFRAME_STRIP_PADDING_X: f32 = 8.0;
+
+fn timeframe_strip(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .children(timeframe_favorite_buttons(app, state))
+        .child(series_selector(
+            app.clone(),
+            state.series_label.clone(),
+            state.pending.series,
+            &state.theme,
+            state.controls.enabled(HeaderControls::SERIES),
+        ))
+}
 
 /// The starred timeframes' quick buttons: one press selects a timeframe, like its menu row.
 fn timeframe_favorite_buttons(
