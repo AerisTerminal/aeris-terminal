@@ -418,11 +418,6 @@ impl TerminalApp {
             }
         }
         for (tab_index, source_pane, change) in relays {
-            if let LinkedChange::Chart(event) = &change
-                && !self.tabs.accept_linked_sync(&event.source, event.revision)
-            {
-                continue;
-            }
             let Some(workspace) = self.tabs.get(tab_index) else {
                 continue;
             };

@@ -3342,6 +3342,93 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn time_sync_relays_a_change_from_every_pane_of_the_tab(cx: &mut TestAppContext) {
+        let lifecycle = DesktopLifecycle::new_for_test();
+        let (factory, _additions) =
+            engine_market_worker::WorkspaceMarketFactory::unstarted(lifecycle.market().clone());
+        let product = local_state::fixture_workspace().watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("default instrument");
+        let (_publications, messages) = market_projection_channel(NonZeroUsize::MIN);
+        let (terminal, _requests, cx) =
+            terminal_harness_with_requests(cx, lifecycle, Some(factory), product, messages);
+        let first = cx.read(|cx| terminal.read(cx).active_surface());
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.split_pane_horizontal(&SplitPaneHorizontal, window, cx);
+        });
+        let second = cx.read(|cx| terminal.read(cx).active_surface());
+        let snapshot = aeris_application::EmbeddedReplaySource
+            .load_snapshot(aeris_application::LoadEmbeddedReplay { bar_count: 64 })
+            .expect("embedded replay");
+        for surface in [&first, &second] {
+            cx.update(|_, cx| {
+                surface.update(cx, |surface, cx| {
+                    surface.install_snapshot_chart(&snapshot, cx);
+                });
+            });
+        }
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.toggle_active_chart_sync(chart_sync::ChartSyncKind::Time, cx);
+            terminal.synchronize_linked_charts(cx);
+        });
+        let range = |surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                surface
+                    .read(cx)
+                    .chart
+                    .as_ref()
+                    .and_then(|chart| chart.read(cx).visible_time_range_unix_nanos())
+            })
+        };
+        let first_bar = range(&first, cx).expect("the chart shows a range").0 / 1_000_000_000;
+        let minute = |bar: i64| first_bar + bar * 60;
+        let seconds = |at: i64| f64::from(u32::try_from(at).expect("a 2025 time fits"));
+        // Every chart engine names itself "local" and counts its own revisions, as a pane's
+        // user input publishes them.
+        let publish = |surface: &Entity<WorkspaceSurface>,
+                       revision: u64,
+                       (from, to): (i64, i64),
+                       cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                surface.update(cx, |surface, _| {
+                    surface.pending_chart_sync_events.push_back(
+                        aeris_chart_integration::ChartSyncEvent {
+                            source: "local".to_string(),
+                            revision,
+                            kind: aeris_chart_integration::ChartSyncEventKind::VisibleTimeRange {
+                                range: aeris_chart_integration::VisibleTimeRangeSync {
+                                    from: seconds(from),
+                                    to: seconds(to),
+                                },
+                            },
+                        },
+                    );
+                });
+            });
+            update_terminal(&terminal, cx, |terminal, _, cx| {
+                terminal.synchronize_linked_charts(cx);
+            });
+        };
+        let nanos = |(from, to): (i64, i64)| Some((from * 1_000_000_000, to * 1_000_000_000));
+
+        let from_first = (minute(10), minute(30));
+        publish(&first, 5, from_first, cx);
+        assert_eq!(
+            range(&second, cx),
+            nanos(from_first),
+            "the second chart follows the first"
+        );
+        let from_second = (minute(4), minute(20));
+        publish(&second, 1, from_second, cx);
+        assert_eq!(
+            range(&first, cx),
+            nanos(from_second),
+            "the first chart follows the second although its revision is lower"
+        );
+    }
+
+    #[gpui::test]
     fn starring_a_timeframe_in_one_pane_reaches_every_tab_and_is_saved(cx: &mut TestAppContext) {
         let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
         let first = cx.read(|cx| terminal.read(cx).active_surface());
