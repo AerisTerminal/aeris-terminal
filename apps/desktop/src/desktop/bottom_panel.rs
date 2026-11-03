@@ -22,6 +22,12 @@ const TRADE_HISTORY_MINIMUM_WORKSPACE_HEIGHT: f32 = 240.0;
 const TRADE_HISTORY_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
 const ACCOUNT_STATS_GAP: f32 = 24.0;
 const ACCOUNT_STATS_DIVIDER_HEIGHT: f32 = 28.0;
+/// The tab strip is as tall as its tallest control, the trade-history report button, plus
+/// its vertical padding, so the Positions tab, which has no report button, keeps the same
+/// strip height and the table header never moves when the tab changes.
+const BOTTOM_PANEL_TAB_BAR_HEIGHT: f32 = ButtonSize::Sm.logical_height() + 8.0;
+/// The history paging row keeps the height of its load button while only a message shows.
+const HISTORY_PAGE_CONTROLS_HEIGHT: f32 = ButtonSize::Sm.logical_height();
 const TABLE_HEADER_HEIGHT: f32 = 30.0;
 const TABLE_ROW_HEIGHT: f32 = 30.0;
 const TABLE_CELL_PADDING_X: f32 = 6.0;
@@ -1064,7 +1070,6 @@ fn bottom_panel_tab_bar(
     state: &BottomPanelState,
     theme: &AerisTheme,
 ) -> Div {
-    let colors = theme.colors;
     let count_label = match state.tab {
         BottomPanelTab::TradeHistory => {
             let count = state.history.rows.len();
@@ -1079,24 +1084,29 @@ fn bottom_panel_tab_bar(
             tr_count!(trading::POSITIONS_COUNT, count)
         }
     };
-    div()
-        .flex_none()
-        .w_full()
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_2()
-        .py_1()
-        .border_b(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
-        .text_xs()
-        .text_color(gpui_color(colors.text_secondary))
+    bottom_panel_tab_bar_frame(theme)
         .child(bottom_panel_tabs(terminal, state, theme))
         .child(div().flex_1())
         .child(count_label)
         .when(state.tab == BottomPanelTab::TradeHistory, |bar| {
             bar.child(trading_report_button(terminal, state, theme))
         })
+}
+
+fn bottom_panel_tab_bar_frame(theme: &AerisTheme) -> Div {
+    let colors = theme.colors;
+    div()
+        .flex_none()
+        .w_full()
+        .h(px(BOTTOM_PANEL_TAB_BAR_HEIGHT))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border))
+        .text_xs()
+        .text_color(gpui_color(colors.text_secondary))
 }
 
 fn trading_report_button(
@@ -1411,6 +1421,7 @@ fn history_page_controls(
     let load_terminal = terminal.clone();
     div()
         .flex_none()
+        .h(px(HISTORY_PAGE_CONTROLS_HEIGHT))
         .flex()
         .items_center()
         .gap_2()
@@ -2696,6 +2707,77 @@ mod tests {
         state.select_tab(BottomPanelTab::Positions);
         assert!(state.open);
         assert_eq!(state.tab, BottomPanelTab::Positions);
+    }
+
+    /// The tab strip of either tab: only Trade history carries the report button.
+    struct TabBarHarness {
+        report_button: bool,
+    }
+
+    impl Render for TabBarHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let theme = AerisTheme::dark();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    bottom_panel_tab_bar_frame(&theme)
+                        .debug_selector(|| "bottom_panel_tab_bar".into())
+                        .child(
+                            TabList::new("tabs", "tabs", &theme).compact().children(
+                                ["positions", "history"]
+                                    .map(|id| Tab::new(id, &theme).compact().child(id)),
+                            ),
+                        )
+                        .child(div().flex_1())
+                        .when(self.report_button, |bar| {
+                            bar.child(
+                                Button::new("report", &theme)
+                                    .variant(ButtonVariant::Outline)
+                                    .button_size(ButtonSize::Sm)
+                                    .label("Report"),
+                            )
+                        }),
+                )
+                .child(
+                    table_header_frame(&theme)
+                        .debug_selector(|| "bottom_panel_table_header".into()),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn switching_tabs_keeps_the_tab_strip_and_table_header_in_place(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            gpui_base::init(cx);
+            TabBarHarness {
+                report_button: false,
+            }
+        });
+        cx.run_until_parked();
+        let positions_bar = cx.debug_bounds("bottom_panel_tab_bar").expect("tab strip");
+        let positions_header = cx
+            .debug_bounds("bottom_panel_table_header")
+            .expect("table header");
+        view.update(cx, |harness, cx| {
+            harness.report_button = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let history_bar = cx.debug_bounds("bottom_panel_tab_bar").expect("tab strip");
+        let history_header = cx
+            .debug_bounds("bottom_panel_table_header")
+            .expect("table header");
+        assert_eq!(positions_bar, history_bar, "the tab strip keeps its frame");
+        assert_eq!(
+            positions_header, history_header,
+            "the table header keeps its position and height"
+        );
+        assert_eq!(
+            f32::from(history_bar.size.height),
+            BOTTOM_PANEL_TAB_BAR_HEIGHT
+        );
     }
 
     #[test]
