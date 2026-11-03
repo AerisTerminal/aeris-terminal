@@ -313,7 +313,6 @@ impl Render for ChartTradeBar {
             account,
             quantity: trading.order_entry.quantity,
             ready,
-            replaying,
         };
         div()
             .flex()
@@ -350,7 +349,6 @@ struct MarketOrderTarget {
     account: Option<String>,
     quantity: OrderQuantity,
     ready: bool,
-    replaying: bool,
 }
 
 fn trade_bar_order_button(
@@ -364,7 +362,6 @@ fn trade_bar_order_button(
     let surface = order.surface.clone();
     let account = order.account.clone();
     let quantity = order.quantity;
-    let replaying = order.replaying;
     div().w(px(TRADE_BAR_BUTTON_WIDTH)).child(
         Button::new(id, theme)
             .debug_selector(|| id.into())
@@ -374,7 +371,9 @@ fn trade_bar_order_button(
             .label(label)
             .disabled(!order.ready)
             .on_click(move |_, _, cx| {
-                if replaying {
+                // Checked at the click: a bar drawn before replay started must not send an
+                // account order from a chart that now shows the past.
+                if surface.read(cx).bar_replay_on(cx) {
                     surface.update(cx, |surface, surface_cx| {
                         surface.place_bar_replay_market_order(side, quantity, surface_cx);
                     });

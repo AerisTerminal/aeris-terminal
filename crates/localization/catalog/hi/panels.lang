@@ -177,6 +177,14 @@ replay_trading_order_limit = रीप्ले में पहले से �
 replay_trading_unknown_order = वह रीप्ले ऑर्डर अब सक्रिय नहीं है।
 replay_trading_no_position = रीप्ले में कोई खुली पोज़िशन नहीं है।
 replay_trading_failed = रीप्ले उस ट्रेड का हिसाब नहीं रख सका।
+replay_account = बार रीप्ले
+replay_orders_cancelled = रीप्ले ऑर्डर रद्द किए गए।
+replay_flattened = रीप्ले फ़्लैट किया गया: ऑर्डर रद्द और पोज़िशन बंद की गई।
+replay_trading_changed = आपकी पुष्टि से पहले बार रीप्ले शुरू या बंद हो गया। ऑर्डर फिर से भेजें।
+replay_book_live = ऑर्डर बुक लाइव कीमतें दिखाती है, इसलिए यह बार रीप्ले में ट्रेड नहीं करती। ऑर्डर टिकट या चार्ट का उपयोग करें।
+replay_ticket_notice = बार रीप्ले: ऑर्डर रीप्ले में ट्रेड होते हैं, आपके खाते में नहीं।
+replay_cancel_summary = बार रीप्ले के सभी सक्रिय ऑर्डर रद्द करें।
+replay_flatten_summary = बार रीप्ले के सक्रिय ऑर्डर रद्द करें और उसकी पोज़िशन नवीनतम बार के क्लोज़ पर बंद करें।
 
 ## Trading command notices
 trading_command_failed = ट्रेडिंग कमांड विफल रहा

@@ -177,6 +177,14 @@ replay_trading_order_limit = The replay already holds as many working orders as 
 replay_trading_unknown_order = That replay order is no longer working.
 replay_trading_no_position = The replay has no open position.
 replay_trading_failed = The replay could not account for that trade.
+replay_account = Bar replay
+replay_orders_cancelled = Replay orders cancelled.
+replay_flattened = Replay flattened: orders cancelled and position closed.
+replay_trading_changed = Bar replay started or ended before you confirmed. Send the order again.
+replay_book_live = The order book shows live prices, so it doesn't trade the bar replay. Use the order ticket or the chart.
+replay_ticket_notice = Bar replay: orders trade the replay, not your account.
+replay_cancel_summary = Cancel every working order in the bar replay.
+replay_flatten_summary = Cancel the bar replay's working orders and close its position at the newest bar's close.
 
 ## Trading command notices
 trading_command_failed = Trading command failed

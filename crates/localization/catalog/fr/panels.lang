@@ -178,6 +178,14 @@ replay_trading_order_limit = La relecture détient déjà le nombre maximal d'or
 replay_trading_unknown_order = Cet ordre de relecture n'est plus actif.
 replay_trading_no_position = La relecture n'a pas de position ouverte.
 replay_trading_failed = La relecture n'a pas pu comptabiliser cette transaction.
+replay_account = Relecture de barres
+replay_orders_cancelled = Ordres de relecture annulés.
+replay_flattened = Relecture soldée : ordres annulés et position clôturée.
+replay_trading_changed = La relecture de barres a démarré ou s'est arrêtée avant votre confirmation. Envoyez l'ordre à nouveau.
+replay_book_live = Le carnet d'ordres affiche les prix en direct, il ne trade donc pas la relecture de barres. Utilisez le ticket d'ordre ou le graphique.
+replay_ticket_notice = Relecture de barres : les ordres tradent la relecture, pas votre compte.
+replay_cancel_summary = Annuler tous les ordres en cours de la relecture de barres.
+replay_flatten_summary = Annuler les ordres en cours de la relecture de barres et clôturer sa position à la clôture de la barre la plus récente.
 
 ## Notifications des commandes de trading
 trading_command_failed = Échec de la commande de trading

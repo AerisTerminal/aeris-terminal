@@ -175,6 +175,14 @@ replay_trading_order_limit = 回放的挂单数量已达上限。
 replay_trading_unknown_order = 该回放订单已不再有效。
 replay_trading_no_position = 回放没有持仓。
 replay_trading_failed = 回放无法计入该笔交易。
+replay_account = K 线回放
+replay_orders_cancelled = 回放订单已撤销。
+replay_flattened = 回放已清仓：订单已撤销，持仓已平仓。
+replay_trading_changed = 在您确认之前，K 线回放已开始或结束。请重新发送订单。
+replay_book_live = 订单簿显示实时价格，因此不会在 K 线回放中交易。请使用下单面板或图表。
+replay_ticket_notice = K 线回放：订单在回放中成交，而不是在您的账户中。
+replay_cancel_summary = 撤销 K 线回放中的所有挂单。
+replay_flatten_summary = 撤销 K 线回放的挂单，并以最新 K 线的收盘价平掉其持仓。
 
 ## 交易命令通知
 trading_command_failed = 交易命令失败

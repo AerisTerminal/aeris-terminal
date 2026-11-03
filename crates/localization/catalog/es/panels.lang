@@ -178,6 +178,14 @@ replay_trading_order_limit = La repetición ya tiene el máximo de órdenes acti
 replay_trading_unknown_order = Esa orden de repetición ya no está activa.
 replay_trading_no_position = La repetición no tiene una posición abierta.
 replay_trading_failed = La repetición no pudo contabilizar esa operación.
+replay_account = Repetición de barras
+replay_orders_cancelled = Órdenes de repetición canceladas.
+replay_flattened = Repetición cerrada: órdenes canceladas y posición cerrada.
+replay_trading_changed = La repetición de barras empezó o terminó antes de su confirmación. Envíe la orden de nuevo.
+replay_book_live = El libro de órdenes muestra precios en vivo, así que no opera en la repetición de barras. Use el ticket de órdenes o el gráfico.
+replay_ticket_notice = Repetición de barras: las órdenes operan en la repetición, no en su cuenta.
+replay_cancel_summary = Cancelar todas las órdenes activas de la repetición de barras.
+replay_flatten_summary = Cancelar las órdenes activas de la repetición de barras y cerrar su posición al cierre de la barra más reciente.
 
 ## Avisos de comandos de trading
 trading_command_failed = El comando de trading falló

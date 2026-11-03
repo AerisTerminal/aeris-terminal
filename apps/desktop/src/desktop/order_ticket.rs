@@ -300,6 +300,8 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) trading: &'a super::TradingPaneState,
     pub(super) quantity: &'a super::order_quantity::OrderQuantityControls,
     pub(super) controls: &'a OrderTicketControls,
+    /// Set while the pane's chart replays: orders then trade the replay, not the account.
+    pub(super) replay: Option<&'a super::bar_replay_trading::ReplayTicket>,
     pub(super) theme: &'a AerisTheme,
 }
 
@@ -310,8 +312,10 @@ struct TicketView<'a> {
     position: Option<&'a aeris_trading_runtime::PositionPnl>,
     working_orders: usize,
     instrument: Option<aeris_instruments::InstrumentId>,
-    /// Orders may be placed: an unlocked account and instrument.
+    /// Orders may be placed: an unlocked account and instrument, or an instrument while the
+    /// chart replays.
     ready: bool,
+    replay: Option<&'a super::bar_replay_trading::ReplayTicket>,
 }
 
 pub(super) fn ticket_scope<'a>(
@@ -356,19 +360,22 @@ impl<'a> TicketView<'a> {
             trading.order_entry.selected_account_id.as_ref(),
             instrument.as_ref(),
         );
+        let account_ready = account.is_some()
+            && super::selected_account_lock_reason(super::PaneLockView {
+                selected_account: trading.order_entry.selected_account_id.as_ref(),
+                locks: set.map_or(&[], |set| set.risk_locks.as_slice()),
+            })
+            .is_none();
         Self {
             account,
             broker: account.and_then(TicketBroker::of),
             position,
-            working_orders,
-            ready: account.is_some()
-                && super::selected_account_lock_reason(super::PaneLockView {
-                    selected_account: trading.order_entry.selected_account_id.as_ref(),
-                    locks: set.map_or(&[], |set| set.risk_locks.as_slice()),
-                })
-                .is_none()
-                && instrument.is_some(),
+            working_orders: state
+                .replay
+                .map_or(working_orders, |replay| replay.working_orders),
+            ready: (state.replay.is_some() || account_ready) && instrument.is_some(),
             instrument,
+            replay: state.replay,
         }
     }
 
@@ -377,7 +384,10 @@ impl<'a> TicketView<'a> {
     }
 
     fn net_quantity(&self) -> Option<aeris_trading::FixedPoint> {
-        self.position.map(|position| position.position.net_quantity)
+        match self.replay {
+            Some(replay) => replay.net_quantity,
+            None => self.position.map(|position| position.position.net_quantity),
+        }
     }
 }
 
@@ -398,6 +408,16 @@ pub(super) fn trading_order_controls(
         .bg(gpui_color(colors.surface))
         .text_color(gpui_color(colors.text_default))
         .child(symbol_field(state))
+        .when(view.replay.is_some(), |ticket| {
+            ticket.child(
+                div()
+                    .debug_selector(|| "ticket_replay_notice".into())
+                    .mx(px(2.0))
+                    .text_size(px(11.0))
+                    .text_color(gpui_color(colors.text_secondary))
+                    .child(tr!(panels::REPLAY_TICKET_NOTICE)),
+            )
+        })
         .child(position_stats(state, &view))
         .child(quantity_field(state))
         .child(broker_field(state, &view))
@@ -571,40 +591,26 @@ fn symbol_field(state: &TradingOrderControlsState<'_>) -> impl IntoElement + use
     )
 }
 
-fn position_stats(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> Div {
-    let theme = state.theme;
-    let colors = theme.colors;
+/// The open and daily P/L the ticket shows, with their currency: the replay session's open
+/// and realized P/L while the chart replays, the selected account's otherwise.
+fn ticket_money<'a>(
+    state: &TradingOrderControlsState<'a>,
+    view: &TicketView<'a>,
+) -> (
+    &'a str,
+    Option<aeris_trading::FixedPoint>,
+    Option<aeris_trading::FixedPoint>,
+) {
+    if let Some(replay) = view.replay {
+        let currency = replay.currency.as_deref().unwrap_or("USD");
+        return (currency, replay.open_pnl, replay.realized_pnl);
+    }
     let currency = view
         .account
         .map_or("USD", |account| account.currency.as_str());
     let zero_money = view
         .account
         .and_then(|account| aeris_trading::FixedPoint::try_new(0, account.currency_scale).ok());
-    let net = view.net_quantity();
-    let tint = match net.map(|net| net.units().signum()) {
-        Some(1) => Some((colors.buy_subtle, colors.buy_subtle_foreground)),
-        Some(-1) => Some((colors.sell_subtle, colors.sell_subtle_foreground)),
-        _ => None,
-    };
-    // A long or short position tints its row with the side's subtle fill.
-    let (label_color, value_color) = tint
-        .map_or((colors.text_secondary, colors.text_default), |(_, text)| {
-            (text, text)
-        });
-    let open_qty = field_frame(theme)
-        .justify_between()
-        .when_some(tint, |row, (fill, _)| {
-            row.border_color(gpui::transparent_black())
-                .bg(gpui_color(fill))
-        })
-        .child(field_label(tr!(panels::TICKET_OPEN_QTY), label_color))
-        .child(
-            div()
-                .flex_none()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(value_color))
-                .child(net.map_or_else(|| "0".to_string(), format_quantity)),
-        );
     // A broker account whose venue is unreachable has no known open P/L.
     let open_pnl_known = state
         .store
@@ -632,6 +638,38 @@ fn position_stats(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) 
             .find(|meter| meter.account_id == account.id && meter.enabled)
             .map(|meter| meter.current_realized_pnl)
     });
+    (currency, open_pnl, daily_pnl)
+}
+
+fn position_stats(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> Div {
+    let theme = state.theme;
+    let colors = theme.colors;
+    let (currency, open_pnl, daily_pnl) = ticket_money(state, view);
+    let net = view.net_quantity();
+    let tint = match net.map(|net| net.units().signum()) {
+        Some(1) => Some((colors.buy_subtle, colors.buy_subtle_foreground)),
+        Some(-1) => Some((colors.sell_subtle, colors.sell_subtle_foreground)),
+        _ => None,
+    };
+    // A long or short position tints its row with the side's subtle fill.
+    let (label_color, value_color) = tint
+        .map_or((colors.text_secondary, colors.text_default), |(_, text)| {
+            (text, text)
+        });
+    let open_qty = field_frame(theme)
+        .justify_between()
+        .when_some(tint, |row, (fill, _)| {
+            row.border_color(gpui::transparent_black())
+                .bg(gpui_color(fill))
+        })
+        .child(field_label(tr!(panels::TICKET_OPEN_QTY), label_color))
+        .child(
+            div()
+                .flex_none()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(value_color))
+                .child(net.map_or_else(|| "0".to_string(), format_quantity)),
+        );
     div()
         .flex()
         .flex_col()
@@ -968,9 +1006,45 @@ fn ticket_price(
     frame: &aeris_market_data::OrderBookFrame,
     offset_ticks: u32,
 ) -> Result<Option<i64>, &'static str> {
+    let touch = TicketTouch {
+        bid: frame.best_bid.as_ref().map(|level| level.price),
+        ask: frame.best_ask.as_ref().map(|level| level.price),
+        tick: frame.price_increment,
+    };
+    touch_price(action, side, touch, offset_ticks)
+}
+
+/// The same price on a replaying chart, where the newest revealed close is both the bid and
+/// the ask.
+fn replay_ticket_price(
+    action: TicketAction,
+    side: aeris_trading::OrderSide,
+    replay: super::bar_replay_trading::ReplayTouch,
+    offset_ticks: u32,
+) -> Result<Option<i64>, &'static str> {
+    let touch = TicketTouch {
+        bid: Some(replay.close_units),
+        ask: Some(replay.close_units),
+        tick: replay.tick_units,
+    };
+    touch_price(action, side, touch, offset_ticks)
+}
+
+/// The touch a ticket price is measured from, in price units.
+#[derive(Clone, Copy)]
+struct TicketTouch {
+    bid: Option<i64>,
+    ask: Option<i64>,
+    tick: Option<i64>,
+}
+
+fn touch_price(
+    action: TicketAction,
+    side: aeris_trading::OrderSide,
+    TicketTouch { bid, ask, tick }: TicketTouch,
+    offset_ticks: u32,
+) -> Result<Option<i64>, &'static str> {
     use aeris_trading::OrderSide::{Buy, Sell};
-    let bid = frame.best_bid.as_ref().map(|level| level.price);
-    let ask = frame.best_ask.as_ref().map(|level| level.price);
     let (touch, below) = match (action, side) {
         (TicketAction::Market, _) => return Ok(None),
         (TicketAction::Touch | TicketAction::Limit, Buy)
@@ -990,8 +1064,7 @@ fn ticket_price(
     let distance = if offset == 0 {
         0
     } else {
-        let tick = frame
-            .price_increment
+        let tick = tick
             .filter(|tick| *tick > 0)
             .ok_or(tr!(panels::TICKET_PRICE_INCREMENT_UNKNOWN))?;
         i64::from(offset)
@@ -1054,9 +1127,11 @@ fn order_button(
         aeris_trading::OrderSide::Buy => frame.best_bid.is_some(),
         aeris_trading::OrderSide::Sell => frame.best_ask.is_some(),
     });
+    // A replaying chart prices every order at its newest revealed close, never the book.
     let enabled = view.ready
-        && (action == TicketAction::Market || state.frame.is_some())
-        && (action != TicketAction::Touch || has_touch);
+        && (view.replay.is_some()
+            || ((action == TicketAction::Market || state.frame.is_some())
+                && (action != TicketAction::Touch || has_touch)));
     let app = state.app.clone();
     let frame = state.frame.cloned();
     let product = state.product.cloned();
@@ -1072,6 +1147,23 @@ fn order_button(
         .label(action.label(side))
         .disabled(!enabled)
         .on_click(move |_, _, cx| {
+            // Replay is checked at the click, so an order never reaches the account from a
+            // chart that started replaying after the ticket was drawn.
+            if app.read(cx).bar_replay_on(cx) {
+                let order = super::bar_replay_trading::ReplayTicketOrder {
+                    side,
+                    quantity,
+                    bracket: settings.bracket(),
+                };
+                app.update(cx, |surface, surface_cx| {
+                    surface.place_bar_replay_ticket_order(
+                        order,
+                        |touch| replay_ticket_price(action, side, touch, settings.offset()),
+                        surface_cx,
+                    );
+                });
+                return;
+            }
             let Some(product) = product.as_ref() else {
                 return;
             };
@@ -1108,7 +1200,8 @@ fn order_button(
         })
 }
 
-/// Cancels every working order of the selected account; it needs no book.
+/// Cancels every working order of the selected account, or of the replay while the chart
+/// replays; it needs no book.
 fn cancel_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> Button {
     let app = state.app.clone();
     let account = view.account_key();
@@ -1116,8 +1209,12 @@ fn cancel_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
         .variant(ButtonVariant::Destructive)
         .label(tr!(common::CANCEL))
         .aria_label(tr!(panels::TICKET_CANCEL_WORKING))
-        .disabled(account.is_none())
+        .disabled(view.replay.is_none() && account.is_none())
         .on_click(move |_, _, cx| {
+            if app.read(cx).bar_replay_on(cx) {
+                app.update(cx, WorkspaceSurface::cancel_bar_replay_orders);
+                return;
+            }
             let service = app.read(cx).lifecycle.trading().clone();
             let feedback = app.read(cx).lifecycle.trading_feedback().clone();
             let pane = app.read(cx).trading_pane_token.clone();
@@ -1131,7 +1228,8 @@ fn cancel_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
         })
 }
 
-/// Cancels the selected account's orders on this instrument and closes its position.
+/// Cancels the selected account's orders on this instrument and closes its position, or the
+/// replay's while the chart replays.
 fn flat_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> Button {
     let app = state.app.clone();
     let instrument = state
@@ -1143,8 +1241,12 @@ fn flat_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> 
         .variant(ButtonVariant::Warning)
         .label(tr!(panels::TICKET_FLAT))
         .aria_label(tr!(panels::TICKET_FLATTEN))
-        .disabled(account.is_none() || instrument.is_none())
+        .disabled((view.replay.is_none() && account.is_none()) || instrument.is_none())
         .on_click(move |_, _, cx| {
+            if app.read(cx).bar_replay_on(cx) {
+                app.update(cx, WorkspaceSurface::flatten_bar_replay);
+                return;
+            }
             let Some(instrument) = instrument.as_ref() else {
                 return;
             };
@@ -1537,6 +1639,27 @@ mod tests {
         let mut no_bid = book();
         no_bid.best_bid = None;
         assert!(ticket_price(TicketAction::Touch, Buy, &no_bid, 0).is_err());
+    }
+
+    #[test]
+    fn replay_ticket_prices_measure_from_the_newest_close() {
+        use aeris_trading::OrderSide::{Buy, Sell};
+        let touch = super::super::bar_replay_trading::ReplayTouch {
+            close_units: 10_000,
+            tick_units: Some(25),
+        };
+        let price = |action, side, offset| replay_ticket_price(action, side, touch, offset);
+        assert_eq!(price(TicketAction::Market, Buy, 2), Ok(None));
+        assert_eq!(price(TicketAction::Touch, Sell, 2), Ok(Some(10_000)));
+        assert_eq!(price(TicketAction::Limit, Buy, 2), Ok(Some(9_950)));
+        assert_eq!(price(TicketAction::Limit, Sell, 2), Ok(Some(10_050)));
+        assert_eq!(price(TicketAction::Stop, Buy, 2), Ok(Some(10_050)));
+        assert_eq!(price(TicketAction::StopLimit, Sell, 2), Ok(Some(9_950)));
+        let no_tick = super::super::bar_replay_trading::ReplayTouch {
+            tick_units: None,
+            ..touch
+        };
+        assert!(replay_ticket_price(TicketAction::Limit, Buy, no_tick, 1).is_err());
     }
 
     #[test]

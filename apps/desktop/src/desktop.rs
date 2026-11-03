@@ -1,6 +1,6 @@
 //! Desktop composition and shared presentation types. Behavior lives in owned child modules.
 
-use aeris_localization::{tr, tr_count, workspace};
+use aeris_localization::{panels, tr, tr_count, workspace};
 
 mod accounts_panel;
 mod alerts_controller;
@@ -4830,6 +4830,14 @@ fn subscribe_order_book_trading(
             move |_, event: &OrderBookLevelClick, _, cx| {
                 let order_entry = {
                     let surface = click_workspace.read(cx);
+                    // The ladder shows live prices; a replaying chart trades only the past.
+                    if surface.bar_replay_on(cx) {
+                        surface.lifecycle.trading_feedback().record_for_pane(
+                            &surface.trading_pane_token,
+                            Err(tr!(panels::REPLAY_BOOK_LIVE).to_string()),
+                        );
+                        return;
+                    }
                     if surface.selected_account_lock_reason(cx).is_some() {
                         return;
                     }

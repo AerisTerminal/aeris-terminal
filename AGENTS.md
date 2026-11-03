@@ -165,10 +165,14 @@ violations and missing verification explicitly, and never describe them as satis
   replaying pane (`desktop/bar_replay_trading.rs`), built on the chart instrument's registered
   terms. It fills only against the bars the chart's replay reveals, through the `execution` touch
   policies and the owner's position and P&L math, and never reaches the trading owner, an account,
-  a venue or the store. While a chart replays, its order entry and trade bar trade that session and
-  the chart shows it in place of the account; the session ends with the replay and resets with a
-  notice when replay steps back before its newest trade or changes instrument. A timeframe or
-  symbol switch carries the engine's `ChartReplaySession` to the rebuilt chart at the same clock;
+  a venue or the store. While a chart replays, every order entry on it trades that session, decided
+  at the click or key rather than at render: chart orders and drawings, the trade bar, the order
+  ticket (resting prices measured from the newest revealed close, its bracket, Cancel and Flat) and
+  the buy, sell, cancel-all and flatten shortcuts (a confirmation answered after replay started or
+  ended is refused); only the kill switch still locks the accounts, and the live order-book ladder
+  refuses clicks. The chart and ticket show the session in place of the account; the session ends
+  with the replay and resets with a notice when replay steps back before its newest trade or
+  changes instrument. A timeframe or symbol switch carries the engine's `ChartReplaySession` to the rebuilt chart at the same clock;
   history that starts after the clock is requested through the reported chart viewport, and the
   runtime's `MarketDemandErrorScope::HistoryStart` (no older history exists) moves replay to the
   earliest bar with a notice.

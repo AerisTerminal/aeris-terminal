@@ -177,6 +177,14 @@ replay_trading_order_limit = Das Replay hält bereits die maximale Anzahl aktive
 replay_trading_unknown_order = Diese Replay-Order ist nicht mehr aktiv.
 replay_trading_no_position = Das Replay hat keine offene Position.
 replay_trading_failed = Das Replay konnte diesen Trade nicht verbuchen.
+replay_account = Bar-Replay
+replay_orders_cancelled = Replay-Orders storniert.
+replay_flattened = Replay glattgestellt: Orders storniert und Position geschlossen.
+replay_trading_changed = Das Bar-Replay wurde vor Ihrer Bestätigung gestartet oder beendet. Senden Sie die Order erneut.
+replay_book_live = Das Orderbuch zeigt Live-Kurse und handelt daher nicht im Bar-Replay. Nutzen Sie das Orderticket oder den Chart.
+replay_ticket_notice = Bar-Replay: Orders handeln im Replay, nicht auf Ihrem Konto.
+replay_cancel_summary = Alle offenen Orders im Bar-Replay stornieren.
+replay_flatten_summary = Die offenen Orders des Bar-Replays stornieren und seine Position zum Schlusskurs des neuesten Balkens schließen.
 
 ## Hinweise zu Handelsbefehlen
 trading_command_failed = Handelsbefehl fehlgeschlagen

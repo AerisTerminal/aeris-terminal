@@ -1,10 +1,11 @@
 //! Keyboard trading: the held-key guard and the order confirmation that one-click trading skips.
 //! Orders from a position drawing's toolbar share the confirmation. Clicks on the order ticket
-//! never pass through here.
+//! never pass through here. While the active chart replays, orders, cancels and flattens trade
+//! the replay's session instead of the account; the kill switch still locks every account.
 
 use super::chart_chrome::TradingShortcutMode;
 use super::*;
-use aeris_localization::{tr, trading};
+use aeris_localization::{panels, tr, trading};
 
 /// A trading command sent by a shortcut or the command palette.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,6 +170,9 @@ struct TradingConfirmation {
     trade: ConfirmedTrade,
     message: String,
     skip_next_time: bool,
+    /// Whether the message described the replay's session; a confirmation answered after
+    /// replay started or ended would send somewhere else than it said.
+    replaying: bool,
 }
 
 impl TerminalApp {
@@ -283,6 +287,7 @@ impl TerminalApp {
                 trade,
                 message,
                 skip_next_time: false,
+                replaying: self.active_surface().read(cx).bar_replay_on(cx),
             });
             // Enter and Escape answer the dialog from the shell, ahead of a focused chart.
             self.window.chrome_focus().focus(window, cx);
@@ -310,6 +315,19 @@ impl TerminalApp {
     }
 
     fn drawing_bracket_summary(&self, long: bool, cx: &App) -> Result<String, String> {
+        let surface = self.active_surface().read(cx);
+        if surface.bar_replay_on(cx) {
+            let product = surface
+                .product
+                .as_ref()
+                .ok_or(tr!(trading::CHOOSE_SYMBOL_FIRST))?;
+            return Ok(drawing_bracket_message(
+                long,
+                surface.trading_pnl.order_entry.quantity,
+                product,
+                tr!(panels::REPLAY_ACCOUNT),
+            ));
+        }
         let account = self
             .selected_trading_account_name(cx)
             .ok_or(tr!(trading::CHOOSE_TRADING_ACCOUNT))?;
@@ -341,6 +359,9 @@ impl TerminalApp {
         let surface = self.active_surface();
         let surface = surface.read(cx);
         let trading = &surface.trading_pnl;
+        if surface.bar_replay_on(cx) {
+            return replay_hotkey_summary(hotkey, surface).map_err(str::to_string);
+        }
         let account = self.selected_trading_account_name(cx);
         match hotkey {
             TradingHotkey::BuyMarket | TradingHotkey::SellMarket => {
@@ -378,7 +399,9 @@ impl TerminalApp {
         match trade {
             ConfirmedTrade::Hotkey(hotkey) => self.send_trading_hotkey(*hotkey, cx),
             ConfirmedTrade::DrawingBracket { chart, drawing } => {
-                if self.trading_order_entry_locked(cx) {
+                // A replaying chart sends the bracket to its replay session, which no account
+                // lock covers.
+                if !chart.read(cx).bar_replay_on() && self.trading_order_entry_locked(cx) {
                     return;
                 }
                 let quantity = self.trading_order_entry(cx).1;
@@ -403,7 +426,22 @@ impl TerminalApp {
     }
 
     fn send_trading_hotkey(&self, hotkey: TradingHotkey, cx: &mut Context<Self>) {
-        let pane = self.active_surface().read(cx).trading_pane_token.clone();
+        let surface = self.active_surface().clone();
+        if hotkey != TradingHotkey::KillSwitch && surface.read(cx).bar_replay_on(cx) {
+            let quantity = self.trading_order_entry(cx).1;
+            surface.update(cx, |surface, surface_cx| match hotkey {
+                TradingHotkey::BuyMarket | TradingHotkey::SellMarket => {
+                    if let Some(side) = hotkey.side() {
+                        surface.place_bar_replay_market_order(side, quantity, surface_cx);
+                    }
+                }
+                TradingHotkey::CancelAll => surface.cancel_bar_replay_orders(surface_cx),
+                TradingHotkey::FlattenAccount => surface.flatten_bar_replay(surface_cx),
+                TradingHotkey::KillSwitch => {}
+            });
+            return;
+        }
+        let pane = surface.read(cx).trading_pane_token.clone();
         match hotkey {
             TradingHotkey::BuyMarket | TradingHotkey::SellMarket => {
                 if self.trading_order_entry_locked(cx) {
@@ -469,6 +507,16 @@ impl TerminalApp {
         };
         if confirmation.skip_next_time {
             self.set_trading_shortcut_mode(TradingShortcutMode::OneClick, cx);
+        }
+        let surface = self.active_surface().read(cx);
+        if surface.bar_replay_on(cx) != confirmation.replaying {
+            self.lifecycle.trading_feedback().record_for_pane(
+                &surface.trading_pane_token,
+                Err(tr!(panels::REPLAY_TRADING_CHANGED).to_string()),
+            );
+            self.focus_workspace(window, cx);
+            cx.notify();
+            return;
         }
         self.send_confirmed_trade(&confirmation.trade, cx);
         self.focus_workspace(window, cx);
@@ -549,6 +597,30 @@ impl TerminalApp {
             )
             .into_any_element(),
         )
+    }
+}
+
+/// What a trading shortcut does on a replaying chart, or why it cannot run there.
+fn replay_hotkey_summary(
+    hotkey: TradingHotkey,
+    surface: &WorkspaceSurface,
+) -> Result<String, &'static str> {
+    match hotkey {
+        TradingHotkey::BuyMarket | TradingHotkey::SellMarket => {
+            let product = surface
+                .product
+                .as_ref()
+                .ok_or(tr!(trading::CHOOSE_SYMBOL_FIRST))?;
+            Ok(market_order_message(
+                hotkey.confirm_label(),
+                surface.trading_pnl.order_entry.quantity,
+                product,
+                tr!(panels::REPLAY_ACCOUNT),
+            ))
+        }
+        TradingHotkey::CancelAll => Ok(tr!(panels::REPLAY_CANCEL_SUMMARY).to_string()),
+        TradingHotkey::FlattenAccount => Ok(tr!(panels::REPLAY_FLATTEN_SUMMARY).to_string()),
+        TradingHotkey::KillSwitch => Ok(tr!(trading::KILL_SWITCH_SUMMARY).to_string()),
     }
 }
 

@@ -175,6 +175,14 @@ replay_trading_order_limit = 리플레이에 이미 가능한 최대 수의 대�
 replay_trading_unknown_order = 해당 리플레이 주문은 더 이상 대기 중이 아닙니다.
 replay_trading_no_position = 리플레이에 보유 포지션이 없습니다.
 replay_trading_failed = 리플레이에서 해당 거래를 정산하지 못했습니다.
+replay_account = 봉 리플레이
+replay_orders_cancelled = 리플레이 주문을 취소했습니다.
+replay_flattened = 리플레이를 무포지션으로 만들었습니다: 주문을 취소하고 포지션을 청산했습니다.
+replay_trading_changed = 확인하기 전에 봉 리플레이가 시작되거나 종료되었습니다. 주문을 다시 보내세요.
+replay_book_live = 호가창은 실시간 가격을 표시하므로 봉 리플레이에서는 거래하지 않습니다. 주문 티켓이나 차트를 사용하세요.
+replay_ticket_notice = 봉 리플레이: 주문은 계좌가 아니라 리플레이에서 거래됩니다.
+replay_cancel_summary = 봉 리플레이의 모든 대기 주문을 취소합니다.
+replay_flatten_summary = 봉 리플레이의 대기 주문을 취소하고 최신 봉의 종가로 포지션을 청산합니다.
 
 ## 트레이딩 명령 알림
 trading_command_failed = 트레이딩 명령 실패

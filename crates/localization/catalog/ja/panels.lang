@@ -175,6 +175,14 @@ replay_trading_order_limit = リプレイの有効注文数が上限に達して
 replay_trading_unknown_order = そのリプレイ注文はすでに有効ではありません。
 replay_trading_no_position = リプレイに保有ポジションがありません。
 replay_trading_failed = リプレイでその取引を計上できませんでした。
+replay_account = バーリプレイ
+replay_orders_cancelled = リプレイ注文を取り消しました。
+replay_flattened = リプレイをノーポジにしました：注文を取り消し、ポジションを決済しました。
+replay_trading_changed = 確認する前にバーリプレイが開始または終了しました。注文をもう一度送信してください。
+replay_book_live = 板はライブ価格を表示しているため、バーリプレイでは取引しません。注文チケットまたはチャートを使用してください。
+replay_ticket_notice = バーリプレイ：注文は口座ではなくリプレイで取引されます。
+replay_cancel_summary = バーリプレイの有効な注文をすべて取り消します。
+replay_flatten_summary = バーリプレイの有効な注文を取り消し、最新バーの終値でポジションを決済します。
 
 ## 取引コマンドの通知
 trading_command_failed = 取引コマンドに失敗しました

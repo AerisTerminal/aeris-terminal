@@ -28,6 +28,8 @@ const POSITION_ID_PREFIX: &str = "replay-position:";
 #[derive(Clone, Debug, PartialEq)]
 enum ReplayTradingRefusal {
     Intent(ChartIntentRejection),
+    /// The order ticket could not price its order.
+    Ticket(&'static str),
     /// The trading owner has published no verified terms for the chart's instrument.
     NoTerms,
     Session(BarReplayTradingError),
@@ -37,6 +39,7 @@ impl ReplayTradingRefusal {
     fn message(&self) -> &'static str {
         match self {
             Self::Intent(reason) => reason.message(),
+            Self::Ticket(reason) => reason,
             Self::NoTerms => tr!(panels::REPLAY_TRADING_NO_TERMS),
             Self::Session(error) => match error {
                 BarReplayTradingError::MissingPointValue => {
@@ -69,6 +72,33 @@ impl From<ChartIntentRejection> for ReplayTradingRefusal {
     fn from(reason: ChartIntentRejection) -> Self {
         Self::Intent(reason)
     }
+}
+
+/// The newest revealed close and the instrument's tick, in price units at the replay
+/// session's price scale.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReplayTouch {
+    pub(super) close_units: i64,
+    pub(super) tick_units: Option<i64>,
+}
+
+/// An order the order ticket, a trading shortcut or the chart trade bar sends to the replay.
+#[derive(Clone, Copy)]
+pub(super) struct ReplayTicketOrder {
+    pub(super) side: aeris_trading::OrderSide,
+    pub(super) quantity: aeris_desktop::trading::OrderQuantity,
+    /// A stop and target in ticks from the entry, or from the close for a market order.
+    pub(super) bracket: Option<aeris_desktop::trading::TicketBracket>,
+}
+
+/// What the order ticket shows while its chart replays; empty before the first replay order.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ReplayTicket {
+    pub(super) currency: Option<String>,
+    pub(super) net_quantity: Option<aeris_trading::FixedPoint>,
+    pub(super) open_pnl: Option<aeris_trading::FixedPoint>,
+    pub(super) realized_pnl: Option<aeris_trading::FixedPoint>,
+    pub(super) working_orders: usize,
 }
 
 impl WorkspaceSurface {
@@ -189,18 +219,32 @@ impl WorkspaceSurface {
         intent: &ChartTradingIntent,
         cx: &mut Context<Self>,
     ) {
-        let result = self
-            .apply_bar_replay_intent(intent, cx)
-            .map(str::to_string)
-            .map_err(|refusal| refusal.message().to_string());
+        let result = self.apply_bar_replay_intent(intent, cx);
+        let accepted = self.record_bar_replay_result(result, cx);
+        chart.update(cx, |chart, _| {
+            chart.resolve_trading_intent(intent.sequence, accepted);
+        });
+    }
+
+    /// Shows a replay trading result on the pane's status line and re-projects the chart.
+    /// Returns whether the action ran.
+    fn record_bar_replay_result(
+        &mut self,
+        result: Result<&'static str, ReplayTradingRefusal>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let result = result.map(str::to_string).map_err(|refusal| {
+            let message = refusal.message();
+            diagnostic!("Bar replay refused a trading action: {refusal:?}");
+            message.to_string()
+        });
         let accepted = result.is_ok();
         self.lifecycle
             .trading_feedback()
             .record_for_pane(&self.trading_pane_token, result);
-        chart.update(cx, |chart, _| {
-            chart.resolve_trading_intent(intent.sequence, accepted);
-        });
         self.refresh_pane_trading_projection(cx);
+        cx.notify();
+        accepted
     }
 
     fn apply_bar_replay_intent(
@@ -262,34 +306,142 @@ impl WorkspaceSurface {
         }
     }
 
-    /// The chart trade bar's Buy or Sell on a replaying chart: a market order at the newest
-    /// revealed close.
+    /// A Buy or Sell at the market on a replaying chart (the chart trade bar or a trading
+    /// shortcut): it fills at the newest revealed close.
     pub(super) fn place_bar_replay_market_order(
         &mut self,
         side: aeris_trading::OrderSide,
         quantity: aeris_desktop::trading::OrderQuantity,
         cx: &mut Context<Self>,
     ) {
-        let result = self
-            .bar_replay_trading_session(cx)
-            .and_then(|session| {
-                let quantity = quantity
-                    .fixed_point(session.instrument().quantity_scale)
-                    .ok_or(ChartIntentRejection::InvalidQuantity)?;
-                session.place(ReplayOrderRequest {
-                    side,
-                    entry: ReplayEntry::Market,
-                    quantity,
-                    stop_loss: None,
-                    take_profit: None,
-                })?;
-                Ok(tr!(panels::REPLAY_ORDER_PLACED).to_string())
-            })
-            .map_err(|refusal| refusal.message().to_string());
-        self.lifecycle
-            .trading_feedback()
-            .record_for_pane(&self.trading_pane_token, result);
-        self.refresh_pane_trading_projection(cx);
+        let order = ReplayTicketOrder {
+            side,
+            quantity,
+            bracket: None,
+        };
+        self.place_bar_replay_ticket_order(order, |_| Ok(None), cx);
+    }
+
+    /// An order on a replaying chart. `price` turns the newest revealed close into the entry
+    /// price in price units, or `None` for a market order.
+    pub(super) fn place_bar_replay_ticket_order(
+        &mut self,
+        order: ReplayTicketOrder,
+        price: impl FnOnce(ReplayTouch) -> Result<Option<i64>, &'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self.apply_bar_replay_ticket_order(order, price, cx);
+        self.record_bar_replay_result(result, cx);
+    }
+
+    fn apply_bar_replay_ticket_order(
+        &mut self,
+        order: ReplayTicketOrder,
+        price: impl FnOnce(ReplayTouch) -> Result<Option<i64>, &'static str>,
+        cx: &App,
+    ) -> Result<&'static str, ReplayTradingRefusal> {
+        let session = self.bar_replay_trading_session(cx)?;
+        let price_scale = session.instrument().price_scale;
+        let tick_units = tick_units(session.instrument());
+        let quantity = order
+            .quantity
+            .fixed_point(session.instrument().quantity_scale)
+            .ok_or(ChartIntentRejection::InvalidQuantity)?;
+        let close_units = session
+            .last_bar()
+            .ok_or(BarReplayTradingError::NoBar)?
+            .close
+            .units();
+        let entry_units = price(ReplayTouch {
+            close_units,
+            tick_units,
+        })
+        .map_err(ReplayTradingRefusal::Ticket)?;
+        let fixed = |units: Option<i64>| {
+            units
+                .and_then(|units| aeris_trading::FixedPoint::try_new(units, price_scale).ok())
+                .ok_or(BarReplayTradingError::InvalidPrice)
+        };
+        let (stop_loss, take_profit) = match order.bracket {
+            None => (None, None),
+            Some(bracket) => {
+                let tick = tick_units.ok_or(ReplayTradingRefusal::Ticket(tr!(
+                    panels::TICKET_PRICE_INCREMENT_UNKNOWN
+                )))?;
+                let reference = entry_units.unwrap_or(close_units);
+                let away = |ticks: u32, below: bool| {
+                    let distance = i64::from(ticks).checked_mul(tick)?;
+                    if below {
+                        reference.checked_sub(distance)
+                    } else {
+                        reference.checked_add(distance)
+                    }
+                };
+                let long = order.side == aeris_trading::OrderSide::Buy;
+                (
+                    Some(fixed(away(bracket.stop_ticks, long))?),
+                    Some(fixed(away(bracket.target_ticks, !long))?),
+                )
+            }
+        };
+        let entry = match entry_units {
+            Some(units) => ReplayEntry::At(fixed(Some(units))?),
+            None => ReplayEntry::Market,
+        };
+        session.place(ReplayOrderRequest {
+            side: order.side,
+            entry,
+            quantity,
+            stop_loss,
+            take_profit,
+        })?;
+        Ok(tr!(panels::REPLAY_ORDER_PLACED))
+    }
+
+    /// Cancels every working replay order.
+    pub(super) fn cancel_bar_replay_orders(&mut self, cx: &mut Context<Self>) {
+        let result = match self.bar_replay.trading.as_mut() {
+            Some(session) => cancel_every_replay_order(session),
+            None => Ok(()),
+        }
+        .map(|()| tr!(panels::REPLAY_ORDERS_CANCELLED))
+        .map_err(ReplayTradingRefusal::from);
+        self.record_bar_replay_result(result, cx);
+    }
+
+    /// Cancels every working replay order and closes the replay position at the newest close.
+    pub(super) fn flatten_bar_replay(&mut self, cx: &mut Context<Self>) {
+        let result = match self.bar_replay.trading.as_mut() {
+            Some(session) => cancel_every_replay_order(session).and_then(|()| {
+                if session.position().is_some() {
+                    session.close_position()
+                } else {
+                    Ok(())
+                }
+            }),
+            None => Ok(()),
+        }
+        .map(|()| tr!(panels::REPLAY_FLATTENED))
+        .map_err(ReplayTradingRefusal::from);
+        self.record_bar_replay_result(result, cx);
+    }
+
+    /// What the order ticket shows while the chart replays; `None` otherwise.
+    pub(super) fn bar_replay_ticket(&self, cx: &App) -> Option<ReplayTicket> {
+        if !self.bar_replay_on(cx) {
+            return None;
+        }
+        let Some(session) = self.bar_replay.trading.as_ref() else {
+            return Some(ReplayTicket::default());
+        };
+        let position = session.position();
+        Some(ReplayTicket {
+            currency: Some(session.currency().to_string()),
+            net_quantity: position.map(|position| position.net_quantity),
+            open_pnl: Some(session.unrealized_pnl()),
+            realized_pnl: Some(session.realized_pnl()),
+            working_orders: session.orders().len(),
+        })
     }
 
     /// Re-projects the pane's trading onto its chart: the replay session while the chart
@@ -381,6 +533,27 @@ impl WorkspaceSurface {
             )
         })
     }
+}
+
+fn cancel_every_replay_order(session: &mut BarReplayTrading) -> Result<(), BarReplayTradingError> {
+    // Cancelling an entry also cancels the protections waiting for it, so each pass takes
+    // whatever order is first; the session bounds how many there are.
+    while let Some(order_id) = session.orders().first().map(|order| order.id) {
+        session.cancel(order_id)?;
+    }
+    Ok(())
+}
+
+/// The instrument's tick in price units at its price scale, when its terms name one that
+/// fits that scale.
+fn tick_units(instrument: &aeris_trading_runtime::TradingInstrument) -> Option<i64> {
+    let tick = instrument.contract.tick_size.as_ref()?;
+    aeris_trading::FixedPoint::try_new(tick.units(), tick.scale())
+        .ok()?
+        .exact_rescale(instrument.price_scale)
+        .ok()
+        .map(aeris_trading::FixedPoint::units)
+        .filter(|units| *units > 0)
 }
 
 fn replay_chart_order(

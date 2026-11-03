@@ -429,6 +429,7 @@ pub(super) fn workspace_market_area(
     let drawing_scroll = surface.scrolls.drawing.clone();
     let chrome_focus = surface.chrome_focus.clone();
     let order_book_frame = surface.order_book.read(cx).frame().cloned();
+    let replay_ticket = surface.bar_replay_ticket(cx);
     let side_panels = surface.chrome.side_panels();
     let side_panel = side_panels.any().then(|| {
         workspace_side_panel(WorkspaceSidePanelState {
@@ -455,6 +456,7 @@ pub(super) fn workspace_market_area(
                 trading: &surface.trading_pnl,
                 quantity: &surface.order_quantity,
                 controls: &surface.order_ticket,
+                replay: replay_ticket.as_ref(),
                 theme,
             },
             time_sales: TimeSalesPanelState {

@@ -729,6 +729,124 @@ fn assert_replay_buy_trades_the_session_until_exit(
     });
 }
 
+/// The order ticket and trading shortcuts on a replaying chart trade the replay session: a
+/// resting bracket entry measured from the newest close, a market order, cancel and flatten,
+/// with no account order.
+#[gpui::test]
+fn pane_harness_bar_replay_ticket_orders_trade_the_replay_session(cx: &mut TestAppContext) {
+    let (owner, root, _, _, instrument, _) =
+        trading_store::real_owner_fill_fixture_for("hyperliquid");
+    let subscription = owner.subscribe().expect("owner subscription");
+    let mut product = aeris_desktop::test_support::fixture_public_crypto();
+    product.instrument_id = instrument.as_str().into();
+    product.price_scale = 2;
+    product.quantity_scale = 0;
+    product.price_increment = Some(1);
+    let (mut harness, cx) = PaneHarness::open_with_product_and_owner(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        product,
+        ChartInterval::Minute1,
+        Some(owner.clone()),
+        cx,
+    );
+    harness.publish_snapshot(120, cx);
+    harness.adopt_owner_publication(&subscription, cx);
+    cx.run_until_parked();
+    start_bar_replay_after(&harness, 20, cx);
+
+    let close = place_replay_ticket_bracket(&harness, cx);
+    harness.pane.update(cx, |pane, cx| {
+        let quantity = pane.trading_pnl.order_entry.quantity;
+        pane.place_bar_replay_market_order(aeris_trading::OrderSide::Buy, quantity, cx);
+        let ticket = pane.bar_replay_ticket(cx).expect("replay ticket");
+        assert_eq!(ticket.working_orders, 3, "the market order filled at once");
+        assert_eq!(
+            ticket.net_quantity.map(aeris_trading::FixedPoint::units),
+            Some(1),
+            "the ticket shows the replay position"
+        );
+        let session = pane.bar_replay.trading.as_ref().expect("replay session");
+        assert_eq!(
+            session.fills().last().map(|fill| fill.price.units()),
+            Some(close)
+        );
+
+        pane.cancel_bar_replay_orders(cx);
+        let session = pane.bar_replay.trading.as_ref().expect("replay session");
+        assert_eq!(session.orders(), [], "cancel takes the entry and its legs");
+        assert!(session.position().is_some(), "cancel keeps the position");
+
+        pane.flatten_bar_replay(cx);
+        let session = pane.bar_replay.trading.as_ref().expect("replay session");
+        assert!(session.position().is_none(), "flatten closes the position");
+        assert_eq!(session.fills().count(), 2);
+    });
+    assert!(
+        subscription
+            .recv_timeout(Duration::from_millis(300))
+            .is_none(),
+        "no replay action reaches the account"
+    );
+    owner
+        .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
+        .expect("owner stopped");
+    std::fs::remove_dir_all(root).expect("remove test root");
+}
+
+/// Sends the ticket's two-tick buy limit with a four-tick stop and eight-tick target to the
+/// replay and checks where its three orders rest; returns the newest close in price units.
+fn place_replay_ticket_bracket(harness: &PaneHarness, cx: &mut VisualTestContext) -> i64 {
+    use super::bar_replay_trading::ReplayTicketOrder;
+
+    harness.pane.update(cx, |pane, cx| {
+        assert!(
+            pane.bar_replay_ticket(cx).is_some(),
+            "a replaying chart's ticket trades the replay"
+        );
+        let order = ReplayTicketOrder {
+            side: aeris_trading::OrderSide::Buy,
+            quantity: pane.trading_pnl.order_entry.quantity,
+            bracket: Some(aeris_desktop::trading::TicketBracket {
+                stop_ticks: 4,
+                target_ticks: 8,
+            }),
+        };
+        let mut touched = None;
+        pane.place_bar_replay_ticket_order(
+            order,
+            |touch| {
+                touched = Some(touch);
+                let tick = touch.tick_units.expect("instrument tick");
+                Ok(Some(touch.close_units - 2 * tick))
+            },
+            cx,
+        );
+        let touch = touched.expect("the ticket priced from the replay");
+        let tick = touch.tick_units.expect("instrument tick");
+        let entry = touch.close_units - 2 * tick;
+        let session = pane.bar_replay.trading.as_ref().expect("replay session");
+        let prices = session
+            .orders()
+            .iter()
+            .map(|order| order.price.units())
+            .collect::<Vec<_>>();
+        assert_eq!(prices, [entry, entry - 4 * tick, entry + 8 * tick]);
+        assert_eq!(
+            pane.chart
+                .as_ref()
+                .expect("chart")
+                .read(cx)
+                .trading_snapshot()
+                .orders
+                .len(),
+            3,
+            "the bracket is on the chart"
+        );
+        touch.close_units
+    })
+}
+
 /// Starts replay at the first fixture bar and steps `bars` forward; returns the replay clock.
 fn start_bar_replay_after(harness: &PaneHarness, bars: usize, cx: &mut VisualTestContext) -> i64 {
     use aeris_chart_integration::ChartReplayCommand;

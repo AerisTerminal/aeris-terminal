@@ -177,6 +177,14 @@ replay_trading_order_limit = O replay já tem o máximo de ordens ativas.
 replay_trading_unknown_order = Essa ordem de replay não está mais ativa.
 replay_trading_no_position = O replay não tem posição aberta.
 replay_trading_failed = O replay não conseguiu contabilizar essa operação.
+replay_account = Replay de barras
+replay_orders_cancelled = Ordens de replay canceladas.
+replay_flattened = Replay zerado: ordens canceladas e posição encerrada.
+replay_trading_changed = O replay de barras começou ou terminou antes da sua confirmação. Envie a ordem novamente.
+replay_book_live = O livro de ofertas mostra preços ao vivo, então não opera no replay de barras. Use a boleta de ordens ou o gráfico.
+replay_ticket_notice = Replay de barras: as ordens operam no replay, não na sua conta.
+replay_cancel_summary = Cancelar todas as ordens ativas do replay de barras.
+replay_flatten_summary = Cancelar as ordens ativas do replay de barras e encerrar sua posição no fechamento da barra mais recente.
 
 ## Avisos de comandos de negociação
 trading_command_failed = O comando de negociação falhou
