@@ -518,7 +518,6 @@ pub(super) fn header_controls(
     // Give the global controls an explicit, non-shrinking track. GPUI cannot
     // infer a stable intrinsic width for this mixed Button/avatar group, which
     // previously let the flex item collapse to zero even on wide windows.
-    let link_toggle = chart_link_toggle(app, &state);
     let connection = header_connection_presentation(&state);
     let market_controls = div()
         .h_full()
@@ -593,8 +592,7 @@ pub(super) fn header_controls(
             state.bar_replay_phase,
             state.controls.enabled(HeaderControls::CHART_TYPE),
             &state.theme,
-        ))
-        .child(link_toggle);
+        ));
     let accounts = accounts_selector(app.clone(), state.account_label, &state.theme);
     let time_zone = time_zone_selector(
         app.clone(),
@@ -676,30 +674,6 @@ pub(super) fn provider_attribution(
         )
 }
 
-fn chart_link_toggle(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> AnyElement {
-    let link_label = match state.chart_link_group {
-        1 => tr!(shell::CHART_LINK_GROUP, group = "A"),
-        2 => tr!(shell::CHART_LINK_GROUP, group = "B"),
-        3 => tr!(shell::CHART_LINK_GROUP, group = "C"),
-        4 => tr!(shell::CHART_LINK_GROUP, group = "D"),
-        _ => tr!(shell::CHART_LINK).to_string(),
-    };
-    panel_toggle(
-        PanelToggleState {
-            id: "chart_link_group_toggle",
-            label: link_label,
-            icon: HugeIcon::SplitSideBySide,
-            enabled: true,
-            selected: state.chart_link_group != 0,
-            tooltip: tr!(shell::CHART_LINK_TOOLTIP),
-            toggle: WorkspaceSurface::cycle_chart_link_group,
-        },
-        &state.theme,
-        app.clone(),
-    )
-    .into_any_element()
-}
-
 /// A `ButtonSize::Default` toggle (28 px) with 4 px of rail on each side.
 const PANEL_SIDEBAR_WIDTH: f32 = 36.0;
 
@@ -750,7 +724,6 @@ pub(super) fn panel_sidebar(
     let context = sidebar_toggle(
         &PanelToggleState {
             id: "context_panel_toggle",
-            label: tr!(context_command.title).to_string(),
             icon: HugeIcon::Info,
             enabled: true,
             selected: state.context_visible,
@@ -871,7 +844,6 @@ fn side_panel_toggle(
     sidebar_toggle(
         &PanelToggleState {
             id,
-            label: tr!(command.title).to_string(),
             icon,
             enabled,
             selected,
@@ -1002,32 +974,11 @@ fn connection_tooltip_row(
 #[derive(Clone)]
 struct PanelToggleState {
     id: &'static str,
-    label: String,
     icon: HugeIcon,
     enabled: bool,
     selected: bool,
     tooltip: &'static str,
     toggle: fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
-}
-
-fn panel_toggle(
-    state: PanelToggleState,
-    theme: &AerisTheme,
-    app: Entity<WorkspaceSurface>,
-) -> impl IntoElement {
-    Button::new(state.id, theme)
-        .variant(ButtonVariant::Ghost)
-        .button_size(ButtonSize::Lg)
-        .icon(header_icon(state.icon))
-        .label(state.label)
-        .aria_label(state.tooltip)
-        .tooltip(TooltipSpec::new(state.tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
-        .text_toggle()
-        .selected(state.selected)
-        .disabled(!state.enabled)
-        .on_click(move |_, _, cx| {
-            app.update(cx, state.toggle);
-        })
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

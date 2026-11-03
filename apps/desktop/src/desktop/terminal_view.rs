@@ -50,7 +50,6 @@ fn active_header_state(
             workspace.has_market_selection(),
         )
         .with_chart_controls(chart_has_market_data),
-        chart_link_group: workspace.chart_link_group,
         connection_state: workspace
             .connection_state
             .unwrap_or(FeedConnectionState::Disconnected),
@@ -581,6 +580,7 @@ impl TerminalApp {
         let layout_menu = self.layout_menu_button(
             terminal,
             self.layout_tab_has_unsaved_changes(self.tabs.active_index(), cx),
+            workspace.chart_link_group,
         );
         terminal_header(
             surface,

@@ -6554,8 +6554,12 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    pub(super) fn cycle_chart_link_group(&mut self, cx: &mut Context<Self>) {
-        self.chart_link_group = (self.chart_link_group + 1) % 5;
+    /// Group 0 unlinks the pane; groups 1 to 4 are the layout menu's A to D.
+    pub(super) fn set_chart_link_group(&mut self, group: u8, cx: &mut Context<Self>) {
+        if group > 4 || group == self.chart_link_group {
+            return;
+        }
+        self.chart_link_group = group;
         self.persistence.mark_dirty();
         cx.notify();
     }

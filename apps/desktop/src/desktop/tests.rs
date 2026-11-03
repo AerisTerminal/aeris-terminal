@@ -3267,6 +3267,41 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn the_layout_menu_links_and_unlinks_only_the_active_pane(cx: &mut TestAppContext) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let first = cx.read(|cx| terminal.read(cx).active_surface());
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.add_workspace("Second", window, cx)
+        })
+        .expect("a second tab");
+        let second = cx.read(|cx| terminal.read(cx).active_surface());
+        let group = |surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext| {
+            cx.read(|cx| surface.read(cx).chart_link_group)
+        };
+        let menu_open =
+            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).pages.layouts.menu_open());
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.toggle_layout_menu(cx);
+        });
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.set_active_chart_link_group(2, cx);
+        });
+        assert_eq!(group(&second, cx), 2, "the active pane joins group B");
+        assert_eq!(
+            group(&first, cx),
+            0,
+            "another tab's pane keeps its own choice"
+        );
+        assert!(!menu_open(cx), "choosing a group closes the menu");
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.set_active_chart_link_group(0, cx);
+        });
+        assert_eq!(group(&second, cx), 0, "Off unlinks the pane");
+    }
+
+    #[gpui::test]
     fn show_hidden_drawings_is_offered_while_a_drawing_is_hidden_on_its_own(
         cx: &mut TestAppContext,
     ) {

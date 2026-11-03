@@ -161,9 +161,9 @@ update_download = 다운로드
 ## 창 캡션과 헤더 크롬
 caption_maximize = 창 최대화
 caption_restore = 창 복원
-chart_link = 연동
-chart_link_group = 연동 {group}
-chart_link_tooltip = 연동 차트 그룹 순환
+chart_link = 차트 연동
+chart_link_off = 끔
+chart_link_group = 그룹 {group}
 select_chart_timeframe = 차트 주기 선택
 select_chart_type = 차트 유형 선택
 chart_time_zone = 차트 시간대 · {time_zone}

@@ -182,6 +182,15 @@ pub(super) fn unsaved_layout_dot(theme: &AerisTheme) -> Div {
         .bg(gpui_color(theme.colors.primary))
 }
 
+fn menu_section_heading(label: &'static str, theme: &AerisTheme) -> Div {
+    div()
+        .px_2()
+        .py_1()
+        .text_xs()
+        .text_color(gpui_color(theme.colors.text_muted))
+        .child(label)
+}
+
 impl TerminalApp {
     /// Shows the start page in the "New tab" placeholder, creating the placeholder when there
     /// is none. There is at most one.
@@ -718,7 +727,12 @@ impl TerminalApp {
     }
 
     /// The layout button of the chart header and, while open, its menu.
-    pub(super) fn layout_menu_button(&self, terminal: &Entity<Self>, unsaved: bool) -> AnyElement {
+    pub(super) fn layout_menu_button(
+        &self,
+        terminal: &Entity<Self>,
+        unsaved: bool,
+        chart_link_group: u8,
+    ) -> AnyElement {
         let theme = self.theme;
         let workspace = self.tabs.active();
         let open = self.pages.layouts.layout_menu_open;
@@ -741,7 +755,7 @@ impl TerminalApp {
                 toggle.update(cx, TerminalApp::toggle_layout_menu);
             });
         let menu = MenuAnchor::new("layout_menu_anchor", button)
-            .menu(open.then(|| self.layout_menu(terminal, unsaved)))
+            .menu(open.then(|| self.layout_menu(terminal, unsaved, chart_link_group)))
             .on_dismiss(move |_, cx| {
                 dismiss.update(cx, TerminalApp::close_layout_menus);
             });
@@ -773,7 +787,43 @@ impl TerminalApp {
             .collect()
     }
 
-    fn layout_menu(&self, terminal: &Entity<Self>, unsaved: bool) -> MenuPanel {
+    /// The active pane's link group choices: Off, then groups A to D.
+    fn chart_link_rows(&self, terminal: &Entity<Self>, chart_link_group: u8) -> Vec<MenuRow> {
+        (0..=4u8)
+            .map(|group| {
+                let label = match group {
+                    0 => tr!(shell::CHART_LINK_OFF).to_string(),
+                    _ => tr!(
+                        shell::CHART_LINK_GROUP,
+                        group = char::from(b'A' + group - 1).to_string()
+                    ),
+                };
+                let terminal = terminal.clone();
+                MenuRow::compact(("layout_menu_link", u64::from(group)), label, &self.theme)
+                    .checked(group == chart_link_group)
+                    .on_click(move |_, _, cx| {
+                        terminal.update(cx, |terminal, cx| {
+                            terminal.set_active_chart_link_group(group, cx);
+                        });
+                    })
+            })
+            .collect()
+    }
+
+    pub(super) fn set_active_chart_link_group(&mut self, group: u8, cx: &mut Context<Self>) {
+        self.pages.layouts.layout_menu_open = false;
+        self.active_surface().update(cx, |surface, cx| {
+            surface.set_chart_link_group(group, cx);
+        });
+        cx.notify();
+    }
+
+    fn layout_menu(
+        &self,
+        terminal: &Entity<Self>,
+        unsaved: bool,
+        chart_link_group: u8,
+    ) -> MenuPanel {
         let theme = self.theme;
         let active_layout = self.tabs.active().saved_layout_id;
         let autosave = self
@@ -823,6 +873,9 @@ impl TerminalApp {
             .checked(autosave),
         )
         .separator()
+        .child(menu_section_heading(tr!(shell::CHART_LINK), &theme))
+        .children(self.chart_link_rows(terminal, chart_link_group))
+        .separator()
         .child(action(
             "layout_menu_rename",
             tr!(shell::RENAME_ELLIPSIS),
@@ -848,14 +901,7 @@ impl TerminalApp {
         .separator();
         if !recent.is_empty() {
             menu = menu
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_xs()
-                        .text_color(gpui_color(theme.colors.text_muted))
-                        .child(tr!(shell::RECENTLY_USED)),
-                )
+                .child(menu_section_heading(tr!(shell::RECENTLY_USED), &theme))
                 .children(recent)
                 .separator();
         }
