@@ -315,6 +315,7 @@ use workspace_layout::workspace_split_ratio;
 use workspace_layout::{
     WorkspaceMarketArea, WorkspaceMaximizeTransition, pane_chart_notice, toast_host,
     workspace_market_area, workspace_maximize_transition, workspace_pane_grid,
+    workspace_price_alert_dialog,
 };
 
 trait AccountRefreshExitClaim {

@@ -1970,6 +1970,42 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn the_price_alert_dialog_opens_over_a_fullscreen_chart(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.toggle_chart_fullscreen(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.read(|cx| terminal.read(cx).window.chart_fullscreen()));
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_price_alert_dialog(
+                    ChartAlertCreateRequest {
+                        sequence: 1,
+                        pane_index: 0,
+                        price_scale: ChartAlertPriceScale::Right,
+                        price: 100.0,
+                        condition: ChartAlertCondition::Crossing,
+                        frequency: ChartAlertFrequency::OnlyOnce,
+                    },
+                    cx,
+                );
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.read(|cx| surface.read(cx).alerts.dialog().is_some()));
+        assert!(
+            cx.debug_bounds("price_alert_dialog").is_some(),
+            "chart-only fullscreen draws the open alert dialog"
+        );
+    }
+
+    #[gpui::test]
     fn keyboard_focus_returns_to_the_workspace_when_its_target_leaves_the_screen(
         cx: &mut TestAppContext,
     ) {

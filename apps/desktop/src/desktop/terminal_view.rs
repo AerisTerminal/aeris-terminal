@@ -827,11 +827,7 @@ impl TerminalApp {
         };
         let drawing_favorites = self.drawing_favorites_overlay(&terminal, chart_top, window, cx);
         let drawing_context = self.drawing_context_overlay(&terminal, chart_top, window, cx);
-        let command_palette = self.rendered_command_palette(&terminal, cx);
-        let keyboard_shortcuts = self.keyboard_shortcuts_layer(&terminal);
-        let trading_confirmation = self.trading_confirmation_layer(&terminal);
-        let layouts_dialog = self.layouts_dialog_layer(&terminal, cx);
-        let trading_report = self.trading_report_layer(&terminal, cx);
+        let dialogs = self.terminal_dialog_layers(&terminal, cx);
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(&terminal, window, placement, now, cx);
         let header = self.rendered_header(&terminal, &active, cx);
@@ -861,11 +857,7 @@ impl TerminalApp {
                 .children(context_menu)
                 .children(settings_menu)
                 .children(drawing_tool_menu)
-                .children(keyboard_shortcuts)
-                .children(command_palette)
-                .children(trading_confirmation)
-                .children(layouts_dialog)
-                .children(trading_report);
+                .children(dialogs);
         }
         self.page_root()
             .children(title_bar)
@@ -888,11 +880,26 @@ impl TerminalApp {
             .children(drawing_tool_menu)
             .children(platform_menu)
             .children(shell_menus)
-            .children(keyboard_shortcuts)
-            .children(command_palette)
-            .children(trading_confirmation)
-            .children(layouts_dialog)
-            .children(trading_report)
+            .children(dialogs)
+    }
+
+    /// The terminal page's window-level dialogs in paint order. Chart-only fullscreen draws the
+    /// same set, so a dialog opened from a chart shows in either layout.
+    fn terminal_dialog_layers(
+        &self,
+        terminal: &Entity<Self>,
+        cx: &App,
+    ) -> impl Iterator<Item = AnyElement> + use<> {
+        [
+            self.keyboard_shortcuts_layer(terminal),
+            self.rendered_command_palette(terminal, cx),
+            self.trading_confirmation_layer(terminal),
+            workspace_price_alert_dialog(self.tabs.active(), &self.theme, cx),
+            self.layouts_dialog_layer(terminal, cx),
+            self.trading_report_layer(terminal, cx),
+        ]
+        .into_iter()
+        .flatten()
     }
 }
 

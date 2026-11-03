@@ -378,6 +378,7 @@ impl RenderOnce for Dialog {
             .children(footer);
         let scrim = div()
             .id(self.id.clone())
+            .debug_selector(|| self.id.to_string())
             .absolute()
             .inset_0()
             .occlude()

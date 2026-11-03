@@ -422,7 +422,6 @@ pub(super) fn workspace_market_area(
     } = area;
     let drawing_toolbar_collapsed = expanded_drawing_toolbar.is_none();
     let grid = workspace_pane_grid(terminal, workspace, toaster, theme, cx);
-    let price_alert_dialog = workspace_price_alert_dialog(workspace, theme, cx);
     let surface = active_surface.read(cx);
     let store = trading_store.read(cx);
     let drawing_state = surface.drawing_toolbar_state(cx);
@@ -505,11 +504,11 @@ pub(super) fn workspace_market_area(
                 theme,
             ))
         })
-        .children(price_alert_dialog)
 }
 
-/// The price alert dialog of whichever pane of the workspace has one open.
-fn workspace_price_alert_dialog(
+/// The price alert dialog of whichever pane of the workspace has one open. It is a window-level
+/// layer: chart-only fullscreen shows the pane grid without the market area.
+pub(super) fn workspace_price_alert_dialog(
     workspace: &WorkspaceTab,
     theme: &AerisTheme,
     cx: &App,
