@@ -519,6 +519,7 @@ pub(super) fn header_controls(
     // infer a stable intrinsic width for this mixed Button/avatar group, which
     // previously let the flex item collapse to zero even on wide windows.
     let connection = header_connection_presentation(&state);
+    let timeframe_favorites = timeframe_favorite_buttons(app, &state);
     let market_controls = div()
         .h_full()
         .min_w_0()
@@ -563,6 +564,7 @@ pub(super) fn header_controls(
             &state.theme,
             state.controls.enabled(HeaderControls::SERIES),
         ))
+        .children(timeframe_favorites)
         .child(chart_type_selector(
             app.clone(),
             state.chart_type,
@@ -1338,6 +1340,35 @@ pub(super) fn series_selector(
         trigger,
         theme,
     )
+}
+
+/// The starred timeframes' quick buttons: one press selects a timeframe, like its menu row.
+fn timeframe_favorite_buttons(
+    app: &Entity<WorkspaceSurface>,
+    state: &HeaderState,
+) -> Vec<AnyElement> {
+    let enabled = state.controls.enabled(HeaderControls::SERIES) && !state.pending.series;
+    state
+        .timeframe_favorites
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, interval)| {
+            let app = app.clone();
+            Button::new(("timeframe_favorite_button", index), &state.theme)
+                .variant(ButtonVariant::Ghost)
+                .button_size(ButtonSize::Lg)
+                .label(interval.label())
+                .selected(interval == state.interval)
+                .disabled(!enabled)
+                .on_click(move |_, _, cx| {
+                    app.update(cx, |app, app_cx| {
+                        app.select_interval(interval, app_cx);
+                    });
+                })
+                .into_any_element()
+        })
+        .collect()
 }
 
 pub(super) fn chart_type_selector(

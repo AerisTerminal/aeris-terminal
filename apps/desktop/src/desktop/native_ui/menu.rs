@@ -360,7 +360,7 @@ impl MenuRow {
     }
 
     /// A checkable option: a trailing check while `checked`, announced as toggled. The check
-    /// takes the trailing slot, so a checkable row carries no other trailing content.
+    /// sits before any other trailing content.
     pub(crate) fn checked(mut self, checked: bool) -> Self {
         self.behavior.checked = Some(checked);
         self
@@ -517,7 +517,8 @@ impl RenderOnce for MenuRow {
                 self.detail
                     .map(|detail| row_detail(detail, scale, colors.text_muted)),
             )
-            .children(check_mark.or(self.trailing));
+            .children(check_mark)
+            .children(self.trailing);
 
         BaseButton::new(self.id)
             .group(MENU_ROW_GROUP)

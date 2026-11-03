@@ -197,6 +197,9 @@ pub struct WorkspaceChromeState {
     /// switch existed keep their drawings shown.
     #[prost(bool, tag = "18")]
     pub drawings_hidden: bool,
+    /// Comma-separated starred timeframe labels such as `5m,1h`; unknown labels are skipped.
+    #[prost(string, tag = "19")]
+    pub timeframe_favorites: String,
 }
 
 /// A window-relative logical position in the chrome preferences.

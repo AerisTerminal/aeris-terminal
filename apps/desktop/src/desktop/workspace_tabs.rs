@@ -210,6 +210,13 @@ impl TerminalApp {
             },
         )
         .detach();
+        cx.subscribe(
+            surface,
+            |app, _surface, event: &TimeframeFavoriteToggledEvent, cx| {
+                app.toggle_timeframe_favorite(event.0, cx);
+            },
+        )
+        .detach();
         surface.update(cx, |surface, cx| {
             surface.emit_initial_price_alert_restore_notice(cx);
             surface.emit_initial_chart_failure_notice(cx);
@@ -2644,6 +2651,30 @@ impl TerminalApp {
                 active.chart_chrome.symbol_search_scope;
         }
         self.record_layout_change(cx);
+    }
+
+    /// Stars or unstars a timeframe for every pane. Each surface saves its own copy of the
+    /// chrome preferences, so every one holds the new favorites before the save.
+    pub(super) fn toggle_timeframe_favorite(
+        &mut self,
+        interval: ChartInterval,
+        cx: &mut Context<Self>,
+    ) {
+        self.chrome
+            .preferences_mut()
+            .timeframe_favorites
+            .toggle(interval);
+        let favorites = self.chrome.preferences().timeframe_favorites;
+        for workspace in self.tabs.iter() {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, surface_cx| {
+                    surface.chart_chrome.timeframe_favorites = favorites;
+                    surface_cx.notify();
+                });
+            }
+        }
+        self.save_chart_chrome_preferences(cx);
+        cx.notify();
     }
 
     pub(super) fn resize_workspace_split(

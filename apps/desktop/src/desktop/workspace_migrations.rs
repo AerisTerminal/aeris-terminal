@@ -944,6 +944,7 @@ mod tests {
                 fill_glow_off: false,
                 language: "system".to_string(),
                 drawings_hidden: false,
+                timeframe_favorites: String::new(),
             },
             "the fold carries the legacy values verbatim"
         );

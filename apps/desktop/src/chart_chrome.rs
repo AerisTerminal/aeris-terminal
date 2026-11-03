@@ -3,6 +3,7 @@ use aeris_chart_integration::{
     ChartDrawingKind, ChartDrawingStamp, ChartIndicatorChrome, ChartType,
 };
 use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
+use aeris_market_data::ChartInterval;
 use aeris_market_runtime::InstrumentSearchCategories;
 use std::path::{Path, PathBuf};
 
@@ -370,6 +371,59 @@ pub struct ChartChromePreferences {
     /// Every chart drawing at once, on every pane of every tab. Arming a drawing tool shows
     /// them again.
     pub drawings: ChromeVisibility,
+    /// The timeframes starred in the timeframe menu, offered as header buttons.
+    pub timeframe_favorites: TimeframeFavorites,
+}
+
+/// The timeframes the user starred, a bitset over [`ChartInterval::ALL`] so the preferences
+/// stay `Copy`. On disk they are the interval labels; unknown labels are skipped so a newer
+/// document never fails to load.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TimeframeFavorites(u32);
+
+impl TimeframeFavorites {
+    fn bit(interval: ChartInterval) -> u32 {
+        ChartInterval::ALL
+            .iter()
+            .position(|candidate| *candidate == interval)
+            .map_or(0, |index| 1 << index)
+    }
+
+    #[must_use]
+    pub fn contains(self, interval: ChartInterval) -> bool {
+        self.0 & Self::bit(interval) != 0
+    }
+
+    pub fn toggle(&mut self, interval: ChartInterval) {
+        self.0 ^= Self::bit(interval);
+    }
+
+    /// The starred timeframes from finest to coarsest.
+    pub fn intervals(self) -> impl Iterator<Item = ChartInterval> {
+        ChartInterval::ALL
+            .into_iter()
+            .filter(move |interval| self.contains(*interval))
+    }
+
+    fn parse(value: &str) -> Self {
+        let mut favorites = Self::default();
+        for label in value.split(',').map(str::trim) {
+            if let Some(interval) = ChartInterval::ALL
+                .into_iter()
+                .find(|interval| interval.label() == label)
+            {
+                favorites.0 |= Self::bit(interval);
+            }
+        }
+        favorites
+    }
+
+    fn encode(self) -> String {
+        self.intervals()
+            .map(ChartInterval::label)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 const STAMP_FAVORITE_PREFIX: &str = "stamp:";
@@ -582,6 +636,7 @@ impl Default for ChartChromePreferences {
             fill_glow: ChromeVisibility::Shown,
             language: LanguagePreference::System,
             drawings: ChromeVisibility::Shown,
+            timeframe_favorites: TimeframeFavorites::default(),
         }
     }
 }
@@ -620,6 +675,7 @@ impl ChartChromePreferences {
             fill_glow_off: !self.fill_glow.shown(),
             language: self.language.identifier().to_string(),
             drawings_hidden: !self.drawings.shown(),
+            timeframe_favorites: self.timeframe_favorites.encode(),
         }
     }
 
@@ -668,6 +724,7 @@ impl ChartChromePreferences {
         preferences.fill_glow = ChromeVisibility::from_shown(!state.fill_glow_off);
         preferences.language = LanguagePreference::from_identifier(&state.language);
         preferences.drawings = ChromeVisibility::from_shown(!state.drawings_hidden);
+        preferences.timeframe_favorites = TimeframeFavorites::parse(&state.timeframe_favorites);
         preferences
     }
 }
@@ -786,11 +843,12 @@ mod tests {
     use super::{
         ChartChromePreferences, ChromeVisibility, DesktopPersistence, DrawingFavorites,
         ExchangeCode, INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
-        InstrumentSearchCategories, SymbolSearchScope, TradingShortcutMode, WindowFrame,
-        chart_chrome_path, filter_indicator_specs, parse_chart_chrome_preferences,
+        InstrumentSearchCategories, SymbolSearchScope, TimeframeFavorites, TradingShortcutMode,
+        WindowFrame, chart_chrome_path, filter_indicator_specs, parse_chart_chrome_preferences,
     };
     use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
     use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
+    use aeris_market_data::ChartInterval;
     use std::path::PathBuf;
 
     #[test]
@@ -1000,6 +1058,7 @@ mod tests {
             fill_glow: ChromeVisibility::Shown,
             language: crate::language::LanguagePreference::System,
             drawings: ChromeVisibility::Shown,
+            timeframe_favorites: TimeframeFavorites::default(),
         }
     }
 
@@ -1102,6 +1161,39 @@ mod tests {
     }
 
     #[test]
+    fn timeframe_favorites_round_trip_by_label_and_skip_unknown_ones() {
+        let mut favorites = TimeframeFavorites::default();
+        favorites.toggle(ChartInterval::Hour1);
+        favorites.toggle(ChartInterval::Minute5);
+        favorites.toggle(ChartInterval::Month1);
+        let state = ChartChromePreferences {
+            timeframe_favorites: favorites,
+            ..ChartChromePreferences::default()
+        }
+        .to_workspace_chrome();
+        assert_eq!(state.timeframe_favorites, "5m,1h,1M");
+        assert_eq!(
+            ChartChromePreferences::from_workspace_chrome(Some(&state)).timeframe_favorites,
+            favorites
+        );
+        let restored = TimeframeFavorites::parse(" 1m , 7m,1m,1M");
+        assert_eq!(
+            restored.intervals().collect::<Vec<_>>(),
+            [ChartInterval::Minute1, ChartInterval::Month1],
+            "minutes and months stay apart and unknown labels are skipped"
+        );
+        favorites.toggle(ChartInterval::Hour1);
+        assert!(!favorites.contains(ChartInterval::Hour1));
+        assert!(
+            ChartChromePreferences::from_workspace_chrome(Some(&WorkspaceChromeState::default()))
+                .timeframe_favorites
+                .intervals()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn chart_chrome_preferences_convert_to_and_from_the_workspace_document() {
         let hidden = hidden_chrome_preferences();
         let state = hidden.to_workspace_chrome();
@@ -1126,6 +1218,7 @@ mod tests {
                 fill_glow_off: false,
                 language: "system".to_string(),
                 drawings_hidden: false,
+                timeframe_favorites: String::new(),
             },
             "the document form keeps the legacy identifiers"
         );

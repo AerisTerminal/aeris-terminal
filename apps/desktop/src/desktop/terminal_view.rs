@@ -15,6 +15,13 @@ fn active_header_state(
         provider: workspace.provider,
         instrument_label: terminal_instrument_label(workspace),
         series_label: series_selector_label(workspace.selected_interval()),
+        interval: workspace.selected_interval(),
+        timeframe_favorites: workspace
+            .chart_chrome
+            .timeframe_favorites
+            .intervals()
+            .filter(|interval| workspace.available_intervals().contains(interval))
+            .collect(),
         chart_type: workspace.chart_type(cx),
         instruments: workspace.instrument_entries(cx),
         symbol_input: workspace.symbol_entry.input().cloned(),

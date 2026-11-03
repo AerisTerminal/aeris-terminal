@@ -3342,6 +3342,52 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn starring_a_timeframe_in_one_pane_reaches_every_tab_and_is_saved(cx: &mut TestAppContext) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let first = cx.read(|cx| terminal.read(cx).active_surface());
+        let star = |surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                surface.update(cx, |_, cx| {
+                    cx.emit(TimeframeFavoriteToggledEvent(ChartInterval::Minute5));
+                });
+            });
+        };
+        let starred = |surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                surface
+                    .read(cx)
+                    .chart_chrome
+                    .timeframe_favorites
+                    .contains(ChartInterval::Minute5)
+            })
+        };
+        let saved = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .chrome
+                    .preferences()
+                    .to_workspace_chrome()
+                    .timeframe_favorites
+            })
+        };
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.add_workspace("Second", window, cx)
+        })
+        .expect("a second tab");
+        let second = cx.read(|cx| terminal.read(cx).active_surface());
+
+        star(&second, cx);
+        assert!(starred(&first, cx), "the other tab's pane shows the star");
+        assert!(starred(&second, cx));
+        assert_eq!(saved(cx), "5m", "the favorite is saved with the chrome");
+
+        star(&first, cx);
+        assert!(!starred(&first, cx) && !starred(&second, cx));
+        assert_eq!(saved(cx), "");
+    }
+
+    #[gpui::test]
     fn show_hidden_drawings_is_offered_while_a_drawing_is_hidden_on_its_own(
         cx: &mut TestAppContext,
     ) {

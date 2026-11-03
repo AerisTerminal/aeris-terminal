@@ -970,6 +970,12 @@ struct ChartChromeChangedEvent;
 
 impl gpui::EventEmitter<ChartChromeChangedEvent> for WorkspaceSurface {}
 
+/// A pane's timeframe menu starred or unstarred a timeframe. The favorites follow the user
+/// across every pane, so the window owns the change and hands it to every pane.
+struct TimeframeFavoriteToggledEvent(ChartInterval);
+
+impl gpui::EventEmitter<TimeframeFavoriteToggledEvent> for WorkspaceSurface {}
+
 /// Pane-only choices and feedback. Runtime-derived facts stay in the shared store.
 #[derive(Default)]
 struct TradingPaneState {
@@ -2945,6 +2951,9 @@ struct HeaderState {
     provider: ProviderId,
     instrument_label: String,
     series_label: String,
+    interval: ChartInterval,
+    /// Starred timeframes the provider offers, shown as quick buttons beside the selector.
+    timeframe_favorites: Vec<ChartInterval>,
     chart_type: ChartType,
     instruments: Vec<InstrumentMenuEntry>,
     symbol_input: Option<Entity<InputState>>,

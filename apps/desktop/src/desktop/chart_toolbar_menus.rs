@@ -1,5 +1,5 @@
 use super::*;
-use aeris_localization::{chart_menu, tr};
+use aeris_localization::{chart_menu, drawing, tr};
 
 pub(super) fn chrome_overlay_layer(
     app_state: &WorkspaceSurface,
@@ -288,6 +288,7 @@ pub(super) fn chrome_overlay_content(
                 keyboard_selection: app_state.chrome.selection(),
                 keyboard_active: app_state.chrome.timeframe_flyout_keyboard(),
                 pending,
+                favorites: app_state.chart_chrome.timeframe_favorites,
             },
             theme,
         )
@@ -428,6 +429,7 @@ pub(super) struct TimeframeOverlayState {
     keyboard_selection: usize,
     keyboard_active: bool,
     pending: bool,
+    favorites: chart_chrome::TimeframeFavorites,
 }
 
 pub(super) fn timeframe_overlay_content(
@@ -539,15 +541,7 @@ fn timeframe_flyout_host(
         .h(px(flyout_height))
         .flex_none()
         .child(animate_popup_from_origin(
-            timeframe_flyout_panel(
-                app,
-                intervals,
-                state.selected,
-                group,
-                state.keyboard_active.then_some(state.keyboard_selection),
-                state.pending,
-                theme,
-            ),
+            timeframe_flyout_panel(app, intervals, group, state, theme),
             ("timeframe_flyout_enter", group as usize),
             animation_origin,
         ))
@@ -556,12 +550,12 @@ fn timeframe_flyout_host(
 pub(super) fn timeframe_flyout_panel(
     app: &Entity<WorkspaceSurface>,
     intervals: &[ChartInterval],
-    selected: ChartInterval,
     group: TimeframeMenuGroup,
-    keyboard_index: Option<usize>,
-    pending: bool,
+    state: TimeframeOverlayState,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
+    let selected = state.selected;
+    let keyboard_index = state.keyboard_active.then_some(state.keyboard_selection);
     let mut panel = MenuPanel::new(
         ("timeframe_overlay_flyout", group as usize),
         MenuPlacement::InFlow,
@@ -579,8 +573,9 @@ pub(super) fn timeframe_flyout_panel(
             TimeframeRowState {
                 active: timeframe_flyout_row_is_active(interval, selected, keyboard_index, index),
                 selected: interval == selected,
-                pending,
+                pending: state.pending,
             },
+            state.favorites.contains(interval),
             theme,
         ));
     }
@@ -945,6 +940,7 @@ pub(super) fn timeframe_overlay_row(
     interval: ChartInterval,
     index: usize,
     state: TimeframeRowState,
+    favorite: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
@@ -957,6 +953,9 @@ pub(super) fn timeframe_overlay_row(
     .highlighted(state.active)
     .disabled(state.pending)
     .checked(state.selected)
+    .trailing(timeframe_favorite_star(
+        app, interval, index, favorite, theme,
+    ))
     .on_hover(move |hovered, window, cx| {
         hover_app.update(cx, |app, app_cx| {
             app.hover_timeframe_menu_region(*hovered, window, app_cx);
@@ -969,6 +968,40 @@ pub(super) fn timeframe_overlay_row(
             }
         });
     })
+}
+
+/// The row's own star target. It handles the press itself so starring a timeframe neither
+/// selects it nor closes the menu.
+fn timeframe_favorite_star(
+    app: &Entity<WorkspaceSurface>,
+    interval: ChartInterval,
+    index: usize,
+    favorite: bool,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let label = if favorite {
+        tr!(drawing::REMOVE_FROM_FAVORITES)
+    } else {
+        tr!(drawing::ADD_TO_FAVORITES)
+    };
+    let toggle = app.clone();
+    let star = if favorite {
+        // A starred timeframe keeps the warning-coloured star in every state.
+        Icon::new(HugeIcon::StarFilled.path()).color(gpui_color(theme.colors.warning))
+    } else {
+        Icon::new(HugeIcon::Star.path())
+    };
+    Button::new(("timeframe_favorite_star", index), theme)
+        .variant(ButtonVariant::Ghost)
+        .button_size(ButtonSize::Sm)
+        .icon(star)
+        .aria_label(label)
+        .tooltip(TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .on_press(move |_, _, cx| {
+            toggle.update(cx, |_, app_cx| {
+                app_cx.emit(TimeframeFavoriteToggledEvent(interval));
+            });
+        })
 }
 
 #[derive(Clone, Copy)]
