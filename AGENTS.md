@@ -153,7 +153,10 @@ violations and missing verification explicitly, and never describe them as satis
   layout): the layout menu switches symbol, timeframe, crosshair and time sync on and off one by
   one, and `TerminalApp::synchronize_linked_charts` relays each change a user made in one pane
   to the other panes of that tab only. Panes keep no link state; a pane's legacy link group is
-  read once by the sanitizer to derive its tab's sync and then cleared.
+  read once by the sanitizer to derive its tab's sync and then cleared. Aeris Charts publishes
+  the crosshair and time range from user input and owns how a linked crosshair is drawn; chart
+  integration only names each chart's instrument as its sync price key, so a pane on another
+  symbol shows the linked time line without a price.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;

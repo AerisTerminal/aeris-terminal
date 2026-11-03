@@ -148,6 +148,7 @@ fn apply_platform_chrome_contract(engine: &mut ChartEngine, labels: TimeAxisLabe
 fn apply_replay_contract(engine: &mut ChartEngine, replay: &ReplaySnapshot) {
     apply_platform_chrome_contract(engine, TimeAxisLabels::for_replay(replay));
     engine.set_drawing_interval(drawing_interval(replay));
+    engine.set_sync_price_key(Some(replay.instrument().instrument_id.as_str().to_owned()));
 }
 
 /// The bar cadence in the largest whole unit, so a 60-minute series matches a drawing's

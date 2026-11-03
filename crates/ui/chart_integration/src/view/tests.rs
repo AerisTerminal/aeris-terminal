@@ -1522,6 +1522,38 @@ fn externally_applied_time_range_is_not_echoed_to_the_link_coordinator() {
 }
 
 #[test]
+fn a_linked_crosshair_names_the_instrument_so_other_symbols_share_only_its_time() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    let mut chart = AerisChartView::with_replay(&replay);
+    chart
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    chart.engine.fit_content();
+    let time = chart
+        .engine
+        .data_layer()
+        .series_data(0)
+        .expect("primary series")
+        .0[4]
+        .to_f64()
+        .expect("time");
+    assert!(chart.engine.set_crosshair_position(1.0, time, 0));
+    let price_key = chart
+        .take_sync_events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            aeris_charts_engine::ChartSyncEventKind::Crosshair { position } => position.price_key,
+            _ => None,
+        });
+    assert_eq!(
+        price_key.as_deref(),
+        Some(replay.instrument().instrument_id.as_str())
+    );
+}
+
+#[test]
 fn covering_forming_snapshot_recovers_the_aeris_charts_view_without_a_new_candle() {
     let baseline = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
