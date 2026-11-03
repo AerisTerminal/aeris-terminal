@@ -103,7 +103,7 @@ aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git
 
 # Aeris Charts pins `gpui = 0.2.2` from crates.io and from the upstream Zed Git source; replace
 # both with the exact same reviewed fork revision used by the desktop so GPUI types cannot split
-# across sources.
+# across sources. See "GPUI fork" in AGENTS.md before changing any of the four revisions.
 [patch.crates-io]
 gpui = { git = "https://github.com/AerisTerminal/zed", rev = "5d2536a8e586e0b29f2b388a083dde933255d02e", version = "=0.2.2" }
 
