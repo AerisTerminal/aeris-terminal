@@ -1457,7 +1457,7 @@ fn zoom_controls(ui: Page<'_>, zoom: f32) -> Div {
             Button::new("workflow_zoom_reset", theme)
                 .variant(ButtonVariant::Outline)
                 .button_size(ButtonSize::Sm)
-                .numeric_label()
+                .tabular_numerals()
                 .label(format!("{:.0}%", zoom * 100.0))
                 .aria_label(tr!(workflows::ZOOM_RESET_ARIA))
                 .on_click(move |_, window, cx| {

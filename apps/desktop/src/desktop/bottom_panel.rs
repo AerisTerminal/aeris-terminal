@@ -1043,7 +1043,7 @@ fn account_summary_stats(summary: &AccountSummary, theme: &AerisTheme) -> [Div; 
                 value
                     .text_sm()
                     .font_weight(platform_font_weight(TypographyRole::Emphasis))
-                    .map(numeric_readout),
+                    .font_features(platform_tabular_numerals()),
             )
     };
     [
@@ -1898,7 +1898,6 @@ fn text_cell(width: f32, content: impl IntoElement, theme: &AerisTheme) -> Div {
 fn numeric_cell(width: f32, content: impl IntoElement, theme: &AerisTheme) -> Div {
     table_cell(width, theme)
         .justify_end()
-        .map(numeric_readout)
         .child(div().min_w_0().truncate().child(content))
 }
 

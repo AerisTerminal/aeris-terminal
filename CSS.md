@@ -73,18 +73,14 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   fading strength (the layer opacity and each dot's alpha) is animation, not a tint, and no other
   UI may borrow it as a shade. It never shows under reduced motion, and the Trading settings'
   Fill glow switch turns it off.
-- Typography uses the bundled Inter faces (Regular 400, Medium 500, Bold 700) for platform text,
-  the bundled JetBrains Mono NL faces (Regular 400, Medium 500, Bold 700) for numeric readouts,
-  and the bundled Faculty Glyphic Regular face only for brand/display text. Inter covers Latin and
-  Cyrillic, so every supported display language renders in one text face. The normal platform
-  weight (`--font-weight-normal`) is Regular 400; emphasis and strong text use Bold 700.
-  Numeric readouts (order book, time and sales, watchlist and screener figures, position, order and
-  trade figures, prices, P&L, clocks) use `--font-mono` with tabular figures (`tnum`), natively
-  through `native_ui::numeric_readout` and on the web through `.platform-numeric-changing`;
-  their labels and symbol names stay in Inter, and numbers inside sentences keep Inter tabular
-  figures. There is no HK Grotesk dependency. The CSS `--font-sans` and native
-  `platform_font_family()` resolve to Inter, `--font-mono` and `platform_numeric_font_family()`
-  to JetBrains Mono NL; keep the web mirror in sync.
+- Typography uses the bundled Inter faces (Regular 400, Medium 500, Bold 700) for all platform
+  text, numbers included, and the bundled Faculty Glyphic Regular face only for brand/display text.
+  Inter covers Latin and Cyrillic, so every supported display language renders in one face.
+  The normal platform weight (`--font-weight-normal`) is Regular 400; emphasis and strong text use
+  Bold 700. Changing numbers and data-panel rows (order book, time and sales, positions, orders,
+  trades, screener) use Inter tabular figures (`tnum`) so digits keep one width. There is no
+  separate mono platform face and no HK Grotesk dependency. The CSS `--font-sans` and native
+  `platform_font_family()` both resolve to Inter; keep the web mirror in sync.
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
 

@@ -355,7 +355,7 @@ fn time_sales_row(
         .flex()
         .gap_2()
         .items_center()
-        .map(numeric_readout)
+        .font_features(platform_tabular_numerals())
         .text_xs()
         .text_color(gpui_color(tone))
         .child(div().w(px(62.0)).flex_none().child(time))

@@ -22,33 +22,8 @@
   font-display: swap;
 }
 
-@font-face {
-  font-family: "JetBrains Mono NL";
-  src: url("./assets/fonts/jetbrains_mono_nl_regular.ttf") format("truetype");
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "JetBrains Mono NL";
-  src: url("./assets/fonts/jetbrains_mono_nl_medium.ttf") format("truetype");
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "JetBrains Mono NL";
-  src: url("./assets/fonts/jetbrains_mono_nl_bold.ttf") format("truetype");
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-}
-
 :root {
   --font-sans: "Inter", sans-serif;
-  --font-mono: "JetBrains Mono NL", monospace;
   --font-weight-normal: 400;
   --font-weight-emphasis: 700;
   --font-weight-strong: 700;
@@ -2174,7 +2149,6 @@ body {
 }
 
 .platform-numeric-changing {
-  font-family: var(--font-mono);
   font-feature-settings: var(--font-feature-tabular-numerals) 1;
   font-variant-numeric: tabular-nums;
 }

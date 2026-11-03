@@ -1173,7 +1173,7 @@ fn workspace_tab_content(
                 .flex_none()
                 .text_xs()
                 .whitespace_nowrap()
-                .map(numeric_readout)
+                .font_features(platform_tabular_numerals())
                 .text_color(gpui_color(change_color))
                 .child(change)
         }));
@@ -1240,7 +1240,6 @@ fn workspace_tab_width(
     let rem = f32::from(window.rem_size());
     let label_width = measure(label, rem * 0.875, font.clone());
     let change_width = change.map(|change| {
-        font.family = aeris_design_system::platform_numeric_font_family().into();
         font.features = platform_tabular_numerals();
         measure(change, rem * 0.75, font)
     });

@@ -508,7 +508,12 @@ fn price_alert_dialog_subtitle(symbol: &str, price: &str) -> Div {
         .items_center()
         .gap_1()
         .child(tr!(drawing::ALERT_DIALOG_SUBTITLE, symbol = symbol))
-        .child(div().map(numeric_readout).child(price.to_string()))
+        .child(
+            div()
+                .font_family(aeris_design_system::platform_font_family())
+                .font_features(platform_tabular_numerals())
+                .child(price.to_string()),
+        )
 }
 
 fn price_alert_dialog_body(

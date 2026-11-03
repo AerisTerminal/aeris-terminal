@@ -43,7 +43,7 @@ use crate::desktop::assets::UiIcon;
 use super::{
     icon::Icon,
     loader::Loader,
-    numeric_readout, platform_font_weight,
+    platform_font_weight, platform_tabular_numerals,
     rem_scale::design_rems,
     theme::{gpui_color, platform_border_width},
     tooltip::{TooltipSpec, attach_tooltip},
@@ -323,7 +323,7 @@ impl ButtonFlags {
     const FULL_WIDTH: u16 = 1 << 7;
     const SKIP_TAB_STOP: u16 = 1 << 8;
     const TEXT_TOGGLE: u16 = 1 << 9;
-    const NUMERIC_LABEL: u16 = 1 << 10;
+    const TABULAR_NUMERALS: u16 = 1 << 10;
 
     const fn has(self, flag: u16) -> bool {
         self.0 & flag != 0
@@ -502,10 +502,10 @@ impl Button {
         self
     }
 
-    /// A numeric label that changes while shown, such as a clock, set in the numeric face so
-    /// its width never jitters as the digits change.
-    pub(crate) fn numeric_label(mut self) -> Self {
-        self.flags.set(ButtonFlags::NUMERIC_LABEL, true);
+    /// Equal-width digits for a label that changes while shown, such as a clock, so its width
+    /// never jitters as the digits change.
+    pub(crate) fn tabular_numerals(mut self) -> Self {
+        self.flags.set(ButtonFlags::TABULAR_NUMERALS, true);
         self
     }
 
@@ -755,7 +755,9 @@ fn style_frame(
             }
         })
         .when(flags.has(ButtonFlags::FULL_WIDTH), Styled::w_full)
-        .when(flags.has(ButtonFlags::NUMERIC_LABEL), numeric_readout)
+        .when(flags.has(ButtonFlags::TABULAR_NUMERALS), |button| {
+            button.font_features(platform_tabular_numerals())
+        })
         .when(flags.has(ButtonFlags::DISABLED), Styled::cursor_not_allowed)
         .when(flags.has(ButtonFlags::LOADING), |button| {
             button.cursor_default().opacity(0.8)
