@@ -864,8 +864,6 @@ pub(super) fn drawing_toolbar(
         .flex_col()
         .items_center()
         .overflow_hidden()
-        .border_r_1()
-        .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.surface))
         .child(
             div()
@@ -908,6 +906,10 @@ pub(super) fn drawing_toolbar(
                 .border_color(gpui_color(colors.border))
                 .child(drawing_favorites_toggle(terminal, sidebar.favorites, theme)),
         )
+        .children(panel_corners(
+            theme,
+            PanelEdges::INNER.with(PanelEdges::LEFT, false),
+        ))
 }
 
 const DRAWING_TOOL_MENU_WIDTH: f32 = 264.0;
@@ -1204,7 +1206,7 @@ where
 /// The default spot beside the drawing sidebar and below the chart header.
 pub(super) fn drawing_favorites_default_origin(chart_top: f32) -> gpui::Point<Pixels> {
     point(
-        px(chart_chrome::CHART_CHROME_HEIGHT + FLOATING_TOOLBAR_DEFAULT_INSET),
+        px(chart_chrome::CHART_CHROME_HEIGHT + PANEL_GAP + FLOATING_TOOLBAR_DEFAULT_INSET),
         px(chart_top + FLOATING_TOOLBAR_DEFAULT_INSET),
     )
 }

@@ -183,8 +183,6 @@ pub(super) fn terminal_header(
         .h(px(theme.dimensions.app_header_height))
         .flex()
         .items_center()
-        .border_b_1()
-        .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.surface))
         .child(header_brand(&theme))
         .child(div().h_full().min_w_0().flex_1().pr_3().child(controls))
@@ -332,8 +330,6 @@ pub(super) fn workspace_title_bar(
         .flex_none()
         .flex()
         .items_center()
-        .border_b_1()
-        .border_color(gpui_color(theme.colors.border_secondary))
         .bg(gpui_color(title_bar_fill(&theme)))
         .when(cfg!(target_os = "macos"), |bar| bar.pl(px(80.0)))
         .child(
@@ -738,8 +734,7 @@ pub(super) fn panel_sidebar(
         .items_center()
         .gap_1()
         .py_2()
-        .border_l(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
+        .relative()
         .bg(gpui_color(colors.surface))
         .child(side_panel(SidePanel::Watchlist))
         .child(side_panel(SidePanel::OrderBook))
@@ -751,6 +746,10 @@ pub(super) fn panel_sidebar(
             terminal,
             state.unread_notifications,
             theme,
+        ))
+        .children(panel_corners(
+            theme,
+            PanelEdges::INNER.with(PanelEdges::RIGHT, false),
         ))
 }
 

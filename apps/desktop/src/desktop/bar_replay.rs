@@ -350,8 +350,6 @@ pub(super) fn bar_replay_panel(
             .gap_1()
             .px_2()
             .overflow_hidden()
-            .border_t_1()
-            .border_color(gpui_color(theme.colors.border))
             .bg(gpui_color(theme.colors.surface))
             .children(controls)
             .into_any_element(),

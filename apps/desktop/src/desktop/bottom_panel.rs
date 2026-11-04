@@ -895,8 +895,6 @@ pub(super) fn bottom_panel(
         .when(open, |panel| panel.h(px(state.height)))
         .flex()
         .flex_col()
-        .border_t(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.surface))
         .child(trade_history_header(terminal, state, attribution, theme))
         .when(open, |panel| {

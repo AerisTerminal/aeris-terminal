@@ -57,6 +57,7 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
+  --surface-backdrop: #e5e5e5;
 
   /* Borders */
   --border: #0a0a0a33;
@@ -177,6 +178,7 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   /* Surfaces */
   --surface: #171717;
   --surface-secondary: #fafafa0f;
+  --surface-backdrop: #0a0a0a;
 
   /* Borders */
   --border: #fafafa1a;
@@ -306,6 +308,7 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
+  --surface-backdrop: #e5e5e5;
 
   /* Borders */
   --border: #0a0a0a33;
@@ -426,6 +429,7 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   /* Surfaces */
   --surface: #000000;
   --surface-secondary: #171717;
+  --surface-backdrop: #1f1f1f;
 
   /* Borders */
   --border: #2c2c2c;
@@ -541,6 +545,7 @@ Day (light) and Night (dark).
   /* Surfaces */
   --surface: #e1e2e7;
   --surface-secondary: #d5d6db;
+  --surface-backdrop: #c4c8da;
 
   /* Borders */
   --border: #3760bf33;
@@ -661,6 +666,7 @@ Day (light) and Night (dark).
   /* Surfaces */
   --surface: #1a1b26;
   --surface-secondary: #272937;
+  --surface-backdrop: #16161e;
 
   /* Borders */
   --border: #313443;
@@ -776,6 +782,7 @@ Latte (light) and Mocha (dark).
   /* Surfaces */
   --surface: #eff1f5;
   --surface-secondary: #e6e9ef;
+  --surface-backdrop: #dce0e8;
 
   /* Borders */
   --border: #4c4f6933;
@@ -896,6 +903,7 @@ Latte (light) and Mocha (dark).
   /* Surfaces */
   --surface: #1e1e2e;
   --surface-secondary: #2c2d3e;
+  --surface-backdrop: #11111b;
 
   /* Borders */
   --border: #36384a;
@@ -1011,6 +1019,7 @@ GitHub Light (light) and GitHub Dark (dark).
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #f6f8fa;
+  --surface-backdrop: #eaeef2;
 
   /* Borders */
   --border: #1f232833;
@@ -1131,6 +1140,7 @@ GitHub Light (light) and GitHub Dark (dark).
   /* Surfaces */
   --surface: #0d1117;
   --surface-secondary: #161b22;
+  --surface-backdrop: #010409;
 
   /* Borders */
   --border: #2b3036;
@@ -1246,6 +1256,7 @@ Atom One Light (light) and One Dark Pro (dark).
   /* Surfaces */
   --surface: #fafafa;
   --surface-secondary: #f0f0f1;
+  --surface-backdrop: #e5e5e6;
 
   /* Borders */
   --border: #383a4233;
@@ -1366,6 +1377,7 @@ Atom One Light (light) and One Dark Pro (dark).
   /* Surfaces */
   --surface: #282c34;
   --surface-secondary: #32373f;
+  --surface-backdrop: #21252b;
 
   /* Borders */
   --border: #3a3f47;
@@ -1481,6 +1493,7 @@ Alucard (light) and Dracula (dark).
   /* Surfaces */
   --surface: #fffbeb;
   --surface-secondary: #f5f1de;
+  --surface-backdrop: #ebe7d2;
 
   /* Borders */
   --border: #1f1f1f33;
@@ -1601,6 +1614,7 @@ Alucard (light) and Dracula (dark).
   /* Surfaces */
   --surface: #282a36;
   --surface-secondary: #393a45;
+  --surface-backdrop: #21222c;
 
   /* Borders */
   --border: #454750;
@@ -1716,6 +1730,7 @@ Solarized Light (light) and Solarized Dark (dark).
   /* Surfaces */
   --surface: #fdf6e3;
   --surface-secondary: #eee8d5;
+  --surface-backdrop: #e4ddc8;
 
   /* Borders */
   --border: #586e7533;
@@ -1836,6 +1851,7 @@ Solarized Light (light) and Solarized Dark (dark).
   /* Surfaces */
   --surface: #002b36;
   --surface-secondary: #073642;
+  --surface-backdrop: #00212b;
 
   /* Borders */
   --border: #153c45;
@@ -1951,6 +1967,7 @@ Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
   /* Surfaces */
   --surface: #fbf1c7;
   --surface-secondary: #f2e5bc;
+  --surface-backdrop: #ebdbb2;
 
   /* Borders */
   --border: #3c383633;
@@ -2071,6 +2088,7 @@ Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
   /* Surfaces */
   --surface: #282828;
   --surface-secondary: #32302f;
+  --surface-backdrop: #1d2021;
 
   /* Borders */
   --border: #43413b;

@@ -3,18 +3,20 @@ use super::*;
 use aeris_desktop::command_registry::{self, WorkspaceShortcut};
 use aeris_localization::{panels, tr};
 
+/// The workspace's chart panes; `edges` names the grid's sides that face a gap.
 pub(super) fn workspace_pane_grid(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
+    edges: PanelEdges,
     toaster: &Toaster,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
     if let Some(pane_id) = workspace.maximized_pane {
-        return workspace_pane_element(terminal, workspace, pane_id, toaster, theme, cx);
+        return workspace_pane_element(terminal, workspace, pane_id, edges, toaster, theme, cx);
     }
     let layout = workspace.layout.layout();
-    workspace_layout_element(terminal, workspace, &layout, toaster, theme, cx)
+    workspace_layout_element(terminal, workspace, &layout, edges, toaster, theme, cx)
 }
 
 /// Toasts that belong to the workspace rather than one chart, such as fills, stack on the pane
@@ -99,12 +101,13 @@ pub(super) fn workspace_layout_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     layout: &ChartWorkspaceLayout,
+    edges: PanelEdges,
     toaster: &Toaster,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
     if let ChartWorkspaceLayout::Cell { id } = layout {
-        return workspace_pane_element(terminal, workspace, *id, toaster, theme, cx);
+        return workspace_pane_element(terminal, workspace, *id, edges, toaster, theme, cx);
     }
 
     let ChartWorkspaceLayout::Split {
@@ -120,11 +123,21 @@ pub(super) fn workspace_layout_element(
     let second_ids = second.leaf_ids();
     let left_pane_id = *first_ids.last().unwrap_or(&0);
     let right_pane_id = *second_ids.first().unwrap_or(&0);
-    let first_element = workspace_layout_element(terminal, workspace, first, toaster, theme, cx);
-    let second_element = workspace_layout_element(terminal, workspace, second, toaster, theme, cx);
+    let direction = *direction;
+    let (first_edges, second_edges) = split_edges(direction, edges);
+    let first_element =
+        workspace_layout_element(terminal, workspace, first, first_edges, toaster, theme, cx);
+    let second_element = workspace_layout_element(
+        terminal,
+        workspace,
+        second,
+        second_edges,
+        toaster,
+        theme,
+        cx,
+    );
     let workspace_id = workspace.id;
     let split_id = format!("workspace_split_{workspace_id}_{left_pane_id}_{right_pane_id}");
-    let direction = *direction;
     let drag = WorkspaceSplitDrag {
         workspace_id,
         left_pane_id,
@@ -147,13 +160,7 @@ pub(super) fn workspace_layout_element(
         })
         .child(first_element);
     let second = div().flex_1().min_w_0().min_h_0().child(second_element);
-    let handle = workspace_split_handle(
-        handle_id,
-        direction,
-        ratio,
-        handle_drag,
-        gpui_color(theme.colors.border),
-    );
+    let handle = workspace_split_handle(handle_id, direction, ratio, handle_drag);
     div()
         .id(split_id)
         .relative()
@@ -194,18 +201,47 @@ pub(super) fn workspace_layout_element(
             });
         })
         .child(first)
+        .child(split_gap(direction))
         .child(second)
         .child(handle)
         .into_any_element()
 }
+
+/// The edges of a split's two sides: each faces a gap toward the other.
+const fn split_edges(
+    direction: ChartSplitDirection,
+    edges: PanelEdges,
+) -> (PanelEdges, PanelEdges) {
+    match direction {
+        ChartSplitDirection::Horizontal => (
+            edges.with(PanelEdges::RIGHT, true),
+            edges.with(PanelEdges::LEFT, true),
+        ),
+        ChartSplitDirection::Vertical => (
+            edges.with(PanelEdges::BOTTOM, true),
+            edges.with(PanelEdges::TOP, true),
+        ),
+    }
+}
+
+/// The space between a split's two sides; the backdrop behind the panes shows through it.
+fn split_gap(direction: ChartSplitDirection) -> Div {
+    match direction {
+        ChartSplitDirection::Horizontal => div().flex_none().w(px(PANEL_GAP)).h_full(),
+        ChartSplitDirection::Vertical => div().flex_none().h(px(PANEL_GAP)).w_full(),
+    }
+}
+
+/// Thickness of a pane split's drag target, centered on the gap between its panes.
+const WORKSPACE_SPLIT_HANDLE_SIZE: f32 = 8.0;
 
 pub(super) fn workspace_split_handle(
     id: String,
     direction: ChartSplitDirection,
     ratio: f32,
     drag: WorkspaceSplitDrag,
-    border: Hsla,
 ) -> impl IntoElement {
+    let offset = px((PANEL_GAP - WORKSPACE_SPLIT_HANDLE_SIZE) / 2.0);
     div()
         .id(id)
         .absolute()
@@ -214,32 +250,21 @@ pub(super) fn workspace_split_handle(
             handle
                 .top_0()
                 .left(relative(ratio))
-                .ml(px(-4.0))
+                .ml(offset)
                 .h_full()
-                .w(px(8.0))
+                .w(px(WORKSPACE_SPLIT_HANDLE_SIZE))
                 .cursor_col_resize()
         })
         .when(direction == ChartSplitDirection::Vertical, |handle| {
             handle
                 .left_0()
                 .top(relative(ratio))
-                .mt(px(-4.0))
+                .mt(offset)
                 .w_full()
-                .h(px(8.0))
+                .h(px(WORKSPACE_SPLIT_HANDLE_SIZE))
                 .cursor_row_resize()
         })
         .on_drag(drag, move |drag, _, _, cx| cx.new(|_| drag.clone()))
-        .child(
-            div()
-                .absolute()
-                .bg(border)
-                .when(direction == ChartSplitDirection::Horizontal, |line| {
-                    line.left(px(3.0)).top_0().h_full().w(px(1.0))
-                })
-                .when(direction == ChartSplitDirection::Vertical, |line| {
-                    line.left_0().top(px(3.0)).w_full().h(px(1.0))
-                }),
-        )
 }
 
 pub(super) fn workspace_split_ratio(
@@ -293,6 +318,7 @@ pub(super) fn workspace_pane_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     pane_id: u64,
+    edges: PanelEdges,
     toaster: &Toaster,
     theme: &AerisTheme,
     cx: &App,
@@ -322,6 +348,13 @@ pub(super) fn workspace_pane_element(
     let quantity_menu =
         super::order_quantity::order_quantity_menu_layer(&pane.surface, surface, theme);
     let workspace_id = workspace.id;
+    // With several panes on screen, the one the user is working in carries the focus edge.
+    let focused = workspace.maximized_pane.is_none()
+        && workspace.panes.len() > 1
+        && workspace
+            .panes
+            .get(workspace.active_pane)
+            .is_some_and(|active| active.id == pane_id);
     let select_terminal = terminal.clone();
     let context_terminal = terminal.clone();
     let maximize_terminal = terminal.clone();
@@ -332,6 +365,7 @@ pub(super) fn workspace_pane_element(
         .size_full()
         .min_w_0()
         .min_h_0()
+        .bg(gpui_color(theme.colors.surface))
         // Keep the chart canvas flush with the pane's right edge. Aeris draws structural
         // indicator separators across its complete viewport; host padding here would shorten
         // every separator and leave a visible break before the workspace boundary.
@@ -386,6 +420,8 @@ pub(super) fn workspace_pane_element(
             cx.stop_propagation();
         })
         .child(content)
+        .when(focused, |pane| pane.child(panel_focus_border(theme, edges)))
+        .children(panel_corners(theme, edges))
         .children(quantity_menu)
         .children(indicator_settings_dialog)
         .into_any_element()
@@ -421,7 +457,8 @@ pub(super) fn workspace_market_area(
         theme,
     } = area;
     let drawing_toolbar_collapsed = expanded_drawing_toolbar.is_none();
-    let grid = workspace_pane_grid(terminal, workspace, toaster, theme, cx);
+    let center_edges = PanelEdges::INNER.with(PanelEdges::LEFT, !drawing_toolbar_collapsed);
+    let grid = workspace_pane_grid(terminal, workspace, center_edges, toaster, theme, cx);
     let surface = active_surface.read(cx);
     let store = trading_store.read(cx);
     let drawing_state = surface.drawing_toolbar_state(cx);
@@ -484,11 +521,12 @@ pub(super) fn workspace_market_area(
         super::bar_replay::bar_replay_panel(active_surface, theme, cx),
         workspace_context_panel(surface, active_surface, theme),
     ];
-    let center = workspace_center_column(grid, below, drawing_toolbar_collapsed, active_surface);
+    let center = workspace_center_column(grid, below, center_edges, active_surface, theme);
     div()
         .relative()
         .flex()
         .size_full()
+        .gap(px(PANEL_GAP))
         .overflow_hidden()
         .track_focus(&chrome_focus)
         .child(center)
@@ -521,15 +559,26 @@ pub(super) fn workspace_price_alert_dialog(
     })
 }
 
-/// Chart grid plus the panels docked below it (bar replay, then market context), inset past
-/// the drawing toolbar.
+/// Chart grid plus the panels docked below it (bar replay, then market context). Its left
+/// side faces a gap only beside the drawing toolbar, which it is then inset past; without
+/// the toolbar it meets the window's left edge.
 fn workspace_center_column(
     grid: impl IntoElement,
     below: [Option<AnyElement>; 2],
-    drawing_toolbar_collapsed: bool,
+    edges: PanelEdges,
     active_surface: &Entity<WorkspaceSurface>,
+    theme: &AerisTheme,
 ) -> Div {
     let grid = div().flex_1().min_w_0().min_h_0().child(grid);
+    let below = below.into_iter().flatten().map(|panel| {
+        div()
+            .relative()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(panel)
+            .children(panel_corners(theme, edges))
+    });
     let context_drag_app = active_surface.clone();
     // The drawing toolbar overlays the left edge of the whole center column, so
     // the chart grid and the context panel beneath it share one inset.
@@ -539,12 +588,13 @@ fn workspace_center_column(
         .min_w_0()
         .flex()
         .flex_col()
+        .gap(px(PANEL_GAP))
         .overflow_hidden()
-        .when(!drawing_toolbar_collapsed, |center| {
-            center.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
+        .when(edges.has(PanelEdges::LEFT), |center| {
+            center.ml(px(chart_chrome::CHART_CHROME_HEIGHT + PANEL_GAP))
         })
         .child(grid)
-        .children(below.into_iter().flatten())
+        .children(below)
         .on_drag_move::<ContextPanelHeightDrag>(move |event, _, cx| {
             let bottom = f32::from(event.bounds.bottom());
             let available =

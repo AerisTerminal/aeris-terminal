@@ -70,8 +70,6 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
         .flex()
         .flex_col()
         .overflow_hidden()
-        .border_t_1()
-        .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.surface))
         .child(
             div()

@@ -2,7 +2,8 @@
 //!
 //! The trigger owns the tooltip: hover starts a delayed show, and leaving, pressing or
 //! scrolling fades it out. The tooltip sits beside the trigger on the requested side rather
-//! than at the cursor, so it never covers the pointer or the control it describes.
+//! than at the cursor, so it never covers the pointer or the control it describes, and its
+//! tail points at the trigger.
 
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
@@ -11,12 +12,20 @@ use aeris_design_system::{
 };
 use gpui::{
     Anchor, AnimationExt, AnyElement, App, Bounds, BoxShadow, Context, Div, ElementId, Hsla,
-    IntoElement, Pixels, Point, SharedString, Size, SpringAnimation, SpringConfig, Task, Window,
-    anchored, canvas, deferred, div, point, prelude::*, px,
+    IntoElement, PathBuilder, Pixels, Point, SharedString, Size, SpringAnimation, SpringConfig,
+    Task, Window, anchored, canvas, deferred, div, point, prelude::*, px,
 };
 
-/// Space between the trigger edge and the tooltip.
-const TOOLTIP_GAP: f32 = 6.0;
+/// Space between the trigger edge and the tooltip body; the tail reaches into it.
+const TOOLTIP_GAP: f32 = 8.0;
+/// Distance from the body edge to the tip of the tail.
+const TOOLTIP_TAIL_LENGTH: f32 = 5.0;
+/// Half the width of the tail where it meets the body edge.
+const TOOLTIP_TAIL_HALF_WIDTH: f32 = 5.0;
+const _: () = assert!(
+    TOOLTIP_TAIL_LENGTH < TOOLTIP_GAP,
+    "the tail tip stays off the trigger"
+);
 /// Space kept between a tooltip and the window edge.
 const TOOLTIP_WINDOW_MARGIN: f32 = 4.0;
 /// A single-line tooltip plus its gap; a vertical side with less room flips to the other side.
@@ -78,6 +87,89 @@ impl TooltipPlacement {
             Self::Bottom => (0.0, -1.0),
             Self::Left => (1.0, 0.0),
             Self::Right => (-1.0, 0.0),
+        }
+    }
+
+    /// Where the tail meets the body edge facing the trigger: in line with the trigger's
+    /// centre, but clear of the rounded corners when the window snap moved the body.
+    fn tail_base(self, body: Bounds<Pixels>, trigger: Bounds<Pixels>) -> Point<Pixels> {
+        let inset = f32::from(RadiusToken::Compact.logical_pixels()) + TOOLTIP_TAIL_HALF_WIDTH;
+        let along = |target: Pixels, start: Pixels, end: Pixels| {
+            let (target, start, end) = (f32::from(target), f32::from(start), f32::from(end));
+            px(if end - start < inset * 2.0 {
+                f32::midpoint(start, end)
+            } else {
+                target.clamp(start + inset, end - inset)
+            })
+        };
+        let center = trigger.center();
+        match self {
+            Self::Top => point(along(center.x, body.left(), body.right()), body.bottom()),
+            Self::Bottom => point(along(center.x, body.left(), body.right()), body.top()),
+            Self::Left => point(body.right(), along(center.y, body.top(), body.bottom())),
+            Self::Right => point(body.left(), along(center.y, body.top(), body.bottom())),
+        }
+    }
+}
+
+/// The tail triangle with its two sides moved `offset` outward (inward when negative) and its
+/// base `depth` past the body edge toward the trigger (into the body when negative).
+fn tail_triangle(
+    base: Point<Pixels>,
+    outward: (f32, f32),
+    offset: f32,
+    depth: f32,
+) -> [Point<Pixels>; 3] {
+    let (half_width, length) = (TOOLTIP_TAIL_HALF_WIDTH, TOOLTIP_TAIL_LENGTH);
+    let side = half_width.hypot(length);
+    let tip = length + offset * side / half_width;
+    let half = half_width + offset * side / length - depth * half_width / length;
+    let along = (outward.1.abs(), outward.0.abs());
+    let at = |across: f32, out: f32| {
+        point(
+            base.x + px(along.0 * across + outward.0 * out),
+            base.y + px(along.1 * across + outward.1 * out),
+        )
+    };
+    [at(-half, depth), at(0.0, tip), at(half, depth)]
+}
+
+/// Paints the tail in the body's own layers so its edges continue the body's: the
+/// `border-popover` outer edge (starting past the body's outer ring, so the translucent edge
+/// is never doubled), the `surface-popover` fill that opens the body edge under the tail, the
+/// `border-popover-highlight` inner edge and the fill inside it.
+fn paint_tail(
+    window: &mut Window,
+    body: Bounds<Pixels>,
+    trigger: Bounds<Pixels>,
+    placement: TooltipPlacement,
+    theme: &AerisTheme,
+) {
+    let colors = theme.colors;
+    let edge = theme.dimensions.border_width;
+    let scale = window.scale_factor();
+    let snap = |value: Pixels| px((f32::from(value) * scale).round() / scale);
+    let base = placement.tail_base(body, trigger);
+    let base = match placement {
+        TooltipPlacement::Top | TooltipPlacement::Bottom => point(snap(base.x), base.y),
+        TooltipPlacement::Left | TooltipPlacement::Right => point(base.x, snap(base.y)),
+    };
+    let outward = placement.toward_trigger();
+    let layers = [
+        (edge, edge, colors.border_popover),
+        (0.0, -edge, colors.surface_popover),
+        (0.0, -edge, colors.border_popover_highlight),
+        (-edge, -edge, colors.surface_popover),
+    ];
+    for (offset, depth, color) in layers {
+        let [start, tip, end] = tail_triangle(base, outward, offset, depth);
+        let mut path = PathBuilder::fill();
+        path.move_to(start);
+        path.line_to(tip);
+        path.line_to(end);
+        path.close();
+        if let Ok(path) = path.build() {
+            window.paint_path(path, gpui_color(color));
         }
     }
 }
@@ -145,11 +237,11 @@ impl TooltipSpec {
 
     /// The Theme System popover look: `surface-popover` with a `border-popover-highlight`
     /// inner edge and a `border-popover` outer edge.
-    /// Single-line labels are pills; rich content keeps a rounded rectangle so rows stay aligned.
     fn surface(&self, cx: &App) -> Div {
         let colors = self.theme.colors;
         let edge = px(self.theme.dimensions.border_width);
         let base = div()
+            .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
             .border(edge)
             .border_color(gpui_color(colors.border_popover_highlight))
             .bg(gpui_color(colors.surface_popover))
@@ -167,15 +259,10 @@ impl TooltipSpec {
             TooltipContent::Static(label) => label.clone(),
             TooltipContent::Dynamic(label) => label(cx),
             TooltipContent::Rich(content) => {
-                return base
-                    .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
-                    .px_3()
-                    .py_2()
-                    .child(content(&self.theme));
+                return base.px_3().py_2().child(content(&self.theme));
             }
         };
-        base.rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-            .px(px(10.0))
+        base.px(px(10.0))
             .py(px(4.0))
             .whitespace_nowrap()
             .child(label)
@@ -330,17 +417,30 @@ fn tooltip_layer(
     let motion = SpringAnimation::new(TOOLTIP_SPRING)
         .to(if showing { 1.0_f32 } else { 0.0 })
         .from(0.0);
-    let surface = spec.surface(cx).relative().with_spring(
-        "tooltip_motion",
-        motion,
-        move |surface, progress| {
+    let theme = spec.theme;
+    // Pinned to the body: an absolute element without insets sits after the body instead.
+    let tail = div()
+        .debug_selector(|| "TOOLTIP_TAIL".into())
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |body, (), window, _| paint_tail(window, body, trigger, placement, &theme),
+            )
+            .size_full(),
+        );
+    let surface = div()
+        .relative()
+        .child(spec.surface(cx))
+        .child(tail)
+        .with_spring("tooltip_motion", motion, move |surface, progress| {
             let travel = TOOLTIP_SLIDE * (1.0 - progress);
             surface
                 .opacity(progress.clamp(0.0, 1.0))
                 .left(px(toward_x * travel))
                 .top(px(toward_y * travel))
-        },
-    );
+        });
     deferred(
         anchored()
             .position(position)
@@ -381,7 +481,10 @@ impl RenderOnce for TooltipTrigger {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOLTIP_EXIT, TOOLTIP_GAP, TooltipPlacement, TooltipSpec, with_tooltip};
+    use super::{
+        TOOLTIP_EXIT, TOOLTIP_GAP, TOOLTIP_TAIL_LENGTH, TooltipPlacement, TooltipSpec,
+        tail_triangle, with_tooltip,
+    };
     use aeris_design_system::AerisTheme;
     use gpui::{
         Anchor, Bounds, Context, Modifiers, MouseButton, TestAppContext, Window, div, point,
@@ -443,6 +546,13 @@ mod tests {
         // anchored layer rounds to whole pixels.
         assert!((body.center().x - px(120.0)).abs() <= px(1.0), "{body:?}");
         assert!(body.top() > px(120.0), "{body:?}");
+        let tail = cx
+            .debug_bounds("TOOLTIP_TAIL")
+            .expect("the tail paints with the tooltip");
+        assert!(
+            tail.top() < body.top() && tail.bottom() > body.bottom(),
+            "the tail is laid out over the body it attaches to: {tail:?} {body:?}"
+        );
 
         cx.simulate_mouse_move(point(px(400.0), px(400.0)), None, Modifiers::none());
         cx.run_until_parked();
@@ -530,6 +640,38 @@ mod tests {
             TooltipPlacement::Left.resolve(at_top, viewport),
             TooltipPlacement::Left
         );
+    }
+
+    #[test]
+    fn the_tail_points_at_the_trigger_and_stays_clear_of_the_corners() {
+        let body = Bounds::new(point(px(100.0), px(50.0)), size(px(120.0), px(26.0)));
+        let trigger = Bounds::new(point(px(140.0), px(84.0)), size(px(20.0), px(20.0)));
+        assert_eq!(
+            TooltipPlacement::Top.tail_base(body, trigger),
+            point(px(150.0), px(76.0))
+        );
+        // A trigger past the body's end (the window snap moved the body) keeps the tail
+        // beside the rounded corner instead of on it: the 6px radius plus the 5px half width.
+        let far_left = Bounds::new(point(px(0.0), px(84.0)), size(px(20.0), px(20.0)));
+        assert_eq!(
+            TooltipPlacement::Top.tail_base(body, far_left),
+            point(px(111.0), px(76.0))
+        );
+        let side = Bounds::new(point(px(240.0), px(53.0)), size(px(20.0), px(20.0)));
+        assert_eq!(
+            TooltipPlacement::Left.tail_base(body, side),
+            point(px(220.0), px(63.0))
+        );
+    }
+
+    #[test]
+    fn the_tail_tip_reaches_into_the_gap_toward_the_trigger() {
+        let base = point(px(150.0), px(76.0));
+        let [start, tip, end] =
+            tail_triangle(base, TooltipPlacement::Top.toward_trigger(), 0.0, 0.0);
+        assert_eq!(tip, point(px(150.0), px(76.0 + TOOLTIP_TAIL_LENGTH)));
+        assert_eq!((start.y, end.y), (px(76.0), px(76.0)));
+        assert!(start.x < base.x && end.x > base.x);
     }
 
     #[test]

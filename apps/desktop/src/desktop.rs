@@ -252,7 +252,8 @@ use native_ui::{
     switch::{Switch, SwitchRow},
     tab::{Tab, TabList},
     theme::{
-        base_theme, field_border, field_surface, gpui_color, platform_border_width, popover_surface,
+        PanelEdges, base_theme, field_border, field_surface, gpui_color, panel_corners,
+        panel_focus_border, platform_border_width, popover_surface,
     },
     tooltip::{TooltipSpec, with_tooltip},
 };
@@ -539,6 +540,9 @@ const SIDE_PANEL_INITIAL_WIDTH: f32 = 400.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 360.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 480.0;
 const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 8.0;
+/// Space between adjacent workspace panels: the title bar, chart header, chart panes, docked
+/// side panels, panel rail, drawing toolbar and bottom panel. `surface-backdrop` shows through it.
+const PANEL_GAP: f32 = 4.0;
 /// Chart area always left above the context panel while resizing.
 const CONTEXT_PANEL_MINIMUM_CHART_HEIGHT: f32 = 160.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;

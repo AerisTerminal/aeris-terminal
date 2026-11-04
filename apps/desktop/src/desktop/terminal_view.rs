@@ -683,6 +683,18 @@ impl TerminalApp {
             .font_weight(platform_font_weight(TypographyRole::Normal))
     }
 
+    /// The terminal page under the title bar row: the header, the market area and the bottom
+    /// panel on `surface-backdrop`, which shows through the `PANEL_GAP` between them.
+    fn terminal_page_body(&self) -> Div {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(PANEL_GAP))
+            .bg(gpui_color(self.theme.colors.surface_backdrop))
+    }
+
     /// The screener under the title bar. Only shell-level overlays apply on this page.
     fn rendered_screener_page(&self, terminal: &Entity<Self>, window: &Window, cx: &App) -> Div {
         let placement = title_bar_placement(
@@ -823,7 +835,7 @@ impl TerminalApp {
         let chart_top = if self.window.chart_fullscreen() {
             0.0
         } else {
-            title_bar_row_height + chart_chrome::CHART_CHROME_HEIGHT
+            title_bar_row_height + chart_chrome::CHART_CHROME_HEIGHT + PANEL_GAP
         };
         let drawing_favorites = self.drawing_favorites_overlay(&terminal, chart_top, window, cx);
         let drawing_context = self.drawing_context_overlay(&terminal, chart_top, window, cx);
@@ -840,14 +852,21 @@ impl TerminalApp {
             // Alt+click stays the only one shown, exactly as in the docked workspace.
             let workspace = self.tabs.active();
             let toaster = self.notices.toaster();
-            let charts = workspace_pane_grid(&terminal, workspace, toaster, &self.theme, cx);
+            let charts = workspace_pane_grid(
+                &terminal,
+                workspace,
+                PanelEdges::default(),
+                toaster,
+                &self.theme,
+                cx,
+            );
             return self
                 .page_root()
                 .child(
                     div()
                         .flex_1()
                         .overflow_hidden()
-                        .bg(gpui_color(self.theme.colors.surface))
+                        .bg(gpui_color(self.theme.colors.surface_backdrop))
                         .child(charts),
                 )
                 .children(drawing_favorites)
@@ -861,15 +880,12 @@ impl TerminalApp {
         }
         self.page_root()
             .children(title_bar)
-            .child(header)
             .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .bg(gpui_color(self.theme.colors.surface))
-                    .child(market),
+                self.terminal_page_body()
+                    .child(header)
+                    .child(div().flex_1().min_h_0().overflow_hidden().child(market))
+                    .child(bottom_panel),
             )
-            .child(bottom_panel)
             .children(drawing_favorites)
             .children(drawing_context)
             .children(fullscreen_hint)

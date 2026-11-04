@@ -178,6 +178,7 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
+  --surface-backdrop: #e5e5e5;
 
   /* Borders */
   --border: #0a0a0a33;
@@ -298,6 +299,7 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   /* Surfaces */
   --surface: #171717;
   --surface-secondary: #fafafa0f;
+  --surface-backdrop: #0a0a0a;
 
   /* Borders */
   --border: #fafafa1a;

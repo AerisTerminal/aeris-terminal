@@ -14,7 +14,6 @@ use aeris_localization::{panels, tr};
 use gpui::AppContext;
 
 pub(super) const SIDE_PANEL_HEADER_HEIGHT: f32 = 30.0;
-const SIDE_PANEL_SPLIT_DIVIDER_WIDTH: f32 = 1.0;
 const SIDE_PANEL_SPLIT_HANDLE_WIDTH: f32 = 8.0;
 
 /// How one docked panel takes horizontal space in the dock.
@@ -58,6 +57,10 @@ struct DockGeometry {
     fixed_width: f32,
     /// Fixed panels docked left of the split between two flexible panels.
     fixed_before_split: f32,
+    /// Gaps between adjacent docked panels; the split divider is one of them.
+    gaps: f32,
+    /// Gaps docked left of the split divider.
+    gaps_before_split: f32,
 }
 
 impl DockGeometry {
@@ -65,11 +68,22 @@ impl DockGeometry {
         let mut flexible_count = 0_u8;
         let mut fixed_width = 0.0;
         let mut fixed_before_split = 0.0;
-        for panel in SidePanel::ALL
+        let mut gaps = 0.0;
+        let mut gaps_before_split = 0.0;
+        for (index, panel) in SidePanel::ALL
             .into_iter()
             .filter(|panel| visible.contains(*panel))
+            .enumerate()
         {
-            match panel.sizing() {
+            let sizing = panel.sizing();
+            if index > 0 {
+                gaps += PANEL_GAP;
+                let divider = matches!(sizing, SidePanelSizing::Flexible) && flexible_count == 1;
+                if flexible_count < 2 && !divider {
+                    gaps_before_split += PANEL_GAP;
+                }
+            }
+            match sizing {
                 SidePanelSizing::Flexible => flexible_count += 1,
                 SidePanelSizing::Fixed(panel_width) => {
                     fixed_width += panel_width;
@@ -79,15 +93,13 @@ impl DockGeometry {
                 }
             }
         }
-        let geometry = Self {
-            total_width: 0.0,
+        Self {
+            total_width: width * f32::from(flexible_count) + fixed_width + gaps,
             flexible_count,
             fixed_width,
             fixed_before_split,
-        };
-        Self {
-            total_width: width * f32::from(flexible_count) + geometry.divider() + fixed_width,
-            ..geometry
+            gaps,
+            gaps_before_split,
         }
     }
 
@@ -95,29 +107,20 @@ impl DockGeometry {
         self.flexible_count == 2
     }
 
-    const fn divider(&self) -> f32 {
-        if self.split() {
-            SIDE_PANEL_SPLIT_DIVIDER_WIDTH
-        } else {
-            0.0
-        }
-    }
-
     /// Per-panel width for a left-edge drag, or `None` when no panel is resizable.
     fn width_from_drag(&self, right: f32, pointer_x: f32) -> Option<f32> {
         (self.flexible_count > 0).then(|| {
             clamped_side_panel_width(
-                (right - pointer_x - self.divider() - self.fixed_width)
-                    / f32::from(self.flexible_count),
+                (right - pointer_x - self.gaps - self.fixed_width) / f32::from(self.flexible_count),
             )
         })
     }
 
     /// Share of the flexible width left of the split for a divider drag.
     fn split_ratio_from_drag(&self, left: f32, pointer_x: f32) -> Option<f32> {
-        let content_width = self.total_width - self.divider() - self.fixed_width;
+        let content_width = self.total_width - self.gaps - self.fixed_width;
         (self.split() && content_width > 0.0).then(|| {
-            (pointer_x - left - self.fixed_before_split - SIDE_PANEL_SPLIT_DIVIDER_WIDTH / 2.0)
+            (pointer_x - left - self.fixed_before_split - self.gaps_before_split - PANEL_GAP / 2.0)
                 / content_width
         })
     }
@@ -141,8 +144,8 @@ struct DockSlot {
     panel: SidePanel,
     /// The resizable split divider precedes this panel.
     split_before: bool,
-    /// A 1 px border separates this panel from the one before it.
-    leading_border: bool,
+    /// A panel gap separates this panel from the one before it.
+    leading_gap: bool,
     sizing: DockSlotSizing,
 }
 
@@ -177,7 +180,7 @@ fn dock_slots(visible: SidePanelVisibility, split_ratio: Option<f32>) -> Vec<Doc
             DockSlot {
                 panel,
                 split_before,
-                leading_border: index > 0 && !split_before,
+                leading_gap: index > 0 && !split_before,
                 sizing,
             }
         })
@@ -217,7 +220,7 @@ impl DockContents<'_> {
     }
 }
 
-fn dock_region(slot: DockSlot, border: gpui::Hsla) -> Div {
+fn dock_region(slot: DockSlot, surface: gpui::Hsla) -> Div {
     let region = match slot.sizing {
         DockSlotSizing::Grow(grow) => div().min_w_0().flex_basis(px(0.0)).flex_grow(grow),
         DockSlotSizing::Fixed(width) => div().w(px(width)).flex_none(),
@@ -225,9 +228,8 @@ fn dock_region(slot: DockSlot, border: gpui::Hsla) -> Div {
     region
         .h_full()
         .overflow_hidden()
-        .when(slot.leading_border, |region| {
-            region.border_l_1().border_color(border)
-        })
+        .bg(surface)
+        .when(slot.leading_gap, |region| region.ml(px(PANEL_GAP)))
 }
 
 pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl IntoElement + use<> {
@@ -248,7 +250,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
     let split_ratio = geometry
         .split()
         .then(|| side_panel_horizontal_ratio(width, split_basis_points));
-    let border = gpui_color(theme.colors.border);
+    let surface = gpui_color(theme.colors.surface);
     let split_drag_app = app.clone();
     let width_drag_app = app.clone();
     let mut contents = DockContents {
@@ -267,15 +269,16 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         .flex_none()
         .relative()
         .flex()
-        .overflow_hidden()
-        .bg(gpui_color(theme.colors.surface))
-        .border_l_1()
-        .border_color(border);
+        .overflow_hidden();
     for slot in dock_slots(visible, split_ratio) {
         if slot.split_before {
-            dock = dock.child(side_panel_split_handle(workspace_id, border));
+            dock = dock.child(side_panel_split_handle(workspace_id));
         }
-        dock = dock.child(dock_region(slot, border).child(contents.render(slot.panel)));
+        dock = dock.child(
+            dock_region(slot, surface)
+                .child(contents.render(slot.panel))
+                .children(panel_corners(theme, PanelEdges::INNER)),
+        );
     }
     dock.on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
         let Some(ratio) = geometry.split_ratio_from_drag(
@@ -380,22 +383,20 @@ impl Render for SidePanelWidthDrag {
     }
 }
 
-fn side_panel_split_handle(workspace_id: u64, border: gpui::Hsla) -> impl IntoElement {
+/// The gap between the two flexible panels, which also drags their split.
+fn side_panel_split_handle(workspace_id: u64) -> impl IntoElement {
     div()
         .id(("side_panel_split", workspace_id))
         .relative()
         .flex_none()
         .h_full()
-        .w(px(SIDE_PANEL_SPLIT_DIVIDER_WIDTH))
-        .bg(border)
+        .w(px(PANEL_GAP))
         .child(
             div()
                 .id(("side_panel_split_hit", workspace_id))
                 .absolute()
                 .top_0()
-                .left(px(-(SIDE_PANEL_SPLIT_HANDLE_WIDTH
-                    - SIDE_PANEL_SPLIT_DIVIDER_WIDTH)
-                    / 2.0))
+                .left(px(-(SIDE_PANEL_SPLIT_HANDLE_WIDTH - PANEL_GAP) / 2.0))
                 .h_full()
                 .w(px(SIDE_PANEL_SPLIT_HANDLE_WIDTH))
                 .occlude()
@@ -442,10 +443,7 @@ mod tests {
             visible(&[SidePanel::OrderBook, SidePanel::Watchlist]),
             400.0,
         );
-        assert!(
-            (book_and_watchlist.total_width - (800.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH)).abs()
-                < f32::EPSILON
-        );
+        assert!((book_and_watchlist.total_width - (800.0 + PANEL_GAP)).abs() < f32::EPSILON);
 
         let tape_only = DockGeometry::new(visible(&[SidePanel::TimeSales]), 400.0);
         assert!((tape_only.total_width - TIME_SALES_PANEL_WIDTH).abs() < f32::EPSILON);
@@ -453,11 +451,10 @@ mod tests {
 
         let fixed = ORDER_ENTRY_PANEL_WIDTH + TIME_SALES_PANEL_WIDTH;
         let all = DockGeometry::new(visible(&SidePanel::ALL), 400.0);
-        assert!(
-            (all.total_width - (800.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH + fixed)).abs()
-                < f32::EPSILON
-        );
+        // One gap between each pair of the four docked panels, the split divider included.
+        assert!((all.total_width - (800.0 + 3.0 * PANEL_GAP + fixed)).abs() < f32::EPSILON);
         assert!((all.fixed_before_split - fixed).abs() < f32::EPSILON);
+        assert!((all.gaps_before_split - 2.0 * PANEL_GAP).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -471,12 +468,13 @@ mod tests {
         assert!((width - 400.0).abs() < 0.01);
 
         // The split handle sits after the book (400 px) and the fixed order entry and
-        // Time & Sales columns.
+        // Time & Sales columns, each behind its own gap.
         let handle_x = left
             + 400.0
             + ORDER_ENTRY_PANEL_WIDTH
             + TIME_SALES_PANEL_WIDTH
-            + SIDE_PANEL_SPLIT_DIVIDER_WIDTH / 2.0;
+            + 2.0 * PANEL_GAP
+            + PANEL_GAP / 2.0;
         let ratio = all
             .split_ratio_from_drag(left, handle_x)
             .expect("two flexible panels split");
@@ -495,24 +493,24 @@ mod tests {
         let panels = slots.iter().map(|slot| slot.panel).collect::<Vec<_>>();
         assert_eq!(panels, SidePanel::ALL);
         assert_eq!(slots[0].sizing, DockSlotSizing::Grow(0.4));
-        assert!(!slots[0].leading_border && !slots[0].split_before);
+        assert!(!slots[0].leading_gap && !slots[0].split_before);
         assert_eq!(
             slots[1].sizing,
             DockSlotSizing::Fixed(ORDER_ENTRY_PANEL_WIDTH)
         );
-        assert!(slots[1].leading_border);
+        assert!(slots[1].leading_gap);
         assert_eq!(
             slots[2].sizing,
             DockSlotSizing::Fixed(TIME_SALES_PANEL_WIDTH)
         );
-        assert!(slots[2].leading_border);
+        assert!(slots[2].leading_gap);
         assert_eq!(slots[3].sizing, DockSlotSizing::Grow(0.6));
-        assert!(slots[3].split_before && !slots[3].leading_border);
+        assert!(slots[3].split_before && !slots[3].leading_gap);
 
         let tape_and_watchlist =
             dock_slots(visible(&[SidePanel::TimeSales, SidePanel::Watchlist]), None);
         assert_eq!(tape_and_watchlist[1].sizing, DockSlotSizing::Grow(1.0));
-        assert!(tape_and_watchlist[1].leading_border && !tape_and_watchlist[1].split_before);
+        assert!(tape_and_watchlist[1].leading_gap && !tape_and_watchlist[1].split_before);
     }
 
     #[test]

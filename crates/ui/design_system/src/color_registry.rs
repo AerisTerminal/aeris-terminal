@@ -9,6 +9,8 @@ macro_rules! platform_color_registry {
         $expand! {
             surface => "surface",
             surface_secondary => "surface-secondary",
+            /// The workspace backdrop that shows through the gaps between docked panels.
+            surface_backdrop => "surface-backdrop",
             /// Floating-layer fill. Aeris declares it; presets fall back to `surface-secondary`.
             surface_popover => "surface-popover",
             border => "border",
