@@ -851,6 +851,11 @@ design-system build rejects it in any other block, and presets resolve it to the
 (`surface-secondary`, `border-secondary`, transparent). They are platform-only: `crates/ui/chart_integration` projects a non-default
 preset onto Aeris Charts through its existing appearance and options APIs, and Aeris Charts never
 receives a preset identity and keeps its own default theme.
+`--surface-backdrop` is the workspace page backdrop: every theme block, presets included, carries
+its own value, and it paints only the page background behind the workspace panel gaps and the
+rounded panel corner rings (`terminal_view.rs`, `theme.rs`), never a component fill. The website
+mirror declares it for parity and never uses it, and chart integration never projects it onto Aeris
+Charts.
 The color choices (`--swatch-*` picker swatches, `--swatch-default` and `--session-plan-level`) are
 Aeris-owned, not Theme System palette entries. A user's choice is stored as its value, so they are
 declared once in their own `:root` block and the build rejects them in `.dark` and every preset.

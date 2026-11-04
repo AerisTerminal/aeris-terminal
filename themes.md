@@ -2,6 +2,8 @@
 
 Every Theme Studio theme in one place: the default Aeris theme plus eight presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme. The one exception is the popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`), which only Aeris defines.
 
+The surfaces come in three layers: `--surface` for pages and panels, `--surface-secondary` for subtle fills, and `--surface-backdrop` for the page backdrop that shows through the gaps between workspace panels. The backdrop belongs to the native desktop platform: web pages use `--surface` as their page background and never read `--surface-backdrop`.
+
 ## How to use
 
 1. Copy the CSS blocks below into one stylesheet, **in the order shown**. Aeris comes first because it is the fallback when no preset is selected.
@@ -178,7 +180,7 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
   /* Surfaces */
   --surface: #171717;
   --surface-secondary: #fafafa0f;
-  --surface-backdrop: #0a0a0a;
+  --surface-backdrop: #2a2a2a;
 
   /* Borders */
   --border: #fafafa1a;
@@ -429,7 +431,7 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   /* Surfaces */
   --surface: #000000;
   --surface-secondary: #171717;
-  --surface-backdrop: #1f1f1f;
+  --surface-backdrop: #262626;
 
   /* Borders */
   --border: #2c2c2c;

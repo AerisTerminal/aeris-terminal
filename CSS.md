@@ -34,6 +34,10 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `border-secondary`, exactly as CSS reads them with fallbacks. The outer edge is a solid ring,
   not a cast shadow; no floating layer casts a shadow. Menus, dropdowns, select menus, dialogs,
   the color picker and the large workspace panels use `--radius-compact` (`RadiusToken::Compact`).
+- The workspace page background is `surface-backdrop`: it paints the gaps between panels and the
+  corner ring of rounded panel corners, and nothing else. Panels, cards, fields and floating layers
+  keep their own surface fills; never use `surface-backdrop` as a component fill. The website mirror
+  declares the token for parity but never uses it, and Aeris Charts never receives it.
 - Tooltips (`terminal_ui::tooltip`) use the same popover look: `surface-popover`, the
   `border-popover-highlight` / `border-popover` edges and `text-default`. A one-line
   label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
@@ -299,7 +303,7 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   /* Surfaces */
   --surface: #171717;
   --surface-secondary: #fafafa0f;
-  --surface-backdrop: #0a0a0a;
+  --surface-backdrop: #2a2a2a;
 
   /* Borders */
   --border: #fafafa1a;
