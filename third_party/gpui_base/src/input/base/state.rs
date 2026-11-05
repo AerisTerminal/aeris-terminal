@@ -7,7 +7,7 @@ use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
+    Pixels, Point, Render, ScrollEvent, ScrollHandle, SharedString, Styled as _, Subscription,
     UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
 };
 use ropey::{Rope, RopeSlice};
@@ -150,8 +150,18 @@ pub(crate) fn init(cx: &mut App) {
             },
             Some(CONTEXT),
         ),
+        #[cfg(target_os = "macos")]
         KeyBinding::new(
-            "secondary-enter",
+            "cmd-enter",
+            Enter {
+                secondary: true,
+                shift: false,
+            },
+            Some(CONTEXT),
+        ),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new(
+            "ctrl-enter",
             Enter {
                 secondary: true,
                 shift: false,
@@ -1400,7 +1410,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     pub(super) fn on_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2573,7 +2583,7 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
                 MouseButton::Right,
                 window.listener_for(&entity, InputBaseState::on_mouse_up),
             )
-            .on_scroll_wheel(window.listener_for(&entity, InputBaseState::on_scroll_wheel))
+            .on_scroll(window.listener_for(&entity, InputBaseState::on_scroll_wheel))
             .when(!self.disabled, |this| this.cursor_text())
             .flex_1()
             .when(self.is_multi_line(), |this| this.h_full())

@@ -92,23 +92,14 @@ schemars = "=1.2.2"
 smallvec = "=1.16.2"
 sum-tree = { version = "=0.2.0", package = "zed-sum-tree" }
 unicode-segmentation = "=1.13.3"
-gpui = { git = "https://github.com/AerisTerminal/zed", rev = "ed1eb21a4016254db5a342d4f1f9eb6ec4a5d6a2", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
-gpui_platform = { git = "https://github.com/AerisTerminal/zed", rev = "ed1eb21a4016254db5a342d4f1f9eb6ec4a5d6a2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "c7bea343838f42b4c14151393e41f0bbe033c95e", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c7bea343838f42b4c14151393e41f0bbe033c95e", default-features = false, features = ["font-kit", "wayland", "x11"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "147757468165a1a9d62f8c0ce2c121e27ee3278f", version = "=0.3.0" }
-aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "147757468165a1a9d62f8c0ce2c121e27ee3278f", version = "=0.3.0" }
-aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "147757468165a1a9d62f8c0ce2c121e27ee3278f", version = "=0.3.0" }
-aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "147757468165a1a9d62f8c0ce2c121e27ee3278f", version = "=0.3.0", features = ["gpui-backend"] }
-aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "147757468165a1a9d62f8c0ce2c121e27ee3278f", version = "=0.3.0" }
-
-# Aeris Charts pins `gpui = 0.2.2` from crates.io and from the upstream Zed Git source; replace
-# both with the exact same reviewed fork revision used by the desktop so GPUI types cannot split
-# across sources. See "GPUI fork" in AGENTS.md before changing any of the four revisions.
-[patch.crates-io]
-gpui = { git = "https://github.com/AerisTerminal/zed", rev = "ed1eb21a4016254db5a342d4f1f9eb6ec4a5d6a2", version = "=0.2.2" }
-
-[patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/AerisTerminal/zed", rev = "ed1eb21a4016254db5a342d4f1f9eb6ec4a5d6a2", version = "=0.2.2" }
+aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b1ca0f900f4707e3e5f8ef2a3b53ab00b2a22faf", version = "=0.3.0" }
+aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b1ca0f900f4707e3e5f8ef2a3b53ab00b2a22faf", version = "=0.3.0" }
+aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b1ca0f900f4707e3e5f8ef2a3b53ab00b2a22faf", version = "=0.3.0" }
+aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b1ca0f900f4707e3e5f8ef2a3b53ab00b2a22faf", version = "=0.3.0", features = ["gpui-backend"] }
+aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "b1ca0f900f4707e3e5f8ef2a3b53ab00b2a22faf", version = "=0.3.0" }
 
 [profile.release]
 codegen-units = 1

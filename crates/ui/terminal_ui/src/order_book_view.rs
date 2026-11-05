@@ -734,7 +734,7 @@ fn render_virtualized_ladder_list(
             },
         )
         .track_scroll(ladder_scroll)
-        .on_scroll_wheel(move |event, window, cx| {
+        .on_scroll(move |event, window, cx| {
             if event.delta.pixel_delta(window.line_height()).y != px(0.0) {
                 scroll_order_book.update(cx, |order_book, _| order_book.pause_auto_center());
             }
@@ -773,7 +773,7 @@ fn render_virtualized_ladder_list(
         },
     )
     .track_scroll(ladder_scroll)
-    .on_scroll_wheel(move |event, window, cx| {
+    .on_scroll(move |event, window, cx| {
         if event.delta.pixel_delta(window.line_height()).y != px(0.0) {
             fallback_scroll_order_book.update(cx, |order_book, _| order_book.pause_auto_center());
         }

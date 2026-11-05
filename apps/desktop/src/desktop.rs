@@ -6283,7 +6283,7 @@ fn command_key_action(
 
 /// Builds every desktop key binding from the command registry after checking it, and the
 /// workspace shortcuts, against the system shortcuts and the keys the chart consumes.
-fn desktop_key_bindings() -> Result<Vec<KeyBinding>, String> {
+fn desktop_key_bindings(cx: &App) -> Result<Vec<KeyBinding>, String> {
     use aeris_desktop::command_registry::{COMMANDS, WORKSPACE_SHORTCUTS, validate_chords};
     validate_chords(
         COMMANDS,
@@ -6295,15 +6295,8 @@ fn desktop_key_bindings() -> Result<Vec<KeyBinding>, String> {
         let action = command_key_action(spec.id)
             .ok_or_else(|| format!("{} has a shortcut but no key action", spec.title))?;
         for chord in spec.chords {
-            let binding = KeyBinding::load(
-                chord,
-                action.boxed_clone(),
-                None,
-                false,
-                None,
-                &gpui::DummyKeyboardMapper,
-            )
-            .map_err(|error| format!("{} chord {chord}: {error}", spec.title))?;
+            let binding = KeyBinding::load(chord, action.boxed_clone(), None, false, None, cx)
+                .map_err(|error| format!("{} chord {chord}: {error}", spec.title))?;
             bindings.push(binding);
         }
     }
@@ -6311,7 +6304,8 @@ fn desktop_key_bindings() -> Result<Vec<KeyBinding>, String> {
 }
 
 fn bind_desktop_keys(cx: &mut App) -> Result<(), String> {
-    cx.bind_keys(desktop_key_bindings()?);
+    let bindings = desktop_key_bindings(cx)?;
+    cx.bind_keys(bindings);
     Ok(())
 }
 #[cfg(test)]

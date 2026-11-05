@@ -752,43 +752,25 @@ Chart behavior is owned by Aeris Charts, never re-implemented here:
 - After bumping Aeris Charts, check for engine capabilities Terminal is not yet using (for example a new
   controller behavior or host request) instead of assuming the pin bump alone delivered them.
 
-## GPUI fork
+## GPUI
 
-GPUI comes only from the Aeris fork `https://github.com/AerisTerminal/zed`, never directly from
-upstream `zed-industries/zed` or crates.io. `Cargo.toml` names one fork revision four times: the
-`gpui` and `gpui_platform` workspace dependencies, and the `gpui` entries under `[patch.crates-io]`
-and `[patch."https://github.com/zed-industries/zed"]`. Aeris Charts declares GPUI from both of those
-sources, and the two patches keep exactly one GPUI in the build. All four entries carry the same
-revision, and `Cargo.lock` holds no `zed-industries/zed` source.
+GPUI comes only from upstream Zed, `https://github.com/zed-industries/zed`, at one exact
+revision (currently `c7bea343`), never from crates.io or a fork. `Cargo.toml` names that revision
+twice, on the `gpui` and `gpui_platform` workspace dependencies, and Aeris Charts pins the same
+revision in `aeris_charts_render_gpui`. Because both repositories name the identical Git source and
+revision, Cargo resolves exactly one GPUI without any `[patch]` table; a mismatch splits GPUI types
+across two sources and fails to compile.
 
-The fork is a liability we carry deliberately, so keep it small and easy to rebase:
-
-- The fork's `aeris-patches` branch is upstream Zed at a chosen revision plus only the commits Aeris
-  needs. Every pinned revision also has an `aeris-pin-<short rev>` tag, so older Aeris commits keep
-  building after the branch moves on. Current series, on upstream `56934ec0`, pinned at `ed1eb21a`:
-  1. `gpui_windows: Match Chromium text weight on Windows`: glyphs apply DirectWrite enhanced
-     contrast at every text brightness (upstream scales it to zero for light text), and the
-     enhanced contrast is floored at 1.0. Upstream discussion: zed-industries/zed#66484.
-  2. `gpui_windows: Draw SVG masks with their exact coverage`: `MonochromeSprite.pad` becomes
-     `is_glyph`, and the Windows shader applies the text contrast and gamma correction only to font
-     glyphs. Upstream pull request: zed-industries/zed#66483.
-  3. `gpui: Snap hard shadow edges to their element's device pixels`: box shadows offset and
-     dilate the element's snapped bounds by whole device pixels, so a 1px spread ring stays as
-     wide as the element's 1px border at fractional scale factors. Not yet proposed upstream.
-- A fork commit must be a change Zed itself could merge: titled in Zed's `crate: Description` style,
-  with no Aeris names, product code or measurement programs. Product behavior stays in this
-  repository.
-- Updating GPUI is its own task, never a side effect of another change. Tag the current pin if it has
-  no tag yet, rebase `aeris-patches` onto the new upstream revision, and drop any patch upstream has
-  merged. Resolve conflicts while keeping each commit's intent, then push the branch and tag the new
-  head. Next, change all four revisions in `Cargo.toml` together and run `cargo update -p gpui` so the
-  lockfile moves with them. Run the full gates and a release build that renders correctly on Windows.
-  The patches change the shared `MonochromeSprite` layout, so build macOS through the preview lane
-  before a release.
-- Never delete an `aeris-pin-*` tag or force-push over a revision that a pushed Aeris commit pins.
-- When upstream has merged every patch, point the dependencies and the crates.io patch back at
-  upstream Zed, delete the `[patch."https://github.com/zed-industries/zed"]` table, and update this
-  section.
+- Updating GPUI is its own task, never a side effect of another change. Move Aeris Charts first:
+  change its GPUI revisions, run `cargo update -p gpui -p gpui_platform`, adapt to upstream API
+  changes, pass its gates (including the GPUI tests and pixel-parity harness) and push it. Then
+  change both revisions here together with the `aeris_charts_*` revisions, run
+  `cargo update -p gpui -p gpui_platform` so the lockfile moves with them, run the full gates and a
+  release build that renders correctly on Windows, and build macOS through the preview lane before a
+  release.
+- Rendering fixes Aeris needs from GPUI are proposed upstream as changes Zed itself could merge;
+  product behavior stays in this repository. Do not reintroduce a fork or a `[patch]` redirect to
+  carry them.
 
 ## Authentication and website coordination
 

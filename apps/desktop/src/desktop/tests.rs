@@ -2225,7 +2225,7 @@ mod timeframe_input {
         let confirming = |cx: &mut VisualTestContext| {
             cx.read(|cx| terminal.read(cx).keyboard_trading.confirming())
         };
-        let release = |cx: &mut VisualTestContext, key: &str| {
+        let release = |cx: &mut VisualTestContext, key: &'static str| {
             cx.simulate_event(gpui::KeyUpEvent {
                 keystroke: gpui::Keystroke::parse(key).expect("key"),
             });
@@ -4618,10 +4618,12 @@ fn escape_exits_fullscreen_without_stealing_regular_escape() {
     assert_eq!(fullscreen_escape_command("enter", true), None);
 }
 
-#[test]
-fn ctrl_s_saves_the_layout_and_ctrl_shift_s_sells_at_market() {
-    let bindings = desktop_key_bindings().expect("the registry shortcuts bind");
-    let actions = |chord: &str| {
+#[gpui::test]
+fn ctrl_s_saves_the_layout_and_ctrl_shift_s_sells_at_market(cx: &mut gpui::TestAppContext) {
+    let bindings = cx
+        .update(|cx| desktop_key_bindings(cx))
+        .expect("the registry shortcuts bind");
+    let actions = |chord: &'static str| {
         let typed = [gpui::Keystroke::parse(chord).expect("chord")];
         bindings
             .iter()
@@ -4639,9 +4641,11 @@ fn ctrl_s_saves_the_layout_and_ctrl_shift_s_sells_at_market() {
     );
 }
 
-#[test]
-fn every_registry_shortcut_binds_and_stays_off_the_chart_keys() {
-    let bindings = desktop_key_bindings().expect("the registry shortcuts bind");
+#[gpui::test]
+fn every_registry_shortcut_binds_and_stays_off_the_chart_keys(cx: &mut gpui::TestAppContext) {
+    let bindings = cx
+        .update(|cx| desktop_key_bindings(cx))
+        .expect("the registry shortcuts bind");
     let chord_count = aeris_desktop::command_registry::COMMANDS
         .iter()
         .map(|spec| spec.chords.len())

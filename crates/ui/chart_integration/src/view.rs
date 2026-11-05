@@ -52,8 +52,8 @@ use aeris_localization::{chart_ui, tr};
 use aeris_observability::diagnostic;
 use gpui::{
     AnyView, App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba,
-    ScrollWheelEvent, SharedString, Task, Window, canvas, div, prelude::*, px,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, ScrollEvent,
+    SharedString, Task, Window, canvas, div, prelude::*, px,
 };
 use num_traits::ToPrimitive;
 use order_flow::{OrderFlowChartState, OrderFlowStudy};
@@ -2699,7 +2699,7 @@ impl Render for AerisChartView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_scroll(cx.listener(Self::on_scroll_wheel))
             .on_pinch(cx.listener(Self::on_pinch))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))

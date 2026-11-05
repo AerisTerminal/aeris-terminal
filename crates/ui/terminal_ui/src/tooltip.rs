@@ -390,7 +390,7 @@ where
         .capture_any_mouse_down(move |_, _, cx| {
             press.update(cx, TooltipState::dismiss);
         })
-        .on_scroll_wheel(move |_, _, cx| {
+        .on_scroll(move |_, _, cx| {
             state.update(cx, TooltipState::dismiss);
         })
         .child(

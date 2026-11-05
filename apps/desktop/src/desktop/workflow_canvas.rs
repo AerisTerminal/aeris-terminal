@@ -27,7 +27,7 @@ use aeris_trading_runtime::{
 };
 use gpui::{
     Bounds, ClickEvent, DispatchPhase, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Point, ScrollWheelEvent, fill, size,
+    Point, ScrollEvent, fill, size,
 };
 
 const SIDEBAR_WIDTH: f32 = 264.0;
@@ -1300,11 +1300,11 @@ fn board(
                 });
             },
         )
-        .on_scroll_wheel(move |event: &ScrollWheelEvent, window, cx| {
+        .on_scroll(move |event: &ScrollEvent, window, cx| {
             let at = local_point(event.position, origin.get());
             let delta = event.delta.pixel_delta(window.line_height());
             let delta = BoardPoint::new(f32::from(delta.x), f32::from(delta.y));
-            let zoom = event.modifiers.secondary();
+            let zoom = event.modifiers.secondary(cx);
             wheel.update(cx, |terminal, terminal_cx| {
                 terminal.workflow_wheel(at, delta, zoom, terminal_cx);
             });

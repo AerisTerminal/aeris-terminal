@@ -4,7 +4,7 @@
 use super::{
     AerisChartView, ChartContextKind, ChartContextRequest, ChartHostEvent, ChartSettingsRequest,
     Context, KeyDownEvent, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PointerInteractionState, ScrollWheelEvent, SelectionRemoval, SharedString, Window, px,
+    PointerInteractionState, ScrollEvent, SelectionRemoval, SharedString, Window, px,
 };
 use aeris_charts_engine::{ChartContextMenu, ChartInputEvent, ChartRegion, PriceScaleTarget};
 use aeris_charts_render_gpui::input::cursor_style;
@@ -244,7 +244,7 @@ impl AerisChartView {
 
     pub(super) fn on_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
