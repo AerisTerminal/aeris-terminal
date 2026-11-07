@@ -2221,8 +2221,7 @@ mod tests {
     fn workspace_file_round_trip_keeps_valid_saved_scans_and_drops_invalid_ones() {
         use aeris_contracts::{
             WorkspaceScanComparison, WorkspaceScanConditionState, WorkspaceScanMatchMode,
-            WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScanTimeframe,
-            WorkspaceScreenerScanState,
+            WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScreenerScanState,
         };
         let operand = |kind: WorkspaceScanOperandKind, period: u32| WorkspaceScanOperandState {
             kind: kind as i32,
@@ -2231,7 +2230,7 @@ mod tests {
         };
         let scan = |name: &str, period: u32| WorkspaceScreenerScanState {
             name: name.to_string(),
-            timeframe: WorkspaceScanTimeframe::Day1 as i32,
+            interval: "1D".to_string(),
             match_mode: WorkspaceScanMatchMode::All as i32,
             universe_limit: 100,
             conditions: vec![WorkspaceScanConditionState {

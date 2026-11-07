@@ -43,7 +43,7 @@ pub use scan::{
     MAXIMUM_SCAN_PERIOD, MAXIMUM_SCAN_RESULTS, MAXIMUM_SCAN_UNIVERSE, ProviderMarketScan,
     ProviderMarketScanMatch, ScanBand, ScanComparison, ScanCondition, ScanConditionValues,
     ScanDefinition, ScanDefinitionError, ScanIndicator, ScanMacdLine, ScanMatchMode, ScanNumber,
-    ScanOperand, ScanPriceField, ScanProgress, ScanProviderMarkets, ScanTimeframe,
+    ScanOperand, ScanPriceField, ScanProgress, ScanProviderMarkets,
 };
 pub use status::{
     EngineFaultCode, FailureStage, Fault, MarketSessionPhase, MarketSessionSource,

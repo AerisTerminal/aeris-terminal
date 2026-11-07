@@ -8,11 +8,11 @@ use std::collections::BTreeSet;
 use aeris_contracts::{
     WorkspaceScanBand, WorkspaceScanComparison, WorkspaceScanConditionState, WorkspaceScanMacdLine,
     WorkspaceScanMatchMode, WorkspaceScanOperandKind, WorkspaceScanOperandState,
-    WorkspaceScanTimeframe, WorkspaceScreenerScanState,
+    WorkspaceScreenerScanState,
 };
 use aeris_market_runtime::{
     MAXIMUM_SCAN_UNIVERSE, ScanBand, ScanComparison, ScanCondition, ScanDefinition, ScanIndicator,
-    ScanMacdLine, ScanMatchMode, ScanNumber, ScanOperand, ScanPriceField, ScanTimeframe,
+    ScanMacdLine, ScanMatchMode, ScanNumber, ScanOperand, ScanPriceField, persisted_interval,
 };
 
 pub(super) const MAXIMUM_SAVED_SCANS: usize = 64;
@@ -45,7 +45,7 @@ impl SavedScan {
             return None;
         }
         let definition = ScanDefinition {
-            timeframe: timeframe(WorkspaceScanTimeframe::try_from(state.timeframe).ok()?)?,
+            timeframe: persisted_interval(&state.interval)?,
             match_mode: match_mode(WorkspaceScanMatchMode::try_from(state.match_mode).ok()?)?,
             conditions: state
                 .conditions
@@ -64,7 +64,7 @@ impl SavedScan {
     pub(super) fn to_state(&self) -> WorkspaceScreenerScanState {
         WorkspaceScreenerScanState {
             name: self.name.clone(),
-            timeframe: timeframe_state(self.definition.timeframe) as i32,
+            interval: self.definition.timeframe.label().to_string(),
             match_mode: match_mode_state(self.definition.match_mode) as i32,
             universe_limit: self.universe_limit,
             conditions: self
@@ -98,27 +98,6 @@ pub(super) fn sanitize_saved_scans(
         .iter()
         .map(SavedScan::to_state)
         .collect()
-}
-
-const fn timeframe(state: WorkspaceScanTimeframe) -> Option<ScanTimeframe> {
-    Some(match state {
-        WorkspaceScanTimeframe::Unspecified => return None,
-        WorkspaceScanTimeframe::Minutes15 => ScanTimeframe::Minutes15,
-        WorkspaceScanTimeframe::Hour1 => ScanTimeframe::Hour1,
-        WorkspaceScanTimeframe::Hour4 => ScanTimeframe::Hour4,
-        WorkspaceScanTimeframe::Day1 => ScanTimeframe::Day1,
-        WorkspaceScanTimeframe::Week1 => ScanTimeframe::Week1,
-    })
-}
-
-const fn timeframe_state(timeframe: ScanTimeframe) -> WorkspaceScanTimeframe {
-    match timeframe {
-        ScanTimeframe::Minutes15 => WorkspaceScanTimeframe::Minutes15,
-        ScanTimeframe::Hour1 => WorkspaceScanTimeframe::Hour1,
-        ScanTimeframe::Hour4 => WorkspaceScanTimeframe::Hour4,
-        ScanTimeframe::Day1 => WorkspaceScanTimeframe::Day1,
-        ScanTimeframe::Week1 => WorkspaceScanTimeframe::Week1,
-    }
 }
 
 const fn match_mode(state: WorkspaceScanMatchMode) -> Option<ScanMatchMode> {
@@ -306,6 +285,7 @@ fn operand_state(operand: ScanOperand) -> WorkspaceScanOperandState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_market_data::ChartInterval;
 
     const CLOSE: ScanOperand = ScanOperand::Price(ScanPriceField::Close);
 
@@ -326,7 +306,7 @@ mod tests {
         SavedScan {
             name: name.to_string(),
             definition: ScanDefinition {
-                timeframe: ScanTimeframe::Hour4,
+                timeframe: ChartInterval::Hour4,
                 match_mode: ScanMatchMode::Any,
                 conditions,
             },
@@ -414,7 +394,7 @@ mod tests {
             "Comparisons",
             comparisons.into_iter().chain([between]).collect(),
         );
-        for timeframe in ScanTimeframe::ALL {
+        for timeframe in ChartInterval::ALL {
             saved.definition.timeframe = timeframe;
             for mode in [ScanMatchMode::All, ScanMatchMode::Any] {
                 saved.definition.match_mode = mode;
@@ -429,8 +409,10 @@ mod tests {
     #[test]
     fn an_unknown_or_missing_value_makes_only_that_scan_invalid() {
         let valid = scan("Valid", vec![above(CLOSE, number(1, 0))]).to_state();
-        let mut unknown_timeframe = valid.clone();
-        unknown_timeframe.timeframe = 99;
+        let mut unknown_interval = valid.clone();
+        unknown_interval.interval = "7h".to_string();
+        let mut missing_interval = valid.clone();
+        missing_interval.interval.clear();
         let mut unspecified_mode = valid.clone();
         unspecified_mode.match_mode = WorkspaceScanMatchMode::Unspecified as i32;
         let mut unknown_operand = valid.clone();
@@ -459,7 +441,8 @@ mod tests {
             .expect("left")
             .macd_line = 7;
         for invalid in [
-            unknown_timeframe,
+            unknown_interval,
+            missing_interval,
             unspecified_mode,
             unknown_operand,
             missing_right,

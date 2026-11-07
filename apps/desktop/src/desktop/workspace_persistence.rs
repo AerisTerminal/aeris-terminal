@@ -682,7 +682,7 @@ mod tests {
         };
         let scan = aeris_contracts::WorkspaceScreenerScanState {
             name: "Oversold".to_string(),
-            timeframe: aeris_contracts::WorkspaceScanTimeframe::Hour4 as i32,
+            interval: "4h".to_string(),
             match_mode: aeris_contracts::WorkspaceScanMatchMode::All as i32,
             universe_limit: 200,
             conditions: vec![aeris_contracts::WorkspaceScanConditionState {

@@ -34,7 +34,7 @@ use aeris_hyperliquid_market_adapter::{
     HyperliquidLiveCandle, WsClientEvent, decode_book_snapshot, decode_live_candle,
     decode_trades_batch, fetch_meta_bundle, parse_ws_frame,
 };
-use aeris_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
+use aeris_market_data::{BarPeriod, DepthSnapshot, MarketTrade, TopOfBookQuote};
 use aeris_market_engine::fence::{Fenced, ProviderTag};
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
@@ -122,7 +122,11 @@ pub(crate) enum HyperliquidCatalogControl {
     Search(SearchProviderInstruments),
     Select(SelectProviderInstrument),
     Screen(ScreenProviderMarkets),
-    Scan(ScanProviderMarkets),
+    /// A scan with its interval already resolved to an offered bar period.
+    Scan {
+        scan: ScanProviderMarkets,
+        period: BarPeriod,
+    },
 }
 
 pub(crate) enum HyperliquidCatalogEvent {
@@ -280,8 +284,8 @@ fn handle_catalog_control(
         HyperliquidCatalogControl::Screen(screen) => {
             handle_catalog_screen(&screen, catalog, events, stop, http_config)
         }
-        HyperliquidCatalogControl::Scan(scan) => {
-            handle_catalog_scan(scan, catalog, events, scan_jobs, stop, http_config)
+        HyperliquidCatalogControl::Scan { scan, period } => {
+            handle_catalog_scan(scan, period, catalog, events, scan_jobs, stop, http_config)
         }
     }
 }
@@ -290,6 +294,7 @@ fn handle_catalog_control(
 /// universe. Returns true when the worker must exit.
 fn handle_catalog_scan(
     scan: ScanProviderMarkets,
+    period: BarPeriod,
     catalog: &mut CatalogState,
     events: &CatalogPublisher<HyperliquidCatalogEvent>,
     scan_jobs: &SyncSender<HyperliquidScanJob>,
@@ -327,6 +332,7 @@ fn handle_catalog_scan(
     };
     let job = HyperliquidScanJob {
         request: scan,
+        period,
         provider_generation: catalog.epoch.max(1),
         universe,
     };

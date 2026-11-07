@@ -70,7 +70,17 @@ fn dispatch_hyperliquid_catalog(
         ProviderCatalogCommand::Search(value) => HyperliquidCatalogControl::Search(value),
         ProviderCatalogCommand::Select(value) => HyperliquidCatalogControl::Select(value),
         ProviderCatalogCommand::Screen(value) => HyperliquidCatalogControl::Screen(value),
-        ProviderCatalogCommand::Scan(value) => HyperliquidCatalogControl::Scan(value),
+        ProviderCatalogCommand::Scan(scan) => {
+            let interval = scan.definition.timeframe;
+            // Every Hyperliquid market trades around the clock.
+            let period = crate::resolve_cadence(
+                interval,
+                &super::HYPERLIQUID_PRESENTATION,
+                aeris_instruments::CalendarSourceKind::AlwaysOpen,
+            )
+            .map_err(|_| format!("{provider} does not offer a {interval} market scan"))?;
+            HyperliquidCatalogControl::Scan { scan, period }
+        }
     };
     try_send_hyperliquid_catalog(controls, control, provider)
 }
@@ -1802,15 +1812,25 @@ mod tests {
             hyperliquid_rx.try_recv(),
             Ok(HyperliquidCatalogControl::Screen(_))
         ));
+        let mut unoffered = ScanProviderMarkets::default();
+        unoffered.definition.timeframe = aeris_market_data::ChartInterval::Second5;
+        assert!(
+            hyperliquid
+                .send("hyperliquid", ProviderCatalogCommand::Scan(unoffered))
+                .is_err(),
+            "an interval the provider does not offer is refused before dispatch"
+        );
+        let mut weekly = ScanProviderMarkets::default();
+        weekly.definition.timeframe = aeris_market_data::ChartInterval::Week1;
         hyperliquid
-            .send(
-                "hyperliquid",
-                ProviderCatalogCommand::Scan(ScanProviderMarkets::default()),
-            )
+            .send("hyperliquid", ProviderCatalogCommand::Scan(weekly))
             .expect("public provider supports market scans");
         assert!(matches!(
             hyperliquid_rx.try_recv(),
-            Ok(HyperliquidCatalogControl::Scan(_))
+            Ok(HyperliquidCatalogControl::Scan {
+                period: aeris_market_data::BarPeriod::Week { weeks: 1 },
+                ..
+            })
         ));
     }
 

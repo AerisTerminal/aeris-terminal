@@ -85,18 +85,6 @@ pub enum WorkspaceStudyMarketStream {
     Depth = 4,
 }
 
-/// Persisted market-scan bar timeframe. Zero is never written, so an absent value is invalid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
-#[repr(i32)]
-pub enum WorkspaceScanTimeframe {
-    Unspecified = 0,
-    Minutes15 = 1,
-    Hour1 = 2,
-    Hour4 = 3,
-    Day1 = 4,
-    Week1 = 5,
-}
-
 /// Persisted market-scan match mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
 #[repr(i32)]
@@ -219,14 +207,18 @@ pub struct WorkspaceState {
     pub screener_scans: Vec<WorkspaceScreenerScanState>,
 }
 
-/// One user-named saved screener scan: conditions over one timeframe, evaluated across the
-/// most traded markets of the scanning provider.
+/// One user-named saved screener scan: conditions over one chart interval, evaluated across
+/// the most traded markets of the scanning provider.
+///
+/// Tag 2 held a five-value timeframe enumeration in builds that never shipped; it is retired,
+/// so a scan written with it reads without an interval and is dropped.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct WorkspaceScreenerScanState {
     #[prost(string, tag = "1")]
     pub name: String,
-    #[prost(enumeration = "WorkspaceScanTimeframe", tag = "2")]
-    pub timeframe: i32,
+    /// The chart interval label (`15m`, `1D`), the stable form a chart pane stores.
+    #[prost(string, tag = "6")]
+    pub interval: String,
     #[prost(enumeration = "WorkspaceScanMatchMode", tag = "3")]
     pub match_mode: i32,
     /// How many of the most traded markets the scan covers.

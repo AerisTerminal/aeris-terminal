@@ -7,7 +7,7 @@
 //! over the same bars. Evaluation is pure: providers fetch bars, this module decides matches.
 
 use aeris_charts_indicators as indicators;
-use aeris_market_data::{BarPeriod, ChartInterval, MarketBar};
+use aeris_market_data::{ChartInterval, MarketBar};
 
 use crate::ProviderInstrumentSummary;
 
@@ -31,51 +31,6 @@ const MINIMUM_SCAN_HISTORY_BARS: usize = 100;
 const RECURSIVE_WARMUP_PERIODS: usize = 10;
 /// Largest Bollinger deviation, in tenths.
 const MAXIMUM_DEVIATION_TENTHS: u16 = 100;
-
-/// Bar timeframe a scan evaluates.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ScanTimeframe {
-    Minutes15,
-    Hour1,
-    Hour4,
-    #[default]
-    Day1,
-    Week1,
-}
-
-impl ScanTimeframe {
-    pub const ALL: [Self; 5] = [
-        Self::Minutes15,
-        Self::Hour1,
-        Self::Hour4,
-        Self::Day1,
-        Self::Week1,
-    ];
-
-    /// Canonical bar period of this timeframe.
-    #[must_use]
-    pub const fn bar_period(self) -> BarPeriod {
-        match self {
-            Self::Minutes15 => BarPeriod::Time { seconds: 900 },
-            Self::Hour1 => BarPeriod::Time { seconds: 3_600 },
-            Self::Hour4 => BarPeriod::Time { seconds: 14_400 },
-            Self::Day1 => BarPeriod::Time { seconds: 86_400 },
-            Self::Week1 => BarPeriod::Week { weeks: 1 },
-        }
-    }
-
-    /// The chart interval that shows the same bars.
-    #[must_use]
-    pub const fn chart_interval(self) -> ChartInterval {
-        match self {
-            Self::Minutes15 => ChartInterval::Minute15,
-            Self::Hour1 => ChartInterval::Hour1,
-            Self::Hour4 => ChartInterval::Hour4,
-            Self::Day1 => ChartInterval::Day1,
-            Self::Week1 => ChartInterval::Week1,
-        }
-    }
-}
 
 /// Whether every condition or any one condition must hold.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -251,12 +206,23 @@ pub struct ScanCondition {
     pub upper: Option<ScanOperand>,
 }
 
-/// A complete scan: conditions over one timeframe.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+/// A complete scan: conditions over one chart interval.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ScanDefinition {
-    pub timeframe: ScanTimeframe,
+    /// The bars every condition reads; a provider refuses an interval it does not offer.
+    pub timeframe: ChartInterval,
     pub match_mode: ScanMatchMode,
     pub conditions: Vec<ScanCondition>,
+}
+
+impl Default for ScanDefinition {
+    fn default() -> Self {
+        Self {
+            timeframe: ChartInterval::Day1,
+            match_mode: ScanMatchMode::default(),
+            conditions: Vec::new(),
+        }
+    }
 }
 
 /// Why a scan definition was refused.
@@ -735,7 +701,7 @@ mod tests {
 
     fn definition(conditions: Vec<ScanCondition>) -> ScanDefinition {
         ScanDefinition {
-            timeframe: ScanTimeframe::Day1,
+            timeframe: ChartInterval::Day1,
             match_mode: ScanMatchMode::All,
             conditions,
         }

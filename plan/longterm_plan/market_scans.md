@@ -12,6 +12,72 @@ Item IDs are stable: **S** checkpoints. A checkpoint is **Complete** only when i
 real runtime and desktop path on the installed app, not when a unit test alone passes.
 Status as of 2026-11-07.
 
+**Goal (maintainer, 2026-11-07):** scans reach TC2000 breadth: any formula, the full indicator
+library, every timeframe, real time across the whole market. Crypto proves it first, at full
+capability; nothing is held back because stock data is not signed yet. Everything stays
+provider-neutral so a stock provider (S7) plugs in without desktop or evaluator changes.
+
+## Where we stand against TC2000
+
+What we have (V1, pushed in `a1f44d0a` and `e5b1bef1`):
+
+- 17 operands: open, high, low, close, volume, change %, SMA, EMA, RSI, MACD (3 lines),
+  Bollinger (3 bands), ATR, ADX, relative volume, highest high and lowest low of N prior bars, and
+  a typed number.
+- 5 comparisons (above, below, crosses above, crosses below, between), up to 8 conditions, all or
+  any.
+- 5 timeframes (15m, 1h, 4h, 1D, 1W), one per scan.
+- Hyperliquid perps and spot, top 50 to 500 by volume, progressive results, a rescan 30 s after
+  each pass while the tab is shown, 64 saved scans, click to open on the scan's timeframe, the
+  compared value shown at the market's precision.
+
+Where we are strong (keep these as everything else grows):
+
+- **Same numbers as the chart.** One indicator library for charts and scans; the live spot check
+  matched exactly (closed bars) and within 0.004% (forming bar).
+- **Local and free.** No server, no subscription; bars come straight from the provider.
+- **Charts never starve.** Scans spend only the background share of the request budget (measured:
+  a chart loaded in 2.3 s mid-scan).
+- **Provider-neutral contract.** Definition, evaluator and results know no provider; a stock
+  provider needs only its own bar fetcher.
+- **Bounded and deterministic.** Every list, cache and queue has a bound; no model decides a match.
+- **One click to the chart** on the scan's timeframe.
+
+What we lack, compared with TC2000 (each gap maps to a checkpoint below):
+
+| Gap | TC2000 | Aeris today | Checkpoint |
+| --- | --- | --- | --- |
+| Timeframes | Every chart timeframe, plus custom | Every provider chart interval (14 on Hyperliquid) | S15 |
+| Indicators | Hundreds | 10 studies; the chart library already has 68 calculations and 61 studies | S10 |
+| Formulas | Personal Criteria Formulas: arithmetic, functions, bars ago | One operand per side | S11, S12 |
+| Condition logic | True for N bars, within N bars, nested and/or | Single bar, flat all/any | S13 |
+| Multi-timeframe | Conditions on different timeframes in one scan | One timeframe per scan | S13 |
+| Speed | Real time across the whole market | A 100-market pass takes about 3 minutes and repeats | S14 |
+| Universe | All US stocks and ETFs, lists, sectors | Top 500 Hyperliquid markets by volume | S14, S7 |
+| Market data fields | Fundamentals, earnings | None in scans (funding, open interest and 24 h volume exist on the Markets tab) | S16, S7 |
+| Results | Custom columns, sort by formula, watchlists, alerts | Fixed columns plus one value per condition | S17 |
+| Stocks | Yes | No; waits for a data partner | S7 |
+
+Key facts for this roadmap (checked 2026-11-07):
+
+- Hyperliquid candles (REST and WebSocket) exist for 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h,
+  1d, 3d, 1w and 1M (adapter `candles.rs` `hyperliquid_interval_for_period`), and every one maps
+  to a `ChartInterval`. `BarPeriod::validate` allows only these fixed periods, and the runtime
+  has no bar aggregation, so a custom timeframe such as 10m or 2D needs a new provider-neutral
+  aggregation step (S15).
+- Hyperliquid limits per IP address: 1,200 REST weight per minute (Aeris uses 1,000, scans 700),
+  10 WebSocket connections, 1,000 WebSocket subscriptions, 2,000 sent messages per minute.
+  `allMids` and `allDexsAssetCtxs` cover every market in one subscription. The runtime today
+  has one realtime socket per provider session with candle, trades, bbo and book subscriptions
+  only (`hyperliquid_realtime.rs` `SubscriptionKey`).
+- Aeris Charts (pinned `19633d6`) exports 68 indicator calculations from
+  `aeris_charts_indicators` and 61 built-in chart studies (`IndicatorKind`). There is no
+  formula or expression language anywhere (Aeris Charts or `study_sdk`); S11 and S12 build one
+  in `market_runtime::scan`.
+- No released version has scans yet (1.8.1 shipped without them). Everything added to the saved
+  scan format before the first scan release costs no compatibility; after it, each change must be
+  additive (new tags and enum values; an older build drops only a scan it cannot read).
+
 ## Why we are building it
 
 - **Users ask for it first.** A screener with indicator conditions is the first thing an active
@@ -66,6 +132,9 @@ The maintainer decided these on 2026-11-06. Do not reopen them without asking.
    - Timeframes: 15m, 1h, 4h, 1D, 1W.
    - Match all conditions or any condition.
    - Live results while the page is open, saved scans, and click a result to open its chart.
+4. **Beyond V1 (2026-11-07):** the maintainer asked for TC2000 breadth on crypto now, without
+   waiting for stock data. The V1 bounds and principles above still hold; S9 to S17 extend the
+   scope step by step.
 
 ## Architecture
 
@@ -119,12 +188,22 @@ Desktop Screener page (Scans tab)
 | S4 | Scan builder UI and results on the Screener page (10 languages) | **Complete** (unit-tested; not yet run on the installed app) |
 | S5 | Gates, real-path verification on the installed app, AGENTS.md invariant | **Complete** (UI follow-ups listed) |
 | S6 | Release, website copy and changelog | Open |
-| S7 | US stocks through a data partner (bulk daily bars) | Open; needs ThetaData or AlgoSeek |
-| S8 | Later operands: fundamentals, scan-on-scan, alerts from a scan | Open |
+| S7 | US stocks through a data partner (bulk daily bars), fundamentals | Open; needs ThetaData or AlgoSeek |
+| S8 | Small V1 follow-ups (typed adapter error, budget overshoot) | Open |
+| S9 | Every provider timeframe (14 on Hyperliquid) | **Complete** (live probe on 15m and 1W, installed app) |
+| S10 | The full chart indicator library as scan operands | Open; next |
+| S11 | Formula operands: arithmetic, bars ago, functions over any operand | Open |
+| S12 | Text formulas (a PCF-style language) with a parser and editor | Open |
+| S13 | Condition logic: true for N bars, within N bars, nested groups, per-condition timeframe | Open |
+| S14 | Real time across the whole market | Open |
+| S15 | Custom timeframes by aggregation (10m, 2D, ...) | Open |
+| S16 | Market fields as operands (funding, open interest, 24 h volume, mark/oracle premium) | Open |
+| S17 | Results: custom columns, sort by formula, scan on a list, watchlists, alerts | Open |
 
 ### S1 — Scan contract and evaluator
 
-- [x] `crates/market_runtime/src/scan.rs`: `ScanTimeframe` (with `bar_period()`), `ScanMatchMode`,
+- [x] `crates/market_runtime/src/scan.rs`: `ScanTimeframe` (with `bar_period()`; replaced by
+      `ChartInterval` in S9), `ScanMatchMode`,
       `ScanPriceField`, `ScanMacdLine`, `ScanBand`, `ScanIndicator`, `ScanNumber` (exact
       `units / 10^scale`), `ScanOperand`, `ScanComparison`, `ScanCondition`, `ScanDefinition` with
       `validate()` and `history_bars()`, `ScanProviderMarkets`, `ProviderMarketScanMatch`,
@@ -289,7 +368,7 @@ UI follow-ups seen on the installed app (fixed and checked on a release build):
       and every price-scale value in the row use it, at least two ("613.80" / "607.69",
       "0.004925" / "0.004684").
 - [x] Opening a result kept the pane's interval. It now opens on the scan's timeframe
-      (`ScanTimeframe::chart_interval`, nearest offered by the provider); a chart already showing
+      (the scan's `ChartInterval`, nearest offered by the provider); a chart already showing
       the market only changes timeframe. Panes synced to that pane follow the symbol; a new
       market's timeframe is not relayed with it.
 
@@ -319,14 +398,137 @@ WebSocket candle stream for the universe instead of re-fetching it.
 - [ ] Data licensing: confirm that displaying derived scan values locally is allowed under the
       partner agreement and exchange policies (AGENTS.md data licensing checklist).
 
-### S8 — Later
+- [ ] Fundamentals (market cap, sector, earnings) as operands once the partner supplies them,
+      through the same provider-neutral field operands as S16.
 
-- [ ] Fundamentals (market cap, sector) once a stock provider supplies them.
-- [ ] Scan on the results of another scan, and watchlists from results.
-- [ ] Alerts when a market newly enters a scan, through the existing notification feed.
-- [ ] Keep each universe market's forming bar current from the provider's WebSocket candle
-      stream after the first fetch (Hyperliquid allows far more subscriptions than a 100-market
-      universe needs), so live passes stop spending info weight. See the S5 finding.
+### S8 — Small V1 follow-ups
+
+- [ ] The typed adapter error and the post-response weight charge listed under S2.
+- [ ] Hyperliquid candle volume overflows for high-supply tokens on long bars. Volume is held at
+      the normalized quantity scale (8 places), so one bar holds at most about 92 billion units
+      (`i64::MAX / 10^8`). On 1W, PUMP, kPEPE and the spot market `@188` exceed it and the
+      adapter refuses the page ("market decimal value overflowed"); the scan counts them as
+      unavailable (3 of 100 on 2026-11-07), and charts read the same decoder at the same scale.
+      The durable fix is a per-market quantity scale from `szDecimals` (0 for these tokens),
+      which also touches instrument terms the trading store registers, so it is planned on its
+      own rather than inside a scan change.
+
+### S9 — Every provider timeframe
+
+- [x] `ScanTimeframe` is gone: `ScanDefinition.timeframe` is a `ChartInterval`, the interval
+      a chart uses, so every interval a provider publishes (on Hyperliquid 1m, 3m, 5m, 15m, 30m,
+      1h, 2h, 4h, 8h, 12h, 1D, 3D, 1W, 1M) is a scan timeframe, and opening a match needs no
+      mapping.
+- [x] The provider's catalog dispatch resolves the interval to its bar period through the one
+      `resolve_cadence` mapping and refuses an interval it does not offer before dispatch
+      ("hyperliquid does not offer a 5s market scan"); the scan job carries the resolved
+      `BarPeriod`, and the worker cache is keyed by it.
+- [x] The builder lists only the scanning provider's published chart intervals, labelled as the
+      chart toolbar labels them (`ChartInterval::label`, language-neutral), so the five
+      `scan_timeframe_*` label keys left all ten catalogs; `scan_timeframe_aria` stays.
+- [x] The worker's tail estimate uses the shortest span a bar of its period covers (a month
+      counts 28 days), so a tail request never passes one page; the history window already
+      handled every period.
+- [x] Persistence: saved scans store the interval label in `WorkspaceScreenerScanState.interval`
+      (tag 6), the form a chart pane stores. Tag 2, a five-value enumeration that no release
+      wrote, is retired; a scan saved with it decodes without an interval and is dropped alone.
+- [x] Unit tests: every offered interval has a history window and tail estimate, an intraday
+      tail refresh, the unoffered refusal and the weekly period at dispatch, the builder's
+      interval list, every interval round-tripping through persistence, and the retired tag.
+- [x] Live probe (`market_scan_probe --interval`, 100 markets, 2026-11-07): 15m cold pass
+      187 s and warm 233 s, 100 of 100 evaluated, chart history during the scan 2.7 s (baseline
+      2.1 s), ETH highest-high(20) equal to the chart and SMA(20) within the forming bar's move;
+      1W cold 184 s and warm 235 s, 97 evaluated and 3 unavailable (the volume overflow under
+      S8), chart history during the scan 1.8 s, the same ETH spot check passing. The unoffered 5s
+      interval was refused on both runs.
+- [x] Installed app (release build, validation root, 2026-11-07): the timeframe menu lists all
+      14 Hyperliquid intervals, a 15m scan streams its results, and opening a match shows its
+      chart on 15m.
+
+### S10 — The full indicator library
+
+- [ ] Replace the closed `ScanIndicator` list with a descriptor table: each study names its
+      parameters (kind, default, bounds), its outputs (one or several lines) and its inputs
+      (OHLCV), and calls its `aeris_charts_indicators` function. The evaluator, the builder
+      menus and persistence read the table, so adding a study is one table entry.
+- [ ] Every single-series calculation the library exports: moving averages (SMA, EMA, DEMA,
+      TEMA, SMMA/RMA, HMA, WMA, VWMA, KAMA, McGinley, ALMA, linear regression), oscillators
+      (RSI, MACD, stochastic, stochastic RSI, CCI, Williams %R, momentum, rate of change, Chande
+      momentum, DPO, awesome oscillator, Aroon, TRIX, KST, TSI, Fisher, ultimate oscillator,
+      Coppock), trend (ADX/DMI, parabolic SAR, SuperTrend, Ichimoku, vortex, choppiness, mass
+      index), volatility (ATR, standard deviation, historical volatility), bands and channels
+      (Bollinger and its %B/width, Donchian, Keltner, envelopes, ATR bands), volume (OBV,
+      accumulation/distribution, PVT, Chaikin, relative volume, Klinger, volume oscillator,
+      Elder force, ease of movement, CMF, MFI). Session-dependent studies (VWAP and its bands,
+      pivots, session levels) follow once their calendar input is wired.
+- [ ] Persisted as a study identifier plus parameter values, so new studies need no new message
+      fields. Grouped, searchable operand menu in the builder.
+- [ ] Each study checked against the chart's value on the same bars (unit tests on fixtures and
+      one live probe spot check per family).
+
+### S11 — Formula operands
+
+- [ ] An operand becomes a bounded expression tree: numbers, bar fields, studies, `+ - * /`,
+      unary minus, and functions over any operand: value N bars ago, average/sum/highest/lowest/
+      standard deviation over N bars, change and percent change over N bars, absolute value,
+      min/max of two operands. Examples: close > SMA(50) × 1.05; volume > 2 × average of volume
+      over 50 bars; RSI(14) 5 bars ago < 30.
+- [ ] Bounds: at most 64 nodes and depth 8 per expression; the history depth needed is the sum
+      of offsets and windows along the deepest path, capped at the scan history bound. Division
+      by zero and missing warm-up yield no value, never a match.
+- [ ] Builder: each side is a small formula editor (operand, then optional "× number",
+      "N bars ago", or a function wrapper), saved as the tree.
+
+### S12 — Text formulas
+
+- [ ] A PCF-style text language over the S11 tree (`C > AVGC50 * 1.05`, `RSI14.5 < 30` style
+      shorthand plus readable names such as `close > sma(50) * 1.05 and rsi(14)[5] < 30`), with a
+      hand-written parser that reports the position of every error, and a formatter that prints
+      any saved tree back to text.
+- [ ] A formula editor with inline errors; the builder and the text view edit the same tree.
+
+### S13 — Condition logic
+
+- [ ] Modifiers on any condition: true for N consecutive bars, true at least once within the last
+      N bars (crossed within N bars), rising or falling for N bars.
+- [ ] Nested all/any groups (bounded depth and total conditions).
+- [ ] A timeframe per condition (daily trend up and 1h RSI below 30), each market fetching every
+      timeframe the scan names.
+
+### S14 — Real time across the whole market
+
+- [ ] After a market's first fetch, keep its forming bar current from the provider's live candle
+      stream instead of re-fetching it: a scan-owned, bounded set of candle subscriptions on the
+      runtime's provider session (within Hyperliquid's 1,000 subscriptions, leaving room for
+      charts), re-evaluating only the markets that changed and publishing at most once per
+      second. A whole-market price feed (`allMids`) covers markets beyond the subscription
+      budget.
+- [ ] Universe choices up to every listed market (perps, spot and builder dexes), and a named
+      list (a watchlist) as the universe.
+- [ ] Measure: time from a provider candle update to the result row, and request weight per
+      minute while live (target: close to zero REST weight once warm).
+
+### S15 — Custom timeframes
+
+- [ ] A provider-neutral aggregation step in `market_runtime` that builds N-minute, N-hour and
+      N-day bars from the nearest provider period that divides them, aligned like the chart.
+- [ ] Coordinated with Aeris Charts and `ChartInterval` so a custom-timeframe match opens on the
+      same custom chart interval.
+
+### S16 — Market fields as operands
+
+- [ ] Provider-published per-market fields as operands: funding rate, open interest, 24 h
+      notional volume, mark and oracle prices and premium, and their change. The Markets tab
+      already receives these (`ProviderMarketStatistics`). A stock provider later publishes
+      market cap, sector and earnings through the same field operands (S7).
+
+### S17 — Results
+
+- [ ] Custom result columns (any operand or formula), sort by any of them.
+- [ ] Scan on the results of another scan or on a watchlist; save results as a watchlist.
+- [ ] Alerts when a market enters or leaves a scan, through the existing notification feed
+      (event descriptions only, per the data licensing checklist).
+- [ ] Export results to CSV.
 
 ## How to resume (for a new agent)
 
@@ -367,4 +569,5 @@ WebSocket candle stream for the universe instead of re-fetching it.
   3.5 minutes for 100 cold daily scans).
 - Delay between live passes: about 30 s after a completed pass is planned.
 - Whether a scan should keep refreshing while the user is on the Terminal page. It is planned not
-  to, which matches the Markets list.
+  to, which matches the Markets list. S14 and the S17 alerts may revisit this: an alerting scan
+  has to keep running in the background, within its own bound.

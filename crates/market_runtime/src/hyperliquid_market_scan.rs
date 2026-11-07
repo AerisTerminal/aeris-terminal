@@ -23,7 +23,7 @@ use aeris_hyperliquid_market_adapter::{
     HyperliquidHttpClient, HyperliquidHttpConfig, HyperliquidRequestPriority,
     NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE,
 };
-use aeris_market_data::MarketBar;
+use aeris_market_data::{BarPeriod, MarketBar};
 
 use crate::hyperliquid_realtime::HyperliquidCatalogEvent;
 use crate::market_service::CatalogPublisher;
@@ -31,7 +31,7 @@ use crate::market_service::clock::Clock;
 use crate::scan::{ScanBars, evaluate, price_decimals};
 use crate::{
     MAXIMUM_SCAN_HISTORY_BARS, ProviderInstrumentSummary, ProviderMarketScan,
-    ProviderMarketScanMatch, ScanDefinition, ScanProgress, ScanProviderMarkets, ScanTimeframe,
+    ProviderMarketScanMatch, ScanDefinition, ScanProgress, ScanProviderMarkets,
 };
 
 pub(crate) const SCAN_WORKER_NAME: &str = "aeris-hyperliquid-scan";
@@ -52,6 +52,8 @@ const NANOS_PER_MILLI: i64 = 1_000_000;
 /// One scan with the universe the catalog resolved for it.
 pub(crate) struct HyperliquidScanJob {
     pub(crate) request: ScanProviderMarkets,
+    /// The provider bar period of the definition's interval, resolved at dispatch.
+    pub(crate) period: BarPeriod,
     pub(crate) provider_generation: u64,
     /// Instruments to evaluate, most traded first, already bounded to the request.
     pub(crate) universe: Vec<ProviderInstrumentSummary>,
@@ -178,7 +180,7 @@ where
             }
             match self.cache.series_bars(
                 &instrument.symbol,
-                definition.timeframe,
+                job.period,
                 depth,
                 self.clock,
                 self.stop,
@@ -321,7 +323,7 @@ enum Refresh {
     Tail { from_millis: i64 },
 }
 
-type SeriesKey = (String, ScanTimeframe);
+type SeriesKey = (String, BarPeriod);
 
 /// Bars of recently scanned series, bounded by total bars with least-recently-used eviction.
 struct ScanBarCache {
@@ -395,7 +397,7 @@ impl ScanBarCache {
     fn series_bars<F>(
         &mut self,
         wire_coin: &str,
-        timeframe: ScanTimeframe,
+        period: BarPeriod,
         depth: usize,
         clock: &dyn Clock,
         stop: &Arc<AtomicBool>,
@@ -407,25 +409,22 @@ impl ScanBarCache {
             &Arc<AtomicBool>,
         ) -> Result<HyperliquidCandlePage, SeriesError>,
     {
-        let key = (wire_coin.to_string(), timeframe);
+        let key = (wire_coin.to_string(), period);
         let now = clock.monotonic();
         let now_millis = clock
             .wall_nanos()
             .map(|nanos| nanos.div_euclid(NANOS_PER_MILLI))
             .ok_or(SeriesError::Unavailable)?;
-        let refresh = plan_refresh(self.series.get(&key), timeframe, depth, now, now_millis);
+        let refresh = plan_refresh(self.series.get(&key), period, depth, now, now_millis);
         let page = match refresh {
             Refresh::Reuse => None,
             Refresh::Full => {
-                let (start_millis, end_millis) = crate::hyperliquid_history::history_window(
-                    timeframe.bar_period(),
-                    depth,
-                    now_millis,
-                )
-                .map_err(|_| SeriesError::Unavailable)?;
+                let (start_millis, end_millis) =
+                    crate::hyperliquid_history::history_window(period, depth, now_millis)
+                        .map_err(|_| SeriesError::Unavailable)?;
                 Some(fetch_page(
                     wire_coin,
-                    timeframe,
+                    period,
                     start_millis,
                     end_millis,
                     stop,
@@ -434,7 +433,7 @@ impl ScanBarCache {
             }
             Refresh::Tail { from_millis } => Some(fetch_page(
                 wire_coin,
-                timeframe,
+                period,
                 from_millis,
                 now_millis,
                 stop,
@@ -497,7 +496,7 @@ impl ScanBarCache {
 
 fn plan_refresh(
     cached: Option<&CachedSeries>,
-    timeframe: ScanTimeframe,
+    period: BarPeriod,
     depth: usize,
     now: Instant,
     now_millis: i64,
@@ -518,26 +517,32 @@ fn plan_refresh(
         .exchange_timestamp_unix_nanos
         .div_euclid(NANOS_PER_MILLI);
     // A tail longer than a full window costs the same request and could pass one page.
-    let tail_bars = now_millis.saturating_sub(from_millis) / bar_millis(timeframe) + 1;
+    let Some(bar_millis) = shortest_bar_millis(period) else {
+        return Refresh::Full;
+    };
+    let tail_bars = now_millis.saturating_sub(from_millis) / bar_millis + 1;
     if from_millis >= now_millis || !usize::try_from(tail_bars).is_ok_and(|bars| bars <= depth) {
         return Refresh::Full;
     }
     Refresh::Tail { from_millis }
 }
 
-const fn bar_millis(timeframe: ScanTimeframe) -> i64 {
-    match timeframe {
-        ScanTimeframe::Minutes15 => 900_000,
-        ScanTimeframe::Hour1 => 3_600_000,
-        ScanTimeframe::Hour4 => 14_400_000,
-        ScanTimeframe::Day1 => 86_400_000,
-        ScanTimeframe::Week1 => 604_800_000,
-    }
+/// The shortest span one bar of `period` covers, so a tail estimate never undercounts bars.
+fn shortest_bar_millis(period: BarPeriod) -> Option<i64> {
+    const DAY_MILLIS: i64 = 86_400_000;
+    let millis = match period {
+        BarPeriod::Time { seconds } => i64::from(seconds).checked_mul(1_000)?,
+        BarPeriod::Session { days } => i64::from(days).checked_mul(DAY_MILLIS)?,
+        BarPeriod::Week { weeks } => i64::from(weeks).checked_mul(7 * DAY_MILLIS)?,
+        BarPeriod::Month { months } => i64::from(months).checked_mul(28 * DAY_MILLIS)?,
+        BarPeriod::Tick { .. } => return None,
+    };
+    (millis > 0).then_some(millis)
 }
 
 fn fetch_page<F>(
     wire_coin: &str,
-    timeframe: ScanTimeframe,
+    period: BarPeriod,
     start_millis: i64,
     end_millis: i64,
     stop: &Arc<AtomicBool>,
@@ -552,7 +557,7 @@ where
     fetch(
         &CandleSnapshotRequest {
             wire_coin,
-            period: timeframe.bar_period(),
+            period,
             start_millis,
             end_millis,
             now_millis: end_millis,
@@ -577,6 +582,7 @@ mod tests {
     use std::sync::mpsc::{self, SyncSender};
 
     const DAY_MILLIS: i64 = 86_400_000;
+    const DAY: BarPeriod = BarPeriod::Time { seconds: 86_400 };
     /// Day 20,000 of the epoch plus one hour, so the current daily bar is forming.
     const NOW_MILLIS: i64 = 20_000 * DAY_MILLIS + 3_600_000;
 
@@ -633,7 +639,7 @@ mod tests {
     /// Close above 100 on the daily timeframe.
     fn close_above_100() -> ScanDefinition {
         ScanDefinition {
-            timeframe: ScanTimeframe::Day1,
+            timeframe: aeris_market_data::ChartInterval::Day1,
             match_mode: ScanMatchMode::All,
             conditions: vec![ScanCondition {
                 left: ScanOperand::Price(ScanPriceField::Close),
@@ -657,6 +663,7 @@ mod tests {
                 universe_limit: 64,
                 maximum_results,
             },
+            period: DAY,
             provider_generation: 7,
             universe: symbols.iter().map(|symbol| instrument(symbol)).collect(),
         }
@@ -756,7 +763,7 @@ mod tests {
         for (fetched_before, request) in (0_i64..).zip(&requests) {
             // Each scripted fetch advances the clock, so every window ends at its own now.
             let (start, end) = crate::hyperliquid_history::history_window(
-                ScanTimeframe::Day1.bar_period(),
+                DAY,
                 close_above_100().history_bars(),
                 NOW_MILLIS + fetched_before * 600,
             )
@@ -882,7 +889,7 @@ mod tests {
     }
 
     fn cached_closes(cache: &ScanBarCache, coin: &str) -> Vec<i64> {
-        let series = &cache.series[&(coin.to_string(), ScanTimeframe::Day1)];
+        let series = &cache.series[&(coin.to_string(), DAY)];
         series
             .closed
             .iter()
@@ -906,12 +913,12 @@ mod tests {
         };
 
         let bars = cache
-            .series_bars("AAA", ScanTimeframe::Day1, 3, &*clock, &stop, &mut fetch)
+            .series_bars("AAA", DAY, 3, &*clock, &stop, &mut fetch)
             .expect("first fetch");
         assert_eq!(bars.len(), 3);
         clock.advance(Duration::from_secs(59));
         let reused = cache
-            .series_bars("AAA", ScanTimeframe::Day1, 3, &*clock, &stop, &mut fetch)
+            .series_bars("AAA", DAY, 3, &*clock, &stop, &mut fetch)
             .expect("cached bars");
         assert_eq!(reused, bars, "a series fetched within a minute is reused");
 
@@ -919,7 +926,7 @@ mod tests {
         // of its last closed bar, and the returned bars replace the cached ones from there.
         clock.advance(Duration::from_secs(86_400 - 59));
         let refreshed = cache
-            .series_bars("AAA", ScanTimeframe::Day1, 3, &*clock, &stop, &mut fetch)
+            .series_bars("AAA", DAY, 3, &*clock, &stop, &mut fetch)
             .expect("tail refresh");
         drop(fetch);
         let now = NOW_MILLIS + DAY_MILLIS;
@@ -953,14 +960,14 @@ mod tests {
             Ok(page(20_000, &[1, 2, 3]))
         };
         cache
-            .series_bars("AAA", ScanTimeframe::Day1, 3, &*clock, &stop, &mut fetch)
+            .series_bars("AAA", DAY, 3, &*clock, &stop, &mut fetch)
             .expect("shallow");
         cache
-            .series_bars("AAA", ScanTimeframe::Day1, 5, &*clock, &stop, &mut fetch)
+            .series_bars("AAA", DAY, 5, &*clock, &stop, &mut fetch)
             .expect("deeper refetch");
         // The deeper fetch returned fewer bars than requested: the listing has no more.
         cache
-            .series_bars("AAA", ScanTimeframe::Day1, 5, &*clock, &stop, &mut fetch)
+            .series_bars("AAA", DAY, 5, &*clock, &stop, &mut fetch)
             .expect("exhausted history is reused");
         drop(fetch);
         assert_eq!(calls, 2);
@@ -980,7 +987,7 @@ mod tests {
         };
         for coin in ["AAA", "BBB", "AAA", "CCC", "BBB"] {
             cache
-                .series_bars(coin, ScanTimeframe::Day1, 4, &*clock, &stop, &mut fetch)
+                .series_bars(coin, DAY, 4, &*clock, &stop, &mut fetch)
                 .expect("bars");
         }
         drop(fetch);
@@ -1012,6 +1019,57 @@ mod tests {
             series.closed[0].exchange_timestamp_unix_nanos,
             101 * DAY_MILLIS * NANOS_PER_MILLI
         );
+    }
+
+    #[test]
+    fn an_intraday_series_refreshes_its_tail_until_the_gap_passes_its_depth() {
+        const HOUR_MILLIS: i64 = 3_600_000;
+        let hour = BarPeriod::Time { seconds: 3_600 };
+        let last_open = NOW_MILLIS - HOUR_MILLIS;
+        let mut closed = bar(0, 1);
+        closed.exchange_timestamp_unix_nanos = last_open * NANOS_PER_MILLI;
+        let fetched_at = Instant::now();
+        let series = CachedSeries {
+            closed: vec![closed],
+            forming: None,
+            fetched_at,
+            history_exhausted: true,
+            last_used: 0,
+        };
+        let stale = fetched_at + SCAN_BAR_REFRESH_AGE;
+        assert!(matches!(
+            plan_refresh(Some(&series), hour, 3, stale, NOW_MILLIS + HOUR_MILLIS),
+            Refresh::Tail { from_millis } if from_millis == last_open
+        ));
+        assert!(matches!(
+            plan_refresh(Some(&series), hour, 3, stale, NOW_MILLIS + 5 * HOUR_MILLIS),
+            Refresh::Full
+        ));
+    }
+
+    #[test]
+    fn every_offered_scan_interval_has_a_history_window_and_a_tail_estimate() {
+        let presentation = crate::built_in_provider_presentations()
+            .iter()
+            .find(|presentation| presentation.market_scan_available)
+            .expect("a provider answers market scans");
+        let mut offered = 0;
+        for interval in aeris_market_data::ChartInterval::ALL {
+            let Ok(period) = crate::resolve_cadence(
+                interval,
+                presentation,
+                aeris_instruments::CalendarSourceKind::AlwaysOpen,
+            ) else {
+                continue;
+            };
+            offered += 1;
+            assert!(shortest_bar_millis(period).is_some(), "{interval}");
+            assert!(
+                crate::hyperliquid_history::history_window(period, 300, NOW_MILLIS).is_ok(),
+                "{interval}"
+            );
+        }
+        assert_eq!(offered, presentation.chart_interval_labels.len());
     }
 
     #[test]

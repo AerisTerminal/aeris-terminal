@@ -4,8 +4,7 @@
 use super::market_scan::{
     COMPARISONS, ConditionDraft, MATCH_MODES, MarketScan, OperandDraft, OperandKind, OperandPart,
     SCAN_UNIVERSE_CHOICES, ScanDraft, ScanField, ScanMenu, ScanResultColumn, ScanResultRow,
-    ScanRun, ScanRunNotice, ScanSide, ScanTimeframeLabel, TIMEFRAMES, comparison_label,
-    match_mode_label, run_summary,
+    ScanRun, ScanRunNotice, ScanSide, comparison_label, match_mode_label, run_summary,
 };
 use super::market_screener::{MarketScreener, ScreenerTab};
 use super::market_screener_view::{
@@ -370,7 +369,10 @@ fn builder_header(ui: Ui<'_>) -> Div {
             draft.timeframe.label().to_string(),
             tr!(panels::SCAN_TIMEFRAME_ARIA).to_string(),
         ),
-        TIMEFRAMES.map(|timeframe| (timeframe, timeframe.label().to_string())),
+        ui.scans
+            .intervals()
+            .into_iter()
+            .map(|interval| (interval, interval.label().to_string())),
         draft.timeframe,
         |draft, timeframe| {
             draft.timeframe = timeframe;
@@ -1091,12 +1093,7 @@ impl TerminalApp {
 
     /// Opens a match on the timeframe the scan found it on.
     pub(super) fn open_market_scan_row(&mut self, row: &ScanResultRow, cx: &mut Context<Self>) {
-        let interval = self
-            .pages
-            .screener
-            .scans
-            .run()
-            .map(|run| run.timeframe().chart_interval());
+        let interval = self.pages.screener.scans.run().map(ScanRun::timeframe);
         self.pages
             .screener
             .open_market(&row.symbol, &row.exchange, &row.display_symbol, interval);

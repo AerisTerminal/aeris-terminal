@@ -4,8 +4,8 @@ use aeris_contracts::{
     WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
     WorkspaceSavedLayoutState, WorkspaceScanBand, WorkspaceScanComparison,
     WorkspaceScanConditionState, WorkspaceScanMacdLine, WorkspaceScanMatchMode,
-    WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScanTimeframe,
-    WorkspaceScreenerScanState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
+    WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScreenerScanState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
     WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
     WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
@@ -208,7 +208,7 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
         chart_chrome: None,
         screener_scans: vec![WorkspaceScreenerScanState {
             name: "Oversold".into(),
-            timeframe: WorkspaceScanTimeframe::Day1 as i32,
+            interval: "1D".into(),
             match_mode: WorkspaceScanMatchMode::All as i32,
             universe_limit: 100,
             conditions: vec![WorkspaceScanConditionState {
@@ -263,6 +263,37 @@ fn workspaces_written_before_saved_scans_open_with_none() {
         .expect("a document without tag 23 decodes");
     assert_eq!(decoded.screener_scans, Vec::new());
     assert_eq!(decoded.workspace_tabs, before.workspace_tabs);
+}
+
+#[test]
+fn a_scan_with_the_retired_timeframe_tag_decodes_without_an_interval() {
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct RetiredScan {
+        #[prost(string, tag = "1")]
+        name: String,
+        #[prost(int32, tag = "2")]
+        timeframe: i32,
+        #[prost(uint32, tag = "4")]
+        universe_limit: u32,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct RetiredWorkspace {
+        #[prost(message, repeated, tag = "23")]
+        screener_scans: Vec<RetiredScan>,
+    }
+
+    let retired = RetiredWorkspace {
+        screener_scans: vec![RetiredScan {
+            name: "Daily".into(),
+            timeframe: 4,
+            universe_limit: 100,
+        }],
+    };
+    let decoded = WorkspaceState::decode(retired.encode_to_vec().as_slice())
+        .expect("the retired tag is skipped, not a decode failure");
+    assert_eq!(decoded.screener_scans.len(), 1);
+    assert_eq!(decoded.screener_scans[0].name, "Daily");
+    assert_eq!(decoded.screener_scans[0].interval, "");
 }
 
 #[test]

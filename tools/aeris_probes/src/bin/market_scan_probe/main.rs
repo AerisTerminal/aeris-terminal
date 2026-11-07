@@ -1,8 +1,9 @@
 //! Market-scan probe: runs real scans through `MarketService` against the live public
 //! Hyperliquid feed on an isolated validation root. It measures a cold and a warm pass over
-//! the most traded markets, opens a daily chart while the cold pass runs to show background
-//! scan requests leave charts their budget reserve, and checks one match's values against
-//! the bars that chart received. Records an `aeris.probe.v1` envelope and exits non-zero on
+//! the most traded markets on one interval (`--interval`, daily by default), opens a chart on
+//! that interval while the cold pass runs to show background scan requests leave charts their
+//! budget reserve, checks one match's values against the bars that chart received, and checks
+//! that an interval the provider does not offer is refused. Records an `aeris.probe.v1` envelope and exits non-zero on
 //! the first failed check. Non-shipping validation tooling.
 
 use std::{
@@ -15,9 +16,9 @@ use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_market_runtime::{
     InstrumentRef, InstrumentRequest, MarketRuntimeEvent, MarketService, ProviderMarketScan,
     ScanComparison, ScanCondition, ScanDefinition, ScanIndicator, ScanNumber, ScanOperand,
-    ScanPriceField, ScanProviderMarkets, ScanTimeframe, SelectionOutcome, SelectionRequest,
+    ScanPriceField, ScanProviderMarkets, SelectionOutcome, SelectionRequest,
     SeriesPresentationStatus, SeriesTailOperation, StreamRequirements,
-    built_in_provider_presentations,
+    built_in_provider_presentations, persisted_interval,
 };
 use aeris_platform_runtime::data_root::{DataRoot, InstanceLock};
 use aeris_probes::{Envelope, Evidence, ProbeError, ProbeResult, market, validate_paths};
@@ -39,29 +40,47 @@ const MAXIMUM_CHART_BARS: usize = 20_000;
 const SPOT_CHECK_SYMBOL: &str = "ETH";
 const SPOT_PERIOD: u16 = 20;
 
+/// An interval no provider offers for scans, which every scan request must refuse.
+const UNOFFERED_INTERVAL: ChartInterval = ChartInterval::Second5;
+
 struct Options {
     root: PathBuf,
     out: PathBuf,
+    interval: ChartInterval,
 }
 
 impl Options {
     fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Self, &'static str> {
         let mut root = None;
         let mut out = None;
+        let mut interval = None;
         let mut arguments = arguments.into_iter();
         while let Some(flag) = arguments.next() {
-            let slot = match flag.as_str() {
-                "--validation-root" if root.is_none() => &mut root,
-                "--out" if out.is_none() => &mut out,
-                _ => return Err("unknown, duplicate or unsafe probe option"),
+            let value = |arguments: &mut dyn Iterator<Item = String>| {
+                arguments.next().ok_or("missing probe option value")
             };
-            let value = arguments.next().ok_or("missing probe option value")?;
-            *slot = Some(PathBuf::from(value));
+            match flag.as_str() {
+                "--validation-root" if root.is_none() => {
+                    root = Some(PathBuf::from(value(&mut arguments)?));
+                }
+                "--out" if out.is_none() => out = Some(PathBuf::from(value(&mut arguments)?)),
+                "--interval" if interval.is_none() => {
+                    interval = Some(
+                        persisted_interval(&value(&mut arguments)?)
+                            .ok_or("--interval is not a chart interval label")?,
+                    );
+                }
+                _ => return Err("unknown, duplicate or unsafe probe option"),
+            }
         }
         let root = root.ok_or("--validation-root is required")?;
         let out = out.ok_or("--out is required")?;
         validate_paths(&root, &out)?;
-        Ok(Self { root, out })
+        Ok(Self {
+            root,
+            out,
+            interval: interval.unwrap_or(ChartInterval::Day1),
+        })
     }
 }
 
@@ -149,6 +168,7 @@ struct Pass {
 struct Probe {
     service: MarketService,
     provider: &'static str,
+    interval: ChartInterval,
     chart: Chart,
     scan_generation: u64,
     scan: Option<ProviderMarketScan>,
@@ -202,7 +222,7 @@ impl Probe {
                     entitlement_id: format!("{}-public", self.provider),
                     query: Some(symbol.into()),
                 }),
-                interval: ChartInterval::Day1,
+                interval: self.interval,
                 streams: StreamRequirements::BARS,
                 viewport: None,
             },
@@ -222,21 +242,32 @@ impl Probe {
         Ok(started.elapsed())
     }
 
-    fn send_scan(&mut self) -> ProbeResult<()> {
+    fn scan_request(&mut self, interval: ChartInterval) -> ScanProviderMarkets {
         self.scan_generation += 1;
         self.scan = None;
         self.scan_rejected = false;
-        market(self.service.scan_provider_markets(
-            CLIENT,
-            ScanProviderMarkets {
-                consumer_id: SCAN_CONSUMER,
-                scan_generation: self.scan_generation,
-                provider: self.provider.to_string(),
-                definition: definition(),
-                universe_limit: UNIVERSE,
-                maximum_results: aeris_market_runtime::MAXIMUM_SCAN_RESULTS,
-            },
-        ))
+        ScanProviderMarkets {
+            consumer_id: SCAN_CONSUMER,
+            scan_generation: self.scan_generation,
+            provider: self.provider.to_string(),
+            definition: definition(interval),
+            universe_limit: UNIVERSE,
+            maximum_results: aeris_market_runtime::MAXIMUM_SCAN_RESULTS,
+        }
+    }
+
+    fn send_scan(&mut self) -> ProbeResult<()> {
+        let request = self.scan_request(self.interval);
+        market(self.service.scan_provider_markets(CLIENT, request))
+    }
+
+    /// Whether the runtime refuses a scan on an interval the provider does not offer.
+    fn unoffered_interval_refused(&mut self) -> Result<String, ()> {
+        let request = self.scan_request(UNOFFERED_INTERVAL);
+        match self.service.scan_provider_markets(CLIENT, request) {
+            Ok(()) => Err(()),
+            Err(error) => Ok(error),
+        }
     }
 
     /// Runs one pass to completion; `chart_symbol` opens a chart partway through it and
@@ -344,7 +375,7 @@ fn number(units: i64) -> ScanOperand {
 
 /// Every condition holds for any listed market with enough history, so every market with
 /// data is a match and its values can be checked.
-fn definition() -> ScanDefinition {
+fn definition(interval: ChartInterval) -> ScanDefinition {
     let above_zero = |left| ScanCondition {
         left,
         comparison: ScanComparison::Above,
@@ -352,7 +383,7 @@ fn definition() -> ScanDefinition {
         upper: None,
     };
     ScanDefinition {
-        timeframe: ScanTimeframe::Day1,
+        timeframe: interval,
         conditions: vec![
             above_zero(ScanOperand::Price(ScanPriceField::Close)),
             above_zero(ScanOperand::Indicator(ScanIndicator::HighestHigh {
@@ -468,7 +499,11 @@ fn spot_check(
     )
 }
 
-fn scenario(service: &MarketService, evidence: &mut Evidence) -> ProbeResult<()> {
+fn scenario(
+    service: &MarketService,
+    interval: ChartInterval,
+    evidence: &mut Evidence,
+) -> ProbeResult<()> {
     let provider = built_in_provider_presentations()
         .iter()
         .find(|presentation| presentation.market_scan_available)
@@ -485,6 +520,7 @@ fn scenario(service: &MarketService, evidence: &mut Evidence) -> ProbeResult<()>
     let mut probe = Probe {
         service: service.clone(),
         provider,
+        interval,
         chart: Chart::default(),
         scan_generation: 0,
         scan: None,
@@ -496,7 +532,13 @@ fn scenario(service: &MarketService, evidence: &mut Evidence) -> ProbeResult<()>
     evidence.check(
         "baseline_chart_history",
         baseline <= CHART_LATENCY_LIMIT,
-        json!({"symbol": "BTC", "interval": "1D", "latency_ms": baseline.as_millis()}),
+        json!({"symbol": "BTC", "interval": interval.label(), "latency_ms": baseline.as_millis()}),
+    )?;
+    let refusal = probe.unoffered_interval_refused();
+    evidence.check(
+        "unoffered_interval_refused",
+        refusal.is_ok(),
+        json!({"interval": UNOFFERED_INTERVAL.label(), "error": refusal.ok()}),
     )?;
 
     let (cold, chart_latency) = probe.run_pass(Some(SPOT_CHECK_SYMBOL))?;
@@ -515,7 +557,7 @@ fn scenario(service: &MarketService, evidence: &mut Evidence) -> ProbeResult<()>
         chart_latency.is_some_and(|latency| latency <= CHART_LATENCY_LIMIT),
         json!({
             "symbol": SPOT_CHECK_SYMBOL,
-            "interval": "1D",
+            "interval": interval.label(),
             "latency_ms": chart_latency.map(|latency| latency.as_millis()),
             "baseline_ms": baseline.as_millis(),
         }),
@@ -523,16 +565,20 @@ fn scenario(service: &MarketService, evidence: &mut Evidence) -> ProbeResult<()>
 
     let (warm, _) = probe.run_pass(None)?;
     check_pass(evidence, "warm_pass_complete", &warm)?;
-    evidence.metrics = json!({"cold_pass": pass_metrics(&cold), "warm_pass": pass_metrics(&warm)});
+    evidence.metrics = json!({
+        "interval": interval.label(),
+        "cold_pass": pass_metrics(&cold),
+        "warm_pass": pass_metrics(&warm),
+    });
     spot_check(&probe, &warm.last, evidence)?;
     market(service.detach(CLIENT))
 }
 
-fn run(root: &DataRoot, evidence: &mut Evidence) -> ProbeResult<()> {
+fn run(root: &DataRoot, interval: ChartInterval, evidence: &mut Evidence) -> ProbeResult<()> {
     let _lock =
         InstanceLock::acquire(root).map_err(|error| ProbeError::Runtime(error.to_string()))?;
     let service = market(MarketService::start())?;
-    let result = scenario(&service, evidence);
+    let result = scenario(&service, interval, evidence);
     let shutdown = service.shutdown(Duration::from_secs(10));
     result?;
     market(shutdown)
@@ -550,7 +596,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let envelope = Envelope::collect("market_scan", options.root.clone(), options.out.clone())?;
     let started_at = aeris_probes::utc_now().to_rfc3339();
     let mut evidence = Evidence::new();
-    let result = run(root, &mut evidence);
+    let result = run(root, options.interval, &mut evidence);
     let passed = envelope.finish(&started_at, &mut evidence, &result)?;
     if !passed {
         return Err(Box::new(ProbeError::Invariant(

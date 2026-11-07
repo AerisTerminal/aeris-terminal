@@ -16,7 +16,7 @@ use aeris_market_runtime::{
     ProviderCatalogRejected, ProviderMarketScan, ProviderMarketScanMatch,
     ProviderPresentationDescriptor, ScanBand, ScanComparison, ScanCondition, ScanConditionValues,
     ScanDefinition, ScanDefinitionError, ScanIndicator, ScanMacdLine, ScanMatchMode, ScanNumber,
-    ScanOperand, ScanPriceField, ScanProgress, ScanProviderMarkets, ScanTimeframe,
+    ScanOperand, ScanPriceField, ScanProgress, ScanProviderMarkets,
 };
 use gpui::{ScrollStrategy, UniformListScrollHandle};
 use std::cmp::Ordering as CmpOrdering;
@@ -35,37 +35,12 @@ const SCAN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(90);
 const DEFAULT_DEVIATION_TENTHS: u16 = 20;
 const MAXIMUM_DEVIATION_TENTHS: u16 = 100;
 
-impl ScanTimeframeLabel for ScanTimeframe {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Minutes15 => tr!(panels::SCAN_TIMEFRAME_15M),
-            Self::Hour1 => tr!(panels::SCAN_TIMEFRAME_1H),
-            Self::Hour4 => tr!(panels::SCAN_TIMEFRAME_4H),
-            Self::Day1 => tr!(panels::SCAN_TIMEFRAME_1D),
-            Self::Week1 => tr!(panels::SCAN_TIMEFRAME_1W),
-        }
-    }
-}
-
-/// Display names of the runtime's scan vocabulary.
-pub(super) trait ScanTimeframeLabel {
-    fn label(self) -> &'static str;
-}
-
 pub(super) const fn match_mode_label(mode: ScanMatchMode) -> Text {
     match mode {
         ScanMatchMode::All => panels::SCAN_MATCH_ALL,
         ScanMatchMode::Any => panels::SCAN_MATCH_ANY,
     }
 }
-
-pub(super) const TIMEFRAMES: [ScanTimeframe; 5] = [
-    ScanTimeframe::Minutes15,
-    ScanTimeframe::Hour1,
-    ScanTimeframe::Hour4,
-    ScanTimeframe::Day1,
-    ScanTimeframe::Week1,
-];
 
 pub(super) const MATCH_MODES: [ScanMatchMode; 2] = [ScanMatchMode::All, ScanMatchMode::Any];
 
@@ -477,7 +452,7 @@ pub(super) enum ScanField {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ScanDraft {
     pub(super) name: String,
-    pub(super) timeframe: ScanTimeframe,
+    pub(super) timeframe: ChartInterval,
     pub(super) match_mode: ScanMatchMode,
     pub(super) universe_limit: u32,
     pub(super) conditions: Vec<ConditionDraft>,
@@ -487,7 +462,7 @@ impl Default for ScanDraft {
     fn default() -> Self {
         Self {
             name: String::new(),
-            timeframe: ScanTimeframe::default(),
+            timeframe: ScanDefinition::default().timeframe,
             match_mode: ScanMatchMode::default(),
             universe_limit: DEFAULT_SCAN_UNIVERSE,
             conditions: vec![ConditionDraft::default()],
@@ -1060,8 +1035,8 @@ impl ScanRun {
         &self.columns
     }
 
-    /// The timeframe the matches were found on, which an opened match's chart uses.
-    pub(super) const fn timeframe(&self) -> ScanTimeframe {
+    /// The interval the matches were found on, which an opened match's chart uses.
+    pub(super) const fn timeframe(&self) -> ChartInterval {
         self.definition.timeframe
     }
 
@@ -1179,6 +1154,13 @@ impl MarketScan {
 
     pub(super) const fn provider(&self) -> Option<&'static ProviderPresentationDescriptor> {
         self.provider
+    }
+
+    /// The intervals the scanning provider offers, finest first, as its charts list them.
+    pub(super) fn intervals(&self) -> Vec<ChartInterval> {
+        self.provider.map_or_else(Vec::new, |provider| {
+            intervals_from_labels(provider.chart_interval_labels)
+        })
     }
 
     /// Every scanned market is listed by the scanning provider, so its logo marks each match.
@@ -1596,7 +1578,7 @@ mod tests {
         let definition = ScanDraft::default()
             .definition()
             .expect("default draft runs");
-        assert_eq!(definition.timeframe, ScanTimeframe::Day1);
+        assert_eq!(definition.timeframe, ChartInterval::Day1);
         assert_eq!(
             definition.conditions,
             vec![ScanCondition {
@@ -1606,6 +1588,24 @@ mod tests {
                 upper: None,
             }]
         );
+    }
+
+    #[test]
+    fn the_builder_offers_every_interval_the_scanning_provider_charts() {
+        assert_eq!(MarketScan::new(None).intervals(), Vec::new());
+        let provider = aeris_market_runtime::built_in_provider_presentations()
+            .iter()
+            .find(|presentation| presentation.market_scan_available)
+            .expect("a provider answers market scans");
+        let intervals = MarketScan::new(Some(provider)).intervals();
+        assert_eq!(
+            intervals
+                .iter()
+                .map(|interval| interval.label())
+                .collect::<Vec<_>>(),
+            provider.chart_interval_labels
+        );
+        assert!(intervals.contains(&ScanDraft::default().timeframe));
     }
 
     #[test]
@@ -1720,7 +1720,7 @@ mod tests {
     fn a_saved_scan_reopens_as_the_draft_it_was_saved_from() {
         let mut draft = ScanDraft {
             name: "Oversold bounce".to_string(),
-            timeframe: ScanTimeframe::Hour4,
+            timeframe: ChartInterval::Hour4,
             match_mode: ScanMatchMode::Any,
             universe_limit: 200,
             ..ScanDraft::default()
