@@ -673,24 +673,28 @@ mod tests {
             ..aeris_desktop::chart_chrome::ChartChromePreferences::default()
         }
         .to_workspace_chrome();
-        let operand = |kind: aeris_contracts::WorkspaceScanOperandKind, period: u32| {
-            aeris_contracts::WorkspaceScanOperandState {
-                kind: kind as i32,
-                period,
-                ..aeris_contracts::WorkspaceScanOperandState::default()
-            }
-        };
         let scan = aeris_contracts::WorkspaceScreenerScanState {
             name: "Oversold".to_string(),
             interval: "4h".to_string(),
             match_mode: aeris_contracts::WorkspaceScanMatchMode::All as i32,
             universe_limit: 200,
             conditions: vec![aeris_contracts::WorkspaceScanConditionState {
-                left: Some(operand(aeris_contracts::WorkspaceScanOperandKind::Rsi, 14)),
+                left: Some(aeris_contracts::WorkspaceScanOperandState {
+                    kind: aeris_contracts::WorkspaceScanOperandKind::Study as i32,
+                    study: "rsi".to_string(),
+                    study_parameters: vec![aeris_contracts::WorkspaceScanStudyParameterState {
+                        name: "period".to_string(),
+                        units: 14,
+                        scale: 0,
+                    }],
+                    study_output: "value".to_string(),
+                    ..aeris_contracts::WorkspaceScanOperandState::default()
+                }),
                 comparison: aeris_contracts::WorkspaceScanComparison::Below as i32,
                 right: Some(aeris_contracts::WorkspaceScanOperandState {
+                    kind: aeris_contracts::WorkspaceScanOperandKind::Number as i32,
                     number_units: 30,
-                    ..operand(aeris_contracts::WorkspaceScanOperandKind::Number, 0)
+                    ..aeris_contracts::WorkspaceScanOperandState::default()
                 }),
                 upper: None,
             }],

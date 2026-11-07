@@ -123,7 +123,7 @@ The maintainer decided these on 2026-11-06. Do not reopen them without asking.
    (commits `ed296532`, `907d475e`, `8befca7d`) followed the same pattern. The rejected
    alternative was a schema bump to 7. Saved scans must not go in the trading SQLite store;
    that store is for trading workflows.
-3. **Version 1 scope:**
+3. **Version 1 scope** (S9 widened the timeframes and S10 the indicators):
    - Operands: open, high, low, close, volume, change % from the previous close, and the
      indicators SMA, EMA, RSI, MACD (MACD, signal or histogram line), Bollinger (upper, middle
      or lower band), ATR, ADX, relative volume, highest high of N prior bars, lowest low of N
@@ -174,9 +174,11 @@ Desktop Screener page (Scans tab)
   daily bars are UTC-aligned (`"1d"`) and weekly bars use `"1w"`, the same mapping the chart uses
   (`hyperliquid_interval_for_period`). The forming bar comes from the candle page, never from
   `previous_day_price`, which is a trailing-24-hour reference and not the daily open.
-- **Warm-up.** Recursive indicators (EMA, RSI, MACD, ATR, ADX) are seeded with 10 periods of
-  history, 20 for ADX, so the current value matches a chart that loaded longer history to display
-  precision (`ScanDefinition::history_bars`).
+- **Warm-up.** Each study descriptor names the history its current value needs: its window for a
+  windowed study, and 10 periods (`RECURSIVE_WARMUP_PERIODS`) of the smoothing period for a
+  recursive one (EMA, RSI, MACD, ATR, ADX and the like), plus any window stacked on it; parabolic
+  SAR takes 250 bars, Ichimoku 52 and the awesome oscillator 34. `ScanDefinition::history_bars`
+  takes the deepest operand, so the current value matches a chart that loaded longer history.
 
 ## Checkpoints
 
@@ -191,7 +193,7 @@ Desktop Screener page (Scans tab)
 | S7 | US stocks through a data partner (bulk daily bars), fundamentals | Open; needs ThetaData or AlgoSeek |
 | S8 | Small V1 follow-ups (typed adapter error, budget overshoot) | Open |
 | S9 | Every provider timeframe (14 on Hyperliquid) | **Complete** (live probe on 15m and 1W, installed app) |
-| S10 | The full chart indicator library as scan operands | Open; next |
+| S10 | The full chart indicator library as scan operands | **Complete** (56 studies; live probe on 1D) |
 | S11 | Formula operands: arithmetic, bars ago, functions over any operand | Open |
 | S12 | Text formulas (a PCF-style language) with a parser and editor | Open |
 | S13 | Condition logic: true for N bars, within N bars, nested groups, per-condition timeframe | Open |
@@ -447,11 +449,13 @@ WebSocket candle stream for the universe instead of re-fetching it.
 
 ### S10 — The full indicator library
 
-- [ ] Replace the closed `ScanIndicator` list with a descriptor table: each study names its
+- [x] Replace the closed `ScanIndicator` list with a descriptor table: each study names its
       parameters (kind, default, bounds), its outputs (one or several lines) and its inputs
       (OHLCV), and calls its `aeris_charts_indicators` function. The evaluator, the builder
       menus and persistence read the table, so adding a study is one table entry.
-- [ ] Every single-series calculation the library exports: moving averages (SMA, EMA, DEMA,
+      Done as `market_runtime/src/scan/studies.rs` (`SCAN_STUDIES`, 56 descriptors in six
+      families), each with its schema identifier, parameters, lines, calculation and history.
+- [x] Every single-series calculation the library exports: moving averages (SMA, EMA, DEMA,
       TEMA, SMMA/RMA, HMA, WMA, VWMA, KAMA, McGinley, ALMA, linear regression), oscillators
       (RSI, MACD, stochastic, stochastic RSI, CCI, Williams %R, momentum, rate of change, Chande
       momentum, DPO, awesome oscillator, Aroon, TRIX, KST, TSI, Fisher, ultimate oscillator,
@@ -461,10 +465,39 @@ WebSocket candle stream for the universe instead of re-fetching it.
       accumulation/distribution, PVT, Chaikin, relative volume, Klinger, volume oscillator,
       Elder force, ease of movement, CMF, MFI). Session-dependent studies (VWAP and its bands,
       pivots, session levels) follow once their calendar input is wired.
-- [ ] Persisted as a study identifier plus parameter values, so new studies need no new message
+      Shipped: every listed study except OBV, accumulation/distribution and PVT, which are
+      cumulative from the first loaded bar, so their level depends on where history starts and a
+      scan on recent bars cannot match the chart; they return with S11's "change over N bars".
+      Every chart line is offered except Ichimoku's lagging close, which is drawn 26 bars back
+      and has no current value. Highest high and lowest low of N prior bars stay as studies.
+- [x] Persisted as a study identifier plus parameter values, so new studies need no new message
       fields. Grouped, searchable operand menu in the builder.
-- [ ] Each study checked against the chart's value on the same bars (unit tests on fixtures and
+      `WorkspaceScanOperandState` carries `study` (tag 10, the schema identifier such as
+      `sma`), `study_parameters` (tag 11, name plus exact `units / 10^scale`) and
+      `study_output` (tag 12, the line). Operand kinds 7 to 16 and tags 2 to 7 named the fixed
+      V1 indicators, which no release wrote; they are retired, and a scan saved with one is
+      dropped alone. An unknown study, line or out-of-bounds parameter drops its scan; a
+      parameter not stored takes its default. The builder's operand menu groups the studies by
+      family with a search field (Enter picks the first match), each row shows its description,
+      a line menu chooses among a study's lines, and each parameter has its own labelled input
+      (a switch for on/off parameters). Labels read like the chart's, such as "Envelopes
+      Upper(20, 2, Exponential)", in all ten languages.
+- [x] Each study checked against the chart's value on the same bars (unit tests on fixtures and
       one live probe spot check per family).
+      Unit tests: every line of every study equals the library formula on a 400-bar fixture
+      (1e-9 relative), the history each study requests settles its current value against 3,000
+      bars (1e-4 relative), every chart line is offered, and the table is indexed and bounded.
+      Live probe (`market_scan_probe`, 1D, 100 markets, 2026-11-07): cold pass 185 s and warm
+      234 s, 100 of 100 evaluated, chart history during the scan 2.7 s (baseline 5.2 s; an
+      earlier run measured 11.3 s against 2.8 s, so this latency varies with the provider). ETH
+      matched independent reference math on the same bars for one study per family: highest
+      high(20) and SMA(20) exactly, Bollinger(20, 2) bands exactly, RSI(14) within 0.0003,
+      vortex(14) VI+ and CMF(20) exactly, ATR(14) within 0.0001%.
+- [x] Installed app (release build, validation root, 2026-11-07): searching "macd" in the operand
+      menu and pressing Enter picks MACD with Fast 12, Slow 26 and Signal 9 inputs; the line
+      menu offers MACD, Signal and Histogram; "MACD above Signal" on 1D streams its matches with
+      a "MACD(12, 26, 9)" column, a match opens its 1D chart, and the saved scan reopens after a
+      restart with the same study, line and parameters.
 
 ### S11 — Formula operands
 

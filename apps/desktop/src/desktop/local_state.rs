@@ -2221,22 +2221,32 @@ mod tests {
     fn workspace_file_round_trip_keeps_valid_saved_scans_and_drops_invalid_ones() {
         use aeris_contracts::{
             WorkspaceScanComparison, WorkspaceScanConditionState, WorkspaceScanMatchMode,
-            WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScreenerScanState,
+            WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScanStudyParameterState,
+            WorkspaceScreenerScanState,
         };
-        let operand = |kind: WorkspaceScanOperandKind, period: u32| WorkspaceScanOperandState {
-            kind: kind as i32,
-            period,
+        let sma = |period: i64| WorkspaceScanOperandState {
+            kind: WorkspaceScanOperandKind::Study as i32,
+            study: "sma".to_string(),
+            study_parameters: vec![WorkspaceScanStudyParameterState {
+                name: "period".to_string(),
+                units: period,
+                scale: 0,
+            }],
+            study_output: "value".to_string(),
             ..WorkspaceScanOperandState::default()
         };
-        let scan = |name: &str, period: u32| WorkspaceScreenerScanState {
+        let scan = |name: &str, period: i64| WorkspaceScreenerScanState {
             name: name.to_string(),
             interval: "1D".to_string(),
             match_mode: WorkspaceScanMatchMode::All as i32,
             universe_limit: 100,
             conditions: vec![WorkspaceScanConditionState {
-                left: Some(operand(WorkspaceScanOperandKind::Close, 0)),
+                left: Some(WorkspaceScanOperandState {
+                    kind: WorkspaceScanOperandKind::Close as i32,
+                    ..WorkspaceScanOperandState::default()
+                }),
                 comparison: WorkspaceScanComparison::Above as i32,
-                right: Some(operand(WorkspaceScanOperandKind::Sma, period)),
+                right: Some(sma(period)),
                 upper: None,
             }],
         };

@@ -40,10 +40,13 @@ pub use provider_presentation::{
 };
 pub use scan::{
     MAXIMUM_SCAN_CONDITIONS, MAXIMUM_SCAN_HISTORY_BARS, MAXIMUM_SCAN_NUMBER_SCALE,
-    MAXIMUM_SCAN_PERIOD, MAXIMUM_SCAN_RESULTS, MAXIMUM_SCAN_UNIVERSE, ProviderMarketScan,
-    ProviderMarketScanMatch, ScanBand, ScanComparison, ScanCondition, ScanConditionValues,
-    ScanDefinition, ScanDefinitionError, ScanIndicator, ScanMacdLine, ScanMatchMode, ScanNumber,
-    ScanOperand, ScanPriceField, ScanProgress, ScanProviderMarkets,
+    MAXIMUM_SCAN_PERIOD, MAXIMUM_SCAN_RESULTS, MAXIMUM_SCAN_STUDY_PARAMETERS,
+    MAXIMUM_SCAN_UNIVERSE, ProviderMarketScan, ProviderMarketScanMatch, ScanComparison,
+    ScanCondition, ScanConditionValues, ScanDefinition, ScanDefinitionError, ScanMatchMode,
+    ScanNumber, ScanOperand, ScanPriceField, ScanProgress, ScanProviderMarkets, ScanStudy,
+    ScanStudyDescriptor, ScanStudyFamily, ScanStudyOperand, ScanStudyOutput, ScanStudyOutputName,
+    ScanStudyParameter, ScanStudyParameterKind, ScanStudyParameterName, ScanValueUnit,
+    scan_studies,
 };
 pub use status::{
     EngineFaultCode, FailureStage, Fault, MarketSessionPhase, MarketSessionSource,

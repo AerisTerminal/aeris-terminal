@@ -1,10 +1,12 @@
 //! The Scans tab of the screener page: the saved scan library, the builder for the scan being
 //! edited and the markets the running scan matches. Selecting a match opens it in the terminal.
 
+use super::chrome_menu::chrome_menu_group_heading;
 use super::market_scan::{
     COMPARISONS, ConditionDraft, MATCH_MODES, MarketScan, OperandDraft, OperandKind, OperandPart,
     SCAN_UNIVERSE_CHOICES, ScanDraft, ScanField, ScanMenu, ScanResultColumn, ScanResultRow,
-    ScanRun, ScanRunNotice, ScanSide, comparison_label, match_mode_label, run_summary,
+    ScanRun, ScanRunNotice, ScanSide, comparison_label, family_label, line_label, match_mode_label,
+    operand_groups, parameter_label, run_summary,
 };
 use super::market_screener::{MarketScreener, ScreenerTab};
 use super::market_screener_view::{
@@ -15,7 +17,7 @@ use super::market_screener_view::{
 use super::saved_scans::MAXIMUM_SAVED_SCANS;
 use super::*;
 use aeris_localization::{panels, tr};
-use aeris_market_runtime::ScanComparison;
+use aeris_market_runtime::{ScanComparison, ScanStudyParameterKind};
 use gpui::{ClickEvent, uniform_list};
 
 const SECTION_GAP: f32 = 16.0;
@@ -27,6 +29,9 @@ const NUMBER_WIDTH: f32 = 96.0;
 const CONDITION_NUMBER_WIDTH: f32 = 20.0;
 const MENU_WIDTH: f32 = 240.0;
 const MENU_MAX_HEIGHT: f32 = 360.0;
+/// The operand menu lists every study with its full name, so it is wider and taller.
+const OPERAND_MENU_WIDTH: f32 = 340.0;
+const OPERAND_MENU_MAX_HEIGHT: f32 = 440.0;
 const CLOSE_WIDTH: f32 = 128.0;
 const CHANGE_WIDTH: f32 = 96.0;
 const VOLUME_WIDTH: f32 = 112.0;
@@ -225,9 +230,9 @@ fn menu_trigger(ui: Ui<'_>, id: &str, menu: ScanMenu) -> Button {
     Button::new(SharedString::from(format!("{id}_button")), ui.theme)
         .variant(ButtonVariant::Outline)
         .open(ui.scans.menu() == Some(menu))
-        .on_press(move |_, _, cx| {
+        .on_press(move |_, window, cx| {
             toggle.update(cx, |terminal, terminal_cx| {
-                terminal.toggle_market_scan_menu(menu, terminal_cx);
+                terminal.toggle_market_scan_menu(menu, window, terminal_cx);
             });
         })
 }
@@ -558,60 +563,188 @@ const fn side_index(side: ScanSide) -> usize {
     }
 }
 
-/// The menu choosing what one side of a condition reads, followed by that kind's inputs.
+/// The menu choosing what one side of a condition reads, then the study line it reads and
+/// that kind's inputs.
 fn operand_controls(ui: Ui<'_>, condition: usize, side: ScanSide, operand: &OperandDraft) -> Div {
     let colors = ui.theme.colors;
+    let id = format!("scan_operand_{condition}_{}", side_index(side));
+    let parameters = match operand.kind {
+        OperandKind::Study(study) => study.descriptor().parameters,
+        _ => &[],
+    };
+    let label = |text: &'static str| {
+        div()
+            .text_xs()
+            .text_color(gpui_color(colors.text_muted))
+            .child(text)
+    };
+    let parts = operand.kind.parts().into_iter().map(|part| {
+        let field = ScanField::Operand {
+            condition,
+            side,
+            part,
+        };
+        let (name, width) = match part {
+            OperandPart::Value => (None, NUMBER_WIDTH),
+            OperandPart::Parameter(index) => (
+                parameters
+                    .get(index)
+                    .map(|parameter| parameter_label(parameter.name)),
+                PART_WIDTH,
+            ),
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .children(name.map(label))
+            .children(field_input(ui, field, width))
+    });
+    let switches = parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| parameter.kind == ScanStudyParameterKind::Toggle)
+        .map(|(index, parameter)| {
+            let name = parameter_label(parameter.name);
+            let terminal = ui.terminal.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    Switch::new(
+                        SharedString::from(format!("{id}_switch_{index}")),
+                        name,
+                        operand.toggle(index),
+                        ui.theme,
+                    )
+                    .on_change(move |on, _, window, cx| {
+                        terminal.update(cx, |terminal, terminal_cx| {
+                            terminal.edit_market_scan(window, terminal_cx, |scans| {
+                                scans.edit(|draft| {
+                                    draft.set_operand_toggle(condition, side, (index, on))
+                                });
+                            });
+                        });
+                    }),
+                )
+                .child(label(name))
+        });
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(operand_menu(ui, &id, (condition, side), operand))
+        .children(line_menu(ui, &id, (condition, side), operand))
+        .children(parts)
+        .children(switches)
+}
+
+/// The grouped, searchable menu of everything a side can read.
+fn operand_menu(
+    ui: Ui<'_>,
+    id: &str,
+    (condition, side): (usize, ScanSide),
+    operand: &OperandDraft,
+) -> MenuAnchor {
+    let theme = ui.theme;
+    let colors = theme.colors;
     let number = condition + 1;
     let aria = match side {
         ScanSide::Left => tr!(panels::SCAN_MEASURE_ARIA, number = number),
         ScanSide::Right => tr!(panels::SCAN_TARGET_ARIA, number = number),
         ScanSide::Upper => tr!(panels::SCAN_UPPER_ARIA, number = number),
     };
-    // A constant never varies by market, so only the compared sides offer one.
-    let kinds = (side != ScanSide::Left)
-        .then_some(OperandKind::Number)
-        .into_iter()
-        .chain(OperandKind::MEASURES);
-    let menu = choice_menu(
-        ui,
-        (
-            &format!("scan_operand_{condition}_{}", side_index(side)),
-            ScanMenu::Operand(condition, side),
-        ),
-        (operand.kind.label().to_string(), aria),
-        kinds.map(|kind| (kind, kind.label().to_string())),
-        operand.kind,
-        move |draft, kind| draft.set_operand_kind(condition, side, kind),
-    );
-    let parts = operand.kind.parts().iter().map(|part| {
-        let field = ScanField::Operand {
-            condition,
-            side,
-            part: *part,
-        };
-        let width = if *part == OperandPart::Value {
-            NUMBER_WIDTH
-        } else {
-            PART_WIDTH
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .children(part.label().map(|label| {
+    let menu = ScanMenu::Operand(condition, side);
+    let trigger = menu_trigger(ui, id, menu)
+        .aria_label(aria)
+        .label(operand.kind.label())
+        .caret(header_icon(HugeIcon::ChevronDown));
+    let current = operand.kind;
+    menu_anchor(ui, (id, menu), trigger, |panel| {
+        let mut panel = panel
+            .width(px(OPERAND_MENU_WIDTH))
+            .max_height(px(OPERAND_MENU_MAX_HEIGHT));
+        if let Some(input) = ui.scans.operand_search_input() {
+            panel = panel.header(
                 div()
+                    .p_2()
+                    .border_b(platform_border_width(theme))
+                    .border_color(gpui_color(colors.border_secondary))
+                    .child(Input::new(input).platform(theme)),
+            );
+        }
+        let query = ui.scans.operand_search_query();
+        let groups = operand_groups(side, query);
+        if groups.is_empty() {
+            return panel.child(
+                div()
+                    .px_3()
+                    .py_2()
                     .text_xs()
                     .text_color(gpui_color(colors.text_muted))
-                    .child(label)
-            }))
-            .children(field_input(ui, field, width))
-    });
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(menu)
-        .children(parts)
+                    .child(tr!(panels::SCAN_STUDY_SEARCH_EMPTY, query = query.trim())),
+            );
+        }
+        let mut row = 0_usize;
+        for group in groups {
+            panel = panel.child(chrome_menu_group_heading(
+                family_label(group.family),
+                &colors,
+            ));
+            for kind in group.kinds {
+                let choice = MenuRow::compact(
+                    SharedString::from(format!("{id}_choice_{row}")),
+                    kind.label(),
+                    theme,
+                )
+                .checked(kind == current)
+                .on_click(edit_scan(ui.terminal, move |scans| {
+                    scans.edit(|draft| draft.set_operand_kind(condition, side, kind));
+                }));
+                panel = panel.child(match kind.description() {
+                    Some(description) => choice.description(description),
+                    None => choice,
+                });
+                row += 1;
+            }
+        }
+        panel
+    })
+}
+
+/// The line a multi-line study operand reads, such as MACD's signal line.
+fn line_menu(
+    ui: Ui<'_>,
+    id: &str,
+    (condition, side): (usize, ScanSide),
+    operand: &OperandDraft,
+) -> Option<MenuAnchor> {
+    let OperandKind::Study(study) = operand.kind else {
+        return None;
+    };
+    let outputs = study.descriptor().outputs;
+    if outputs.len() < 2 {
+        return None;
+    }
+    let name = |index: usize| {
+        outputs
+            .get(index)
+            .and_then(|output| line_label(output.name))
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(choice_menu(
+        ui,
+        (&format!("{id}_line"), ScanMenu::Line(condition, side)),
+        (
+            name(operand.output),
+            tr!(panels::SCAN_LINE_ARIA, number = condition + 1),
+        ),
+        (0..outputs.len()).map(|index| (index, name(index))),
+        operand.output,
+        move |draft, output| draft.set_operand_output(condition, side, output),
+    ))
 }
 
 struct ResultColumn {
@@ -1073,8 +1206,53 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn toggle_market_scan_menu(&mut self, menu: ScanMenu, cx: &mut Context<Self>) {
-        self.pages.screener.scans.toggle_menu(menu);
+    /// Opens or closes a builder menu; an opened operand menu gets a focused search field.
+    pub(super) fn toggle_market_scan_menu(
+        &mut self,
+        menu: ScanMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let scans = &mut self.pages.screener.scans;
+        scans.toggle_menu(menu);
+        if matches!(scans.menu(), Some(ScanMenu::Operand(..))) {
+            let input = cx.new(|input_cx| {
+                InputState::new(window, input_cx)
+                    .placeholder(tr!(panels::SCAN_STUDY_SEARCH_PLACEHOLDER))
+            });
+            input.update(cx, |input, input_cx| input.focus(window, input_cx));
+            cx.subscribe_in(
+                &input,
+                window,
+                |terminal, input, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => {
+                        let query = input.read(cx).value().to_string();
+                        if terminal
+                            .pages
+                            .screener
+                            .scans
+                            .set_operand_search_query(input, query)
+                        {
+                            cx.notify();
+                        }
+                    }
+                    InputEvent::PressEnter { .. } => {
+                        let scans = &terminal.pages.screener.scans;
+                        if scans.operand_search_input() != Some(input) {
+                            return;
+                        }
+                        if let Some((condition, side, kind)) = scans.first_operand_match() {
+                            terminal.edit_market_scan(window, cx, |scans| {
+                                scans.edit(|draft| draft.set_operand_kind(condition, side, kind));
+                            });
+                        }
+                    }
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            )
+            .detach();
+            self.pages.screener.scans.set_operand_search(input);
+        }
         cx.notify();
     }
 

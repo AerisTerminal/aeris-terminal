@@ -2,7 +2,8 @@
 //! Hyperliquid feed on an isolated validation root. It measures a cold and a warm pass over
 //! the most traded markets on one interval (`--interval`, daily by default), opens a chart on
 //! that interval while the cold pass runs to show background scan requests leave charts their
-//! budget reserve, checks one match's values against the bars that chart received, and checks
+//! budget reserve, checks one match's study values (one study from every family) against
+//! reference math the probe computes itself from the bars that chart received, and checks
 //! that an interval the provider does not offer is refused. Records an `aeris.probe.v1` envelope and exits non-zero on
 //! the first failed check. Non-shipping validation tooling.
 
@@ -15,10 +16,10 @@ use std::{
 use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_market_runtime::{
     InstrumentRef, InstrumentRequest, MarketRuntimeEvent, MarketService, ProviderMarketScan,
-    ScanComparison, ScanCondition, ScanDefinition, ScanIndicator, ScanNumber, ScanOperand,
-    ScanPriceField, ScanProviderMarkets, SelectionOutcome, SelectionRequest,
-    SeriesPresentationStatus, SeriesTailOperation, StreamRequirements,
-    built_in_provider_presentations, persisted_interval,
+    ProviderMarketScanMatch, ScanComparison, ScanCondition, ScanDefinition, ScanNumber,
+    ScanOperand, ScanPriceField, ScanProviderMarkets, ScanStudy, ScanStudyOperand,
+    ScanStudyOutputName, SelectionOutcome, SelectionRequest, SeriesPresentationStatus,
+    SeriesTailOperation, StreamRequirements, built_in_provider_presentations, persisted_interval,
 };
 use aeris_platform_runtime::data_root::{DataRoot, InstanceLock};
 use aeris_probes::{Envelope, Evidence, ProbeError, ProbeResult, market, validate_paths};
@@ -38,7 +39,12 @@ const SCAN_ATTEMPTS: u32 = 6;
 const SCAN_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAXIMUM_CHART_BARS: usize = 20_000;
 const SPOT_CHECK_SYMBOL: &str = "ETH";
-const SPOT_PERIOD: u16 = 20;
+const SPOT_PERIOD: usize = 20;
+const BOLLINGER_DEVIATION: i64 = 2;
+const WILDER_PERIOD: usize = 14;
+/// Wilder averages forget their seed geometrically; past this many periods the scan's shorter
+/// history and the chart's longer one agree far inside the tolerances below.
+const WILDER_HISTORY_PERIODS: usize = 10;
 
 /// An interval no provider offers for scans, which every scan request must refuse.
 const UNOFFERED_INTERVAL: ChartInterval = ChartInterval::Second5;
@@ -90,6 +96,7 @@ struct Chart {
     selected: bool,
     live: bool,
     price_scale: u8,
+    quantity_scale: u8,
     bars: Vec<MarketBar>,
 }
 
@@ -126,6 +133,7 @@ impl Chart {
                     ));
                 }
                 self.price_scale = snapshot.price_scale;
+                self.quantity_scale = snapshot.quantity_scale;
                 self.bars = snapshot.bars.to_vec();
             }
             MarketRuntimeEvent::SeriesUpdate(update)
@@ -373,31 +381,79 @@ fn number(units: i64) -> ScanOperand {
     ScanOperand::Number(ScanNumber { units, scale: 0 })
 }
 
-/// Every condition holds for any listed market with enough history, so every market with
-/// data is a match and its values can be checked.
+/// `study`'s `output` line with `parameters` set explicitly, so the reference math below
+/// does not depend on the runtime's defaults.
+fn study(study: ScanStudy, output: ScanStudyOutputName, parameters: &[i64]) -> ScanOperand {
+    let mut operand = ScanStudyOperand::new(study);
+    operand.output = study
+        .descriptor()
+        .output_index(output)
+        .unwrap_or(usize::MAX);
+    for (slot, value) in operand.parameters.iter_mut().zip(parameters) {
+        *slot = ScanNumber::from(*value);
+    }
+    ScanOperand::Study(operand)
+}
+
+fn whole(period: usize) -> i64 {
+    i64::try_from(period).unwrap_or(i64::MAX)
+}
+
+/// One condition per study family. Every condition holds for any traded market with enough
+/// history, so every such market is a match and its values can be checked.
 fn definition(interval: ChartInterval) -> ScanDefinition {
-    let above_zero = |left| ScanCondition {
+    use ScanStudyOutputName as Line;
+    let compared = |left, comparison, right| ScanCondition {
         left,
-        comparison: ScanComparison::Above,
-        right: number(0),
+        comparison,
+        right,
         upper: None,
+    };
+    let above_zero = |left| compared(left, ScanComparison::Above, number(0));
+    let between = |left, lower, upper| ScanCondition {
+        left,
+        comparison: ScanComparison::Between,
+        right: number(lower),
+        upper: Some(number(upper)),
+    };
+    let bollinger = |line| {
+        study(
+            ScanStudy::Bollinger,
+            line,
+            &[whole(SPOT_PERIOD), BOLLINGER_DEVIATION],
+        )
     };
     ScanDefinition {
         timeframe: interval,
         conditions: vec![
             above_zero(ScanOperand::Price(ScanPriceField::Close)),
-            above_zero(ScanOperand::Indicator(ScanIndicator::HighestHigh {
-                period: SPOT_PERIOD,
-            })),
-            above_zero(ScanOperand::Indicator(ScanIndicator::Sma {
-                period: SPOT_PERIOD,
-            })),
-            ScanCondition {
-                left: ScanOperand::Indicator(ScanIndicator::Rsi { period: 14 }),
-                comparison: ScanComparison::Between,
-                right: number(0),
-                upper: Some(number(100)),
-            },
+            above_zero(study(
+                ScanStudy::HighestHigh,
+                Line::Value,
+                &[whole(SPOT_PERIOD)],
+            )),
+            above_zero(study(ScanStudy::Sma, Line::Value, &[whole(SPOT_PERIOD)])),
+            between(
+                study(ScanStudy::Rsi, Line::Value, &[whole(WILDER_PERIOD)]),
+                0,
+                100,
+            ),
+            compared(
+                bollinger(Line::Upper),
+                ScanComparison::Above,
+                bollinger(Line::Lower),
+            ),
+            above_zero(study(
+                ScanStudy::Vortex,
+                Line::PlusVi,
+                &[whole(WILDER_PERIOD)],
+            )),
+            above_zero(study(ScanStudy::Atr, Line::Value, &[whole(WILDER_PERIOD)])),
+            between(
+                study(ScanStudy::Cmf, Line::Value, &[whole(SPOT_PERIOD)]),
+                -1,
+                1,
+            ),
         ],
         ..ScanDefinition::default()
     }
@@ -444,6 +500,194 @@ fn check_pass(evidence: &mut Evidence, id: &'static str, pass: &Pass) -> ProbeRe
     )
 }
 
+/// The chart's bars as columns. The forming bar's close and volume come from the scan row, so
+/// both sides read the same moment of a bar that keeps trading between the two reads.
+struct Columns {
+    high: Vec<f64>,
+    low: Vec<f64>,
+    close: Vec<f64>,
+    volume: Vec<f64>,
+}
+
+impl Columns {
+    fn new(chart: &Chart, row: &ProviderMarketScanMatch) -> Self {
+        let price = |units| scaled(units, chart.price_scale);
+        let mut columns = Self {
+            high: chart.bars.iter().map(|bar| price(bar.high)).collect(),
+            low: chart.bars.iter().map(|bar| price(bar.low)).collect(),
+            close: chart.bars.iter().map(|bar| price(bar.close)).collect(),
+            volume: chart
+                .bars
+                .iter()
+                .map(|bar| scaled(bar.volume, chart.quantity_scale))
+                .collect(),
+        };
+        if let (Some(close), Some(volume)) = (columns.close.last_mut(), columns.volume.last_mut()) {
+            *close = scaled(row.close, u8::try_from(row.price_scale).unwrap_or(u8::MAX));
+            *volume = scaled(
+                row.volume,
+                u8::try_from(row.quantity_scale).unwrap_or(u8::MAX),
+            );
+        }
+        columns
+    }
+
+    fn len(&self) -> usize {
+        self.close.len()
+    }
+
+    /// The true range of bar `index`, which needs the bar before it.
+    fn true_range(&self, index: usize) -> f64 {
+        let previous = self.close[index - 1];
+        (self.high[index] - self.low[index])
+            .max((self.high[index] - previous).abs())
+            .max((self.low[index] - previous).abs())
+    }
+}
+
+fn count(length: usize) -> f64 {
+    f64::from(u32::try_from(length).unwrap_or(u32::MAX))
+}
+
+fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / count(values.len())
+}
+
+fn trailing(values: &[f64], period: usize) -> &[f64] {
+    &values[values.len() - period..]
+}
+
+/// The highest high of the `period` bars before the current one.
+fn prior_highest(columns: &Columns, period: usize) -> f64 {
+    let end = columns.len() - 1;
+    columns.high[end - period..end]
+        .iter()
+        .copied()
+        .fold(f64::MIN, f64::max)
+}
+
+/// The bands `deviation` population standard deviations around the trailing mean.
+fn bollinger_bands(close: &[f64], period: usize, deviation: f64) -> (f64, f64) {
+    let window = trailing(close, period);
+    let middle = mean(window);
+    let spread = (window
+        .iter()
+        .map(|value| (value - middle).powi(2))
+        .sum::<f64>()
+        / count(period))
+    .sqrt()
+        * deviation;
+    (middle + spread, middle - spread)
+}
+
+/// Wilder's average: the mean of the first `period` samples, then each later sample
+/// weighted one `period`th.
+fn wilder(samples: impl Iterator<Item = f64>, period: usize) -> Option<f64> {
+    let weight = count(period);
+    let mut seed_sum = 0.0;
+    let mut seed_samples = 0;
+    let mut average = None;
+    for sample in samples {
+        average = if let Some(average) = average {
+            Some((average * (weight - 1.0) + sample) / weight)
+        } else {
+            seed_sum += sample;
+            seed_samples += 1;
+            (seed_samples == period).then(|| seed_sum / weight)
+        };
+    }
+    average
+}
+
+fn rsi(close: &[f64], period: usize) -> Option<f64> {
+    let gain = wilder(
+        close.windows(2).map(|pair| (pair[1] - pair[0]).max(0.0)),
+        period,
+    )?;
+    let loss = wilder(
+        close.windows(2).map(|pair| (pair[0] - pair[1]).max(0.0)),
+        period,
+    )?;
+    Some(if loss == 0.0 {
+        if gain == 0.0 { 50.0 } else { 100.0 }
+    } else {
+        100.0 - 100.0 / (1.0 + gain / loss)
+    })
+}
+
+fn atr(columns: &Columns, period: usize) -> Option<f64> {
+    wilder(
+        (1..columns.len()).map(|index| columns.true_range(index)),
+        period,
+    )
+}
+
+/// The positive vortex indicator: upward movement over true range across `period` bars.
+fn vortex_plus(columns: &Columns, period: usize) -> f64 {
+    let rows = columns.len() - period..columns.len();
+    let movement = rows
+        .clone()
+        .map(|index| (columns.high[index] - columns.low[index - 1]).abs())
+        .sum::<f64>();
+    movement / rows.map(|index| columns.true_range(index)).sum::<f64>()
+}
+
+/// Chaikin money flow: volume-weighted close location within each bar's range.
+fn cmf(columns: &Columns, period: usize) -> f64 {
+    let rows = columns.len() - period..columns.len();
+    let flow = rows
+        .clone()
+        .map(|index| {
+            let (high, low, close) = (
+                columns.high[index],
+                columns.low[index],
+                columns.close[index],
+            );
+            let location = if high > low {
+                ((close - low) - (high - close)) / (high - low)
+            } else {
+                0.0
+            };
+            location * columns.volume[index]
+        })
+        .sum::<f64>();
+    flow / rows.map(|index| columns.volume[index]).sum::<f64>()
+}
+
+/// One scan value beside the probe's own computation of it.
+struct Agreement {
+    name: &'static str,
+    scan: Option<f64>,
+    reference: Option<f64>,
+    tolerance: f64,
+}
+
+impl Agreement {
+    /// A price-valued line, which may differ from the reference by `relative` of it.
+    fn price(name: &'static str, scan: Option<f64>, reference: f64, relative: f64) -> Self {
+        Self {
+            name,
+            scan,
+            reference: Some(reference),
+            tolerance: reference.abs() * relative,
+        }
+    }
+
+    fn agrees(&self) -> bool {
+        matches!((self.scan, self.reference), (Some(scan), Some(reference))
+            if (scan - reference).abs() <= self.tolerance)
+    }
+
+    fn evidence(&self) -> serde_json::Value {
+        json!({
+            "scan": self.scan,
+            "reference": self.reference,
+            "tolerance": self.tolerance,
+            "agrees": self.agrees(),
+        })
+    }
+}
+
 fn spot_check(
     probe: &Probe,
     scan: &ProviderMarketScan,
@@ -454,51 +698,94 @@ fn spot_check(
         .iter()
         .find(|row| row.instrument.symbol == SPOT_CHECK_SYMBOL);
     let bars = &probe.chart.bars;
-    let period = usize::from(SPOT_PERIOD);
-    let (Some(row), true) = (found, bars.len() > period) else {
+    let needed = (WILDER_PERIOD * WILDER_HISTORY_PERIODS).max(SPOT_PERIOD) + 1;
+    let (Some(row), true) = (found, bars.len() > needed) else {
         return evidence.check(
-            "spot_check_matches_chart",
+            "spot_check_matches_reference_math",
             false,
-            json!({"symbol": SPOT_CHECK_SYMBOL, "found": found.is_some(), "chart_bars": bars.len()}),
+            json!({
+                "symbol": SPOT_CHECK_SYMBOL,
+                "found": found.is_some(),
+                "chart_bars": bars.len(),
+                "bars_needed": needed,
+            }),
         );
     };
-    let scale = probe.chart.price_scale;
+    let columns = Columns::new(&probe.chart, row);
     let current = bars[bars.len() - 1];
-    let prior = &bars[bars.len() - 1 - period..bars.len() - 1];
-    let chart_highest = prior
-        .iter()
-        .map(|bar| scaled(bar.high, scale))
-        .fold(f64::MIN, f64::max);
-    let chart_sma = bars[bars.len() - period..]
-        .iter()
-        .map(|bar| scaled(bar.close, scale))
-        .sum::<f64>()
-        / f64::from(SPOT_PERIOD);
-    let scan_highest = row.values.get(1).and_then(|values| values.left);
-    let scan_sma = row.values.get(2).and_then(|values| values.left);
     let same_bar = current.exchange_timestamp_unix_nanos / 1_000_000 == row.bar_open_unix_millis;
-    // The highest high excludes the current bar, so closed bars must agree exactly; the
-    // average includes the forming bar, whose close moves between the two reads.
-    let highest_agrees =
-        scan_highest.is_some_and(|value| (value - chart_highest).abs() <= chart_highest * 1e-12);
-    let sma_agrees =
-        scan_sma.is_some_and(|value| (value - chart_sma).abs() <= chart_sma.abs() * 0.002);
+    let left = |condition: usize| row.values.get(condition).and_then(|values| values.left);
+    let (upper, lower) = bollinger_bands(
+        &columns.close,
+        SPOT_PERIOD,
+        f64::from(u8::try_from(BOLLINGER_DEVIATION).unwrap_or(u8::MAX)),
+    );
+    // Closed bars and the forming close agree exactly, so close-only studies match to
+    // rounding. The forming bar's high and low can still widen between the two reads, which
+    // moves range-based studies slightly; Wilder averages also keep a trace of where each
+    // side's history started.
+    let agreements = [
+        Agreement::price(
+            "highest_high_20",
+            left(1),
+            prior_highest(&columns, SPOT_PERIOD),
+            1e-12,
+        ),
+        Agreement::price(
+            "sma_20",
+            left(2),
+            mean(trailing(&columns.close, SPOT_PERIOD)),
+            1e-9,
+        ),
+        Agreement {
+            name: "rsi_14",
+            scan: left(3),
+            reference: rsi(&columns.close, WILDER_PERIOD),
+            tolerance: 0.05,
+        },
+        Agreement::price("bollinger_20_2_upper", left(4), upper, 1e-9),
+        Agreement::price(
+            "bollinger_20_2_lower",
+            row.values.get(4).and_then(|values| values.right),
+            lower,
+            1e-9,
+        ),
+        Agreement {
+            name: "vortex_14_plus",
+            scan: left(5),
+            reference: Some(vortex_plus(&columns, WILDER_PERIOD)),
+            tolerance: 0.01,
+        },
+        Agreement {
+            name: "atr_14",
+            scan: left(6),
+            reference: atr(&columns, WILDER_PERIOD),
+            tolerance: atr(&columns, WILDER_PERIOD).map_or(0.0, |value| value * 5e-3),
+        },
+        Agreement {
+            name: "cmf_20",
+            scan: left(7),
+            reference: Some(cmf(&columns, SPOT_PERIOD)),
+            tolerance: 0.01,
+        },
+    ];
+    let mut values = serde_json::Map::new();
+    for agreement in &agreements {
+        values.insert(agreement.name.to_string(), agreement.evidence());
+    }
     evidence.check(
-        "spot_check_matches_chart",
-        same_bar && highest_agrees && sma_agrees,
+        "spot_check_matches_reference_math",
+        same_bar && agreements.iter().all(Agreement::agrees),
         json!({
             "symbol": SPOT_CHECK_SYMBOL,
             "same_current_bar": same_bar,
             "scan_bar_open_ms": row.bar_open_unix_millis,
             "chart_bar_open_ms": current.exchange_timestamp_unix_nanos / 1_000_000,
-            "highest_high_20": {"scan": scan_highest, "chart": chart_highest},
-            "sma_20": {"scan": scan_sma, "chart": chart_sma},
-            "scan_close": scaled(row.close, u8::try_from(row.price_scale).unwrap_or(u8::MAX)),
-            "chart_close": scaled(current.close, scale),
+            "chart_bars": bars.len(),
+            "values": values,
         }),
     )
 }
-
 fn scenario(
     service: &MarketService,
     interval: ChartInterval,

@@ -2,18 +2,27 @@
 //!
 //! A scan is a bounded list of conditions on one timeframe, evaluated for every listed
 //! instrument of one provider over that instrument's most recent provider bars, the still
-//! forming bar last, exactly as a chart shows them. Indicator values come from the same
-//! Aeris Charts indicator functions the chart uses, so a scan and a chart agree on every value
-//! over the same bars. Evaluation is pure: providers fetch bars, this module decides matches.
+//! forming bar last, exactly as a chart shows them. Study values come from the same Aeris
+//! Charts indicator state the chart builds (`studies`), so a scan and a chart agree on every
+//! value over the same bars. Evaluation is pure: providers fetch bars, this module decides
+//! matches.
 
-use aeris_charts_indicators as indicators;
+mod studies;
+
+use aeris_charts_indicators::IndicatorInput;
 use aeris_market_data::{ChartInterval, MarketBar};
 
 use crate::ProviderInstrumentSummary;
 
+pub use studies::{
+    MAXIMUM_SCAN_STUDY_PARAMETERS, ScanStudy, ScanStudyDescriptor, ScanStudyFamily,
+    ScanStudyOperand, ScanStudyOutput, ScanStudyOutputName, ScanStudyParameter,
+    ScanStudyParameterKind, ScanStudyParameterName, ScanValueUnit, scan_studies,
+};
+
 /// Most conditions one scan definition holds.
 pub const MAXIMUM_SCAN_CONDITIONS: usize = 8;
-/// Largest indicator period a condition may name.
+/// Largest study period a condition may name.
 pub const MAXIMUM_SCAN_PERIOD: u16 = 250;
 /// Most matches one scan publication carries.
 pub const MAXIMUM_SCAN_RESULTS: u32 = 500;
@@ -25,12 +34,6 @@ pub const MAXIMUM_SCAN_NUMBER_SCALE: u8 = 9;
 pub const MAXIMUM_SCAN_HISTORY_BARS: usize = 3_000;
 /// Fewest bars a scan requests, so short-period scans still see recent structure.
 const MINIMUM_SCAN_HISTORY_BARS: usize = 100;
-/// Recursive indicators (EMA, RSI, MACD, ATR, ADX) depend on how much history seeds them.
-/// This many periods of warm-up bring their current value within display precision of a
-/// chart that loaded longer history.
-const RECURSIVE_WARMUP_PERIODS: usize = 10;
-/// Largest Bollinger deviation, in tenths.
-const MAXIMUM_DEVIATION_TENTHS: u16 = 100;
 
 /// Whether every condition or any one condition must hold.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -50,101 +53,6 @@ pub enum ScanPriceField {
     Close,
 }
 
-/// One line of a MACD study.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum ScanMacdLine {
-    #[default]
-    Macd,
-    Signal,
-    Histogram,
-}
-
-/// One band of a Bollinger study.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum ScanBand {
-    Upper,
-    #[default]
-    Middle,
-    Lower,
-}
-
-/// An indicator computed over the bar closes, highs, lows or volumes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ScanIndicator {
-    Sma {
-        period: u16,
-    },
-    Ema {
-        period: u16,
-    },
-    Rsi {
-        period: u16,
-    },
-    Macd {
-        fast: u16,
-        slow: u16,
-        signal: u16,
-        line: ScanMacdLine,
-    },
-    Bollinger {
-        period: u16,
-        /// Band width in standard deviations, in tenths (20 is 2.0).
-        deviation_tenths: u16,
-        band: ScanBand,
-    },
-    Atr {
-        period: u16,
-    },
-    Adx {
-        period: u16,
-    },
-    /// Current volume divided by the mean volume of the previous `period` bars.
-    RelativeVolume {
-        period: u16,
-    },
-    /// Highest high of the `period` bars before the current bar.
-    HighestHigh {
-        period: u16,
-    },
-    /// Lowest low of the `period` bars before the current bar.
-    LowestLow {
-        period: u16,
-    },
-}
-
-impl ScanIndicator {
-    fn periods(self) -> [u16; 3] {
-        match self {
-            Self::Macd {
-                fast, slow, signal, ..
-            } => [fast, slow, signal],
-            Self::Sma { period }
-            | Self::Ema { period }
-            | Self::Rsi { period }
-            | Self::Bollinger { period, .. }
-            | Self::Atr { period }
-            | Self::Adx { period }
-            | Self::RelativeVolume { period }
-            | Self::HighestHigh { period }
-            | Self::LowestLow { period } => [period, period, period],
-        }
-    }
-
-    fn history_bars(self) -> usize {
-        let recursive = |period: u16| usize::from(period) * RECURSIVE_WARMUP_PERIODS;
-        match self {
-            Self::Sma { period } | Self::Bollinger { period, .. } => usize::from(period),
-            Self::Ema { period } | Self::Rsi { period } | Self::Atr { period } => recursive(period),
-            // ADX smooths a Wilder-smoothed directional index a second time.
-            Self::Adx { period } => recursive(period) * 2,
-            Self::Macd { slow, signal, .. } => recursive(slow) + usize::from(signal),
-            Self::RelativeVolume { period }
-            | Self::HighestHigh { period }
-            | Self::LowestLow { period } => usize::from(period) + 1,
-        }
-    }
-}
-
 /// A user-entered constant, exactly `units / 10^scale`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ScanNumber {
@@ -157,6 +65,18 @@ impl ScanNumber {
     fn value(self) -> f64 {
         self.units as f64 / 10_f64.powi(i32::from(self.scale))
     }
+
+    /// The number as a whole number, when it is one.
+    fn whole(self) -> Option<i64> {
+        let divisor = 10_i64.checked_pow(u32::from(self.scale))?;
+        (self.units % divisor == 0).then_some(self.units / divisor)
+    }
+}
+
+impl From<i64> for ScanNumber {
+    fn from(units: i64) -> Self {
+        Self { units, scale: 0 }
+    }
 }
 
 /// One side of a condition.
@@ -167,7 +87,7 @@ pub enum ScanOperand {
     Volume,
     /// Percent change of the close from the previous bar's close.
     ChangePercent,
-    Indicator(ScanIndicator),
+    Study(ScanStudyOperand),
     Number(ScanNumber),
 }
 
@@ -176,7 +96,7 @@ impl ScanOperand {
         match self {
             Self::Price(_) | Self::Volume | Self::Number(_) => 1,
             Self::ChangePercent => 2,
-            Self::Indicator(indicator) => indicator.history_bars(),
+            Self::Study(study) => study.history_bars(),
         }
     }
 }
@@ -230,12 +150,12 @@ impl Default for ScanDefinition {
 pub enum ScanDefinitionError {
     NoConditions,
     TooManyConditions,
-    /// A period is zero or above [`MAXIMUM_SCAN_PERIOD`].
-    PeriodOutOfRange,
-    /// MACD needs a fast period shorter than its slow period.
-    MacdPeriodsOutOfOrder,
-    /// A Bollinger deviation is zero or too wide.
-    DeviationOutOfRange,
+    /// A study parameter is outside its descriptor's bounds, or set where the study has none.
+    ParameterOutOfRange,
+    /// A study with fast and slow periods needs the fast one shorter.
+    FastPeriodNotBelowSlow,
+    /// A study operand reads a line its study does not draw.
+    OutputOutOfRange,
     /// A number's scale is above [`MAXIMUM_SCAN_NUMBER_SCALE`].
     NumberOutOfRange,
     /// The left side is a constant, which never varies by instrument.
@@ -249,9 +169,11 @@ impl std::fmt::Display for ScanDefinitionError {
         formatter.write_str(match self {
             Self::NoConditions => "a scan needs at least one condition",
             Self::TooManyConditions => "a scan has too many conditions",
-            Self::PeriodOutOfRange => "a scan indicator period is out of range",
-            Self::MacdPeriodsOutOfOrder => "a scan MACD fast period must be below its slow period",
-            Self::DeviationOutOfRange => "a scan Bollinger deviation is out of range",
+            Self::ParameterOutOfRange => "a scan study parameter is out of range",
+            Self::FastPeriodNotBelowSlow => {
+                "a scan study's fast period must be below its slow period"
+            }
+            Self::OutputOutOfRange => "a scan study has no such line",
             Self::NumberOutOfRange => "a scan number is out of range",
             Self::ConstantLeftOperand => "a scan condition cannot start with a number",
             Self::UpperBoundMismatch => "a scan range condition needs exactly one upper bound",
@@ -316,26 +238,7 @@ fn validate_operand(operand: ScanOperand) -> Result<(), ScanDefinitionError> {
         ScanOperand::Number(number) if number.scale > MAXIMUM_SCAN_NUMBER_SCALE => {
             Err(ScanDefinitionError::NumberOutOfRange)
         }
-        ScanOperand::Indicator(indicator) => {
-            if indicator
-                .periods()
-                .iter()
-                .any(|period| *period == 0 || *period > MAXIMUM_SCAN_PERIOD)
-            {
-                return Err(ScanDefinitionError::PeriodOutOfRange);
-            }
-            match indicator {
-                ScanIndicator::Macd { fast, slow, .. } if fast >= slow => {
-                    Err(ScanDefinitionError::MacdPeriodsOutOfOrder)
-                }
-                ScanIndicator::Bollinger {
-                    deviation_tenths, ..
-                } if deviation_tenths == 0 || deviation_tenths > MAXIMUM_DEVIATION_TENTHS => {
-                    Err(ScanDefinitionError::DeviationOutOfRange)
-                }
-                _ => Ok(()),
-            }
-        }
+        ScanOperand::Study(study) => study.validate(),
         ScanOperand::Price(_)
         | ScanOperand::Volume
         | ScanOperand::ChangePercent
@@ -416,6 +319,8 @@ pub struct ProviderMarketScan {
 /// One instrument's bars, oldest first, converted to the chart's values.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ScanBars {
+    /// Open times in Unix seconds.
+    times: Vec<i64>,
     open: Vec<f64>,
     high: Vec<f64>,
     low: Vec<f64>,
@@ -439,6 +344,10 @@ impl ScanBars {
                 .collect::<Vec<_>>()
         };
         Self {
+            times: bars
+                .iter()
+                .map(|bar| bar.exchange_timestamp_seconds)
+                .collect(),
             open: column(|bar| bar.open, price),
             high: column(|bar| bar.high, price),
             low: column(|bar| bar.low, price),
@@ -449,6 +358,17 @@ impl ScanBars {
 
     fn len(&self) -> usize {
         self.close.len()
+    }
+
+    fn input(&self) -> IndicatorInput<'_> {
+        IndicatorInput {
+            times: &self.times,
+            open: &self.open,
+            high: &self.high,
+            low: &self.low,
+            close: &self.close,
+            volume: &self.volume,
+        }
     }
 }
 
@@ -533,7 +453,8 @@ fn condition_holds(condition: &ScanCondition, series: &mut OperandSeries<'_>) ->
     }
 }
 
-/// Computes each distinct operand's series once per instrument.
+/// Computes each distinct operand's series once per instrument; every line of a study is
+/// kept from its one computation.
 struct OperandSeries<'a> {
     bars: &'a ScanBars,
     computed: Vec<(ScanOperand, Vec<Option<f64>>)>,
@@ -568,9 +489,10 @@ impl<'a> OperandSeries<'a> {
         let index = if let Some(index) = known {
             index
         } else {
+            self.computed.extend(operand_lines(operand, self.bars));
             self.computed
-                .push((operand, operand_series(operand, self.bars)));
-            self.computed.len() - 1
+                .iter()
+                .rposition(|(line, _)| *line == operand)?
         };
         self.computed[index]
             .1
@@ -581,8 +503,9 @@ impl<'a> OperandSeries<'a> {
     }
 }
 
-fn operand_series(operand: ScanOperand, bars: &ScanBars) -> Vec<Option<f64>> {
-    match operand {
+/// The series `operand` reads, beside every other line of the same study.
+fn operand_lines(operand: ScanOperand, bars: &ScanBars) -> Vec<(ScanOperand, Vec<Option<f64>>)> {
+    let series = match operand {
         ScanOperand::Price(field) => {
             let column = match field {
                 ScanPriceField::Open => &bars.open,
@@ -601,82 +524,54 @@ fn operand_series(operand: ScanOperand, bars: &ScanBars) -> Vec<Option<f64>> {
             )
             .take(bars.len())
             .collect(),
-        ScanOperand::Indicator(indicator) => indicator_series(indicator, bars),
-        ScanOperand::Number(number) => vec![Some(number.value()); bars.len()],
-    }
-}
-
-fn indicator_series(indicator: ScanIndicator, bars: &ScanBars) -> Vec<Option<f64>> {
-    let period = |period: u16| usize::from(period);
-    match indicator {
-        ScanIndicator::Sma { period: p } => indicators::sma(&bars.close, period(p)),
-        ScanIndicator::Ema { period: p } => indicators::ema(&bars.close, period(p)),
-        ScanIndicator::Rsi { period: p } => indicators::rsi(&bars.close, period(p)),
-        ScanIndicator::Macd {
-            fast,
-            slow,
-            signal,
-            line,
-        } => indicators::macd(&bars.close, period(fast), period(slow), period(signal))
-            .into_iter()
-            .map(|point| match line {
-                ScanMacdLine::Macd => point.macd,
-                ScanMacdLine::Signal => point.signal,
-                ScanMacdLine::Histogram => point.histogram,
-            })
-            .collect(),
-        ScanIndicator::Bollinger {
-            period: p,
-            deviation_tenths,
-            band,
-        } => indicators::bollinger(&bars.close, period(p), f64::from(deviation_tenths) / 10.0)
-            .into_iter()
-            .map(|point| match band {
-                ScanBand::Upper => point.upper,
-                ScanBand::Middle => point.middle,
-                ScanBand::Lower => point.lower,
-            })
-            .collect(),
-        ScanIndicator::Atr { period: p } => {
-            indicators::atr(&bars.high, &bars.low, &bars.close, period(p))
-        }
-        ScanIndicator::Adx { period: p } => {
-            indicators::adx_dmi(&bars.high, &bars.low, &bars.close, period(p))
+        ScanOperand::Study(study) => {
+            return study
+                .series(bars)
                 .into_iter()
-                .map(|point| point.adx)
-                .collect()
+                .enumerate()
+                .map(|(output, series)| {
+                    (
+                        ScanOperand::Study(ScanStudyOperand { output, ..study }),
+                        series,
+                    )
+                })
+                .collect();
         }
-        ScanIndicator::RelativeVolume { period: p } => {
-            indicators::relative_volume(&bars.volume, period(p))
-        }
-        ScanIndicator::HighestHigh { period: p } => prior_extreme(&bars.high, period(p), f64::max),
-        ScanIndicator::LowestLow { period: p } => prior_extreme(&bars.low, period(p), f64::min),
-    }
-}
-
-/// The extreme of the `period` values before each row; absent until `period` rows precede it.
-fn prior_extreme(values: &[f64], period: usize, pick: fn(f64, f64) -> f64) -> Vec<Option<f64>> {
-    (0..values.len())
-        .map(|row| {
-            (period > 0 && row >= period)
-                .then(|| values[row - period..row].iter().copied().reduce(pick))
-                .flatten()
-        })
-        .collect()
+        ScanOperand::Number(number) => vec![Some(number.value()); bars.len()],
+    };
+    vec![(operand, series)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_charts_indicators as indicators;
 
     fn bars(closes: &[f64]) -> ScanBars {
         ScanBars {
+            times: (0_i64..)
+                .take(closes.len())
+                .map(|day| day * 86_400)
+                .collect(),
             open: closes.to_vec(),
             high: closes.iter().map(|close| close + 1.0).collect(),
             low: closes.iter().map(|close| close - 1.0).collect(),
             close: closes.to_vec(),
             volume: vec![10.0; closes.len()],
         }
+    }
+
+    /// `kind` with its leading parameters set to whole `values`, reading line `output`.
+    fn study(kind: ScanStudy, values: &[i64], output: usize) -> ScanOperand {
+        let mut operand = ScanStudyOperand::new(kind);
+        for (slot, value) in operand.parameters.iter_mut().zip(values) {
+            *slot = ScanNumber {
+                units: *value,
+                scale: 0,
+            };
+        }
+        operand.output = output;
+        ScanOperand::Study(operand)
     }
 
     fn number(value: i64) -> ScanOperand {
@@ -712,7 +607,7 @@ mod tests {
     #[test]
     fn close_above_its_moving_average_uses_the_chart_formula() {
         let rising = (1..=30).map(f64::from).collect::<Vec<_>>();
-        let sma = ScanOperand::Indicator(ScanIndicator::Sma { period: 20 });
+        let sma = study(ScanStudy::Sma, &[20], 0);
         let scan = definition(vec![condition(CLOSE, ScanComparison::Above, sma)]);
         let outcome = evaluate(&scan, &bars(&rising));
         assert!(outcome.matched);
@@ -762,7 +657,7 @@ mod tests {
 
     #[test]
     fn missing_warm_up_never_matches() {
-        let sma = ScanOperand::Indicator(ScanIndicator::Sma { period: 20 });
+        let sma = study(ScanStudy::Sma, &[20], 0);
         let scan = definition(vec![condition(CLOSE, ScanComparison::Above, sma)]);
         let outcome = evaluate(&scan, &bars(&[1.0, 2.0, 3.0]));
         assert!(!outcome.matched);
@@ -774,7 +669,7 @@ mod tests {
 
     #[test]
     fn breakouts_compare_against_prior_bars_only() {
-        let highest = ScanOperand::Indicator(ScanIndicator::HighestHigh { period: 3 });
+        let highest = study(ScanStudy::HighestHigh, &[3], 0);
         let scan = definition(vec![condition(CLOSE, ScanComparison::Above, highest)]);
         // Prior highs are close + 1: 6, 7, 8. A close of 9 breaks out; the current high is ignored.
         assert!(evaluate(&scan, &bars(&[5.0, 6.0, 7.0, 9.0])).matched);
@@ -840,18 +735,18 @@ mod tests {
 
     #[test]
     fn validation_refuses_every_unbounded_shape() {
-        let sma = |period| ScanOperand::Indicator(ScanIndicator::Sma { period });
+        let sma = |period| study(ScanStudy::Sma, &[period], 0);
         assert_eq!(
             definition(Vec::new()).validate(),
             Err(ScanDefinitionError::NoConditions)
         );
         assert_eq!(
             definition(vec![condition(CLOSE, ScanComparison::Above, sma(0))]).validate(),
-            Err(ScanDefinitionError::PeriodOutOfRange)
+            Err(ScanDefinitionError::ParameterOutOfRange)
         );
         assert_eq!(
             definition(vec![condition(CLOSE, ScanComparison::Above, sma(251))]).validate(),
-            Err(ScanDefinitionError::PeriodOutOfRange)
+            Err(ScanDefinitionError::ParameterOutOfRange)
         );
         assert_eq!(
             definition(vec![condition(number(1), ScanComparison::Above, CLOSE)]).validate(),
@@ -861,15 +756,62 @@ mod tests {
             definition(vec![condition(CLOSE, ScanComparison::Between, number(1))]).validate(),
             Err(ScanDefinitionError::UpperBoundMismatch)
         );
-        let macd = ScanOperand::Indicator(ScanIndicator::Macd {
-            fast: 26,
-            slow: 12,
-            signal: 9,
-            line: ScanMacdLine::Macd,
-        });
+        let macd = study(ScanStudy::Macd, &[26, 12, 9], 0);
         assert_eq!(
             definition(vec![condition(macd, ScanComparison::Above, number(0))]).validate(),
-            Err(ScanDefinitionError::MacdPeriodsOutOfOrder)
+            Err(ScanDefinitionError::FastPeriodNotBelowSlow)
+        );
+        let missing_line = study(ScanStudy::Macd, &[12, 26, 9], 3);
+        assert_eq!(
+            definition(vec![condition(
+                missing_line,
+                ScanComparison::Above,
+                number(0)
+            )])
+            .validate(),
+            Err(ScanDefinitionError::OutputOutOfRange)
+        );
+        let mut stray = ScanStudyOperand::new(ScanStudy::Rsi);
+        stray.parameters[1] = ScanNumber { units: 3, scale: 0 };
+        assert_eq!(
+            definition(vec![condition(
+                ScanOperand::Study(stray),
+                ScanComparison::Above,
+                number(0)
+            )])
+            .validate(),
+            Err(ScanDefinitionError::ParameterOutOfRange),
+            "a value past the study's parameters"
+        );
+        let mut fractional = ScanStudyOperand::new(ScanStudy::Sma);
+        fractional.parameters[0] = ScanNumber {
+            units: 205,
+            scale: 1,
+        };
+        assert_eq!(
+            definition(vec![condition(
+                ScanOperand::Study(fractional),
+                ScanComparison::Above,
+                number(0)
+            )])
+            .validate(),
+            Err(ScanDefinitionError::ParameterOutOfRange),
+            "a period must be whole"
+        );
+        let mut wide = ScanStudyOperand::new(ScanStudy::Bollinger);
+        wide.parameters[1] = ScanNumber {
+            units: 105,
+            scale: 1,
+        };
+        assert_eq!(
+            definition(vec![condition(
+                CLOSE,
+                ScanComparison::Above,
+                ScanOperand::Study(wide)
+            )])
+            .validate(),
+            Err(ScanDefinitionError::ParameterOutOfRange),
+            "a deviation above 10"
         );
         let too_many = vec![condition(CLOSE, ScanComparison::Above, number(1)); 9];
         assert_eq!(
@@ -884,7 +826,7 @@ mod tests {
 
     #[test]
     fn history_covers_the_deepest_indicator_within_bounds() {
-        let ema = ScanOperand::Indicator(ScanIndicator::Ema { period: 50 });
+        let ema = study(ScanStudy::Ema, &[50], 0);
         assert_eq!(
             definition(vec![condition(CLOSE, ScanComparison::Above, ema)]).history_bars(),
             501
@@ -893,7 +835,7 @@ mod tests {
             definition(vec![condition(CLOSE, ScanComparison::Above, number(1))]).history_bars(),
             MINIMUM_SCAN_HISTORY_BARS
         );
-        let adx = ScanOperand::Indicator(ScanIndicator::Adx { period: 250 });
+        let adx = study(ScanStudy::AdxDmi, &[250], 2);
         assert_eq!(
             definition(vec![condition(adx, ScanComparison::Above, number(25))]).history_bars(),
             MAXIMUM_SCAN_HISTORY_BARS

@@ -2,12 +2,12 @@ use aeris_contracts::{
     InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartSettingsTemplateState,
     WorkspaceChartState, WorkspaceChartStudyState, WorkspaceDrawingTemplateState,
     WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSavedLayoutState, WorkspaceScanBand, WorkspaceScanComparison,
-    WorkspaceScanConditionState, WorkspaceScanMacdLine, WorkspaceScanMatchMode,
-    WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScreenerScanState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceSavedLayoutState, WorkspaceScanComparison, WorkspaceScanConditionState,
+    WorkspaceScanMatchMode, WorkspaceScanOperandKind, WorkspaceScanOperandState,
+    WorkspaceScanStudyParameterState, WorkspaceScreenerScanState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -213,11 +213,21 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
             universe_limit: 100,
             conditions: vec![WorkspaceScanConditionState {
                 left: Some(WorkspaceScanOperandState {
-                    kind: WorkspaceScanOperandKind::Macd as i32,
-                    period: 12,
-                    second_period: 26,
-                    third_period: 9,
-                    macd_line: WorkspaceScanMacdLine::Signal as i32,
+                    kind: WorkspaceScanOperandKind::Study as i32,
+                    study: "macd".into(),
+                    study_parameters: vec![
+                        WorkspaceScanStudyParameterState {
+                            name: "fast".into(),
+                            units: 12,
+                            scale: 0,
+                        },
+                        WorkspaceScanStudyParameterState {
+                            name: "slow".into(),
+                            units: 26,
+                            scale: 0,
+                        },
+                    ],
+                    study_output: "signal".into(),
                     ..WorkspaceScanOperandState::default()
                 }),
                 comparison: WorkspaceScanComparison::Between as i32,
@@ -228,10 +238,14 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
                     ..WorkspaceScanOperandState::default()
                 }),
                 upper: Some(WorkspaceScanOperandState {
-                    kind: WorkspaceScanOperandKind::Bollinger as i32,
-                    period: 20,
-                    band: WorkspaceScanBand::Upper as i32,
-                    deviation_tenths: 20,
+                    kind: WorkspaceScanOperandKind::Study as i32,
+                    study: "bollinger".into(),
+                    study_parameters: vec![WorkspaceScanStudyParameterState {
+                        name: "deviation".into(),
+                        units: 25,
+                        scale: 1,
+                    }],
+                    study_output: "upper".into(),
                     ..WorkspaceScanOperandState::default()
                 }),
             }],

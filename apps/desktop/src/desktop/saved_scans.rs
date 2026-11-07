@@ -6,13 +6,14 @@
 use std::collections::BTreeSet;
 
 use aeris_contracts::{
-    WorkspaceScanBand, WorkspaceScanComparison, WorkspaceScanConditionState, WorkspaceScanMacdLine,
-    WorkspaceScanMatchMode, WorkspaceScanOperandKind, WorkspaceScanOperandState,
+    WorkspaceScanComparison, WorkspaceScanConditionState, WorkspaceScanMatchMode,
+    WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScanStudyParameterState,
     WorkspaceScreenerScanState,
 };
 use aeris_market_runtime::{
-    MAXIMUM_SCAN_UNIVERSE, ScanBand, ScanComparison, ScanCondition, ScanDefinition, ScanIndicator,
-    ScanMacdLine, ScanMatchMode, ScanNumber, ScanOperand, ScanPriceField, persisted_interval,
+    MAXIMUM_SCAN_STUDY_PARAMETERS, MAXIMUM_SCAN_UNIVERSE, ScanComparison, ScanCondition,
+    ScanDefinition, ScanMatchMode, ScanNumber, ScanOperand, ScanPriceField, ScanStudy,
+    ScanStudyOperand, persisted_interval,
 };
 
 pub(super) const MAXIMUM_SAVED_SCANS: usize = 64;
@@ -158,7 +159,6 @@ fn condition_state(condition: &ScanCondition) -> WorkspaceScanConditionState {
 }
 
 fn operand(state: &WorkspaceScanOperandState) -> Option<ScanOperand> {
-    let period = || u16::try_from(state.period).ok();
     Some(match WorkspaceScanOperandKind::try_from(state.kind).ok()? {
         WorkspaceScanOperandKind::Unspecified => return None,
         WorkspaceScanOperandKind::Open => ScanOperand::Price(ScanPriceField::Open),
@@ -171,46 +171,36 @@ fn operand(state: &WorkspaceScanOperandState) -> Option<ScanOperand> {
             units: state.number_units,
             scale: u8::try_from(state.number_scale).ok()?,
         }),
-        WorkspaceScanOperandKind::Sma => indicator(ScanIndicator::Sma { period: period()? }),
-        WorkspaceScanOperandKind::Ema => indicator(ScanIndicator::Ema { period: period()? }),
-        WorkspaceScanOperandKind::Rsi => indicator(ScanIndicator::Rsi { period: period()? }),
-        WorkspaceScanOperandKind::Atr => indicator(ScanIndicator::Atr { period: period()? }),
-        WorkspaceScanOperandKind::Adx => indicator(ScanIndicator::Adx { period: period()? }),
-        WorkspaceScanOperandKind::RelativeVolume => {
-            indicator(ScanIndicator::RelativeVolume { period: period()? })
-        }
-        WorkspaceScanOperandKind::HighestHigh => {
-            indicator(ScanIndicator::HighestHigh { period: period()? })
-        }
-        WorkspaceScanOperandKind::LowestLow => {
-            indicator(ScanIndicator::LowestLow { period: period()? })
-        }
-        WorkspaceScanOperandKind::Macd => indicator(ScanIndicator::Macd {
-            fast: period()?,
-            slow: u16::try_from(state.second_period).ok()?,
-            signal: u16::try_from(state.third_period).ok()?,
-            line: match WorkspaceScanMacdLine::try_from(state.macd_line).ok()? {
-                WorkspaceScanMacdLine::Unspecified => return None,
-                WorkspaceScanMacdLine::Macd => ScanMacdLine::Macd,
-                WorkspaceScanMacdLine::Signal => ScanMacdLine::Signal,
-                WorkspaceScanMacdLine::Histogram => ScanMacdLine::Histogram,
-            },
-        }),
-        WorkspaceScanOperandKind::Bollinger => indicator(ScanIndicator::Bollinger {
-            period: period()?,
-            deviation_tenths: u16::try_from(state.deviation_tenths).ok()?,
-            band: match WorkspaceScanBand::try_from(state.band).ok()? {
-                WorkspaceScanBand::Unspecified => return None,
-                WorkspaceScanBand::Upper => ScanBand::Upper,
-                WorkspaceScanBand::Middle => ScanBand::Middle,
-                WorkspaceScanBand::Lower => ScanBand::Lower,
-            },
-        }),
+        WorkspaceScanOperandKind::Study => ScanOperand::Study(study_operand(state)?),
     })
 }
 
-const fn indicator(indicator: ScanIndicator) -> ScanOperand {
-    ScanOperand::Indicator(indicator)
+/// A stored study by its identifiers. A parameter not stored keeps its default; an unknown
+/// study, line or parameter, or a parameter stored twice, makes the operand unreadable rather
+/// than silently reading something else.
+fn study_operand(state: &WorkspaceScanOperandState) -> Option<ScanStudyOperand> {
+    let study = ScanStudy::from_identifier(&state.study)?;
+    let descriptor = study.descriptor();
+    let mut operand = ScanStudyOperand::new(study);
+    operand.output = descriptor
+        .outputs
+        .iter()
+        .position(|output| output.name.identifier() == state.study_output)?;
+    let mut stored = [false; MAXIMUM_SCAN_STUDY_PARAMETERS];
+    for parameter in &state.study_parameters {
+        let index = descriptor
+            .parameters
+            .iter()
+            .position(|known| known.name.identifier() == parameter.name)?;
+        if std::mem::replace(&mut stored[index], true) {
+            return None;
+        }
+        operand.parameters[index] = ScanNumber {
+            units: parameter.units,
+            scale: u8::try_from(parameter.scale).ok()?,
+        };
+    }
+    Some(operand)
 }
 
 fn operand_state(operand: ScanOperand) -> WorkspaceScanOperandState {
@@ -218,11 +208,6 @@ fn operand_state(operand: ScanOperand) -> WorkspaceScanOperandState {
         kind: kind as i32,
         ..WorkspaceScanOperandState::default()
     };
-    let with_period =
-        |operand_kind: WorkspaceScanOperandKind, period: u16| WorkspaceScanOperandState {
-            period: u32::from(period),
-            ..kind(operand_kind)
-        };
     match operand {
         ScanOperand::Price(ScanPriceField::Open) => kind(WorkspaceScanOperandKind::Open),
         ScanOperand::Price(ScanPriceField::High) => kind(WorkspaceScanOperandKind::High),
@@ -235,50 +220,27 @@ fn operand_state(operand: ScanOperand) -> WorkspaceScanOperandState {
             number_scale: u32::from(number.scale),
             ..kind(WorkspaceScanOperandKind::Number)
         },
-        ScanOperand::Indicator(indicator) => match indicator {
-            ScanIndicator::Sma { period } => with_period(WorkspaceScanOperandKind::Sma, period),
-            ScanIndicator::Ema { period } => with_period(WorkspaceScanOperandKind::Ema, period),
-            ScanIndicator::Rsi { period } => with_period(WorkspaceScanOperandKind::Rsi, period),
-            ScanIndicator::Atr { period } => with_period(WorkspaceScanOperandKind::Atr, period),
-            ScanIndicator::Adx { period } => with_period(WorkspaceScanOperandKind::Adx, period),
-            ScanIndicator::RelativeVolume { period } => {
-                with_period(WorkspaceScanOperandKind::RelativeVolume, period)
+        ScanOperand::Study(study) => {
+            let descriptor = study.study.descriptor();
+            WorkspaceScanOperandState {
+                study: descriptor.identifier.to_string(),
+                study_parameters: descriptor
+                    .parameters
+                    .iter()
+                    .zip(study.parameters)
+                    .map(|(parameter, value)| WorkspaceScanStudyParameterState {
+                        name: parameter.name.identifier().to_string(),
+                        units: value.units,
+                        scale: u32::from(value.scale),
+                    })
+                    .collect(),
+                study_output: study
+                    .output_descriptor()
+                    .map(|output| output.name.identifier().to_string())
+                    .unwrap_or_default(),
+                ..kind(WorkspaceScanOperandKind::Study)
             }
-            ScanIndicator::HighestHigh { period } => {
-                with_period(WorkspaceScanOperandKind::HighestHigh, period)
-            }
-            ScanIndicator::LowestLow { period } => {
-                with_period(WorkspaceScanOperandKind::LowestLow, period)
-            }
-            ScanIndicator::Macd {
-                fast,
-                slow,
-                signal,
-                line,
-            } => WorkspaceScanOperandState {
-                second_period: u32::from(slow),
-                third_period: u32::from(signal),
-                macd_line: match line {
-                    ScanMacdLine::Macd => WorkspaceScanMacdLine::Macd,
-                    ScanMacdLine::Signal => WorkspaceScanMacdLine::Signal,
-                    ScanMacdLine::Histogram => WorkspaceScanMacdLine::Histogram,
-                } as i32,
-                ..with_period(WorkspaceScanOperandKind::Macd, fast)
-            },
-            ScanIndicator::Bollinger {
-                period,
-                deviation_tenths,
-                band,
-            } => WorkspaceScanOperandState {
-                deviation_tenths: u32::from(deviation_tenths),
-                band: match band {
-                    ScanBand::Upper => WorkspaceScanBand::Upper,
-                    ScanBand::Middle => WorkspaceScanBand::Middle,
-                    ScanBand::Lower => WorkspaceScanBand::Lower,
-                } as i32,
-                ..with_period(WorkspaceScanOperandKind::Bollinger, period)
-            },
-        },
+        }
     }
 }
 
@@ -286,11 +248,16 @@ fn operand_state(operand: ScanOperand) -> WorkspaceScanOperandState {
 mod tests {
     use super::*;
     use aeris_market_data::ChartInterval;
+    use aeris_market_runtime::scan_studies;
 
     const CLOSE: ScanOperand = ScanOperand::Price(ScanPriceField::Close);
 
     fn number(units: i64, scale: u8) -> ScanOperand {
         ScanOperand::Number(ScanNumber { units, scale })
+    }
+
+    fn study(study: ScanStudy) -> ScanStudyOperand {
+        ScanStudyOperand::new(study)
     }
 
     fn above(left: ScanOperand, right: ScanOperand) -> ScanCondition {
@@ -314,6 +281,8 @@ mod tests {
         }
     }
 
+    /// Every bar value, and every line of every study at its defaults, plus studies with
+    /// changed whole and decimal parameters.
     fn every_operand() -> Vec<ScanOperand> {
         let mut operands = vec![
             ScanOperand::Price(ScanPriceField::Open),
@@ -323,38 +292,23 @@ mod tests {
             ScanOperand::Volume,
             ScanOperand::ChangePercent,
         ];
-        operands.extend(
-            [
-                ScanIndicator::Sma { period: 50 },
-                ScanIndicator::Ema { period: 21 },
-                ScanIndicator::Rsi { period: 14 },
-                ScanIndicator::Atr { period: 10 },
-                ScanIndicator::Adx { period: 14 },
-                ScanIndicator::RelativeVolume { period: 20 },
-                ScanIndicator::HighestHigh { period: 55 },
-                ScanIndicator::LowestLow { period: 30 },
-            ]
-            .map(ScanOperand::Indicator),
-        );
-        for line in [
-            ScanMacdLine::Macd,
-            ScanMacdLine::Signal,
-            ScanMacdLine::Histogram,
-        ] {
-            operands.push(ScanOperand::Indicator(ScanIndicator::Macd {
-                fast: 12,
-                slow: 26,
-                signal: 9,
-                line,
-            }));
+        for descriptor in scan_studies() {
+            for output in 0..descriptor.outputs.len() {
+                operands.push(ScanOperand::Study(ScanStudyOperand {
+                    output,
+                    ..study(descriptor.study)
+                }));
+            }
         }
-        for band in [ScanBand::Upper, ScanBand::Middle, ScanBand::Lower] {
-            operands.push(ScanOperand::Indicator(ScanIndicator::Bollinger {
-                period: 20,
-                deviation_tenths: 25,
-                band,
-            }));
-        }
+        let mut macd = study(ScanStudy::Macd);
+        macd.parameters[..3].copy_from_slice(&[8, 21, 5].map(ScanNumber::from));
+        macd.output = 1;
+        let mut bollinger = study(ScanStudy::Bollinger);
+        bollinger.parameters[1] = ScanNumber {
+            units: 25,
+            scale: 1,
+        };
+        operands.extend([macd, bollinger].map(ScanOperand::Study));
         operands
     }
 
@@ -377,18 +331,12 @@ mod tests {
         ]
         .map(|comparison| ScanCondition {
             comparison,
-            ..above(
-                CLOSE,
-                ScanOperand::Indicator(ScanIndicator::Sma { period: 20 }),
-            )
+            ..above(CLOSE, ScanOperand::Study(study(ScanStudy::Sma)))
         });
         let between = ScanCondition {
             comparison: ScanComparison::Between,
             upper: Some(number(70, 0)),
-            ..above(
-                ScanOperand::Indicator(ScanIndicator::Rsi { period: 14 }),
-                number(30, 0),
-            )
+            ..above(ScanOperand::Study(study(ScanStudy::Rsi)), number(30, 0))
         };
         let mut saved = scan(
             "Comparisons",
@@ -407,7 +355,40 @@ mod tests {
     }
 
     #[test]
+    fn a_study_is_stored_by_its_chart_identifiers() {
+        let mut macd = study(ScanStudy::Macd);
+        macd.output = 1;
+        let state = operand_state(ScanOperand::Study(macd));
+        assert_eq!(state.kind, WorkspaceScanOperandKind::Study as i32);
+        assert_eq!(state.study, "macd");
+        assert_eq!(state.study_output, "signal");
+        let names: Vec<_> = state
+            .study_parameters
+            .iter()
+            .map(|parameter| (parameter.name.as_str(), parameter.units))
+            .collect();
+        assert_eq!(names, [("fast", 12), ("slow", 26), ("signal", 9)]);
+    }
+
+    #[test]
+    fn a_study_parameter_not_stored_keeps_its_default() {
+        let mut bollinger = study(ScanStudy::Bollinger);
+        bollinger.output = 2;
+        let mut state = operand_state(ScanOperand::Study(bollinger));
+        state
+            .study_parameters
+            .retain(|parameter| parameter.name != "deviation");
+        state.study_parameters[0].units = 30;
+        let mut expected = bollinger;
+        expected.parameters[0] = ScanNumber::from(30);
+        assert_eq!(operand(&state), Some(ScanOperand::Study(expected)));
+    }
+
+    #[test]
     fn an_unknown_or_missing_value_makes_only_that_scan_invalid() {
+        fn left(state: &mut WorkspaceScreenerScanState) -> &mut WorkspaceScanOperandState {
+            state.conditions[0].left.as_mut().expect("left")
+        }
         let valid = scan("Valid", vec![above(CLOSE, number(1, 0))]).to_state();
         let mut unknown_interval = valid.clone();
         unknown_interval.interval = "7h".to_string();
@@ -420,60 +401,88 @@ mod tests {
             kind: 400,
             ..WorkspaceScanOperandState::default()
         });
+        let mut retired_kind = valid.clone();
+        retired_kind.conditions[0].left = Some(WorkspaceScanOperandState {
+            kind: 7,
+            ..WorkspaceScanOperandState::default()
+        });
         let mut missing_right = valid.clone();
         missing_right.conditions[0].right = None;
-        let mut unknown_line = scan(
+        let study_scan = scan(
             "Macd",
             vec![above(
-                ScanOperand::Indicator(ScanIndicator::Macd {
-                    fast: 12,
-                    slow: 26,
-                    signal: 9,
-                    line: ScanMacdLine::Macd,
-                }),
+                ScanOperand::Study(study(ScanStudy::Macd)),
                 number(0, 0),
             )],
         )
         .to_state();
-        unknown_line.conditions[0]
-            .left
-            .as_mut()
-            .expect("left")
-            .macd_line = 7;
+        let mut unknown_study = study_scan.clone();
+        left(&mut unknown_study).study = "macd_v2".to_string();
+        let mut unknown_line = study_scan.clone();
+        left(&mut unknown_line).study_output = "upper".to_string();
+        let mut missing_line = study_scan.clone();
+        left(&mut missing_line).study_output.clear();
+        let mut unknown_parameter = study_scan.clone();
+        left(&mut unknown_parameter).study_parameters[0].name = "period".to_string();
+        let mut repeated_parameter = study_scan.clone();
+        let first = left(&mut repeated_parameter).study_parameters[0].clone();
+        left(&mut repeated_parameter).study_parameters.push(first);
+        let mut wide_scale = study_scan.clone();
+        left(&mut wide_scale).study_parameters[0].scale = 300;
         for invalid in [
             unknown_interval,
             missing_interval,
             unspecified_mode,
             unknown_operand,
+            retired_kind,
             missing_right,
+            unknown_study,
             unknown_line,
+            missing_line,
+            unknown_parameter,
+            repeated_parameter,
+            wide_scale,
         ] {
             assert_eq!(SavedScan::from_state(&invalid), None);
         }
         assert!(SavedScan::from_state(&valid).is_some());
+        assert!(SavedScan::from_state(&study_scan).is_some());
     }
 
     #[test]
     fn a_definition_failing_validation_is_invalid() {
-        let zero_period = scan(
-            "Zero",
-            vec![above(
-                CLOSE,
-                ScanOperand::Indicator(ScanIndicator::Sma { period: 0 }),
-            )],
+        let mut zero_period = study(ScanStudy::Sma);
+        zero_period.parameters[0] = ScanNumber::default();
+        let mut fast_above_slow = study(ScanStudy::Macd);
+        fast_above_slow.parameters[0] = ScanNumber::from(30);
+        let zero_period = scan("Zero", vec![above(CLOSE, ScanOperand::Study(zero_period))]);
+        let fast_above_slow = scan(
+            "Fast",
+            vec![above(ScanOperand::Study(fast_above_slow), number(0, 0))],
         );
         let constant_left = scan("Constant", vec![above(number(1, 0), CLOSE)]);
         let no_conditions = scan("Empty", Vec::new());
         let wide_number = scan("Wide", vec![above(CLOSE, number(1, 12))]);
-        for invalid in [zero_period, constant_left, no_conditions, wide_number] {
+        for invalid in [
+            zero_period,
+            fast_above_slow,
+            constant_left,
+            no_conditions,
+            wide_number,
+        ] {
             assert_eq!(SavedScan::from_state(&invalid.to_state()), None);
         }
-        let mut huge_period = scan("Huge", vec![above(CLOSE, number(1, 0))]).to_state();
-        huge_period.conditions[0].right = Some(WorkspaceScanOperandState {
-            kind: WorkspaceScanOperandKind::Sma as i32,
-            period: 70_000,
-            ..WorkspaceScanOperandState::default()
-        });
+        let mut huge_period = scan(
+            "Huge",
+            vec![above(CLOSE, ScanOperand::Study(study(ScanStudy::Sma)))],
+        )
+        .to_state();
+        huge_period.conditions[0]
+            .right
+            .as_mut()
+            .expect("right")
+            .study_parameters[0]
+            .units = 70_000;
         assert_eq!(SavedScan::from_state(&huge_period), None);
     }
 
@@ -517,8 +526,9 @@ mod tests {
     fn the_canonical_form_drops_fields_its_kind_does_not_read() {
         let mut state = scan("Close", vec![above(CLOSE, number(5, 1))]).to_state();
         let left = state.conditions[0].left.as_mut().expect("left");
-        left.period = 20;
-        left.band = WorkspaceScanBand::Upper as i32;
+        left.study = "sma".to_string();
+        left.study_output = "value".to_string();
+        left.number_units = 20;
         let sanitized = sanitize_saved_scans(&[state]);
         assert_eq!(
             sanitized[0].conditions[0].left,

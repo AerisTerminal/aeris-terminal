@@ -106,7 +106,10 @@ pub enum WorkspaceScanComparison {
     Between = 5,
 }
 
-/// Persisted market-scan operand: a bar value, an indicator or a typed number.
+/// Persisted market-scan operand: a bar value, a study or a typed number.
+///
+/// Values 7 to 16 named fixed indicators in builds that never shipped; they are retired, so
+/// an operand written with one reads as unknown and its scan is dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
 #[repr(i32)]
 pub enum WorkspaceScanOperandKind {
@@ -117,37 +120,8 @@ pub enum WorkspaceScanOperandKind {
     Close = 4,
     Volume = 5,
     ChangePercent = 6,
-    Sma = 7,
-    Ema = 8,
-    Rsi = 9,
-    Macd = 10,
-    Bollinger = 11,
-    Atr = 12,
-    Adx = 13,
-    RelativeVolume = 14,
-    HighestHigh = 15,
-    LowestLow = 16,
     Number = 17,
-}
-
-/// Persisted line of a MACD scan operand.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
-#[repr(i32)]
-pub enum WorkspaceScanMacdLine {
-    Unspecified = 0,
-    Macd = 1,
-    Signal = 2,
-    Histogram = 3,
-}
-
-/// Persisted band of a Bollinger scan operand.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
-#[repr(i32)]
-pub enum WorkspaceScanBand {
-    Unspecified = 0,
-    Upper = 1,
-    Middle = 2,
-    Lower = 3,
+    Study = 18,
 }
 
 /// Persisted workspace state.
@@ -243,30 +217,40 @@ pub struct WorkspaceScanConditionState {
     pub upper: Option<WorkspaceScanOperandState>,
 }
 
-/// One side of a saved scan condition. Only the fields its kind reads are written: MACD
-/// stores its fast, slow and signal periods in order, every other indicator one period.
-#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+/// One side of a saved scan condition. Only the fields its kind reads are written.
+///
+/// Tags 2 to 7 held the fixed indicators' periods, lines and band width in builds that never
+/// shipped; they are retired.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct WorkspaceScanOperandState {
     #[prost(enumeration = "WorkspaceScanOperandKind", tag = "1")]
     pub kind: i32,
-    #[prost(uint32, tag = "2")]
-    pub period: u32,
-    #[prost(uint32, tag = "3")]
-    pub second_period: u32,
-    #[prost(uint32, tag = "4")]
-    pub third_period: u32,
-    #[prost(enumeration = "WorkspaceScanMacdLine", tag = "5")]
-    pub macd_line: i32,
-    #[prost(enumeration = "WorkspaceScanBand", tag = "6")]
-    pub band: i32,
-    /// Bollinger band width in standard deviations, in tenths (20 is 2.0).
-    #[prost(uint32, tag = "7")]
-    pub deviation_tenths: u32,
     /// A typed number, exactly `number_units / 10^number_scale`.
     #[prost(sint64, tag = "8")]
     pub number_units: i64,
     #[prost(uint32, tag = "9")]
     pub number_scale: u32,
+    /// The study's Aeris Charts schema name, such as `sma`.
+    #[prost(string, tag = "10")]
+    pub study: String,
+    /// The study's parameters by name; a parameter not stored takes its default.
+    #[prost(message, repeated, tag = "11")]
+    pub study_parameters: Vec<WorkspaceScanStudyParameterState>,
+    /// The line of the study read, such as `signal`.
+    #[prost(string, tag = "12")]
+    pub study_output: String,
+}
+
+/// One parameter of a saved scan study, exactly `units / 10^scale`.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceScanStudyParameterState {
+    /// The parameter's Aeris Charts schema name, such as `period`.
+    #[prost(string, tag = "1")]
+    pub name: String,
+    #[prost(sint64, tag = "2")]
+    pub units: i64,
+    #[prost(uint32, tag = "3")]
+    pub scale: u32,
 }
 
 /// Durable shell chrome that follows the user across charts and workspaces. Enum values are
