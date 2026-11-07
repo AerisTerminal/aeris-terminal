@@ -457,6 +457,14 @@ pub(super) enum ScreenerStatus {
 struct PendingScreenerSelection {
     generation: u64,
     display_symbol: String,
+    interval: Option<ChartInterval>,
+}
+
+/// A row's market, resolved for the terminal to open.
+pub(super) struct OpenedMarket {
+    pub(super) instrument: InstallProviderInstrument,
+    /// The timeframe the chart opens on; `None` keeps the chart's own.
+    pub(super) interval: Option<ChartInterval>,
 }
 
 /// What one poll of the screen consumer changed.
@@ -464,7 +472,7 @@ struct PendingScreenerSelection {
 pub(super) struct ScreenerPoll {
     pub(super) changed: bool,
     /// A screener row resolved to an installed instrument that the terminal should open.
-    pub(super) opened: Option<InstallProviderInstrument>,
+    pub(super) opened: Option<OpenedMarket>,
 }
 
 pub(super) struct MarketScreener {
@@ -675,8 +683,15 @@ impl MarketScreener {
         }
     }
 
-    /// Requests the instrument behind a presented row; the terminal opens it once resolved.
-    pub(super) fn open_market(&mut self, symbol: &str, exchange: &str, display_symbol: &str) {
+    /// Requests the instrument behind a presented row; the terminal opens it once resolved,
+    /// on `interval` when one is given.
+    pub(super) fn open_market(
+        &mut self,
+        symbol: &str,
+        exchange: &str,
+        display_symbol: &str,
+        interval: Option<ChartInterval>,
+    ) {
         let (Some(worker), Some(provider)) = (&self.worker, self.provider) else {
             return;
         };
@@ -699,6 +714,7 @@ impl MarketScreener {
         self.pending_selection = Some(PendingScreenerSelection {
             generation,
             display_symbol: display_symbol.to_string(),
+            interval,
         });
         self.message = None;
     }
@@ -786,7 +802,7 @@ impl MarketScreener {
     fn apply_catalog_event(
         &mut self,
         event: ProviderCatalogEvent,
-        opened: &mut Option<InstallProviderInstrument>,
+        opened: &mut Option<OpenedMarket>,
     ) -> bool {
         match event {
             ProviderCatalogEvent::ScreenCompleted(screen)
@@ -822,8 +838,14 @@ impl MarketScreener {
                 .as_ref()
                 .is_some_and(|selection| selection.generation == command_generation) =>
             {
-                self.pending_selection = None;
-                *opened = Some(instrument);
+                let interval = self
+                    .pending_selection
+                    .take()
+                    .and_then(|selection| selection.interval);
+                *opened = Some(OpenedMarket {
+                    instrument,
+                    interval,
+                });
                 true
             }
             ProviderCatalogEvent::CommandRejected { rejection, .. }

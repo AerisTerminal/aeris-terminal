@@ -7,7 +7,7 @@
 //! over the same bars. Evaluation is pure: providers fetch bars, this module decides matches.
 
 use aeris_charts_indicators as indicators;
-use aeris_market_data::{BarPeriod, MarketBar};
+use aeris_market_data::{BarPeriod, ChartInterval, MarketBar};
 
 use crate::ProviderInstrumentSummary;
 
@@ -61,6 +61,18 @@ impl ScanTimeframe {
             Self::Hour4 => BarPeriod::Time { seconds: 14_400 },
             Self::Day1 => BarPeriod::Time { seconds: 86_400 },
             Self::Week1 => BarPeriod::Week { weeks: 1 },
+        }
+    }
+
+    /// The chart interval that shows the same bars.
+    #[must_use]
+    pub const fn chart_interval(self) -> ChartInterval {
+        match self {
+            Self::Minutes15 => ChartInterval::Minute15,
+            Self::Hour1 => ChartInterval::Hour1,
+            Self::Hour4 => ChartInterval::Hour4,
+            Self::Day1 => ChartInterval::Day1,
+            Self::Week1 => ChartInterval::Week1,
         }
     }
 }
@@ -377,6 +389,14 @@ pub struct ScanProviderMarkets {
     pub maximum_results: u32,
 }
 
+/// One condition's operand values on the current bar; absent until an indicator has warmed up.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScanConditionValues {
+    pub left: Option<f64>,
+    /// The compared value, or the lower bound for [`ScanComparison::Between`].
+    pub right: Option<f64>,
+}
+
 /// One instrument that satisfies a scan, with its current bar's exact close and volume.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProviderMarketScanMatch {
@@ -384,6 +404,8 @@ pub struct ProviderMarketScanMatch {
     pub instrument: ProviderInstrumentSummary,
     /// Decimal scale for `close`.
     pub price_scale: u32,
+    /// Fractional digits the evaluated bars' prices use, at most `price_scale`.
+    pub price_decimals: u32,
     /// Close of the current (possibly still forming) bar.
     pub close: i64,
     /// Decimal scale for `volume`.
@@ -392,8 +414,8 @@ pub struct ProviderMarketScanMatch {
     pub volume: i64,
     /// Percent change of the close from the previous bar's close.
     pub change_percent: Option<f64>,
-    /// Each condition's left value on the current bar, in definition order.
-    pub values: Vec<Option<f64>>,
+    /// Each condition's values on the current bar, in definition order.
+    pub values: Vec<ScanConditionValues>,
     /// Open time of the current bar.
     pub bar_open_unix_millis: i64,
 }
@@ -468,7 +490,7 @@ impl ScanBars {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ScanOutcome {
     pub(crate) matched: bool,
-    pub(crate) values: Vec<Option<f64>>,
+    pub(crate) values: Vec<ScanConditionValues>,
     pub(crate) change_percent: Option<f64>,
 }
 
@@ -478,7 +500,10 @@ pub(crate) fn evaluate(definition: &ScanDefinition, bars: &ScanBars) -> ScanOutc
     let mut held = Vec::with_capacity(definition.conditions.len());
     let mut values = Vec::with_capacity(definition.conditions.len());
     for condition in &definition.conditions {
-        values.push(series.current(condition.left));
+        values.push(ScanConditionValues {
+            left: series.current(condition.left),
+            right: series.current(condition.right),
+        });
         held.push(condition_holds(condition, &mut series));
     }
     let matched = match definition.match_mode {
@@ -490,6 +515,26 @@ pub(crate) fn evaluate(definition: &ScanDefinition, bars: &ScanBars) -> ScanOutc
         values,
         change_percent: series.current(ScanOperand::ChangePercent),
     }
+}
+
+/// Fractional digits the bars' prices use: the scale less the trailing zeros all of them share.
+pub(crate) fn price_decimals(bars: &[MarketBar], price_scale: u32) -> u32 {
+    let mut decimals = 0;
+    for price in bars
+        .iter()
+        .flat_map(|bar| [bar.open, bar.high, bar.low, bar.close])
+    {
+        let (mut used, mut rest) = (price_scale, price);
+        while used > decimals && rest % 10 == 0 {
+            rest /= 10;
+            used -= 1;
+        }
+        decimals = used.max(decimals);
+        if decimals == price_scale {
+            break;
+        }
+    }
+    decimals
 }
 
 fn condition_holds(condition: &ScanCondition, series: &mut OperandSeries<'_>) -> bool {
@@ -705,8 +750,15 @@ mod tests {
         let scan = definition(vec![condition(CLOSE, ScanComparison::Above, sma)]);
         let outcome = evaluate(&scan, &bars(&rising));
         assert!(outcome.matched);
-        assert_eq!(outcome.values, vec![Some(30.0)]);
         let expected = indicators::sma(&rising, 20)[29];
+        assert_eq!(
+            outcome.values,
+            vec![ScanConditionValues {
+                left: Some(30.0),
+                right: expected,
+            }],
+            "the compared average is published beside the close"
+        );
         let rising_bars = bars(&rising);
         let mut series = OperandSeries::new(&rising_bars);
         assert_eq!(series.current(sma), expected);
@@ -748,7 +800,10 @@ mod tests {
         let scan = definition(vec![condition(CLOSE, ScanComparison::Above, sma)]);
         let outcome = evaluate(&scan, &bars(&[1.0, 2.0, 3.0]));
         assert!(!outcome.matched);
-        assert_eq!(evaluate(&scan, &ScanBars::default()).values, vec![None]);
+        assert_eq!(
+            evaluate(&scan, &ScanBars::default()).values,
+            vec![ScanConditionValues::default()]
+        );
     }
 
     #[test]
@@ -790,6 +845,31 @@ mod tests {
         let converted = ScanBars::from_market_bars(&[bar], 2, 3);
         assert_eq!(converted.close, vec![123.5]);
         assert_eq!(converted.volume, vec![2.5]);
+    }
+
+    #[test]
+    fn price_decimals_follow_the_finest_bar_price() {
+        let bar = |close| MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: 0,
+            exchange_timestamp_unix_nanos: 0,
+            open: 11_000_000,
+            high: 13_000_000,
+            low: 10_000_000,
+            close,
+            volume: 0,
+        };
+        assert_eq!(price_decimals(&[bar(12_000_000)], 8), 2, "0.12 at scale 8");
+        assert_eq!(price_decimals(&[bar(12_000_000), bar(12_345_600)], 8), 6);
+        assert_eq!(price_decimals(&[bar(1)], 8), 8);
+        assert_eq!(price_decimals(&[], 8), 0);
+        let whole = MarketBar {
+            open: 0,
+            high: 0,
+            low: 0,
+            ..bar(9_700_000_000_000)
+        };
+        assert_eq!(price_decimals(&[whole], 8), 0, "a whole-number price");
     }
 
     #[test]

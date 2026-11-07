@@ -277,15 +277,21 @@ run on the installed app yet; S5 covers that.
       Terminal chart, and after closing and relaunching the app the saved scan was still listed
       and reloaded into the builder.
 
-UI follow-ups seen on the installed app (not yet fixed):
+UI follow-ups seen on the installed app (fixed and checked on a release build):
 
-- [ ] The per-condition value column shows the left operand, so "Close above SMA 20" repeats
-      the close under a second "Close" header. It should show the compared value (SMA 20) when
-      the left side is a plain price; the runtime publishes only the left value today.
-- [ ] That value column prints 4 decimals ("613.2900") while the Close column uses the market's
-      precision ("613.29").
-- [ ] Opening a result keeps the pane's interval (1m). Opening it on the scan's timeframe is
-      likely what a trader expects.
+- [x] The value column showed the left operand, so "Close above SMA 20" repeated the close.
+      The runtime now publishes both sides of each condition (`ScanConditionValues`), and a
+      condition whose left side is the close or volume the row already shows, compared with a
+      value that varies by market (not a number, not a range), shows the compared value under
+      its own header ("SMA(20)"); sorting uses the shown value.
+- [x] Values printed 4 decimals while the Close column used the market's precision. Each match
+      now carries `price_decimals` (the fractional digits its bars' prices use), and the close
+      and every price-scale value in the row use it, at least two ("613.80" / "607.69",
+      "0.004925" / "0.004684").
+- [x] Opening a result kept the pane's interval. It now opens on the scan's timeframe
+      (`ScanTimeframe::chart_interval`, nearest offered by the provider); a chart already showing
+      the market only changes timeframe. Panes synced to that pane follow the symbol; a new
+      market's timeframe is not relayed with it.
 
 Finding: repeated passes are budget-bound. A tail refresh costs the same 20 base weight as a
 full fetch, and a 100-market pass takes longer than the 60-second reuse window, so the cache

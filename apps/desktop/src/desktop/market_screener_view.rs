@@ -660,7 +660,7 @@ impl TerminalApp {
     pub(super) fn open_market_screener_row(&mut self, row: &ScreenerRow, cx: &mut Context<Self>) {
         self.pages
             .screener
-            .open_market(&row.symbol, &row.exchange, &row.display_symbol);
+            .open_market(&row.symbol, &row.exchange, &row.display_symbol, None);
         cx.notify();
     }
 
@@ -668,9 +668,18 @@ impl TerminalApp {
     /// window back to the terminal with that instrument on the active chart.
     pub(super) fn poll_market_screener(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let outcome = self.pages.screener.poll();
-        if let Some(instrument) = outcome.opened {
+        if let Some(opened) = outcome.opened {
             self.show_app_view(AppView::Terminal, window, cx);
-            self.select_watchlist_instrument(&instrument, cx);
+            match opened.interval {
+                Some(interval) => self.active_surface().update(cx, |surface, surface_cx| {
+                    surface.select_installed_instrument_on(
+                        &opened.instrument,
+                        interval,
+                        surface_cx,
+                    );
+                }),
+                None => self.select_watchlist_instrument(&opened.instrument, cx),
+            }
         }
         if outcome.changed {
             cx.notify();

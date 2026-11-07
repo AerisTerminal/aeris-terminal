@@ -2328,26 +2328,31 @@ impl WorkspaceSurface {
         self.interval
     }
 
+    /// Whether the account's plan offers `interval`.
+    fn plan_offers_interval(interval: ChartInterval) -> bool {
+        aeris_desktop::account::plan_policy().extended_timeframes
+            || matches!(
+                interval,
+                ChartInterval::Minute1
+                    | ChartInterval::Minute3
+                    | ChartInterval::Minute5
+                    | ChartInterval::Minute15
+                    | ChartInterval::Minute30
+                    | ChartInterval::Hour1
+                    | ChartInterval::Hour2
+                    | ChartInterval::Hour4
+                    | ChartInterval::Hour8
+                    | ChartInterval::Hour12
+                    | ChartInterval::Day1
+            )
+    }
+
     pub(super) fn select_interval(
         &mut self,
         interval: ChartInterval,
         cx: &mut Context<Self>,
     ) -> bool {
-        let starter_interval = matches!(
-            interval,
-            ChartInterval::Minute1
-                | ChartInterval::Minute3
-                | ChartInterval::Minute5
-                | ChartInterval::Minute15
-                | ChartInterval::Minute30
-                | ChartInterval::Hour1
-                | ChartInterval::Hour2
-                | ChartInterval::Hour4
-                | ChartInterval::Hour8
-                | ChartInterval::Hour12
-                | ChartInterval::Day1
-        );
-        if !aeris_desktop::account::plan_policy().extended_timeframes && !starter_interval {
+        if !Self::plan_offers_interval(interval) {
             self.series_message = tr!(workspace::TIMEFRAME_REQUIRES_PLAN).to_string();
             Self::post_indicator_failure(
                 "series_selection",
@@ -2415,12 +2420,30 @@ impl WorkspaceSurface {
         instrument: &InstallProviderInstrument,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.select_installed_instrument_on(instrument, self.interval, cx)
+    }
+
+    /// Selects `instrument` on `interval`, or the nearest timeframe its provider offers, as a
+    /// scan match opens on the timeframe it was found on. A chart already showing the
+    /// instrument only changes timeframe.
+    pub(super) fn select_installed_instrument_on(
+        &mut self,
+        instrument: &InstallProviderInstrument,
+        interval: ChartInterval,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let requested = super::instrument_interval(instrument, interval);
+        let interval = if Self::plan_offers_interval(requested) {
+            requested
+        } else {
+            super::instrument_interval(instrument, self.interval)
+        };
         if self.product.as_ref().is_some_and(|current| {
             current.provider == instrument.provider
                 && current.instrument_id == instrument.instrument_id
         }) && self.chart_pane_controller.pending_product().is_none()
         {
-            return true;
+            return interval == self.interval || self.select_interval(interval, cx);
         }
         if self
             .chart_pane_controller
@@ -2432,7 +2455,6 @@ impl WorkspaceSurface {
         {
             return true;
         }
-        let interval = super::instrument_interval(instrument, self.interval);
         let Ok(sequence) = self
             .market_worker
             .try_select_instrument(instrument.clone(), interval)

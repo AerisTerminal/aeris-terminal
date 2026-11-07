@@ -14,9 +14,9 @@ use aeris_localization::{Text, panels, tr, tr_count};
 use aeris_market_runtime::{
     MAXIMUM_SCAN_CONDITIONS, MAXIMUM_SCAN_NUMBER_SCALE, MAXIMUM_SCAN_PERIOD, MAXIMUM_SCAN_RESULTS,
     ProviderCatalogRejected, ProviderMarketScan, ProviderMarketScanMatch,
-    ProviderPresentationDescriptor, ScanBand, ScanComparison, ScanCondition, ScanDefinition,
-    ScanDefinitionError, ScanIndicator, ScanMacdLine, ScanMatchMode, ScanNumber, ScanOperand,
-    ScanPriceField, ScanProgress, ScanProviderMarkets, ScanTimeframe,
+    ProviderPresentationDescriptor, ScanBand, ScanComparison, ScanCondition, ScanConditionValues,
+    ScanDefinition, ScanDefinitionError, ScanIndicator, ScanMacdLine, ScanMatchMode, ScanNumber,
+    ScanOperand, ScanPriceField, ScanProgress, ScanProviderMarkets, ScanTimeframe,
 };
 use gpui::{ScrollStrategy, UniformListScrollHandle};
 use std::cmp::Ordering as CmpOrdering;
@@ -771,8 +771,62 @@ pub(super) fn operand_label(operand: ScanOperand) -> String {
     format!("{}({parameters})", kind.label())
 }
 
-/// A measured value in the units its operand reads.
-fn value_text(operand: ScanOperand, value: Option<f64>) -> String {
+/// Whether a condition's column shows its compared value: the left side is the close or
+/// volume the row already shows and the right side varies by market, as for close above
+/// SMA(20). A range shows the value it bounds.
+fn shows_compared_value(condition: &ScanCondition) -> bool {
+    matches!(
+        condition.left,
+        ScanOperand::Price(ScanPriceField::Close) | ScanOperand::Volume
+    ) && !matches!(condition.right, ScanOperand::Number(_))
+        && condition.comparison != ScanComparison::Between
+}
+
+/// The operand a condition's results column shows.
+fn shown_operand(condition: &ScanCondition) -> ScanOperand {
+    if shows_compared_value(condition) {
+        condition.right
+    } else {
+        condition.left
+    }
+}
+
+fn shown_value(condition: &ScanCondition, values: Option<&ScanConditionValues>) -> Option<f64> {
+    let values = values?;
+    if shows_compared_value(condition) {
+        values.right
+    } else {
+        values.left
+    }
+}
+
+/// Decimals of a match's prices: the digits its bars use, and at least the two (or the
+/// price scale, when smaller) every market price shows.
+fn match_price_decimals(scan_match: &ProviderMarketScanMatch) -> usize {
+    let decimals = scan_match
+        .price_decimals
+        .max(scan_match.price_scale.min(2))
+        .min(scan_match.price_scale);
+    usize::try_from(decimals).unwrap_or(2)
+}
+
+/// The exact close at `decimals` fractional digits, so a row's prices line up.
+fn close_text(scan_match: &ProviderMarketScanMatch, decimals: usize) -> String {
+    let mut text = market_price_text(scan_match.close, scan_match.price_scale);
+    let shown = text
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    if shown < decimals {
+        if shown == 0 {
+            text.push('.');
+        }
+        text.extend(std::iter::repeat_n('0', decimals - shown));
+    }
+    grouped_decimal(&text)
+}
+
+/// A measured value in the units its operand reads; price-scale values use `price_decimals`.
+fn value_text(operand: ScanOperand, value: Option<f64>, price_decimals: usize) -> String {
     let Some(value) = value else {
         return UNAVAILABLE_VALUE.to_string();
     };
@@ -783,23 +837,8 @@ fn value_text(operand: ScanOperand, value: Option<f64>) -> String {
             format!("{value:.2}")
         }
         ScanOperand::Indicator(ScanIndicator::RelativeVolume { .. }) => format!("{value:.2}×"),
-        _ => price_like_text(value),
+        _ => grouped_decimal(&format!("{value:.price_decimals$}")),
     }
-}
-
-/// Enough decimals to show a computed price-scale value's significant digits.
-fn price_like_text(value: f64) -> String {
-    let magnitude = value.abs();
-    let decimals = if magnitude >= 1_000.0 || magnitude == 0.0 {
-        2
-    } else if magnitude >= 1.0 {
-        4
-    } else {
-        // Four significant digits below one, at most ten decimals.
-        let leading_zeros = (-magnitude.log10()).floor().clamp(0.0, 6.0);
-        leading_zeros.to_usize().unwrap_or(6) + 4
-    };
-    grouped_decimal(&format!("{value:.decimals$}"))
 }
 
 /// A quantity with a thousands suffix, such as `12.35M`.
@@ -872,7 +911,11 @@ pub(super) struct ScanResultRow {
     pub(super) values: Vec<String>,
 }
 
-fn match_key(scan_match: &ProviderMarketScanMatch, column: ScanResultColumn) -> Option<f64> {
+fn match_key(
+    scan_match: &ProviderMarketScanMatch,
+    definition: &ScanDefinition,
+    column: ScanResultColumn,
+) -> Option<f64> {
     match column {
         ScanResultColumn::Market => None,
         ScanResultColumn::Close => Some(fixed_to_f64(scan_match.close, scan_match.price_scale)),
@@ -880,13 +923,17 @@ fn match_key(scan_match: &ProviderMarketScanMatch, column: ScanResultColumn) -> 
         ScanResultColumn::Volume => {
             Some(fixed_to_f64(scan_match.volume, scan_match.quantity_scale))
         }
-        ScanResultColumn::Condition(index) => scan_match.values.get(index).copied().flatten(),
+        ScanResultColumn::Condition(index) => shown_value(
+            definition.conditions.get(index)?,
+            scan_match.values.get(index),
+        ),
     }
 }
 
 fn compare_matches(
     left: &ProviderMarketScanMatch,
     right: &ProviderMarketScanMatch,
+    definition: &ScanDefinition,
     sort: ScanSort,
 ) -> CmpOrdering {
     let symbol =
@@ -900,8 +947,8 @@ fn compare_matches(
         }
     } else {
         compare_keys(
-            match_key(left, sort.column),
-            match_key(right, sort.column),
+            match_key(left, definition, sort.column),
+            match_key(right, definition, sort.column),
             sort.descending,
         )
     };
@@ -919,33 +966,40 @@ pub(super) fn scan_rows(
     sort: ScanSort,
 ) -> Vec<ScanResultRow> {
     let mut ordered = matches.iter().collect::<Vec<_>>();
-    ordered.sort_by(|left, right| compare_matches(left, right, sort));
+    ordered.sort_by(|left, right| compare_matches(left, right, definition, sort));
     ordered
         .into_iter()
-        .map(|scan_match| ScanResultRow {
-            symbol: scan_match.instrument.symbol.clone(),
-            exchange: scan_match.instrument.exchange.clone(),
-            display_symbol: scan_match.instrument.display_symbol.clone(),
-            close: grouped_decimal(&market_price_text(scan_match.close, scan_match.price_scale)),
-            change: scan_match.change_percent.map_or_else(
-                || UNAVAILABLE_VALUE.to_string(),
-                |change| format!("{change:+.2}%"),
-            ),
-            change_direction: scan_match
-                .change_percent
-                .map(|change| change.total_cmp(&0.0)),
-            volume: compact_quantity(fixed_to_f64(scan_match.volume, scan_match.quantity_scale)),
-            values: definition
-                .conditions
-                .iter()
-                .enumerate()
-                .map(|(index, condition)| {
-                    value_text(
-                        condition.left,
-                        scan_match.values.get(index).copied().flatten(),
-                    )
-                })
-                .collect(),
+        .map(|scan_match| {
+            let decimals = match_price_decimals(scan_match);
+            ScanResultRow {
+                symbol: scan_match.instrument.symbol.clone(),
+                exchange: scan_match.instrument.exchange.clone(),
+                display_symbol: scan_match.instrument.display_symbol.clone(),
+                close: close_text(scan_match, decimals),
+                change: scan_match.change_percent.map_or_else(
+                    || UNAVAILABLE_VALUE.to_string(),
+                    |change| format!("{change:+.2}%"),
+                ),
+                change_direction: scan_match
+                    .change_percent
+                    .map(|change| change.total_cmp(&0.0)),
+                volume: compact_quantity(fixed_to_f64(
+                    scan_match.volume,
+                    scan_match.quantity_scale,
+                )),
+                values: definition
+                    .conditions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, condition)| {
+                        value_text(
+                            shown_operand(condition),
+                            shown_value(condition, scan_match.values.get(index)),
+                            decimals,
+                        )
+                    })
+                    .collect(),
+            }
         })
         .collect()
 }
@@ -982,7 +1036,7 @@ impl ScanRun {
             columns: definition
                 .conditions
                 .iter()
-                .map(|condition| operand_label(condition.left))
+                .map(|condition| operand_label(shown_operand(condition)))
                 .collect(),
             definition,
             universe_limit,
@@ -1004,6 +1058,11 @@ impl ScanRun {
 
     pub(super) fn columns(&self) -> &[String] {
         &self.columns
+    }
+
+    /// The timeframe the matches were found on, which an opened match's chart uses.
+    pub(super) const fn timeframe(&self) -> ScanTimeframe {
+        self.definition.timeframe
     }
 
     pub(super) const fn scanning(&self) -> bool {
@@ -1805,11 +1864,15 @@ mod tests {
                 ..Default::default()
             },
             price_scale: 2,
+            price_decimals: 0,
             close,
             quantity_scale: 3,
             volume: 12_345_678,
             change_percent: change,
-            values: vec![rsi],
+            values: vec![ScanConditionValues {
+                left: rsi,
+                right: Some(30.0),
+            }],
             bar_open_unix_millis: 0,
         }
     }
@@ -1875,9 +1938,73 @@ mod tests {
             )),
             ["SOL", "ETH", "BTC"]
         );
-        assert_eq!(price_like_text(0.000_123_46), "0.0001235");
-        assert_eq!(price_like_text(1_234.5), "1,234.50");
-        assert_eq!(value_text(ScanOperand::ChangePercent, Some(3.0)), "+3.00%");
+        assert_eq!(
+            value_text(ScanOperand::ChangePercent, Some(3.0), 6),
+            "+3.00%"
+        );
+    }
+
+    #[test]
+    fn a_close_comparison_shows_its_compared_value_at_the_close_precision() {
+        let sma = ScanOperand::Indicator(ScanIndicator::Sma { period: 20 });
+        let close = ScanOperand::Price(ScanPriceField::Close);
+        let definition = ScanDefinition {
+            conditions: vec![
+                ScanCondition {
+                    left: close,
+                    comparison: ScanComparison::Above,
+                    right: sma,
+                    upper: None,
+                },
+                ScanCondition {
+                    left: close,
+                    comparison: ScanComparison::Above,
+                    right: ScanOperand::Number(number(1, 0)),
+                    upper: None,
+                },
+            ],
+            ..ScanDefinition::default()
+        };
+        let run = ScanRun::new(definition.clone(), DEFAULT_SCAN_UNIVERSE);
+        assert_eq!(run.columns(), [operand_label(sma), operand_label(close)]);
+
+        let mut fine = scan_match("PEPE", 0, Some(1.0), None);
+        fine.price_scale = 8;
+        fine.price_decimals = 6;
+        fine.close = 123_400;
+        fine.values = vec![
+            ScanConditionValues {
+                left: Some(0.001_234),
+                right: Some(0.001_198_765),
+            },
+            ScanConditionValues {
+                left: Some(0.001_234),
+                right: Some(1.0),
+            },
+        ];
+        let mut whole = scan_match("BTC", 0, Some(0.5), None);
+        whole.price_scale = 8;
+        whole.close = 9_712_300_000_000;
+        whole.values = vec![
+            ScanConditionValues {
+                left: Some(97_123.0),
+                right: Some(95_432.123_4),
+            },
+            ScanConditionValues {
+                left: Some(97_123.0),
+                right: Some(1.0),
+            },
+        ];
+        let matches = [fine, whole];
+        let rows = scan_rows(&matches, &definition, ScanSort::default());
+        assert_eq!(rows[0].close, "0.001234", "trailing digits the bars use");
+        assert_eq!(rows[0].values, ["0.001199", "0.001234"]);
+        assert_eq!(rows[1].close, "97,123.00");
+        assert_eq!(rows[1].values, ["95,432.12", "97,123.00"]);
+
+        let by_average = ScanSort::default().toggled(ScanResultColumn::Condition(0));
+        let rows = scan_rows(&matches, &definition, by_average);
+        assert_eq!(rows[0].symbol, "BTC", "sorted by the shown average");
     }
 
     fn running(scans: &mut MarketScan) {

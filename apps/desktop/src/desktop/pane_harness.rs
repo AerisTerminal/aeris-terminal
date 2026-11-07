@@ -4023,6 +4023,66 @@ fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAp
     });
 }
 
+#[gpui::test]
+fn pane_harness_opens_the_shown_instrument_on_a_requested_timeframe(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let (shown, starting) = cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        (
+            pane.product.clone().expect("shown instrument"),
+            pane.interval,
+        )
+    });
+    assert_ne!(starting, ChartInterval::Hour4);
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_installed_instrument_on(&shown, starting, cx));
+        assert_eq!(
+            pane.chart_pane_controller.pending_interval(),
+            None,
+            "the shown instrument on its own timeframe selects nothing"
+        );
+        assert!(pane.select_installed_instrument_on(&shown, ChartInterval::Hour4, cx));
+        assert_eq!(
+            pane.chart_pane_controller.pending_interval(),
+            Some(ChartInterval::Hour4)
+        );
+        assert_eq!(
+            pane.chart_pane_controller.pending_product(),
+            None,
+            "the shown instrument only changes timeframe"
+        );
+    });
+}
+
+#[gpui::test]
+fn pane_harness_opens_another_instrument_on_a_requested_timeframe(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let mut replacement = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .clone()
+            .expect("shown instrument")
+    });
+    replacement.instrument_id = "hyperliquid:perp:ETH".into();
+    replacement.provider_symbol = "ETH".into();
+    replacement.display_symbol = "ETH-USDC".into();
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_installed_instrument_on(&replacement, ChartInterval::Day1, cx));
+        assert_eq!(
+            pane.chart_pane_controller.pending_interval(),
+            Some(ChartInterval::Day1)
+        );
+        assert_eq!(
+            pane.chart_pane_controller.pending_product(),
+            Some(&replacement)
+        );
+    });
+}
+
 fn check_switch_cover_through_ready(
     interval_only: bool,
     snapshot_first: bool,

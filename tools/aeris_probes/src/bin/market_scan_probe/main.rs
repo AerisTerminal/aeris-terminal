@@ -443,8 +443,8 @@ fn spot_check(
         .map(|bar| scaled(bar.close, scale))
         .sum::<f64>()
         / f64::from(SPOT_PERIOD);
-    let scan_highest = row.values.get(1).copied().flatten();
-    let scan_sma = row.values.get(2).copied().flatten();
+    let scan_highest = row.values.get(1).and_then(|values| values.left);
+    let scan_sma = row.values.get(2).and_then(|values| values.left);
     let same_bar = current.exchange_timestamp_unix_nanos / 1_000_000 == row.bar_open_unix_millis;
     // The highest high excludes the current bar, so closed bars must agree exactly; the
     // average includes the forming bar, whose close moves between the two reads.

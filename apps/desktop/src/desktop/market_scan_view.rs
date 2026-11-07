@@ -1089,10 +1089,17 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Opens a match on the timeframe the scan found it on.
     pub(super) fn open_market_scan_row(&mut self, row: &ScanResultRow, cx: &mut Context<Self>) {
+        let interval = self
+            .pages
+            .screener
+            .scans
+            .run()
+            .map(|run| run.timeframe().chart_interval());
         self.pages
             .screener
-            .open_market(&row.symbol, &row.exchange, &row.display_symbol);
+            .open_market(&row.symbol, &row.exchange, &row.display_symbol, interval);
         cx.notify();
     }
 }

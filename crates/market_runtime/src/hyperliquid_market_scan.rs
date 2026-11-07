@@ -28,7 +28,7 @@ use aeris_market_data::MarketBar;
 use crate::hyperliquid_realtime::HyperliquidCatalogEvent;
 use crate::market_service::CatalogPublisher;
 use crate::market_service::clock::Clock;
-use crate::scan::{ScanBars, evaluate};
+use crate::scan::{ScanBars, evaluate, price_decimals};
 use crate::{
     MAXIMUM_SCAN_HISTORY_BARS, ProviderInstrumentSummary, ProviderMarketScan,
     ProviderMarketScanMatch, ScanDefinition, ScanProgress, ScanProviderMarkets, ScanTimeframe,
@@ -293,6 +293,7 @@ fn scan_match(
     outcome.matched.then(|| ProviderMarketScanMatch {
         instrument: instrument.clone(),
         price_scale: NORMALIZED_PRICE_SCALE,
+        price_decimals: price_decimals(bars, NORMALIZED_PRICE_SCALE),
         close: current.close,
         quantity_scale: NORMALIZED_QUANTITY_SCALE,
         volume: current.volume,
@@ -570,8 +571,8 @@ mod tests {
     use crate::market_service::ProviderCoordinatorWake;
     use crate::market_service::clock::ScriptedClock;
     use crate::{
-        ProviderInstrumentKind, ScanComparison, ScanCondition, ScanMatchMode, ScanNumber,
-        ScanOperand, ScanPriceField,
+        ProviderInstrumentKind, ScanComparison, ScanCondition, ScanConditionValues, ScanMatchMode,
+        ScanNumber, ScanOperand, ScanPriceField,
     };
     use std::sync::mpsc::{self, SyncSender};
 
@@ -793,7 +794,14 @@ mod tests {
         assert_eq!(best.close, price(300));
         assert_eq!(best.volume, price(7));
         assert_eq!(best.price_scale, NORMALIZED_PRICE_SCALE);
-        assert_eq!(best.values, vec![Some(300.0)]);
+        assert_eq!(best.price_decimals, 0, "whole-number fixture prices");
+        assert_eq!(
+            best.values,
+            vec![ScanConditionValues {
+                left: Some(300.0),
+                right: Some(100.0),
+            }]
+        );
         assert!((best.change_percent.expect("change") - 200.0).abs() < 1e-9);
         assert_eq!(best.bar_open_unix_millis, 20_000 * DAY_MILLIS);
         assert_eq!(
