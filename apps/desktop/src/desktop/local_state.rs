@@ -411,6 +411,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         drawing_templates: Vec::new(),
         saved_layouts: vec![saved_layout],
         chart_chrome: None,
+        screener_scans: Vec::new(),
     }
 }
 
@@ -484,6 +485,7 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     // default template so reset cannot be overwritten after the engine API runs.
     workspace.default_chart_settings = None;
     sanitize_watchlist(&mut workspace);
+    workspace.screener_scans = super::saved_scans::sanitize_saved_scans(&workspace.screener_scans);
     // The migration chain has already lifted the document to the current schema; keep the
     // revision stamp here as the invariant for paths that never pass through a file.
     workspace.schema_revision = workspace.schema_revision.max(CURRENT_WORKSPACE_SCHEMA);
@@ -2213,6 +2215,43 @@ mod tests {
             template("rectangle", "Orange")
         );
         assert_eq!(sanitized.drawing_templates[2].name, "Ray 0");
+    }
+
+    #[test]
+    fn workspace_file_round_trip_keeps_valid_saved_scans_and_drops_invalid_ones() {
+        use aeris_contracts::{
+            WorkspaceScanComparison, WorkspaceScanConditionState, WorkspaceScanMatchMode,
+            WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScanTimeframe,
+            WorkspaceScreenerScanState,
+        };
+        let operand = |kind: WorkspaceScanOperandKind, period: u32| WorkspaceScanOperandState {
+            kind: kind as i32,
+            period,
+            ..WorkspaceScanOperandState::default()
+        };
+        let scan = |name: &str, period: u32| WorkspaceScreenerScanState {
+            name: name.to_string(),
+            timeframe: WorkspaceScanTimeframe::Day1 as i32,
+            match_mode: WorkspaceScanMatchMode::All as i32,
+            universe_limit: 100,
+            conditions: vec![WorkspaceScanConditionState {
+                left: Some(operand(WorkspaceScanOperandKind::Close, 0)),
+                comparison: WorkspaceScanComparison::Above as i32,
+                right: Some(operand(WorkspaceScanOperandKind::Sma, period)),
+                upper: None,
+            }],
+        };
+        let path = temporary_workspace_path();
+        let mut workspace = default_workspace();
+        workspace.screener_scans =
+            vec![scan("Trend", 20), scan("Zero period", 0), scan("trend", 50)];
+
+        save_workspace_to_path(&workspace, &path).expect("workspace saves");
+        let restored = load_workspace_from_path(&path).expect("workspace reloads");
+
+        assert_eq!(restored.screener_scans, vec![scan("Trend", 20)]);
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
     }
 
     #[test]

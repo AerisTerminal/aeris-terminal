@@ -9,12 +9,13 @@ use super::{
     ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord,
     ProviderEventLane, ProviderRuntimeEvent, ProviderRuntimeLifecycle, ProviderRuntimeRecord,
     ProviderRuntimeRegistry, ProviderRuntimeSpec, QuoteSubscription, REALTIME_CAPACITY,
-    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, ScreenProviderMarkets,
-    SearchProviderInstruments, SelectProviderInstrument, StartedProviderRuntime,
-    StreamRequirements, StudyInstanceId, SyncSender, TrySendError, Viewport, WorkspaceId,
-    configured_reconnect_delay, id, mpsc, spawn_coordinator, spawn_history_worker, thread,
-    try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
-    validate_provider_screen, validate_provider_search, validate_provider_selection,
+    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, ScanProviderMarkets,
+    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
+    StartedProviderRuntime, StreamRequirements, StudyInstanceId, SyncSender, TrySendError,
+    Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc, spawn_coordinator,
+    spawn_history_worker, thread, try_send_hyperliquid_catalog, try_send_rithmic_catalog,
+    validate_provider_instrument, validate_provider_scan, validate_provider_screen,
+    validate_provider_search, validate_provider_selection,
 };
 use crate::ProviderPresentationDescriptor;
 use crate::hyperliquid_display_depth::{
@@ -53,6 +54,9 @@ fn dispatch_rithmic_catalog(
         ProviderCatalogCommand::Screen(_) => {
             return Err(format!("{provider} does not provide a market screen"));
         }
+        ProviderCatalogCommand::Scan(_) => {
+            return Err(format!("{provider} does not provide a market scan"));
+        }
     };
     try_send_rithmic_catalog(controls, control, provider)
 }
@@ -66,6 +70,7 @@ fn dispatch_hyperliquid_catalog(
         ProviderCatalogCommand::Search(value) => HyperliquidCatalogControl::Search(value),
         ProviderCatalogCommand::Select(value) => HyperliquidCatalogControl::Select(value),
         ProviderCatalogCommand::Screen(value) => HyperliquidCatalogControl::Screen(value),
+        ProviderCatalogCommand::Scan(value) => HyperliquidCatalogControl::Scan(value),
     };
     try_send_hyperliquid_catalog(controls, control, provider)
 }
@@ -354,9 +359,14 @@ impl ProviderRuntimeRegistry {
             None
         };
         let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
+        // Scan publications share the catalog channel, so its overflow rejects pending scans too.
+        let scan_events_tx =
+            super::CatalogPublisher::new(catalog_events_tx.clone(), descriptor.id, wake.clone());
         let catalog_events_tx =
             super::CatalogPublisher::new(catalog_events_tx, descriptor.id, wake.clone());
         let (catalog_controls, catalog_controls_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let (scan_jobs, scan_jobs_rx) =
+            mpsc::sync_channel(crate::hyperliquid_market_scan::SCAN_JOB_CAPACITY);
         let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_controls, realtime_controls_rx) =
             mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
@@ -372,11 +382,21 @@ impl ProviderRuntimeRegistry {
                 started.cancel_and_join();
                 return Err("Provider reconnect policy is unavailable".to_string());
             };
+            if let Err(error) = Self::spawn_hyperliquid_scan(
+                &mut started,
+                active_workers,
+                scan_jobs_rx,
+                scan_events_tx,
+            ) {
+                started.cancel_and_join();
+                return Err(error.to_string());
+            }
             if let Err(error) = Self::spawn_hyperliquid_catalog(
                 &mut started,
                 active_workers,
                 catalog_controls_rx,
                 catalog_events_tx,
+                scan_jobs,
                 Arc::clone(&ws_generation),
             ) {
                 started.cancel_and_join();
@@ -434,6 +454,7 @@ impl ProviderRuntimeRegistry {
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
         controls: mpsc::Receiver<crate::hyperliquid_realtime::HyperliquidCatalogControl>,
         events: super::CatalogPublisher<crate::hyperliquid_realtime::HyperliquidCatalogEvent>,
+        scan_jobs: mpsc::SyncSender<crate::hyperliquid_market_scan::HyperliquidScanJob>,
         ws_generation: Arc<AtomicU64>,
     ) -> Result<(), String> {
         let cancellation = Arc::clone(&started.cancellation);
@@ -449,6 +470,7 @@ impl ProviderRuntimeRegistry {
                 crate::hyperliquid_realtime::run_catalog(
                     &controls,
                     &events,
+                    &scan_jobs,
                     &ws_generation,
                     &cancellation,
                     aeris_hyperliquid_market_adapter::HyperliquidHttpConfig::default(),
@@ -459,6 +481,40 @@ impl ProviderRuntimeRegistry {
                 }
             })
             .map_err(|error| error.to_string())?;
+        started.workers.push(worker);
+        Ok(())
+    }
+
+    fn spawn_hyperliquid_scan(
+        started: &mut StartedProviderRuntime,
+        active_workers: &Arc<Mutex<BTreeSet<String>>>,
+        jobs: mpsc::Receiver<crate::hyperliquid_market_scan::HyperliquidScanJob>,
+        events: super::CatalogPublisher<crate::hyperliquid_realtime::HyperliquidCatalogEvent>,
+    ) -> std::io::Result<()> {
+        let cancellation = Arc::clone(&started.cancellation);
+        let lifecycle = Arc::clone(&started.lifecycle);
+        let activity = Arc::clone(active_workers);
+        let worker = thread::Builder::new()
+            .name(crate::hyperliquid_market_scan::SCAN_WORKER_NAME.to_string())
+            .spawn(move || {
+                let _activity = ActiveWorkerGuard::register(
+                    crate::hyperliquid_market_scan::SCAN_WORKER_NAME,
+                    activity,
+                );
+                let mut client = aeris_hyperliquid_market_adapter::HyperliquidHttpClient::default();
+                crate::hyperliquid_market_scan::run_scan(
+                    &jobs,
+                    &events,
+                    &cancellation,
+                    &super::clock::SystemClock,
+                    |request, stop| {
+                        crate::hyperliquid_market_scan::fetch_candles(&mut client, request, stop)
+                    },
+                );
+                if !cancellation.load(Ordering::Acquire) {
+                    lifecycle.mark_terminal_failure("Provider scan runtime stopped unexpectedly");
+                }
+            })?;
         started.workers.push(worker);
         Ok(())
     }
@@ -1368,11 +1424,35 @@ impl MarketService {
         client_id: u64,
         screen: ScreenProviderMarkets,
     ) -> Result<(), String> {
-        validate_provider_screen(&screen)?;
+        validate_provider_screen(&screen).map_err(|error| error.to_string())?;
         self.request(|reply| {
             Ok(Command::ScreenProviderMarkets(
                 ClientId(id(client_id)?),
                 screen,
+                reply,
+            ))
+        })
+    }
+
+    /// Schedules one bounded market scan across a provider's most traded listed markets for
+    /// an owned consumer. Progress and the final answer arrive as
+    /// `MarketRuntimeEvent::ProviderMarketScan`, each replacing the previous one and fenced to
+    /// the latest scan generation of that consumer and provider; a newer scan supersedes the
+    /// running pass.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity or definition, out-of-range bounds, a provider
+    /// without a market scan, ownership, or coordinator failure.
+    pub fn scan_provider_markets(
+        &self,
+        client_id: u64,
+        scan: ScanProviderMarkets,
+    ) -> Result<(), String> {
+        validate_provider_scan(&scan).map_err(|error| error.to_string())?;
+        self.request(|reply| {
+            Ok(Command::ScanProviderMarkets(
+                ClientId(id(client_id)?),
+                scan,
                 reply,
             ))
         })
@@ -1676,6 +1756,14 @@ mod tests {
                 )
                 .is_err()
         );
+        assert!(
+            rithmic
+                .send(
+                    "rithmic",
+                    ProviderCatalogCommand::Scan(ScanProviderMarkets::default())
+                )
+                .is_err()
+        );
         rithmic
             .send(
                 "rithmic",
@@ -1713,6 +1801,16 @@ mod tests {
         assert!(matches!(
             hyperliquid_rx.try_recv(),
             Ok(HyperliquidCatalogControl::Screen(_))
+        ));
+        hyperliquid
+            .send(
+                "hyperliquid",
+                ProviderCatalogCommand::Scan(ScanProviderMarkets::default()),
+            )
+            .expect("public provider supports market scans");
+        assert!(matches!(
+            hyperliquid_rx.try_recv(),
+            Ok(HyperliquidCatalogControl::Scan(_))
         ));
     }
 

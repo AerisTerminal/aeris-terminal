@@ -332,6 +332,7 @@ dependencies = [
 name = "aeris_market_runtime"
 version = "1.8.1"
 dependencies = [
+ "aeris_charts_indicators",
  "aeris_contracts",
  "aeris_hyperliquid_market_adapter",
  "aeris_instruments",

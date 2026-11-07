@@ -3,7 +3,8 @@
 use aeris_contracts::InstallProviderInstrument;
 use aeris_market_runtime::MarketRuntimeEvent;
 use aeris_market_runtime::{
-    ProviderCatalogRejected, ProviderInstrumentSearchResult, ProviderMarketScreen,
+    ProviderCatalogRejected, ProviderInstrumentSearchResult, ProviderMarketScan,
+    ProviderMarketScreen,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +28,9 @@ pub(super) enum ProviderCatalogEvent {
     },
     ScreenCompleted(ProviderMarketScreen),
     ScreenRejected(ProviderCatalogRejected),
+    /// Progress or the final answer of the consumer's latest scan pass.
+    ScanUpdated(ProviderMarketScan),
+    ScanRejected(ProviderCatalogRejected),
 }
 
 pub(super) fn project_provider_catalog_event(
@@ -63,6 +67,12 @@ pub(super) fn project_provider_catalog_event(
         }
         MarketRuntimeEvent::ProviderMarketScreenRejected(rejection) => {
             Some(ProviderCatalogEvent::ScreenRejected(rejection))
+        }
+        MarketRuntimeEvent::ProviderMarketScan(scan) => {
+            Some(ProviderCatalogEvent::ScanUpdated(scan))
+        }
+        MarketRuntimeEvent::ProviderMarketScanRejected(rejection) => {
+            Some(ProviderCatalogEvent::ScanRejected(rejection))
         }
         _ => None,
     }
@@ -101,6 +111,36 @@ mod tests {
             )),
             Some(ProviderCatalogEvent::ScreenRejected(rejection))
                 if rejection.consumer_id == 41 && rejection.command_generation == 8
+        ));
+    }
+
+    #[test]
+    fn scan_callbacks_project_with_their_request_identity() {
+        let scan = ProviderMarketScan {
+            consumer_id: 41,
+            provider: "fixture".into(),
+            scan_generation: 9,
+            complete: true,
+            ..ProviderMarketScan::default()
+        };
+        assert!(matches!(
+            project_provider_catalog_event(MarketRuntimeEvent::ProviderMarketScan(scan)),
+            Some(ProviderCatalogEvent::ScanUpdated(scan))
+                if scan.consumer_id == 41 && scan.scan_generation == 9 && scan.complete
+        ));
+        let rejection = ProviderCatalogRejected {
+            consumer_id: 41,
+            provider: "fixture".into(),
+            provider_generation: Some(2),
+            command_generation: 10,
+            reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+        };
+        assert!(matches!(
+            project_provider_catalog_event(MarketRuntimeEvent::ProviderMarketScanRejected(
+                rejection
+            )),
+            Some(ProviderCatalogEvent::ScanRejected(rejection))
+                if rejection.command_generation == 10
         ));
     }
 }

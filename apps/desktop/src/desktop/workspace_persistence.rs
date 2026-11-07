@@ -16,6 +16,7 @@ struct WorkspaceLayoutRequest {
     drawing_templates: Vec<WorkspaceDrawingTemplateState>,
     saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
     chart_chrome: aeris_contracts::WorkspaceChromeState,
+    screener_scans: Vec<aeris_contracts::WorkspaceScreenerScanState>,
 }
 
 /// One save's document content; the persistence owner assigns the layout generation.
@@ -27,6 +28,7 @@ pub(super) struct WorkspaceSaveContent {
     pub(super) drawing_templates: Vec<WorkspaceDrawingTemplateState>,
     pub(super) saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
     pub(super) chart_chrome: aeris_contracts::WorkspaceChromeState,
+    pub(super) screener_scans: Vec<aeris_contracts::WorkspaceScreenerScanState>,
 }
 
 struct WorkspaceLayoutCompletion {
@@ -198,6 +200,7 @@ impl WorkspaceLayoutPersistence {
             drawing_templates: content.drawing_templates,
             saved_layouts: content.saved_layouts,
             chart_chrome: content.chart_chrome,
+            screener_scans: content.screener_scans,
         });
         match self.wake.try_send(()) {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => {
@@ -238,6 +241,7 @@ impl WorkspaceLayoutPersistence {
             drawing_templates: Vec::new(),
             saved_layouts: Vec::new(),
             chart_chrome: aeris_contracts::WorkspaceChromeState::default(),
+            screener_scans: Vec::new(),
         })
     }
 
@@ -335,6 +339,7 @@ fn apply_workspace_save(document: &mut WorkspaceState, request: WorkspaceLayoutR
         .map(|layout| WorkspaceSavedLayoutState::clone(layout))
         .collect();
     document.chart_chrome = Some(request.chart_chrome);
+    document.screener_scans = request.screener_scans;
 }
 
 fn run_workspace_layout_persistence(
@@ -489,6 +494,7 @@ mod tests {
                     .map(Arc::new)
                     .collect(),
                 chart_chrome: aeris_contracts::WorkspaceChromeState::default(),
+                screener_scans: Vec::new(),
             })
             .expect("request");
 
@@ -653,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn chrome_changes_save_through_the_one_workspace_writer() {
+    fn chrome_and_saved_scans_save_through_the_one_workspace_writer() {
         let root = temporary_workspace_root("chrome-writer");
         let owner = aeris_desktop::chart_chrome::DesktopPersistence::new(root.clone());
         let writer = WorkspaceLayoutPersistence::new(
@@ -667,6 +673,28 @@ mod tests {
             ..aeris_desktop::chart_chrome::ChartChromePreferences::default()
         }
         .to_workspace_chrome();
+        let operand = |kind: aeris_contracts::WorkspaceScanOperandKind, period: u32| {
+            aeris_contracts::WorkspaceScanOperandState {
+                kind: kind as i32,
+                period,
+                ..aeris_contracts::WorkspaceScanOperandState::default()
+            }
+        };
+        let scan = aeris_contracts::WorkspaceScreenerScanState {
+            name: "Oversold".to_string(),
+            timeframe: aeris_contracts::WorkspaceScanTimeframe::Hour4 as i32,
+            match_mode: aeris_contracts::WorkspaceScanMatchMode::All as i32,
+            universe_limit: 200,
+            conditions: vec![aeris_contracts::WorkspaceScanConditionState {
+                left: Some(operand(aeris_contracts::WorkspaceScanOperandKind::Rsi, 14)),
+                comparison: aeris_contracts::WorkspaceScanComparison::Below as i32,
+                right: Some(aeris_contracts::WorkspaceScanOperandState {
+                    number_units: 30,
+                    ..operand(aeris_contracts::WorkspaceScanOperandKind::Number, 0)
+                }),
+                upper: None,
+            }],
+        };
 
         writer
             .request_with_chart_settings(WorkspaceSaveContent {
@@ -677,6 +705,7 @@ mod tests {
                 drawing_templates: Vec::new(),
                 saved_layouts: Vec::new(),
                 chart_chrome: chrome.clone(),
+                screener_scans: vec![scan.clone()],
             })
             .expect("a chrome change requests a workspace save");
         let generation = writer
@@ -691,6 +720,7 @@ mod tests {
             Some(chrome),
             "chrome preferences persist inside the workspace document"
         );
+        assert_eq!(saved.screener_scans, vec![scan]);
         std::fs::remove_dir_all(&root).expect("fixture root removed");
     }
 

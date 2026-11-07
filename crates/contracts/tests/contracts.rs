@@ -2,7 +2,10 @@ use aeris_contracts::{
     InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartSettingsTemplateState,
     WorkspaceChartState, WorkspaceChartStudyState, WorkspaceDrawingTemplateState,
     WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
+    WorkspaceSavedLayoutState, WorkspaceScanBand, WorkspaceScanComparison,
+    WorkspaceScanConditionState, WorkspaceScanMacdLine, WorkspaceScanMatchMode,
+    WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScanTimeframe,
+    WorkspaceScreenerScanState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
     WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
     WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
@@ -203,10 +206,63 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
         }],
         saved_layouts: Vec::new(),
         chart_chrome: None,
+        screener_scans: vec![WorkspaceScreenerScanState {
+            name: "Oversold".into(),
+            timeframe: WorkspaceScanTimeframe::Day1 as i32,
+            match_mode: WorkspaceScanMatchMode::All as i32,
+            universe_limit: 100,
+            conditions: vec![WorkspaceScanConditionState {
+                left: Some(WorkspaceScanOperandState {
+                    kind: WorkspaceScanOperandKind::Macd as i32,
+                    period: 12,
+                    second_period: 26,
+                    third_period: 9,
+                    macd_line: WorkspaceScanMacdLine::Signal as i32,
+                    ..WorkspaceScanOperandState::default()
+                }),
+                comparison: WorkspaceScanComparison::Between as i32,
+                right: Some(WorkspaceScanOperandState {
+                    kind: WorkspaceScanOperandKind::Number as i32,
+                    number_units: -125,
+                    number_scale: 2,
+                    ..WorkspaceScanOperandState::default()
+                }),
+                upper: Some(WorkspaceScanOperandState {
+                    kind: WorkspaceScanOperandKind::Bollinger as i32,
+                    period: 20,
+                    band: WorkspaceScanBand::Upper as i32,
+                    deviation_tenths: 20,
+                    ..WorkspaceScanOperandState::default()
+                }),
+            }],
+        }],
     };
     let decoded =
         WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");
     assert_eq!(decoded, workspace);
+}
+
+#[test]
+fn workspaces_written_before_saved_scans_open_with_none() {
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct WorkspaceStateBeforeScans {
+        #[prost(string, tag = "1")]
+        provider: String,
+        #[prost(uint32, tag = "8")]
+        schema_revision: u32,
+        #[prost(message, repeated, tag = "16")]
+        workspace_tabs: Vec<WorkspaceTabState>,
+    }
+
+    let before = WorkspaceStateBeforeScans {
+        provider: "rithmic".into(),
+        schema_revision: 6,
+        workspace_tabs: vec![workspace_tab()],
+    };
+    let decoded = WorkspaceState::decode(before.encode_to_vec().as_slice())
+        .expect("a document without tag 23 decodes");
+    assert_eq!(decoded.screener_scans, Vec::new());
+    assert_eq!(decoded.workspace_tabs, before.workspace_tabs);
 }
 
 #[test]

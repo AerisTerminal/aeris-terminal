@@ -25,8 +25,8 @@ use std::{
 
 use crate::{
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
-    ProviderMarketScreen, ScreenProviderMarkets, SearchProviderInstruments,
-    SelectProviderInstrument,
+    ProviderMarketScan, ProviderMarketScreen, ScanProviderMarkets, ScreenProviderMarkets,
+    SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_contracts::{InstallProviderInstrument, ProviderContractMetadata};
 use aeris_hyperliquid_market_adapter::{
@@ -38,6 +38,7 @@ use aeris_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
 use aeris_market_engine::fence::{Fenced, ProviderTag};
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
+use crate::hyperliquid_market_scan::HyperliquidScanJob;
 use crate::hyperliquid_market_screen::{RetainedMarketStatistics, instrument_summary};
 use crate::market_service::provider_session::ProviderEventSink;
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
@@ -121,12 +122,15 @@ pub(crate) enum HyperliquidCatalogControl {
     Search(SearchProviderInstruments),
     Select(SelectProviderInstrument),
     Screen(ScreenProviderMarkets),
+    Scan(ScanProviderMarkets),
 }
 
 pub(crate) enum HyperliquidCatalogEvent {
     SearchCompleted(ProviderInstrumentSearchResult),
     ScreenCompleted(ProviderMarketScreen),
     ScreenRejected(ProviderCatalogRejected),
+    ScanUpdated(ProviderMarketScan),
+    ScanRejected(ProviderCatalogRejected),
     SelectionResolved {
         consumer_id: u64,
         command_generation: u64,
@@ -165,10 +169,12 @@ enum SubscriptionKey {
     Book { coin: String },
 }
 
-/// Runs the catalog worker: retained-catalog search/select over HTTP.
+/// Runs the catalog worker: retained-catalog search/select over HTTP. Scans are handed to the
+/// scan worker with their universe, so slow candle fetches never delay a search.
 pub(crate) fn run_catalog(
     controls: &Receiver<HyperliquidCatalogControl>,
     events: &CatalogPublisher<HyperliquidCatalogEvent>,
+    scan_jobs: &SyncSender<HyperliquidScanJob>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
     http_config: HyperliquidHttpConfig,
@@ -186,6 +192,7 @@ pub(crate) fn run_catalog(
                     control,
                     &mut catalog,
                     events,
+                    scan_jobs,
                     ws_generation,
                     stop,
                     http_config,
@@ -258,6 +265,7 @@ fn handle_catalog_control(
     control: HyperliquidCatalogControl,
     catalog: &mut CatalogState,
     events: &CatalogPublisher<HyperliquidCatalogEvent>,
+    scan_jobs: &SyncSender<HyperliquidScanJob>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
     http_config: HyperliquidHttpConfig,
@@ -271,6 +279,61 @@ fn handle_catalog_control(
         }
         HyperliquidCatalogControl::Screen(screen) => {
             handle_catalog_screen(&screen, catalog, events, stop, http_config)
+        }
+        HyperliquidCatalogControl::Scan(scan) => {
+            handle_catalog_scan(scan, catalog, events, scan_jobs, stop, http_config)
+        }
+    }
+}
+
+/// Hands one market scan to the scan worker with the most traded listed markets as its
+/// universe. Returns true when the worker must exit.
+fn handle_catalog_scan(
+    scan: ScanProviderMarkets,
+    catalog: &mut CatalogState,
+    events: &CatalogPublisher<HyperliquidCatalogEvent>,
+    scan_jobs: &SyncSender<HyperliquidScanJob>,
+    stop: &Arc<AtomicBool>,
+    http_config: HyperliquidHttpConfig,
+) -> bool {
+    let refreshed = if ensure_catalog(catalog, http_config) {
+        catalog.statistics.refresh(http_config, Instant::now())
+    } else {
+        Err("hyperliquid catalog is unavailable".to_string())
+    };
+    if let Err(error) = &refreshed {
+        diagnostic!("Aeris Hyperliquid market scan is unavailable: {error}");
+    }
+    if stop.load(Ordering::Acquire) {
+        return true;
+    }
+    let universe_limit = usize::try_from(scan.universe_limit).unwrap_or(usize::MAX);
+    let universe = refreshed.ok().and_then(|()| {
+        let current = catalog.present()?;
+        let (_, rows) = catalog.statistics.screen(current, universe_limit)?;
+        Some(rows.into_iter().map(|row| row.instrument).collect())
+    });
+    let rejected = |scan: &ScanProviderMarkets| {
+        HyperliquidCatalogEvent::ScanRejected(ProviderCatalogRejected {
+            consumer_id: scan.consumer_id,
+            provider: "hyperliquid".to_string(),
+            provider_generation: None,
+            command_generation: scan.scan_generation,
+            reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+        })
+    };
+    let Some(universe) = universe else {
+        return publish_catalog(events, rejected(&scan), stop);
+    };
+    let job = HyperliquidScanJob {
+        request: scan,
+        provider_generation: catalog.epoch.max(1),
+        universe,
+    };
+    match scan_jobs.try_send(job) {
+        Ok(()) => false,
+        Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) => {
+            publish_catalog(events, rejected(&job.request), stop)
         }
     }
 }

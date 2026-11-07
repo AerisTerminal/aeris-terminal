@@ -14,6 +14,7 @@ use super::{
     WorkspaceChartSettingsTemplateState, WorkspaceChromeState, WorkspaceDrawingTemplateState,
     WorkspaceTabState, WorkspaceWatchlistEntryState,
 };
+use aeris_contracts::WorkspaceScreenerScanState;
 
 /// A change the compared snapshot does not show, so it is saved even when the snapshot is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,7 +34,7 @@ impl UnsavedEdit {
     }
 }
 
-/// The open tabs, watchlist and shell chrome as the workspace file stores them.
+/// The open tabs, watchlist, shell chrome and saved scans as the workspace file stores them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct WorkspaceSnapshot {
     pub(super) layout: Vec<WorkspaceTabState>,
@@ -41,6 +42,7 @@ pub(super) struct WorkspaceSnapshot {
     pub(super) watchlist: Vec<WorkspaceWatchlistEntryState>,
     /// Chart chrome preferences persist with the document through the same writer.
     pub(super) chart_chrome: WorkspaceChromeState,
+    pub(super) screener_scans: Vec<WorkspaceScreenerScanState>,
 }
 
 /// What a save request did.
@@ -212,6 +214,7 @@ impl SavedWorkspace {
             drawing_templates: self.drawing_templates.clone(),
             saved_layouts: self.layouts.states(),
             chart_chrome: snapshot.chart_chrome.clone(),
+            screener_scans: snapshot.screener_scans.clone(),
         }) {
             return WorkspaceSave::Failed(error);
         }

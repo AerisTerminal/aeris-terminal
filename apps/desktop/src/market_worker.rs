@@ -11,7 +11,7 @@ use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert, MarketRuntimeEvent,
 };
 use aeris_market_runtime::{
-    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
+    ScanProviderMarkets, ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_observability::FeedConnectionState;
 use std::{
@@ -409,6 +409,7 @@ pub enum MarketWorkerCommand {
     ProviderSearch(SearchProviderInstruments),
     ProviderSelect(SelectProviderInstrument),
     ProviderScreen(ScreenProviderMarkets),
+    ProviderScan(ScanProviderMarkets),
     EngineSelect(Box<EngineSelectionRequest>),
     SelectCatalog(Box<CatalogSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
@@ -1109,6 +1110,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::ProviderScreen(_)
+                    | MarketWorkerCommand::ProviderScan(_)
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::SelectCatalog(_)
                     | MarketWorkerCommand::ChartViewport(_)
@@ -1124,6 +1126,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::ProviderScreen(_)
+                    | MarketWorkerCommand::ProviderScan(_)
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::SelectCatalog(_)
                     | MarketWorkerCommand::ChartViewport(_)
@@ -1169,6 +1172,23 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::ProviderScreen(screen))
+            .inspect(|()| commands.notify())
+            .map_err(|_| ProviderCommandUnavailable)
+    }
+
+    /// Enqueues one market scan pass without blocking.
+    ///
+    /// # Errors
+    /// Returns an error when the command mailbox is full or disconnected.
+    pub fn try_scan_provider(
+        &self,
+        scan: ScanProviderMarkets,
+    ) -> Result<(), ProviderCommandUnavailable> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(ProviderCommandUnavailable);
+        };
+        commands
+            .try_send(MarketWorkerCommand::ProviderScan(scan))
             .inspect(|()| commands.notify())
             .map_err(|_| ProviderCommandUnavailable)
     }

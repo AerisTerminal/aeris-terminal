@@ -21,6 +21,7 @@ aeris_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
 aeris_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
 aeris_instruments = { path = "../domain/instruments" }
 aeris_trading = { path = "../domain/trading" }
+aeris_charts_indicators.workspace = true
 chrono.workspace = true
 num-traits.workspace = true
 chrono-tz.workspace = true

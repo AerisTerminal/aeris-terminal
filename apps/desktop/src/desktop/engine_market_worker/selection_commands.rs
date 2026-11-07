@@ -205,6 +205,10 @@ pub(super) fn process_command(
             request.consumer_id = endpoint.consumer_id;
             market.screen_provider_markets(client_id, request)
         }
+        MarketWorkerCommand::ProviderScan(mut request) => {
+            request.consumer_id = endpoint.consumer_id;
+            market.scan_provider_markets(client_id, request)
+        }
         MarketWorkerCommand::EngineSelect(request) => process_engine_select(
             market,
             client_id,

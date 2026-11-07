@@ -1,9 +1,10 @@
 //! The screener page: every market the screening provider lists, with live statistics,
 //! sortable columns, category filters and search. Selecting a row opens it in the terminal.
 
+use super::market_scan_view::{market_scans_tab, screener_tabs};
 use super::market_screener::{
     AppView, MarketScreener, SCREENER_REFRESH_TICK, ScreenerCategory, ScreenerColumn, ScreenerRow,
-    ScreenerSort, ScreenerStatus, capture_time_label,
+    ScreenerSort, ScreenerStatus, ScreenerTab, capture_time_label,
 };
 use super::*;
 use aeris_localization::{Text, panels, tr, tr_count};
@@ -13,16 +14,16 @@ use std::cmp::Ordering as CmpOrdering;
 const PAGE_PADDING_X: f32 = 24.0;
 const PAGE_PADDING_TOP: f32 = 20.0;
 const PAGE_SECTION_GAP: f32 = 16.0;
-const CONTROL_HEIGHT: f32 = 28.0;
+pub(super) const CONTROL_HEIGHT: f32 = 28.0;
 const SEARCH_WIDTH: f32 = 260.0;
-const TABLE_HEADER_HEIGHT: f32 = 32.0;
-const ROW_HEIGHT: f32 = 36.0;
+pub(super) const TABLE_HEADER_HEIGHT: f32 = 32.0;
+pub(super) const ROW_HEIGHT: f32 = 36.0;
 const CELL_PADDING_X: f32 = 12.0;
 const RANK_WIDTH: f32 = 56.0;
-const MARKET_MIN_WIDTH: f32 = 200.0;
-const EXCHANGE_LOGO_SIZE: f32 = 16.0;
-const SORT_ICON_SIZE: f32 = 12.0;
-const FOOTER_HEIGHT: f32 = 36.0;
+pub(super) const MARKET_MIN_WIDTH: f32 = 200.0;
+pub(super) const EXCHANGE_LOGO_SIZE: f32 = 16.0;
+pub(super) const SORT_ICON_SIZE: f32 = 12.0;
+pub(super) const FOOTER_HEIGHT: f32 = 36.0;
 
 #[derive(Clone, Copy)]
 struct ColumnSpec {
@@ -66,7 +67,7 @@ const COLUMNS: [ColumnSpec; 6] = [
 ];
 
 /// A padded cell; every cell but the row's last carries the vertical column divider.
-fn table_cell(theme: &AerisTheme, divided: bool) -> Div {
+pub(super) fn table_cell(theme: &AerisTheme, divided: bool) -> Div {
     div()
         .h_full()
         .flex()
@@ -90,15 +91,15 @@ fn column_cell(spec: ColumnSpec, theme: &AerisTheme) -> Div {
 
 /// The table container's corner radius less its border, so square-cornered table chrome
 /// can be rounded to sit inside the border instead of over it.
-fn table_inner_radius(theme: &AerisTheme) -> Pixels {
+pub(super) fn table_inner_radius(theme: &AerisTheme) -> Pixels {
     px((f32::from(RadiusToken::Default.logical_pixels()) - theme.dimensions.border_width).max(0.0))
 }
 
-fn rank_cell(theme: &AerisTheme) -> Div {
+pub(super) fn rank_cell(theme: &AerisTheme) -> Div {
     table_cell(theme, true).w(px(RANK_WIDTH)).flex_none()
 }
 
-fn table_row_frame(height: f32) -> Div {
+pub(super) fn table_row_frame(height: f32) -> Div {
     div()
         .w_full()
         .h(px(height))
@@ -108,7 +109,7 @@ fn table_row_frame(height: f32) -> Div {
         .font_features(platform_tabular_numerals())
 }
 
-fn direction_color(direction: Option<CmpOrdering>, theme: &AerisTheme) -> Hsla {
+pub(super) fn direction_color(direction: Option<CmpOrdering>, theme: &AerisTheme) -> Hsla {
     let colors = theme.colors;
     gpui_color(match direction {
         Some(CmpOrdering::Greater) => colors.text_positive,
@@ -136,22 +137,27 @@ pub(super) fn market_screener_page(
         .px(px(PAGE_PADDING_X))
         .bg(gpui_color(colors.surface))
         .child(page_header(terminal, screener, theme))
-        .child(category_bar(terminal, screener, theme))
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .flex()
-                .flex_col()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .border(px(theme.dimensions.border_width))
-                .border_color(gpui_color(colors.border_secondary))
-                .overflow_hidden()
-                .child(table_header(terminal, screener.sort(), theme))
-                .child(table_body(terminal, screener, theme)),
-        )
-        .child(page_footer(screener, theme))
+        .child(screener_tabs(terminal, screener.tab(), theme))
+        .map(|page| match screener.tab() {
+            ScreenerTab::Markets => page
+                .child(category_bar(terminal, screener, theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                        .border(px(theme.dimensions.border_width))
+                        .border_color(gpui_color(colors.border_secondary))
+                        .overflow_hidden()
+                        .child(table_header(terminal, screener.sort(), theme))
+                        .child(table_body(terminal, screener, theme)),
+                )
+                .child(page_footer(screener, theme)),
+            ScreenerTab::Scans => page.child(market_scans_tab(terminal, screener, theme)),
+        })
         .into_any_element()
 }
 
@@ -167,13 +173,14 @@ fn page_header(
             .unwrap_or(tr!(panels::SCREENER_NO_PROVIDER_NAME))
             .to_string(),
     ];
-    if screener.status() == ScreenerStatus::Ready {
+    let markets = screener.tab() == ScreenerTab::Markets;
+    if markets && screener.status() == ScreenerStatus::Ready {
         summary.push(tr_count!(
             panels::SCREENER_MARKETS_COUNT,
             screener.counts().all
         ));
     }
-    if let Some(captured) = screener.captured_at_unix_millis() {
+    if let Some(captured) = screener.captured_at_unix_millis().filter(|_| markets) {
         summary.push(tr!(
             panels::SCREENER_UPDATED,
             time = capture_time_label(captured)
@@ -224,14 +231,14 @@ fn page_header(
                 .flex()
                 .items_center()
                 .gap_2()
-                .children(screener.search_input().map(|input| {
+                .children(screener.search_input().filter(|_| markets).map(|input| {
                     div()
                         .w(px(SEARCH_WIDTH))
                         .h(px(CONTROL_HEIGHT))
                         .flex()
                         .child(Input::new(input).platform(theme).flex_1())
                 }))
-                .child(refresh),
+                .when(markets, |controls| controls.child(refresh)),
         )
 }
 
@@ -605,6 +612,7 @@ impl TerminalApp {
             self.frames.dirty(),
         );
         self.ensure_market_screener_search(window, cx);
+        self.refresh_market_scan_inputs(window, cx);
         self.pages.screener.refresh_now();
         self.pages.screener.refresh_if_due(Instant::now());
         let refresh = cx.spawn_in(window, async move |terminal, cx| {
@@ -650,7 +658,9 @@ impl TerminalApp {
     }
 
     pub(super) fn open_market_screener_row(&mut self, row: &ScreenerRow, cx: &mut Context<Self>) {
-        self.pages.screener.open_row(row);
+        self.pages
+            .screener
+            .open_market(&row.symbol, &row.exchange, &row.display_symbol);
         cx.notify();
     }
 

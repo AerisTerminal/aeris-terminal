@@ -19,6 +19,8 @@ pub(super) enum CommandKind {
     Select,
     Selection,
     Screen,
+    /// A market scan publishes progress until its pass completes, which takes minutes.
+    Scan,
     StartupResolve,
 }
 
@@ -83,7 +85,7 @@ impl CommandFences {
     }
 
     /// Earliest response deadline among commands still awaiting a callback.
-    /// Screens and completed searches are not answered by a later callback.
+    /// Screens, scans and completed searches are not answered by a later callback.
     pub(super) fn next_deadline(&self) -> Option<Instant> {
         self.awaiting_callback()
             .map(|(_, pending)| pending.deadline)
@@ -108,9 +110,9 @@ impl CommandFences {
     fn awaiting_callback(
         &self,
     ) -> impl Iterator<Item = (&(ConsumerId, String, CommandKind), &Pending)> {
-        self.pending
-            .iter()
-            .filter(|((_, _, kind), pending)| *kind != CommandKind::Screen && !pending.completed)
+        self.pending.iter().filter(|((_, _, kind), pending)| {
+            !matches!(kind, CommandKind::Screen | CommandKind::Scan) && !pending.completed
+        })
     }
 
     pub(super) fn accepts(
@@ -260,22 +262,24 @@ mod tests {
             CommandKind::Select,
             CommandKind::Selection,
             CommandKind::Screen,
+            CommandKind::Scan,
             CommandKind::StartupResolve,
         ] {
             fences.record(consumer, "rithmic".into(), kind, 1, Instant::now());
         }
-        assert_eq!(fences.count_for(consumer), 5);
+        assert_eq!(fences.count_for(consumer), 6);
         fences.remove_consumer(consumer);
         assert_eq!(fences.count_for(consumer), 0);
     }
 
     #[test]
-    fn unanswered_commands_expire_but_screens_and_completed_searches_do_not() {
+    fn unanswered_commands_expire_but_screens_scans_and_completed_searches_do_not() {
         let consumer = ConsumerId(NonZeroU64::MIN);
         let mut fences = CommandFences::default();
         let start = Instant::now();
         fences.record(consumer, "rithmic".into(), CommandKind::Search, 4, start);
         fences.record(consumer, "rithmic".into(), CommandKind::Screen, 5, start);
+        fences.record(consumer, "rithmic".into(), CommandKind::Scan, 7, start);
         fences.record_operation(
             consumer,
             "rithmic".into(),

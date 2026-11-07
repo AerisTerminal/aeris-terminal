@@ -50,6 +50,8 @@ mod workspace_migrations;
 pub(super) fn default_workspace_for_test() -> WorkspaceState {
     local_state::default_workspace()
 }
+mod market_scan;
+mod market_scan_view;
 mod market_screener;
 mod market_screener_view;
 mod market_watch;
@@ -74,6 +76,7 @@ mod price_alert_dialog;
 mod provider_login;
 #[cfg(any(test, feature = "diagnostics"))]
 mod readiness_conformance;
+mod saved_scans;
 mod saved_workspace;
 use saved_workspace::{SavedWorkspace, UnsavedEdit, WorkspaceSave, WorkspaceSnapshot};
 mod side_panel_dock;
@@ -3848,8 +3851,10 @@ fn provider_catalog_event_provider(event: &ProviderCatalogEvent) -> &str {
         ProviderCatalogEvent::SearchCompleted(result) => &result.provider,
         ProviderCatalogEvent::SelectionInstalled { instrument, .. } => &instrument.provider,
         ProviderCatalogEvent::CommandRejected { rejection, .. }
-        | ProviderCatalogEvent::ScreenRejected(rejection) => &rejection.provider,
+        | ProviderCatalogEvent::ScreenRejected(rejection)
+        | ProviderCatalogEvent::ScanRejected(rejection) => &rejection.provider,
         ProviderCatalogEvent::ScreenCompleted(screen) => &screen.provider,
+        ProviderCatalogEvent::ScanUpdated(scan) => &scan.provider,
     }
 }
 

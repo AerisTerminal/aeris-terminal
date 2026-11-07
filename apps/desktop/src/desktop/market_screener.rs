@@ -2,6 +2,7 @@
 //! statistics it delivered, and the presentation filters over them. Statistics refresh on a
 //! bounded cadence only while the page is shown; leaving the page stops all screen traffic.
 
+use super::market_scan::MarketScan;
 use super::*;
 use aeris_localization::{panels, tr};
 use aeris_market_runtime::{
@@ -19,7 +20,7 @@ pub(super) const SCREENER_REFRESH_TICK: Duration = Duration::from_secs(1);
 /// An unanswered screen older than this is presumed lost; the next refresh supersedes it.
 const SCREENER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const SCREENER_MESSAGES_PER_POLL: usize = 16;
-const UNAVAILABLE_VALUE: &str = "—";
+pub(super) const UNAVAILABLE_VALUE: &str = "—";
 
 /// The application page shown under the title bar.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -46,6 +47,25 @@ impl AppView {
             Self::Terminal => HugeIcon::Chart,
             Self::Screener => HugeIcon::DataPanel,
             Self::Workflows => HugeIcon::Template,
+        }
+    }
+}
+
+/// The screener's two lists: every listed market, or the markets a scan matches.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum ScreenerTab {
+    #[default]
+    Markets,
+    Scans,
+}
+
+impl ScreenerTab {
+    pub(super) const ALL: [Self; 2] = [Self::Markets, Self::Scans];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Markets => tr!(panels::SCREENER_TAB_MARKETS),
+            Self::Scans => tr!(panels::SCREENER_TAB_SCANS),
         }
     }
 }
@@ -241,7 +261,7 @@ impl<'a> ScreenerEntry<'a> {
     }
 }
 
-fn fixed_to_f64(value: i64, scale: u32) -> f64 {
+pub(super) fn fixed_to_f64(value: i64, scale: u32) -> f64 {
     let exponent = i32::try_from(scale.min(18)).unwrap_or(18);
     value.to_f64().unwrap_or(0.0) / 10_f64.powi(exponent)
 }
@@ -262,7 +282,7 @@ fn hourly_funding(statistics: &ProviderMarketStatistics) -> Option<f64> {
 }
 
 /// Present values in the requested direction; unreported values always sort last.
-fn compare_keys(left: Option<f64>, right: Option<f64>, descending: bool) -> CmpOrdering {
+pub(super) fn compare_keys(left: Option<f64>, right: Option<f64>, descending: bool) -> CmpOrdering {
     match (left, right) {
         (Some(left), Some(right)) => {
             let ordering = left.total_cmp(&right);
@@ -465,6 +485,9 @@ pub(super) struct MarketScreener {
     counts: ScreenerCategoryCounts,
     search_input: Option<Entity<InputState>>,
     pub(super) scroll: UniformListScrollHandle,
+    tab: ScreenerTab,
+    /// Scans run through this page's market consumer, so they share its lifetime.
+    pub(super) scans: MarketScan,
     /// Refresh cadence task; held only while the page is shown, and dropping it cancels it.
     refresh_task: Option<Task<()>>,
 }
@@ -491,6 +514,8 @@ impl Default for MarketScreener {
             counts: ScreenerCategoryCounts::default(),
             search_input: None,
             scroll: UniformListScrollHandle::new(),
+            tab: ScreenerTab::default(),
+            scans: MarketScan::default(),
             refresh_task: None,
         }
     }
@@ -543,6 +568,20 @@ impl MarketScreener {
         self.pending_selection
             .as_ref()
             .map(|selection| selection.display_symbol.as_str())
+    }
+
+    pub(super) const fn tab(&self) -> ScreenerTab {
+        self.tab
+    }
+
+    /// Shows one list; only the shown list refreshes, so a scan does not compete with the
+    /// market statistics for the provider's request budget.
+    pub(super) fn set_tab(&mut self, tab: ScreenerTab) {
+        if self.tab != tab {
+            self.tab = tab;
+            self.scans.close_menu();
+            self.next_refresh_at = None;
+        }
     }
 
     pub(super) fn search_input(&self) -> Option<&Entity<InputState>> {
@@ -598,9 +637,17 @@ impl MarketScreener {
         self.refresh_task = None;
     }
 
-    /// Sends one screen when the cadence allows it and no recent request is unanswered.
-    /// Returns whether the presentation changed.
+    /// Refreshes the shown list when its cadence allows it. Returns whether the presentation
+    /// changed.
     pub(super) fn refresh_if_due(&mut self, now: Instant) -> bool {
+        match self.tab {
+            ScreenerTab::Markets => self.refresh_markets_if_due(now),
+            ScreenerTab::Scans => self.scans.refresh_if_due(now, self.worker.as_ref()),
+        }
+    }
+
+    /// Sends one screen when the cadence allows it and no recent request is unanswered.
+    fn refresh_markets_if_due(&mut self, now: Instant) -> bool {
         let (Some(worker), Some(provider)) = (&self.worker, self.provider) else {
             return false;
         };
@@ -629,7 +676,7 @@ impl MarketScreener {
     }
 
     /// Requests the instrument behind a presented row; the terminal opens it once resolved.
-    pub(super) fn open_row(&mut self, row: &ScreenerRow) {
+    pub(super) fn open_market(&mut self, symbol: &str, exchange: &str, display_symbol: &str) {
         let (Some(worker), Some(provider)) = (&self.worker, self.provider) else {
             return;
         };
@@ -641,20 +688,17 @@ impl MarketScreener {
             selection_generation: generation,
             search_generation: self.displayed_generation.max(1),
             provider: provider.id.to_string(),
-            symbol: row.symbol.clone(),
-            exchange: row.exchange.clone(),
+            symbol: symbol.to_string(),
+            exchange: exchange.to_string(),
             entitlement_id: provider.selection_entitlement_id.to_string(),
         };
         if worker.try_select_provider(request).is_err() {
-            self.message = Some(tr!(
-                panels::SCREENER_OPEN_FAILED,
-                symbol = row.display_symbol
-            ));
+            self.message = Some(tr!(panels::SCREENER_OPEN_FAILED, symbol = display_symbol));
             return;
         }
         self.pending_selection = Some(PendingScreenerSelection {
             generation,
-            display_symbol: row.display_symbol.clone(),
+            display_symbol: display_symbol.to_string(),
         });
         self.message = None;
     }
@@ -668,6 +712,7 @@ impl MarketScreener {
         self.refresh_task = None;
         self.pending_screen = None;
         self.pending_selection = None;
+        self.scans.lose_pending();
         self.worker.take()?.begin_retirement()
     }
 
@@ -720,6 +765,7 @@ impl MarketScreener {
                 } => {
                     self.pending_screen = None;
                     self.pending_selection = None;
+                    self.scans.lose_pending();
                     self.message = Some(message);
                     outcome.changed = true;
                 }
@@ -730,6 +776,7 @@ impl MarketScreener {
             self.worker = None;
             self.pending_screen = None;
             self.pending_selection = None;
+            self.scans.lose_pending();
             self.message = Some(tr!(panels::SCREENER_STATS_UNAVAILABLE).to_string());
             outcome.changed = true;
         }
@@ -792,6 +839,12 @@ impl MarketScreener {
                     )
                 });
                 true
+            }
+            ProviderCatalogEvent::ScanUpdated(scan) => {
+                self.scans.apply_update(scan, Instant::now())
+            }
+            ProviderCatalogEvent::ScanRejected(rejection) => {
+                self.scans.apply_rejection(&rejection, Instant::now())
             }
             _ => false,
         }

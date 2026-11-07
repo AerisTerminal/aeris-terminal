@@ -5,6 +5,8 @@
 //! `candleSnapshot` adds one per 60 candles returned. Charts, the catalog and
 //! the market screen all draw from this one budget, so together they wait for
 //! capacity instead of being rejected with HTTP 429 and retrying into the limit.
+//! Background work such as a market scan spends only below a reserve, so a
+//! long scan never makes a chart or the catalog wait.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +18,8 @@ const WINDOW: Duration = Duration::from_secs(60);
 /// Weight spent in any window: below the documented 1,200 so other software
 /// on the same address keeps headroom.
 const WINDOW_WEIGHT: u32 = 1_000;
+/// Weight background requests leave unspent in every window for interactive ones.
+const FOREGROUND_RESERVE_WEIGHT: u32 = 300;
 /// Weight of every info request this adapter sends.
 const INFO_REQUEST_WEIGHT: u32 = 20;
 /// `candleSnapshot` adds one weight per this many returned candles.
@@ -27,15 +31,48 @@ const BUDGET_POLL: Duration = Duration::from_millis(100);
 
 static BUDGET: Mutex<WeightWindow> = Mutex::new(WeightWindow::new());
 
+/// Error of a request the budget could not cover within the bounded wait. It is
+/// not a provider failure: the same request succeeds once earlier spending expires.
+pub const HYPERLIQUID_BUDGET_EXHAUSTED: &str = "hyperliquid info request budget is exhausted";
+
+/// Who waits for an info request's weight.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HyperliquidRequestPriority {
+    /// A request a user is waiting on, such as a chart's history or the catalog.
+    #[default]
+    Interactive,
+    /// Bulk work that yields to interactive requests, such as a market scan.
+    Background,
+}
+
+impl HyperliquidRequestPriority {
+    /// Highest window total a request of this priority may reach.
+    const fn window_limit(self) -> u32 {
+        match self {
+            Self::Interactive => WINDOW_WEIGHT,
+            Self::Background => WINDOW_WEIGHT - FOREGROUND_RESERVE_WEIGHT,
+        }
+    }
+}
+
 /// Spends one info request's weight, waiting while earlier requests leave no
-/// capacity in the window.
+/// capacity in the window for its priority.
 ///
 /// # Errors
 ///
 /// Returns an error when `stop` is raised while waiting, or when the budget
 /// cannot cover the request within the bounded wait.
-pub(crate) fn spend_info_request(stop: Option<&AtomicBool>) -> Result<(), String> {
-    spend(&BUDGET, INFO_REQUEST_WEIGHT, stop, MAXIMUM_BUDGET_WAIT)
+pub(crate) fn spend_info_request(
+    stop: Option<&AtomicBool>,
+    priority: HyperliquidRequestPriority,
+) -> Result<(), String> {
+    spend(
+        &BUDGET,
+        INFO_REQUEST_WEIGHT,
+        priority.window_limit(),
+        stop,
+        MAXIMUM_BUDGET_WAIT,
+    )
 }
 
 /// Charges the additional weight of a returned candle page.
@@ -57,20 +94,21 @@ pub(crate) fn provider_limited() {
 fn spend(
     budget: &Mutex<WeightWindow>,
     weight: u32,
+    limit: u32,
     stop: Option<&AtomicBool>,
     maximum_wait: Duration,
 ) -> Result<(), String> {
     let started = Instant::now();
     loop {
         let now = Instant::now();
-        let Err(wait) = lock(budget).try_spend(weight, now) else {
+        let Err(wait) = lock(budget).try_spend(weight, limit, now) else {
             return Ok(());
         };
         if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
             return Err("hyperliquid info request was cancelled".to_string());
         }
         if now.saturating_duration_since(started) + wait > maximum_wait {
-            return Err("hyperliquid info request budget is exhausted".to_string());
+            return Err(HYPERLIQUID_BUDGET_EXHAUSTED.to_string());
         }
         std::thread::sleep(wait.min(BUDGET_POLL));
     }
@@ -95,18 +133,18 @@ impl WeightWindow {
         }
     }
 
-    /// Spends `weight` at `now` when it fits in the window, or returns how
-    /// long until enough earlier spending expires.
-    fn try_spend(&mut self, weight: u32, now: Instant) -> Result<(), Duration> {
+    /// Spends `weight` at `now` when the window total stays at or below
+    /// `limit`, or returns how long until enough earlier spending expires.
+    fn try_spend(&mut self, weight: u32, limit: u32, now: Instant) -> Result<(), Duration> {
         self.expire(now);
-        if self.total.saturating_add(weight) <= WINDOW_WEIGHT {
+        if self.total.saturating_add(weight) <= limit {
             self.record(weight, now);
             return Ok(());
         }
         let mut remaining = self.total;
         for &(at, spent) in &self.spent {
             remaining = remaining.saturating_sub(spent);
-            if remaining.saturating_add(weight) <= WINDOW_WEIGHT {
+            if remaining.saturating_add(weight) <= limit {
                 return Err((at + WINDOW).saturating_duration_since(now));
             }
         }
@@ -145,15 +183,18 @@ mod tests {
         let start = Instant::now();
         let mut window = WeightWindow::new();
         for _ in 0..WINDOW_WEIGHT / INFO_REQUEST_WEIGHT {
-            assert_eq!(window.try_spend(INFO_REQUEST_WEIGHT, start), Ok(()));
+            assert_eq!(
+                window.try_spend(INFO_REQUEST_WEIGHT, WINDOW_WEIGHT, start),
+                Ok(())
+            );
         }
         let later = start + Duration::from_secs(10);
         assert_eq!(
-            window.try_spend(INFO_REQUEST_WEIGHT, later),
+            window.try_spend(INFO_REQUEST_WEIGHT, WINDOW_WEIGHT, later),
             Err(Duration::from_secs(50))
         );
         assert_eq!(
-            window.try_spend(INFO_REQUEST_WEIGHT, start + WINDOW),
+            window.try_spend(INFO_REQUEST_WEIGHT, WINDOW_WEIGHT, start + WINDOW),
             Ok(())
         );
         assert_eq!(window.total, INFO_REQUEST_WEIGHT);
@@ -165,7 +206,10 @@ mod tests {
         let mut window = WeightWindow::new();
         assert_eq!(candle_weight(1_599), 27);
         assert_eq!(candle_weight(5_000), 84);
-        assert_eq!(window.try_spend(INFO_REQUEST_WEIGHT, start), Ok(()));
+        assert_eq!(
+            window.try_spend(INFO_REQUEST_WEIGHT, WINDOW_WEIGHT, start),
+            Ok(())
+        );
         window.record(candle_weight(5_000), start);
         assert_eq!(window.total, 104);
 
@@ -173,12 +217,12 @@ mod tests {
         window.fill(rejected);
         assert_eq!(window.total, WINDOW_WEIGHT);
         assert_eq!(
-            window.try_spend(INFO_REQUEST_WEIGHT, rejected),
+            window.try_spend(INFO_REQUEST_WEIGHT, WINDOW_WEIGHT, rejected),
             Err(Duration::from_secs(30)),
             "the rejection holds the window until earlier spending expires"
         );
         assert_eq!(
-            window.try_spend(INFO_REQUEST_WEIGHT, start + WINDOW),
+            window.try_spend(INFO_REQUEST_WEIGHT, WINDOW_WEIGHT, start + WINDOW),
             Ok(())
         );
         assert_eq!(window.total, WINDOW_WEIGHT - 104 + INFO_REQUEST_WEIGHT);
@@ -186,10 +230,60 @@ mod tests {
         let mut idle = WeightWindow::new();
         idle.fill(start);
         assert_eq!(
-            idle.try_spend(INFO_REQUEST_WEIGHT, start),
+            idle.try_spend(INFO_REQUEST_WEIGHT, WINDOW_WEIGHT, start),
             Err(WINDOW),
             "a rejection Aeris did not cause blocks the whole window"
         );
+    }
+
+    #[test]
+    fn background_requests_leave_the_foreground_reserve_unspent() {
+        let start = Instant::now();
+        let mut window = WeightWindow::new();
+        let background = HyperliquidRequestPriority::Background.window_limit();
+        let interactive = HyperliquidRequestPriority::Interactive.window_limit();
+        assert_eq!(background, WINDOW_WEIGHT - FOREGROUND_RESERVE_WEIGHT);
+        assert_eq!(interactive, WINDOW_WEIGHT);
+        for _ in 0..background / INFO_REQUEST_WEIGHT {
+            assert_eq!(
+                window.try_spend(INFO_REQUEST_WEIGHT, background, start),
+                Ok(())
+            );
+        }
+        assert_eq!(window.total, 700);
+        let later = start + Duration::from_secs(5);
+        assert_eq!(
+            window.try_spend(INFO_REQUEST_WEIGHT, background, later),
+            Err(Duration::from_secs(55)),
+            "background waits once the window passes the reserve"
+        );
+        for _ in 0..FOREGROUND_RESERVE_WEIGHT / INFO_REQUEST_WEIGHT {
+            assert_eq!(
+                window.try_spend(INFO_REQUEST_WEIGHT, interactive, later),
+                Ok(())
+            );
+        }
+        assert_eq!(window.total, WINDOW_WEIGHT);
+        assert!(
+            window
+                .try_spend(INFO_REQUEST_WEIGHT, interactive, later)
+                .is_err()
+        );
+
+        let expired = start + WINDOW;
+        assert_eq!(
+            window.try_spend(INFO_REQUEST_WEIGHT, background, expired),
+            Ok(())
+        );
+        assert_eq!(
+            window.total,
+            FOREGROUND_RESERVE_WEIGHT + INFO_REQUEST_WEIGHT
+        );
+        assert_eq!(
+            window.try_spend(INFO_REQUEST_WEIGHT, interactive, later + WINDOW),
+            Ok(())
+        );
+        assert_eq!(window.total, 2 * INFO_REQUEST_WEIGHT);
     }
 
     #[test]
@@ -198,11 +292,23 @@ mod tests {
         lock(&budget).fill(Instant::now());
         let stop = AtomicBool::new(true);
         assert_eq!(
-            spend(&budget, INFO_REQUEST_WEIGHT, Some(&stop), WINDOW),
+            spend(
+                &budget,
+                INFO_REQUEST_WEIGHT,
+                WINDOW_WEIGHT,
+                Some(&stop),
+                WINDOW
+            ),
             Err("hyperliquid info request was cancelled".to_string())
         );
         assert_eq!(
-            spend(&budget, INFO_REQUEST_WEIGHT, None, Duration::from_secs(1)),
+            spend(
+                &budget,
+                INFO_REQUEST_WEIGHT,
+                WINDOW_WEIGHT,
+                None,
+                Duration::from_secs(1)
+            ),
             Err("hyperliquid info request budget is exhausted".to_string())
         );
     }

@@ -42,7 +42,7 @@ impl ScriptedClock {
         }
     }
 
-    pub(super) fn advance(&self, by: std::time::Duration) {
+    pub(crate) fn advance(&self, by: std::time::Duration) {
         *self.elapsed.lock().expect("scripted clock lock") += by;
         self.wall_nanos.fetch_add(
             i64::try_from(by.as_nanos()).expect("scripted interval fits i64"),

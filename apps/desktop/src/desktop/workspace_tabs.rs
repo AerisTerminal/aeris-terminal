@@ -274,7 +274,15 @@ impl TerminalApp {
             active_workspace_id: tabs.active().id,
             watchlist: init.watchlist_entries.clone(),
             chart_chrome: init.chart_chrome.to_workspace_chrome(),
+            screener_scans: init.workspace_document.screener_scans.clone(),
         };
+        let mut pages = app_navigation::AppPages::default();
+        pages
+            .screener
+            .scans
+            .restore(saved_scans::sanitized_saved_scans(
+                &init.workspace_document.screener_scans,
+            ));
         let trading_store = start_trading_store(&lifecycle, frames.dirty(), cx);
         let restore_outcome = init.restore_outcome.clone();
         let (updater, download_offer) = start_update_clients();
@@ -302,7 +310,7 @@ impl TerminalApp {
             ),
             chart_menus: ChartMenus::default(),
             overlays: OverlayStack::new(command_palette_input),
-            pages: app_navigation::AppPages::default(),
+            pages,
             notices: AppNotices::new(init.workspace_notice),
             keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
             provider_login: provider_login::ProviderLoginFlow::default(),
@@ -2730,6 +2738,7 @@ impl TerminalApp {
             active_workspace_id: self.tabs.active().id,
             watchlist: self.watchlist_entries(),
             chart_chrome: self.chrome.preferences().to_workspace_chrome(),
+            screener_scans: self.pages.screener.scans.saved_states(),
         };
         match self.saved.save_if_changed(snapshot) {
             WorkspaceSave::Failed(error) => self.notices.show_workspace_error(error),

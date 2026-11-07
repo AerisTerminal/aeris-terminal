@@ -12,6 +12,7 @@ pub mod fence {
 }
 mod hyperliquid_display_depth;
 mod hyperliquid_history;
+mod hyperliquid_market_scan;
 mod hyperliquid_market_screen;
 mod hyperliquid_realtime;
 pub mod market_service;
@@ -19,6 +20,7 @@ mod provider_presentation;
 mod rithmic_history;
 mod rithmic_realtime;
 mod rithmic_venue;
+mod scan;
 mod status;
 pub mod study;
 
@@ -35,6 +37,13 @@ pub use catalog::{
 pub use provider_presentation::{
     ProviderAttribution, ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence,
     ProviderFeedLevel, ProviderPresentationDescriptor,
+};
+pub use scan::{
+    MAXIMUM_SCAN_CONDITIONS, MAXIMUM_SCAN_HISTORY_BARS, MAXIMUM_SCAN_NUMBER_SCALE,
+    MAXIMUM_SCAN_PERIOD, MAXIMUM_SCAN_RESULTS, MAXIMUM_SCAN_UNIVERSE, ProviderMarketScan,
+    ProviderMarketScanMatch, ScanBand, ScanComparison, ScanCondition, ScanDefinition,
+    ScanDefinitionError, ScanIndicator, ScanMacdLine, ScanMatchMode, ScanNumber, ScanOperand,
+    ScanPriceField, ScanProgress, ScanProviderMarkets, ScanTimeframe,
 };
 pub use status::{
     EngineFaultCode, FailureStage, Fault, MarketSessionPhase, MarketSessionSource,
@@ -393,6 +402,9 @@ pub enum MarketRuntimeEvent {
     },
     ProviderMarketScreen(crate::ProviderMarketScreen),
     ProviderMarketScreenRejected(crate::ProviderCatalogRejected),
+    /// The newest progress or final answer of the consumer's latest scan.
+    ProviderMarketScan(crate::ProviderMarketScan),
+    ProviderMarketScanRejected(crate::ProviderCatalogRejected),
     Fault(crate::Fault),
 }
 
@@ -417,6 +429,8 @@ impl MarketRuntimeEvent {
             | Self::ProviderCatalogRejected { .. }
             | Self::ProviderMarketScreen(_)
             | Self::ProviderMarketScreenRejected(_)
+            | Self::ProviderMarketScan(_)
+            | Self::ProviderMarketScanRejected(_)
             | Self::Fault(_) => None,
         }
     }

@@ -28,6 +28,7 @@ mod ws;
 pub use book::{
     DecodedBook, MAXIMUM_HYPERLIQUID_BOOK_LEVELS, decode_bbo_quote, decode_book_snapshot,
 };
+pub use budget::{HYPERLIQUID_BUDGET_EXHAUSTED, HyperliquidRequestPriority};
 pub use candles::{
     HyperliquidCandlePage, HyperliquidLiveCandle, MAXIMUM_HYPERLIQUID_CANDLES, decode_candle_page,
     decode_live_candle, hyperliquid_interval_for_period, period_for_hyperliquid_interval,

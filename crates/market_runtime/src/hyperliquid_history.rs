@@ -15,8 +15,8 @@ use std::{
 
 use aeris_contracts::InstallProviderInstrument;
 use aeris_hyperliquid_market_adapter::{
-    CandleSnapshotRequest, HyperliquidHttpConfig, NORMALIZED_PRICE_SCALE,
-    NORMALIZED_QUANTITY_SCALE, hyperliquid_interval_for_period,
+    CandleSnapshotRequest, HyperliquidHttpConfig, HyperliquidRequestPriority,
+    NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE, hyperliquid_interval_for_period,
 };
 use aeris_market_data::{BarPeriod, BarSeriesKey};
 use aeris_provider_history::HistoryRange;
@@ -97,6 +97,7 @@ pub(super) fn fetch(
             price_scale: NORMALIZED_PRICE_SCALE,
             quantity_scale: NORMALIZED_QUANTITY_SCALE,
             config: HyperliquidHttpConfig::default(),
+            priority: HyperliquidRequestPriority::Interactive,
         },
         stop,
     )?;
@@ -168,7 +169,7 @@ fn history_window_for_range(
 ///
 /// The span is window sizing only: the provider returns what it has (at most
 /// the latest 5,000 candles) and the decoder splits closed from forming.
-fn history_window(
+pub(crate) fn history_window(
     period: BarPeriod,
     maximum_bars: usize,
     now_millis: i64,

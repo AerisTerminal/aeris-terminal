@@ -329,6 +329,7 @@ impl ConsumerEvents {
             || self.catalog_selection.is_some()
             || !self.catalog_search.is_empty()
             || self.catalog_screen.is_some()
+            || self.catalog_scan.is_some()
     }
 
     pub(super) fn pop(&mut self) -> Option<MarketRuntimeEvent> {
@@ -352,6 +353,7 @@ impl ConsumerEvents {
                     .or_else(|| self.catalog_selection.take())
                     .or_else(|| self.catalog_search.pop_first().map(|(_, event)| event))
                     .or_else(|| self.catalog_screen.take())
+                    .or_else(|| self.catalog_scan.take())
             })
     }
 
@@ -380,6 +382,18 @@ impl ConsumerEvents {
             &mut self.startup_catalog_selection
         } else {
             &mut self.catalog_selection
+        }
+    }
+
+    /// The pending answer slot of a market screen or scan.
+    pub(super) fn catalog_market_slot(
+        &mut self,
+        kind: super::CommandKind,
+    ) -> &mut Option<MarketRuntimeEvent> {
+        if kind == super::CommandKind::Scan {
+            &mut self.catalog_scan
+        } else {
+            &mut self.catalog_screen
         }
     }
 

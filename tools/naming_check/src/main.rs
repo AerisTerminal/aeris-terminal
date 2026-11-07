@@ -145,6 +145,11 @@ const DESKTOP_MARKET_FENCE_ALLOWLIST: &[(&str, usize, &str)] = &[
         "app-scoped screener fence",
     ),
     (
+        "apps/desktop/src/desktop/market_scan.rs",
+        1,
+        "scan pass generation fence",
+    ),
+    (
         "apps/desktop/src/desktop/chart_pane_controller.rs",
         3,
         "controller publication/initial/display checks",
@@ -3349,9 +3354,14 @@ mod tests {
             let relative = relative_string(&path);
             let contents = fs::read_to_string(&path).expect("manifest");
             if contents.contains("aeris_charts_indicators.workspace") {
-                assert_eq!(
-                    relative, "crates/study_sdk/Cargo.toml",
-                    "pure Aeris Charts TA must enter Aeris only through the Study SDK facade"
+                assert!(
+                    matches!(
+                        relative.as_str(),
+                        "crates/study_sdk/Cargo.toml" | "crates/market_runtime/Cargo.toml"
+                    ),
+                    "pure Aeris Charts TA enters Aeris only through the Study SDK facade and the \
+                     market runtime's scan evaluator, so scans and charts share one formula: \
+                     {relative}"
                 );
             }
             if contents.contains("aeris_charts_engine.workspace")
@@ -4386,6 +4396,7 @@ mod tests {
                 concat!(".cursor_", "pointer()"),
                 &[
                     ("accounts_panel.rs", "selectable account rows"),
+                    ("market_scan_view.rs", "sortable headers and match rows"),
                     (
                         "market_screener_view.rs",
                         "sortable column headers and market rows",
@@ -4403,6 +4414,7 @@ mod tests {
                 &[
                     ("accounts_panel.rs", "selectable account rows"),
                     ("drawing_toolbar.rs", "favorites toolbar drag handle"),
+                    ("market_scan_view.rs", "sortable headers and match rows"),
                     (
                         "market_screener_view.rs",
                         "sortable column headers and market rows",

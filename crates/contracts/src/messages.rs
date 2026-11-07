@@ -85,6 +85,83 @@ pub enum WorkspaceStudyMarketStream {
     Depth = 4,
 }
 
+/// Persisted market-scan bar timeframe. Zero is never written, so an absent value is invalid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceScanTimeframe {
+    Unspecified = 0,
+    Minutes15 = 1,
+    Hour1 = 2,
+    Hour4 = 3,
+    Day1 = 4,
+    Week1 = 5,
+}
+
+/// Persisted market-scan match mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceScanMatchMode {
+    Unspecified = 0,
+    All = 1,
+    Any = 2,
+}
+
+/// Persisted market-scan comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceScanComparison {
+    Unspecified = 0,
+    Above = 1,
+    Below = 2,
+    CrossesAbove = 3,
+    CrossesBelow = 4,
+    Between = 5,
+}
+
+/// Persisted market-scan operand: a bar value, an indicator or a typed number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceScanOperandKind {
+    Unspecified = 0,
+    Open = 1,
+    High = 2,
+    Low = 3,
+    Close = 4,
+    Volume = 5,
+    ChangePercent = 6,
+    Sma = 7,
+    Ema = 8,
+    Rsi = 9,
+    Macd = 10,
+    Bollinger = 11,
+    Atr = 12,
+    Adx = 13,
+    RelativeVolume = 14,
+    HighestHigh = 15,
+    LowestLow = 16,
+    Number = 17,
+}
+
+/// Persisted line of a MACD scan operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceScanMacdLine {
+    Unspecified = 0,
+    Macd = 1,
+    Signal = 2,
+    Histogram = 3,
+}
+
+/// Persisted band of a Bollinger scan operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceScanBand {
+    Unspecified = 0,
+    Upper = 1,
+    Middle = 2,
+    Lower = 3,
+}
+
 /// Persisted workspace state.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct WorkspaceState {
@@ -136,6 +213,68 @@ pub struct WorkspaceState {
     /// chart-chrome key=value file into the document.
     #[prost(message, optional, tag = "22")]
     pub chart_chrome: Option<WorkspaceChromeState>,
+    /// User-named saved screener scans, at most 64. Absent in documents written before scans
+    /// existed, which open with none; an invalid scan is dropped alone on load.
+    #[prost(message, repeated, tag = "23")]
+    pub screener_scans: Vec<WorkspaceScreenerScanState>,
+}
+
+/// One user-named saved screener scan: conditions over one timeframe, evaluated across the
+/// most traded markets of the scanning provider.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceScreenerScanState {
+    #[prost(string, tag = "1")]
+    pub name: String,
+    #[prost(enumeration = "WorkspaceScanTimeframe", tag = "2")]
+    pub timeframe: i32,
+    #[prost(enumeration = "WorkspaceScanMatchMode", tag = "3")]
+    pub match_mode: i32,
+    /// How many of the most traded markets the scan covers.
+    #[prost(uint32, tag = "4")]
+    pub universe_limit: u32,
+    #[prost(message, repeated, tag = "5")]
+    pub conditions: Vec<WorkspaceScanConditionState>,
+}
+
+/// One saved scan condition, such as close above SMA(20).
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceScanConditionState {
+    #[prost(message, optional, tag = "1")]
+    pub left: Option<WorkspaceScanOperandState>,
+    #[prost(enumeration = "WorkspaceScanComparison", tag = "2")]
+    pub comparison: i32,
+    /// The compared value, or the lower bound of a between condition.
+    #[prost(message, optional, tag = "3")]
+    pub right: Option<WorkspaceScanOperandState>,
+    /// The upper bound of a between condition; absent for every other comparison.
+    #[prost(message, optional, tag = "4")]
+    pub upper: Option<WorkspaceScanOperandState>,
+}
+
+/// One side of a saved scan condition. Only the fields its kind reads are written: MACD
+/// stores its fast, slow and signal periods in order, every other indicator one period.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceScanOperandState {
+    #[prost(enumeration = "WorkspaceScanOperandKind", tag = "1")]
+    pub kind: i32,
+    #[prost(uint32, tag = "2")]
+    pub period: u32,
+    #[prost(uint32, tag = "3")]
+    pub second_period: u32,
+    #[prost(uint32, tag = "4")]
+    pub third_period: u32,
+    #[prost(enumeration = "WorkspaceScanMacdLine", tag = "5")]
+    pub macd_line: i32,
+    #[prost(enumeration = "WorkspaceScanBand", tag = "6")]
+    pub band: i32,
+    /// Bollinger band width in standard deviations, in tenths (20 is 2.0).
+    #[prost(uint32, tag = "7")]
+    pub deviation_tenths: u32,
+    /// A typed number, exactly `number_units / 10^number_scale`.
+    #[prost(sint64, tag = "8")]
+    pub number_units: i64,
+    #[prost(uint32, tag = "9")]
+    pub number_scale: u32,
 }
 
 /// Durable shell chrome that follows the user across charts and workspaces. Enum values are

@@ -542,6 +542,8 @@ fn is_catalog_event(event: &MarketRuntimeEvent) -> bool {
             | MarketRuntimeEvent::ProviderCatalogRejected { .. }
             | MarketRuntimeEvent::ProviderMarketScreen(_)
             | MarketRuntimeEvent::ProviderMarketScreenRejected(_)
+            | MarketRuntimeEvent::ProviderMarketScan(_)
+            | MarketRuntimeEvent::ProviderMarketScanRejected(_)
     )
 }
 

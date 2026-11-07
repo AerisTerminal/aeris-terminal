@@ -1406,6 +1406,9 @@ impl Coordinator<'_> {
             Command::ScreenProviderMarkets(client_id, screen, reply) => {
                 self.handle_provider_screen(client_id, screen, &reply);
             }
+            Command::ScanProviderMarkets(client_id, scan, reply) => {
+                self.handle_provider_scan(client_id, scan, &reply);
+            }
             Command::InstallProviderInstrument(instrument, reply) => {
                 let _ = reply.send(self.install_provider_instrument(&instrument));
             }
@@ -9840,6 +9843,231 @@ mod tests {
         ));
     }
 
+    fn market_scan(
+        consumer: ConsumerId,
+        scan_generation: u64,
+        complete: bool,
+    ) -> crate::ProviderMarketScan {
+        crate::ProviderMarketScan {
+            consumer_id: consumer.0.get(),
+            provider: "hyperliquid".to_string(),
+            provider_generation: 1,
+            scan_generation,
+            complete,
+            ..crate::ProviderMarketScan::default()
+        }
+    }
+
+    fn pending_scan(
+        coordinator: &mut Coordinator,
+        consumer: ConsumerId,
+    ) -> Option<MarketRuntimeEvent> {
+        coordinator
+            .events
+            .get_mut(&consumer)
+            .expect("consumer outbox")
+            .catalog_scan
+            .take()
+    }
+
+    #[test]
+    fn market_scan_progress_is_fenced_until_its_pass_completes() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator.command_fences.record(
+            consumer,
+            "hyperliquid".into(),
+            super::super::CommandKind::Scan,
+            4,
+            coordinator.clock.monotonic(),
+        );
+
+        coordinator.handle_catalog_scan(market_scan(consumer, 3, false));
+        coordinator.handle_catalog_scan(market_scan(consumer, 3, true));
+        assert!(
+            pending_scan(&mut coordinator, consumer).is_none(),
+            "a superseded scan never reaches presentation"
+        );
+
+        for _ in 0..2 {
+            coordinator.handle_catalog_scan(market_scan(consumer, 4, false));
+            assert!(matches!(
+                pending_scan(&mut coordinator, consumer),
+                Some(MarketRuntimeEvent::ProviderMarketScan(ref scan))
+                    if scan.scan_generation == 4 && !scan.complete
+            ));
+            assert!(
+                coordinator.command_fences.accepts(
+                    consumer,
+                    "hyperliquid",
+                    super::super::CommandKind::Scan,
+                    4
+                ),
+                "progress keeps the scan pending"
+            );
+        }
+        assert_eq!(
+            coordinator.command_fences.next_deadline(),
+            None,
+            "a running scan has no response deadline"
+        );
+
+        coordinator.handle_catalog_scan(market_scan(consumer, 4, true));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+        coordinator.handle_catalog_scan(market_scan(consumer, 4, false));
+        let events = coordinator
+            .events
+            .get_mut(&consumer)
+            .expect("consumer outbox");
+        assert!(
+            matches!(
+                events.pop(),
+                Some(MarketRuntimeEvent::ProviderMarketScan(ref scan))
+                    if scan.scan_generation == 4 && scan.complete
+            ),
+            "the final answer is drained and a late publication cannot replace it"
+        );
+        assert!(events.pop().is_none());
+    }
+
+    #[test]
+    fn market_scan_rejections_end_only_the_current_scan() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator.command_fences.record(
+            consumer,
+            "hyperliquid".into(),
+            super::super::CommandKind::Scan,
+            6,
+            coordinator.clock.monotonic(),
+        );
+        let rejection = |command_generation| crate::ProviderCatalogRejected {
+            consumer_id: consumer.0.get(),
+            provider: "hyperliquid".to_string(),
+            provider_generation: None,
+            command_generation,
+            reason: crate::ProviderCatalogRejectionReason::DispatchUnavailable,
+        };
+
+        coordinator.handle_catalog_scan_rejection(rejection(5));
+        assert!(pending_scan(&mut coordinator, consumer).is_none());
+        assert_eq!(coordinator.command_fences.count_for(consumer), 1);
+
+        coordinator.handle_catalog_scan_rejection(rejection(6));
+        assert!(matches!(
+            pending_scan(&mut coordinator, consumer),
+            Some(MarketRuntimeEvent::ProviderMarketScanRejected(ref rejected))
+                if rejected.command_generation == 6
+        ));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+    }
+
+    #[test]
+    fn overflowed_catalog_rejects_pending_market_scans() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator.command_fences.record(
+            consumer,
+            "hyperliquid".into(),
+            super::super::CommandKind::Scan,
+            9,
+            coordinator.clock.monotonic(),
+        );
+
+        coordinator.reject_overflowed_catalog("hyperliquid");
+
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+        assert!(matches!(
+            pending_scan(&mut coordinator, consumer),
+            Some(MarketRuntimeEvent::ProviderMarketScanRejected(ref rejection))
+                if rejection.command_generation == 9
+        ));
+        coordinator.handle_catalog_scan(market_scan(consumer, 9, false));
+        assert!(
+            pending_scan(&mut coordinator, consumer).is_none(),
+            "the rejected pass publishes nothing more"
+        );
+    }
+
+    #[test]
+    fn provider_scan_validation_refuses_unbounded_requests() {
+        let valid = crate::ScanProviderMarkets {
+            consumer_id: 1,
+            scan_generation: 1,
+            provider: "hyperliquid".to_string(),
+            definition: crate::ScanDefinition {
+                conditions: vec![crate::ScanCondition {
+                    left: crate::ScanOperand::Price(crate::ScanPriceField::Close),
+                    comparison: crate::ScanComparison::Above,
+                    right: crate::ScanOperand::Number(crate::ScanNumber { units: 1, scale: 0 }),
+                    upper: None,
+                }],
+                ..crate::ScanDefinition::default()
+            },
+            universe_limit: crate::MAXIMUM_SCAN_UNIVERSE,
+            maximum_results: crate::MAXIMUM_SCAN_RESULTS,
+        };
+        assert_eq!(super::super::validate_provider_scan(&valid), Ok(()));
+        let invalid = [
+            crate::ScanProviderMarkets {
+                consumer_id: 0,
+                ..valid.clone()
+            },
+            crate::ScanProviderMarkets {
+                scan_generation: 0,
+                ..valid.clone()
+            },
+            crate::ScanProviderMarkets {
+                provider: String::new(),
+                ..valid.clone()
+            },
+            crate::ScanProviderMarkets {
+                universe_limit: 0,
+                ..valid.clone()
+            },
+            crate::ScanProviderMarkets {
+                universe_limit: crate::MAXIMUM_SCAN_UNIVERSE + 1,
+                ..valid.clone()
+            },
+            crate::ScanProviderMarkets {
+                maximum_results: 0,
+                ..valid.clone()
+            },
+            crate::ScanProviderMarkets {
+                maximum_results: crate::MAXIMUM_SCAN_RESULTS + 1,
+                ..valid.clone()
+            },
+            crate::ScanProviderMarkets {
+                definition: crate::ScanDefinition::default(),
+                ..valid.clone()
+            },
+        ];
+        for scan in invalid {
+            assert!(super::super::validate_provider_scan(&scan).is_err());
+        }
+        assert_eq!(
+            super::super::validate_provider_scan(&crate::ScanProviderMarkets {
+                definition: crate::ScanDefinition::default(),
+                ..valid
+            }),
+            Err(super::super::InvalidMarketRequest::ScanDefinition(
+                crate::ScanDefinitionError::NoConditions
+            ))
+        );
+    }
+
     #[test]
     fn startup_and_user_searches_have_independent_fences() {
         let mut coordinator = coordinator();
@@ -10404,6 +10632,7 @@ mod tests {
                 super::super::CommandKind::Search,
                 super::super::CommandKind::Select,
                 super::super::CommandKind::Screen,
+                super::super::CommandKind::Scan,
                 super::super::CommandKind::StartupResolve,
             ] {
                 coordinator.command_fences.record(
@@ -10414,7 +10643,7 @@ mod tests {
                     coordinator.clock.monotonic(),
                 );
             }
-            assert_eq!(coordinator.command_fences.count_for(owner), 4);
+            assert_eq!(coordinator.command_fences.count_for(owner), 5);
             assert!(coordinator.engine.has_subscription(&selected));
             if detach {
                 coordinator.attached.remove(&client(1));

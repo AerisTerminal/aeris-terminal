@@ -5,12 +5,12 @@ use super::{
     ClientId, ConsumerId, Coordinator, InstallProviderInstrument, MAXIMUM_CATALOG_FIELD_BYTES,
     MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64, ProviderCatalogCommand, ProviderCatalogEvent,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderGeneration, ProviderHealth,
-    ProviderMarketScreen, Reply, RithmicCatalogControl, ScreenProviderMarkets,
-    SearchProviderInstruments, SelectProviderInstrument, SyncSender, TrySendError,
-    authorize_consumer,
+    ProviderMarketScan, ProviderMarketScreen, Reply, RithmicCatalogControl, ScanProviderMarkets,
+    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument, SyncSender,
+    TrySendError, authorize_consumer,
 };
 use crate::hyperliquid_realtime::HyperliquidCatalogControl;
-use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent};
+use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent, ScanDefinitionError};
 use aeris_observability::diagnostic;
 
 pub(super) fn id(value: u64) -> Result<NonZeroU64, String> {
@@ -35,17 +35,55 @@ pub(super) fn validate_provider_search(search: &SearchProviderInstruments) -> Re
     Ok(())
 }
 
-pub(super) fn validate_provider_screen(screen: &ScreenProviderMarkets) -> Result<(), String> {
-    id(screen.consumer_id)?;
-    id(screen.screen_generation)?;
-    if !valid_catalog_field(&screen.provider)
+/// Why a market screen or scan request was refused before reaching the coordinator.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum InvalidMarketRequest {
+    /// A zero identity, an invalid provider or out-of-range bounds.
+    Screen,
+    /// A zero identity, an invalid provider or out-of-range bounds.
+    Scan,
+    ScanDefinition(ScanDefinitionError),
+}
+
+impl std::fmt::Display for InvalidMarketRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Screen => formatter.write_str("provider market screen is invalid"),
+            Self::Scan => formatter.write_str("provider market scan is invalid"),
+            Self::ScanDefinition(error) => error.fmt(formatter),
+        }
+    }
+}
+
+pub(super) fn validate_provider_screen(
+    screen: &ScreenProviderMarkets,
+) -> Result<(), InvalidMarketRequest> {
+    if screen.consumer_id == 0
+        || screen.screen_generation == 0
+        || !valid_catalog_field(&screen.provider)
         || screen.maximum_results == 0
         || usize::try_from(screen.maximum_results).unwrap_or(usize::MAX)
             > MAXIMUM_CATALOG_INSTRUMENTS
     {
-        return Err("provider market screen is invalid".to_string());
+        return Err(InvalidMarketRequest::Screen);
     }
     Ok(())
+}
+
+pub(super) fn validate_provider_scan(
+    scan: &ScanProviderMarkets,
+) -> Result<(), InvalidMarketRequest> {
+    if scan.consumer_id == 0
+        || scan.scan_generation == 0
+        || !valid_catalog_field(&scan.provider)
+        || !(1..=crate::MAXIMUM_SCAN_UNIVERSE).contains(&scan.universe_limit)
+        || !(1..=crate::MAXIMUM_SCAN_RESULTS).contains(&scan.maximum_results)
+    {
+        return Err(InvalidMarketRequest::Scan);
+    }
+    scan.definition
+        .validate()
+        .map_err(InvalidMarketRequest::ScanDefinition)
 }
 
 pub(super) fn validate_provider_selection(
@@ -682,27 +720,58 @@ impl Coordinator<'_> {
         screen: ScreenProviderMarkets,
         reply: &Reply<()>,
     ) {
-        let raw_consumer_id = screen.consumer_id;
-        let provider = screen.provider.clone();
-        let generation = screen.screen_generation;
+        self.dispatch_market_request(
+            client_id,
+            screen.consumer_id,
+            super::CommandKind::Screen,
+            screen.screen_generation,
+            ProviderCatalogCommand::Screen(screen),
+            reply,
+        );
+    }
+
+    pub(super) fn handle_provider_scan(
+        &mut self,
+        client_id: ClientId,
+        scan: ScanProviderMarkets,
+        reply: &Reply<()>,
+    ) {
+        self.dispatch_market_request(
+            client_id,
+            scan.consumer_id,
+            super::CommandKind::Scan,
+            scan.scan_generation,
+            ProviderCatalogCommand::Scan(scan),
+            reply,
+        );
+    }
+
+    /// Dispatches a market screen or scan and fences its answers to this generation.
+    fn dispatch_market_request(
+        &mut self,
+        client_id: ClientId,
+        raw_consumer_id: u64,
+        kind: super::CommandKind,
+        generation: u64,
+        command: ProviderCatalogCommand,
+        reply: &Reply<()>,
+    ) {
+        let provider = command.provider().to_string();
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
-            .and_then(|()| {
-                self.providers
-                    .dispatch_catalog(&provider, ProviderCatalogCommand::Screen(screen))
-            });
+            .and_then(|()| self.providers.dispatch_catalog(&provider, command));
         if result.is_ok()
             && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
         {
             self.command_fences.record(
                 consumer_id,
                 provider,
-                super::CommandKind::Screen,
+                kind,
                 generation,
                 self.clock.monotonic(),
             );
             if let Some(events) = self.events.get_mut(&consumer_id) {
-                events.catalog_screen = None;
+                *events.catalog_market_slot(kind) = None;
             }
         }
         let _ = reply.send(result);
@@ -861,6 +930,10 @@ impl Coordinator<'_> {
             ProviderCatalogEvent::ScreenRejected(rejection) => {
                 self.handle_catalog_screen_rejection(rejection);
             }
+            ProviderCatalogEvent::ScanUpdated(scan) => self.handle_catalog_scan(scan),
+            ProviderCatalogEvent::ScanRejected(rejection) => {
+                self.handle_catalog_scan_rejection(rejection);
+            }
         }
     }
 
@@ -906,6 +979,58 @@ impl Coordinator<'_> {
         if let Some(events) = self.events.get_mut(&consumer_id) {
             events.catalog_screen =
                 Some(MarketRuntimeEvent::ProviderMarketScreenRejected(rejection));
+        }
+    }
+
+    /// Delivers a scan publication for the consumer's latest scan generation. Progress keeps
+    /// the fence so later publications of the same pass still arrive; the final one ends it.
+    pub(super) fn handle_catalog_scan(&mut self, scan: ProviderMarketScan) {
+        let Ok(consumer_id) = id(scan.consumer_id).map(ConsumerId) else {
+            return;
+        };
+        let current = if scan.complete {
+            self.command_fences
+                .take(
+                    consumer_id,
+                    &scan.provider,
+                    super::CommandKind::Scan,
+                    scan.scan_generation,
+                )
+                .is_some()
+        } else {
+            self.command_fences.accepts(
+                consumer_id,
+                &scan.provider,
+                super::CommandKind::Scan,
+                scan.scan_generation,
+            )
+        };
+        if !current {
+            return;
+        }
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            events.catalog_scan = Some(MarketRuntimeEvent::ProviderMarketScan(scan));
+        }
+    }
+
+    pub(super) fn handle_catalog_scan_rejection(&mut self, rejection: ProviderCatalogRejected) {
+        let Ok(consumer_id) = id(rejection.consumer_id).map(ConsumerId) else {
+            return;
+        };
+        if self
+            .command_fences
+            .take(
+                consumer_id,
+                &rejection.provider,
+                super::CommandKind::Scan,
+                rejection.command_generation,
+            )
+            .is_none()
+        {
+            return;
+        }
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            events.catalog_scan = Some(MarketRuntimeEvent::ProviderMarketScanRejected(rejection));
         }
     }
 
@@ -1223,6 +1348,18 @@ impl Coordinator<'_> {
             .pending_for(provider, super::CommandKind::Screen);
         for (consumer_id, command_generation, _) in screens {
             self.handle_catalog_screen_rejection(ProviderCatalogRejected {
+                consumer_id: consumer_id.0.get(),
+                provider: provider.to_string(),
+                provider_generation: None,
+                command_generation,
+                reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+            });
+        }
+        let scans = self
+            .command_fences
+            .pending_for(provider, super::CommandKind::Scan);
+        for (consumer_id, command_generation, _) in scans {
+            self.handle_catalog_scan_rejection(ProviderCatalogRejected {
                 consumer_id: consumer_id.0.get(),
                 provider: provider.to_string(),
                 provider_generation: None,

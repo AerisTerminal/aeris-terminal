@@ -11,6 +11,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use crate::budget::HyperliquidRequestPriority;
 use crate::candles::{HyperliquidCandlePage, decode_candle_page, hyperliquid_interval_for_period};
 use crate::endpoints::HYPERLIQUID_INFO_URL;
 use crate::meta::{HyperliquidCatalog, RawMetaBundle, decode_catalog};
@@ -53,7 +54,7 @@ pub fn post_info(
     if raw.len() > 64 * 1024 {
         return Err("hyperliquid info request is too large".to_string());
     }
-    crate::budget::spend_info_request(None)?;
+    crate::budget::spend_info_request(None, HyperliquidRequestPriority::Interactive)?;
     // Catalog requests use the same bounded DNS/transport implementation.
     // This shared agent has no mutable request token; history owns its own client.
     let agent =
@@ -352,6 +353,8 @@ pub struct CandleSnapshotRequest<'a> {
     pub quantity_scale: u32,
     /// Bounds for the underlying info request.
     pub config: HyperliquidHttpConfig,
+    /// Share of the request budget this request may spend.
+    pub priority: HyperliquidRequestPriority,
 }
 
 /// Fetches one candle window for a wire coin.
@@ -392,7 +395,7 @@ impl HyperliquidHttpClient {
             return Err("hyperliquid candle request is invalid".to_string());
         }
         let interval = hyperliquid_interval_for_period(request.period)?;
-        crate::budget::spend_info_request(Some(stop))?;
+        crate::budget::spend_info_request(Some(stop), request.priority)?;
         let bytes = post_with_agent(
             self.0.agent(),
             serde_json::json!({
@@ -552,6 +555,7 @@ mod tests {
             price_scale: crate::NORMALIZED_PRICE_SCALE,
             quantity_scale: crate::NORMALIZED_QUANTITY_SCALE,
             config: HyperliquidHttpConfig::default(),
+            priority: HyperliquidRequestPriority::Interactive,
         })
         .expect("live 3D candle page decodes");
         println!(
@@ -584,6 +588,7 @@ mod tests {
             price_scale: crate::NORMALIZED_PRICE_SCALE,
             quantity_scale: crate::NORMALIZED_QUANTITY_SCALE,
             config: HyperliquidHttpConfig::default(),
+            priority: HyperliquidRequestPriority::Interactive,
         })
         .expect("live 1M candle page decodes");
         println!(

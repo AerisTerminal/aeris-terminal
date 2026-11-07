@@ -15,8 +15,9 @@ use std::{
 use crate::{
     EngineFaultCode, FailureStage, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderCatalogSymbol, ProviderConnectionState, ProviderInstrumentSearchResult,
-    ProviderMarketScreen, ProviderPresentationDescriptor, ProviderState, ScreenProviderMarkets,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
+    ProviderMarketScan, ProviderMarketScreen, ProviderPresentationDescriptor, ProviderState,
+    ScanProviderMarkets, ScreenProviderMarkets, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesLoadState,
 };
 use crate::{
     MarketRuntimeEvent,
@@ -311,6 +312,7 @@ enum Command {
     SearchProviderInstruments(ClientId, SearchProviderInstruments, Reply<()>),
     SelectProviderInstrument(ClientId, SelectProviderInstrument, Reply<()>),
     ScreenProviderMarkets(ClientId, ScreenProviderMarkets, Reply<()>),
+    ScanProviderMarkets(ClientId, ScanProviderMarkets, Reply<()>),
     InstallProviderInstrument(InstallProviderInstrument, Reply<()>),
     ReplacePriceAlerts(
         ClientId,
@@ -759,6 +761,8 @@ struct ConsumerEvents {
     startup_catalog_search: Option<MarketRuntimeEvent>,
     startup_catalog_selection: Option<MarketRuntimeEvent>,
     catalog_screen: Option<MarketRuntimeEvent>,
+    /// Newest scan publication or rejection; each replaces the previous one.
+    catalog_scan: Option<MarketRuntimeEvent>,
 }
 
 /// Identity of one consumer's incremental tape stream plus the newest
@@ -988,6 +992,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     feed_level: crate::ProviderFeedLevel::OrderLevels,
     search_categories_available: false,
     market_screen_available: false,
+    market_scan_available: false,
     trades_available: true,
     connection_kind: crate::ProviderConnectionKind::Credentials,
 };
@@ -1054,6 +1059,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     feed_level: crate::ProviderFeedLevel::PriceLevels,
     search_categories_available: false,
     market_screen_available: true,
+    market_scan_available: true,
     trades_available: true,
     connection_kind: crate::ProviderConnectionKind::Public,
 };
@@ -1394,6 +1400,18 @@ enum ProviderCatalogCommand {
     Search(SearchProviderInstruments),
     Select(SelectProviderInstrument),
     Screen(ScreenProviderMarkets),
+    Scan(ScanProviderMarkets),
+}
+
+impl ProviderCatalogCommand {
+    fn provider(&self) -> &str {
+        match self {
+            Self::Search(search) => &search.provider,
+            Self::Select(selection) => &selection.provider,
+            Self::Screen(screen) => &screen.provider,
+            Self::Scan(scan) => &scan.provider,
+        }
+    }
 }
 
 enum ProviderRuntimeEvent {
@@ -1443,6 +1461,8 @@ enum ProviderCatalogEvent {
     },
     ScreenCompleted(ProviderMarketScreen),
     ScreenRejected(ProviderCatalogRejected),
+    ScanUpdated(ProviderMarketScan),
+    ScanRejected(ProviderCatalogRejected),
     RefreshFailed(String),
 }
 
@@ -1492,6 +1512,8 @@ impl From<HyperliquidCatalogEvent> for ProviderCatalogEvent {
             },
             HyperliquidCatalogEvent::ScreenCompleted(screen) => Self::ScreenCompleted(screen),
             HyperliquidCatalogEvent::ScreenRejected(rejection) => Self::ScreenRejected(rejection),
+            HyperliquidCatalogEvent::ScanUpdated(scan) => Self::ScanUpdated(scan),
+            HyperliquidCatalogEvent::ScanRejected(rejection) => Self::ScanRejected(rejection),
             HyperliquidCatalogEvent::RefreshFailed { detail } => Self::RefreshFailed(detail),
         }
     }
@@ -1681,9 +1703,12 @@ use publication::{
 };
 
 mod instrument_selection;
+#[cfg(test)]
+use instrument_selection::InvalidMarketRequest;
 use instrument_selection::{
     id, try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
-    validate_provider_screen, validate_provider_search, validate_provider_selection,
+    validate_provider_scan, validate_provider_screen, validate_provider_search,
+    validate_provider_selection,
 };
 
 mod history;

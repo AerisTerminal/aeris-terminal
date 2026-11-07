@@ -573,6 +573,22 @@ the check.
 - Every Hyperliquid info request spends from the adapter's one process-wide weight budget
   (`hyperliquid_market/src/budget.rs`: 1,000 of the documented 1,200 weight per minute per address);
   never send an info request around it.
+  Background requests (market scans) may spend at most 700 of each window, keeping
+  `FOREGROUND_RESERVE_WEIGHT` (300) for charts, search and the catalog.
+- Market scans are owned by `market_runtime`: `scan.rs` holds the provider-neutral definition,
+  request, result and evaluator, which calls the same `aeris_charts_indicators` functions as
+  the chart (the one other crate `naming_check` lets depend on them besides `study_sdk`).
+  `ScanProviderMarkets` enters through `MarketService::scan_provider_markets` and the catalog
+  channel under `CommandKind::Scan` fences (no response deadline; a newer generation supersedes
+  the pass), and each consumer keeps one `catalog_scan` publication slot. Hyperliquid runs it on
+  its own `aeris-hyperliquid-scan` worker (`hyperliquid_market_scan.rs`, so search keeps its
+  deadline) with background-priority candle requests, a two-job queue where the newest wins, an
+  in-memory bar cache bounded at 600,000 bars (3,000 per market), at most one publication per
+  second plus the final one, and only `SeriesError::BudgetExhausted` retried. Scans never
+  install chart demand or canonical series. Bounds: 8 conditions, period 250, 1,024 markets,
+  500 results. Only the saved definitions persist, as `WorkspaceState.screener_scans` (tag 23,
+  at most 64, sanitized through `desktop/saved_scans.rs`); the desktop Scans tab re-runs a pass
+  30 seconds after each completed one only while it is shown.
 - Generic market-service lifecycle, history, calendar, quote, outbox, coordinator, realtime,
   runtime and publication code must not contain provider identity literals. Provider-specific
   capabilities and user-facing presentation metadata are declared with provider registration;

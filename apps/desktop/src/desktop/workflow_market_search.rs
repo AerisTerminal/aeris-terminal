@@ -303,9 +303,10 @@ impl WorkflowMarketSearch {
             ProviderCatalogEvent::CommandRejected { rejection, command } => {
                 self.apply_rejection(provider, &rejection, command)
             }
-            ProviderCatalogEvent::ScreenCompleted(_) | ProviderCatalogEvent::ScreenRejected(_) => {
-                false
-            }
+            ProviderCatalogEvent::ScreenCompleted(_)
+            | ProviderCatalogEvent::ScreenRejected(_)
+            | ProviderCatalogEvent::ScanUpdated(_)
+            | ProviderCatalogEvent::ScanRejected(_) => false,
         }
     }
 

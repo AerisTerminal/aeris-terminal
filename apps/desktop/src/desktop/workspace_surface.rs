@@ -3891,7 +3891,9 @@ impl WorkspaceSurface {
             | aeris_market_runtime::MarketRuntimeEvent::ProviderInstrumentSelection(_)
             | aeris_market_runtime::MarketRuntimeEvent::ProviderCatalogRejected { .. }
             | aeris_market_runtime::MarketRuntimeEvent::ProviderMarketScreen(_)
-            | aeris_market_runtime::MarketRuntimeEvent::ProviderMarketScreenRejected(_) => {
+            | aeris_market_runtime::MarketRuntimeEvent::ProviderMarketScreenRejected(_)
+            | aeris_market_runtime::MarketRuntimeEvent::ProviderMarketScan(_)
+            | aeris_market_runtime::MarketRuntimeEvent::ProviderMarketScanRejected(_) => {
                 self.apply_runtime_catalog_event(event, cx);
             }
             _ => diagnostic!("Aeris pane received an unexpected fenced runtime event"),
@@ -6187,8 +6189,12 @@ impl WorkspaceSurface {
             ProviderCatalogEvent::CommandRejected { rejection, command } => {
                 self.apply_catalog_rejection(provider, &rejection, command, cx);
             }
-            // Chart surfaces never request market screens; the screener owns its own consumer.
-            ProviderCatalogEvent::ScreenCompleted(_) | ProviderCatalogEvent::ScreenRejected(_) => {
+            // Chart surfaces never request market screens or scans; the screener owns its own
+            // consumer.
+            ProviderCatalogEvent::ScreenCompleted(_)
+            | ProviderCatalogEvent::ScreenRejected(_)
+            | ProviderCatalogEvent::ScanUpdated(_)
+            | ProviderCatalogEvent::ScanRejected(_) => {
                 return;
             }
         }

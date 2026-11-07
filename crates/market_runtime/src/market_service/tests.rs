@@ -227,6 +227,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             feed_level: crate::ProviderFeedLevel::Bars,
             search_categories_available: false,
             market_screen_available: false,
+            market_scan_available: false,
             trades_available: false,
             connection_kind: crate::ProviderConnectionKind::Public,
         };
