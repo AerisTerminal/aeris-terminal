@@ -18,8 +18,8 @@ pub use aeris_charts_engine::DrawingKind as ChartDrawingKind;
 #[cfg(test)]
 use aeris_charts_engine::FinancialThemeColors;
 use aeris_charts_engine::{
-    AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions,
-    DrawingId, DrawingInterval, DrawingIntervalUnit, FinancialAppearance, FinancialLegendIdentity,
+    AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, DeltaTooltipOptions, DrawingId,
+    DrawingInterval, DrawingIntervalUnit, FinancialAppearance, FinancialLegendIdentity,
     FinancialLegendRequest, FinancialSeriesColors, HostLegendSeries, IndicatorChromeOptions,
     IndicatorKind, IndicatorPane, InteractionOptions, PriceScaleTarget, TradingIntent,
     TradingSnapshot,
@@ -65,11 +65,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// How often the surface wakes itself so the candle countdown keeps moving.
 const CHART_CLOCK_INTERVAL: Duration = Duration::from_secs(1);
 const MAXIMUM_SESSION_PLAN_LEVELS: usize = 32;
-
-#[cfg(test)]
-fn aeris_charts_grid_color(theme: ChartTheme) -> String {
-    FinancialThemeColors::for_theme(theme).grid.to_string()
-}
 
 fn gpui_theme_color(color: ThemeColor) -> Rgba {
     Rgba {
@@ -799,16 +794,20 @@ pub type ChartSeriesColors = FinancialSeriesColors;
 /// Which parts of the chart legend show. Presentation only: hiding a legend never hides the
 /// series or indicator it describes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(clippy::struct_excessive_bools)] // Four independent legend toggles.
+#[allow(clippy::struct_excessive_bools)] // Independent legend toggles.
 pub struct ChartLegendOptions {
     /// The symbol row.
     pub symbol: bool,
     /// The symbol row's open, high, low and close readouts.
     pub symbol_values: bool,
+    /// The host's symbol mark, such as the exchange logo, ahead of the symbol row's title.
+    pub symbol_logo: bool,
     /// The rows of indicators, studies and order-flow tools.
     pub indicators: bool,
     /// The readouts on those rows.
     pub indicator_values: bool,
+    /// The price pane's indicator rows folded behind the legend's collapse toggle.
+    pub indicators_collapsed: bool,
 }
 
 impl Default for ChartLegendOptions {
@@ -816,8 +815,10 @@ impl Default for ChartLegendOptions {
         Self {
             symbol: true,
             symbol_values: true,
+            symbol_logo: true,
             indicators: true,
             indicator_values: true,
+            indicators_collapsed: false,
         }
     }
 }
@@ -1000,8 +1001,8 @@ pub struct AerisChartView {
     engine: ChartEngine,
     /// The platform theme the chart paints in; its mode selects the Aeris Charts theme.
     platform: AerisTheme,
-    /// Chart colors of a non-default platform preset; `None` keeps Aeris Charts' own theme.
-    palette: Option<PresetPalette>,
+    /// Chart colors of the platform preset, pinned over Aeris Charts' own theme.
+    palette: PresetPalette,
     renderer: GpuiChartRenderer,
     data_bridge: Option<ChartDataBridge>,
     displayed_provenance: DisplayedProvenance,
@@ -1048,9 +1049,11 @@ pub struct AerisChartView {
     instrument_price_scale: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
-    /// The user's own appearance while Aeris Charts paints a derived one: a preset palette
+    /// The user's own appearance while Aeris Charts paints a derived one: the platform palette
     /// pins theme-following colors. This keeps what the user chose, with its theme
     /// provenance, so readback, persistence and a preset switch never see the derivation.
+    /// `None` only until the next paint reads the engine's appearance after construction or
+    /// a reset.
     appearance_intent: Option<ChartAppearanceSettings>,
     /// Host-owned axis colors, painted after every engine theme or canvas change.
     axis_appearance: ChartAxisAppearance,
@@ -1063,6 +1066,9 @@ pub struct AerisChartView {
     /// Host content placed under the symbol legend row, such as the trading host's order
     /// buttons. The chart only positions it; the host owns its state and behavior.
     legend_accessory: Option<AnyView>,
+    /// Host content placed ahead of the symbol legend title, such as the instrument's
+    /// exchange logo, shown while the legend's symbol logo is on.
+    legend_symbol_mark: Option<AnyView>,
     /// Transient host-projected plan levels. These are deliberately separate
     /// from Aeris Charts-owned user drawings and are reinstalled with price series.
     session_plan_levels: Vec<(f64, String)>,
@@ -1169,6 +1175,7 @@ impl AerisChartView {
             product_bars: ProductPriceBars::default(),
             legend_options: ChartLegendOptions::default(),
             legend_accessory: None,
+            legend_symbol_mark: None,
             session_plan_levels: Vec::new(),
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
@@ -1282,6 +1289,7 @@ impl AerisChartView {
             product_bars,
             legend_options: ChartLegendOptions::default(),
             legend_accessory: None,
+            legend_symbol_mark: None,
             session_plan_levels: Vec::new(),
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
@@ -1370,6 +1378,12 @@ impl AerisChartView {
     /// Presses on it stay with the host and never reach chart input.
     pub fn set_legend_accessory(&mut self, accessory: Option<AnyView>) {
         self.legend_accessory = accessory;
+    }
+
+    /// Places host content ahead of the symbol legend title, or removes it. It shows only
+    /// while [`ChartLegendOptions::symbol_logo`] is on.
+    pub fn set_legend_symbol_mark(&mut self, mark: Option<AnyView>) {
+        self.legend_symbol_mark = mark;
     }
 
     /// Selects a Aeris Charts-owned theme without changing chart data or viewport.
@@ -1853,7 +1867,7 @@ impl AerisChartView {
     /// platform theme.
     #[must_use]
     pub fn theme_defaults(&self) -> ChartThemeDefaults {
-        theme_defaults(self.palette.as_ref(), self.engine_theme())
+        self.palette.defaults().clone()
     }
 
     /// The durable axis colors.
@@ -1926,14 +1940,10 @@ impl AerisChartView {
 
     fn apply_canvas_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
         let before = self.appearance_settings();
-        if let Some(intent) = self.appearance_intent.take() {
-            let intent = with_canvas_of(intent, appearance);
-            self.engine
-                .apply_financial_canvas_appearance(&self.painted_appearance(&intent));
-            self.appearance_intent = Some(intent);
-        } else {
-            self.engine.apply_financial_canvas_appearance(appearance);
-        }
+        let intent = with_canvas_of(before.clone(), appearance);
+        self.engine
+            .apply_financial_canvas_appearance(&self.painted_appearance(&intent));
+        self.appearance_intent = Some(intent);
         // A canvas edit rewrites the price-axis text, so the axis colors follow it.
         self.apply_platform_chart_colors();
         let changed = before != self.appearance_settings();
@@ -1945,14 +1955,10 @@ impl AerisChartView {
 
     fn apply_series_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
         let before = self.appearance_settings();
-        if let Some(intent) = self.appearance_intent.take() {
-            let intent = with_canvas_of(appearance.clone(), &intent);
-            self.engine
-                .apply_financial_series_appearance(0, &self.painted_appearance(&intent));
-            self.appearance_intent = Some(intent);
-        } else {
-            self.engine.apply_financial_series_appearance(0, appearance);
-        }
+        let intent = with_canvas_of(appearance.clone(), &before);
+        self.engine
+            .apply_financial_series_appearance(0, &self.painted_appearance(&intent));
+        self.appearance_intent = Some(intent);
         let changed = before != self.appearance_settings();
         if changed {
             self.invalidate_series_frame();
@@ -1960,38 +1966,24 @@ impl AerisChartView {
         changed
     }
 
-    const fn engine_theme(&self) -> ChartTheme {
-        chart_theme(self.platform.mode)
-    }
-
     /// What Aeris Charts paints for the user's `intent`: theme-following colors pinned to
     /// the preset palette. A hollow chart type is engine-owned (`CandleBody`) and derives
     /// nothing here.
     fn painted_appearance(&self, intent: &ChartAppearanceSettings) -> ChartAppearanceSettings {
-        self.palette
-            .as_ref()
-            .map_or_else(|| intent.clone(), |palette| palette.pin(intent))
+        self.palette.pin(intent)
     }
 
-    /// Paints the derived appearance for the current palette, or restores the
-    /// user's own appearance once nothing is derived. The engine's colors are replaced only
-    /// while something is derived or when leaving that state.
+    /// Paints the user's appearance with its theme-following colors pinned to the current
+    /// palette, keeping the user's own choice as the intent.
     fn sync_painted_appearance(&mut self) {
-        let derived = self.palette.is_some();
-        match (self.appearance_intent.take(), derived) {
-            (None, false) => {}
-            (Some(intent), false) => {
-                self.engine.apply_financial_canvas_appearance(&intent);
-                self.engine.apply_financial_series_appearance(0, &intent);
-            }
-            (intent, true) => {
-                let intent = intent.unwrap_or_else(|| self.appearance_settings());
-                let painted = self.painted_appearance(&intent);
-                self.engine.apply_financial_canvas_appearance(&painted);
-                self.engine.apply_financial_series_appearance(0, &painted);
-                self.appearance_intent = Some(intent);
-            }
-        }
+        let intent = self
+            .appearance_intent
+            .take()
+            .unwrap_or_else(|| self.appearance_settings());
+        let painted = self.painted_appearance(&intent);
+        self.engine.apply_financial_canvas_appearance(&painted);
+        self.engine.apply_financial_series_appearance(0, &painted);
+        self.appearance_intent = Some(intent);
         self.apply_platform_chart_colors();
     }
 
@@ -2003,15 +1995,18 @@ impl AerisChartView {
         let text = effective_color(&self.appearance_settings().text_color, &defaults.text);
         let border = effective_color(&self.axis_appearance.border_color, &defaults.axis_border);
         let axis_text = effective_color(&self.axis_appearance.text_color, &text);
-        let price_scale = serde_json::json!({ "borderColor": border, "textColor": axis_text });
+        let border_visible = self.axis_appearance.border_visible;
+        let price_scale = serde_json::json!({
+            "borderColor": border,
+            "borderVisible": border_visible,
+            "textColor": axis_text,
+        });
         let mut patch = serde_json::json!({
             "leftPriceScale": price_scale,
             "rightPriceScale": price_scale,
-            "timeScale": { "borderColor": border },
+            "timeScale": { "borderColor": border, "borderVisible": border_visible },
         });
-        if let Some(palette) = &self.palette {
-            patch["layout"] = palette.layout_patch();
-        }
+        patch["layout"] = self.palette.layout_patch();
         if let Err(error) = self.engine.apply_options(&patch.to_string()) {
             diagnostic!("Aeris Charts rejected the platform chart colors: {error}");
         }
@@ -2234,6 +2229,13 @@ impl AerisChartView {
         self.legend_options = options;
         self.mark_user_state_changed();
         true
+    }
+
+    /// Folds the price pane's indicator rows behind the legend toggle, or unfolds them.
+    pub(super) fn toggle_indicator_legend_collapsed(&mut self) -> bool {
+        let mut options = self.legend_options;
+        options.indicators_collapsed = !options.indicators_collapsed;
+        self.set_legend_options(options)
     }
 
     /// Selected IANA display time zone. Canonical chart timestamps remain UTC.
@@ -2670,11 +2672,17 @@ impl Render for AerisChartView {
             .clone();
         let legends = chart_legend_layers(
             &entity,
-            &self.legend_rows(),
+            &self.legend_presentation(),
             &self.legend_panes,
             &self.platform,
             self.asset_loading.is_present(),
-            self.legend_accessory.as_ref(),
+            LegendHostContent {
+                accessory: self.legend_accessory.as_ref(),
+                symbol_mark: self
+                    .legend_symbol_mark
+                    .as_ref()
+                    .filter(|_| self.legend_options.symbol_logo),
+            },
         );
 
         div()
@@ -2762,8 +2770,9 @@ mod indicators;
 mod input;
 mod legend;
 use legend::{
-    LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendItem, LegendPaneLayout,
-    LegendPresence, LegendRow, LegendValue, chart_legend_layers,
+    IndicatorLegendToggle, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendHostContent,
+    LegendItem, LegendPaneLayout, LegendPresence, LegendPresentation, LegendRow, LegendValue,
+    chart_legend_layers,
 };
 mod order_book_depth;
 use order_book_depth::OrderBookDepthState;
@@ -2774,7 +2783,7 @@ mod palette;
 pub use palette::{ChartAxisAppearance, ChartThemeDefaults};
 mod pane_heights;
 mod price_axis_menu;
-use palette::{PresetPalette, chart_theme, effective_color, theme_defaults};
+use palette::{PresetPalette, chart_theme, effective_color};
 pub use pane_heights::{ChartPaneContent, ChartPaneHeight};
 use price_axis_menu::price_format_min_move;
 pub use price_axis_menu::{PriceAxisMenuAction, PriceAxisMenuState};

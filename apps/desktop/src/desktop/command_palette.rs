@@ -80,6 +80,7 @@ fn mnemonic_command_row(
     let execute = terminal.clone();
     // The typed mnemonic is the palette's primary action, so it stays highlighted.
     MenuRow::search_result("command_palette_mnemonic", label, theme)
+        .resting_fill(theme.colors.surface_secondary)
         .highlighted(true)
         .on_click(move |_, window, cx| {
             execute.update(cx, |terminal, terminal_cx| {
@@ -100,6 +101,7 @@ fn command_row(
 ) -> AnyElement {
     let execute = terminal.clone();
     MenuRow::search_result(("command_palette_row", index), title, theme)
+        .resting_fill(theme.colors.surface_secondary)
         .highlighted(selected)
         .when_some(shortcut, MenuRow::detail)
         .on_click(move |_, window, cx| {

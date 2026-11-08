@@ -273,10 +273,13 @@ pub(super) const fn persisted_chart_legend(
         show_symbol_values: Some(legend.symbol_values),
         show_indicators: Some(legend.indicators),
         show_indicator_values: Some(legend.indicator_values),
+        show_symbol_logo: Some(legend.symbol_logo),
+        indicators_collapsed: Some(legend.indicators_collapsed),
     }
 }
 
-/// The persisted legend, with every part absent from a legacy workspace or template shown.
+/// The persisted legend, with every part absent from a legacy workspace or template shown and
+/// its indicator rows unfolded.
 pub(super) fn restored_chart_legend(
     legend: Option<WorkspaceChartLegendState>,
 ) -> ChartLegendOptions {
@@ -284,8 +287,10 @@ pub(super) fn restored_chart_legend(
     ChartLegendOptions {
         symbol: legend.show_symbol.unwrap_or(true),
         symbol_values: legend.show_symbol_values.unwrap_or(true),
+        symbol_logo: legend.show_symbol_logo.unwrap_or(true),
         indicators: legend.show_indicators.unwrap_or(true),
         indicator_values: legend.show_indicator_values.unwrap_or(true),
+        indicators_collapsed: legend.indicators_collapsed.unwrap_or(false),
     }
 }
 
@@ -324,6 +329,7 @@ pub(super) fn persisted_chart_appearance(
         ),
         axis_border_color: persisted_appearance_color(&axis.border_color),
         axis_text_color: persisted_appearance_color(&axis.text_color),
+        axis_borders_visible: Some(axis.border_visible),
     }
 }
 
@@ -388,6 +394,7 @@ pub(super) fn restored_chart_axis(
     ChartAxisAppearance {
         border_color: restored_theme_color(&appearance.axis_border_color),
         text_color: restored_theme_color(&appearance.axis_text_color),
+        border_visible: appearance.axis_borders_visible.unwrap_or(true),
     }
 }
 
@@ -446,15 +453,35 @@ impl OrderFlowMenuStudy {
     pub(super) const fn needs_trades(self) -> bool {
         !matches!(self, Self::OrderBookDepth | Self::DepthHeatmap)
     }
+
+    const fn favorite_identifier(self) -> &'static str {
+        let index = match self {
+            Self::CumulativeDelta => 0,
+            Self::Delta => 1,
+            Self::BigTrades => 2,
+            Self::OrderBookDepth => 3,
+            Self::DepthHeatmap => 4,
+        };
+        chart_chrome::ORDER_FLOW_FAVORITE_IDENTIFIERS[index]
+    }
 }
 
 /// One addable row of the indicator menu. Rendering, arrow keys, Enter and scrolling all index
-/// the same list: the matching order-flow studies first, then the matching native indicators.
+/// the same list: the starred rows first, then the matching order-flow studies, then the
+/// matching native indicators.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum IndicatorMenuEntry {
     OrderFlow(OrderFlowMenuStudy),
     Indicator(&'static chart_chrome::IndicatorSpec),
     Builtin(BuiltinIndicator),
+}
+
+/// The indicator menu's groups in display order; each non-empty one has a heading.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum IndicatorMenuGroup {
+    Favorites,
+    OrderFlow,
+    Indicators,
 }
 
 impl IndicatorMenuEntry {
@@ -466,25 +493,40 @@ impl IndicatorMenuEntry {
         }
     }
 
-    /// Whether the row belongs to the "Indicators" group rather than "Order flow".
-    pub(super) const fn is_indicator(self) -> bool {
-        !matches!(self, Self::OrderFlow(_))
+    /// The identifier the chart chrome stars the row under.
+    pub(super) const fn favorite_identifier(self) -> &'static str {
+        match self {
+            Self::OrderFlow(study) => study.favorite_identifier(),
+            Self::Indicator(spec) => spec.kind.identifier(),
+            Self::Builtin(indicator) => indicator.identifier(),
+        }
+    }
+
+    pub(super) fn group(self, favorites: chart_chrome::IndicatorFavorites) -> IndicatorMenuGroup {
+        if favorites.contains(self.favorite_identifier()) {
+            IndicatorMenuGroup::Favorites
+        } else if matches!(self, Self::OrderFlow(_)) {
+            IndicatorMenuGroup::OrderFlow
+        } else {
+            IndicatorMenuGroup::Indicators
+        }
     }
 }
 
 /// Scroll-body child of a menu entry. Each non-empty group is preceded by its heading.
 pub(super) fn indicator_menu_scroll_item(
     entries: &[IndicatorMenuEntry],
+    favorites: chart_chrome::IndicatorFavorites,
     selection: usize,
 ) -> Option<usize> {
-    let entry = entries.get(selection)?;
-    let order_flow_heading = usize::from(
-        entries
-            .first()
-            .is_some_and(|first| matches!(first, IndicatorMenuEntry::OrderFlow(_))),
-    );
-    let indicators_heading = usize::from(entry.is_indicator());
-    Some(selection + order_flow_heading + indicators_heading)
+    let group = entries.get(selection)?.group(favorites);
+    let mut groups = entries
+        .iter()
+        .map(|entry| entry.group(favorites))
+        .filter(|candidate| *candidate <= group)
+        .collect::<Vec<_>>();
+    groups.dedup();
+    Some(selection + groups.len())
 }
 
 fn persisted_big_trades(settings: BigTradesSettings) -> WorkspaceBigTradesState {
@@ -953,6 +995,29 @@ fn persisted_legacy_indicator_states(
             visible: state.visible,
             volume: state.volume.as_ref().map(persisted_volume_settings),
         })
+        .collect()
+}
+
+/// The chart-owned indicators of a saved document; runtime studies and unknown kinds are left
+/// out.
+fn restored_legacy_indicator_states(
+    states: &[WorkspaceChartIndicatorState],
+) -> Vec<ChartIndicatorState> {
+    states
+        .iter()
+        .filter_map(|item| {
+            ChartIndicator::from_identifier(&item.kind).map(|indicator| ChartIndicatorState {
+                indicator,
+                visible: item.visible,
+                volume: item
+                    .volume
+                    .as_ref()
+                    .filter(|_| indicator == ChartIndicator::Volume)
+                    .and_then(restored_volume_settings),
+            })
+        })
+        .filter(|state| !runtime_managed_indicator(state.indicator))
+        .take(ChartIndicator::CATALOG_LEN)
         .collect()
 }
 
@@ -1714,23 +1779,7 @@ struct PanePresentation {
 impl PanePresentation {
     fn apply(&self, chart: &Entity<AerisChartView>, cx: &mut Context<WorkspaceSurface>) -> bool {
         let state = &self.state;
-        let indicators = state
-            .indicators
-            .iter()
-            .filter_map(|item| {
-                ChartIndicator::from_identifier(&item.kind).map(|indicator| ChartIndicatorState {
-                    indicator,
-                    visible: item.visible,
-                    volume: item
-                        .volume
-                        .as_ref()
-                        .filter(|_| indicator == ChartIndicator::Volume)
-                        .and_then(restored_volume_settings),
-                })
-            })
-            .filter(|state| !runtime_managed_indicator(state.indicator))
-            .take(ChartIndicator::CATALOG_LEN)
-            .collect::<Vec<_>>();
+        let indicators = restored_legacy_indicator_states(&state.indicators);
         let chart_type = ChartType::from_identifier(&state.chart_type);
         let price_axis = state.price_axis.as_ref().and_then(|axis| {
             Some(PriceAxisMenuState {
@@ -2586,9 +2635,11 @@ impl WorkspaceSurface {
                 self.scrolls.instrument.scroll_to_item(selection);
             }
             Some(ChromeOverlay::Indicator) => {
-                if let Some(item) =
-                    indicator_menu_scroll_item(&self.indicator_menu_entries(cx), selection)
-                {
+                if let Some(item) = indicator_menu_scroll_item(
+                    &self.indicator_menu_entries(cx),
+                    self.chart_chrome.indicator_favorites,
+                    selection,
+                ) {
                     self.scrolls.indicator.scroll_to_item(item);
                 }
             }
@@ -5548,7 +5599,13 @@ impl WorkspaceSurface {
                 .any(|value| chart_chrome::indicator_search_key(value).contains(&query_key))
             })
             .map(IndicatorMenuEntry::Builtin);
-        order_flow.chain(indicators).chain(builtins).collect()
+        let favorites = self.chart_chrome.indicator_favorites;
+        let (mut entries, rest): (Vec<_>, Vec<_>) = order_flow
+            .chain(indicators)
+            .chain(builtins)
+            .partition(|entry| entry.group(favorites) == IndicatorMenuGroup::Favorites);
+        entries.extend(rest);
+        entries
     }
 
     pub(super) fn add_indicator_menu_entry(
@@ -7938,6 +7995,7 @@ impl WorkspaceSurface {
     }
 }
 
+mod indicator_templates;
 mod study_history;
 
 #[cfg(test)]

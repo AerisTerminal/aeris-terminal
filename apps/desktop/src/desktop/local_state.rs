@@ -12,10 +12,10 @@ use super::workspace_migrations::{
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
-    WorkspaceChartStudyState, WorkspaceDrawingTemplateState, WorkspaceLayoutState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspaceSavedLayoutState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream, WorkspaceTabState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceChartStudyState, WorkspaceDrawingTemplateState, WorkspaceIndicatorTemplateState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSavedLayoutState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream,
+    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_market_data::ChartInterval;
 use prost::Message as _;
@@ -27,6 +27,7 @@ const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 12 * 1_048_576;
 const MAXIMUM_CHART_COLOR_BYTES: usize = 64;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATES: usize = 32;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES: usize = 64;
+pub(super) const MAXIMUM_INDICATOR_TEMPLATES: usize = 32;
 pub(super) const MAXIMUM_WATCHLIST_ENTRIES: usize = 64;
 /// Fewer than Aeris Charts accepts, so the largest templates cannot crowd the workspace file.
 pub(super) const MAXIMUM_DRAWING_TEMPLATES: usize = 64;
@@ -412,6 +413,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         saved_layouts: vec![saved_layout],
         chart_chrome: None,
         screener_scans: Vec::new(),
+        indicator_templates: Vec::new(),
     }
 }
 
@@ -481,6 +483,7 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     workspace
         .drawing_templates
         .truncate(MAXIMUM_DRAWING_TEMPLATES);
+    sanitize_indicator_templates(&mut workspace.indicator_templates);
     // Aeris Charts owns the canonical style defaults. Retire the legacy host-side
     // default template so reset cannot be overwritten after the engine API runs.
     workspace.default_chart_settings = None;
@@ -632,16 +635,36 @@ fn valid_watchlist_instrument(instrument: &InstallProviderInstrument) -> bool {
 }
 
 fn valid_chart_settings_template(template: &WorkspaceChartSettingsTemplateState) -> bool {
-    let name = template.name.trim();
-    !name.is_empty()
-        && name.len() <= MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES
-        && !template.name.chars().any(char::is_control)
+    valid_template_name(&template.name)
         && template.crosshair_mode <= 3
         && valid_chart_time_zone(&template.time_zone)
         && template
             .appearance
             .as_ref()
             .is_some_and(valid_chart_appearance)
+}
+
+/// Keeps the first template of each name, in any letter case, within the bound. A template's
+/// invalid studies are dropped alone; its indicators are checked again when it is applied.
+fn sanitize_indicator_templates(templates: &mut Vec<WorkspaceIndicatorTemplateState>) {
+    let mut names = std::collections::BTreeSet::new();
+    templates.retain(|template| {
+        valid_template_name(&template.name) && names.insert(template.name.to_ascii_lowercase())
+    });
+    templates.truncate(MAXIMUM_INDICATOR_TEMPLATES);
+    for template in templates {
+        template
+            .indicators
+            .truncate(aeris_chart_integration::ChartIndicator::CATALOG_LEN);
+        template.studies = sanitize_studies(std::mem::take(&mut template.studies));
+    }
+}
+
+pub(super) fn valid_template_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES
+        && !name.chars().any(char::is_control)
 }
 
 /// Shape checks only; Aeris Charts validates the template document when it is applied.
@@ -1150,6 +1173,7 @@ mod tests {
                 crosshair_style_custom: Some(true),
                 axis_border_color: "#475569".to_string(),
                 axis_text_color: "theme".to_string(),
+                axis_borders_visible: Some(false),
             }),
             order_flow: Some(round_trip_order_flow()),
             context_panel_visible: true,
@@ -1166,6 +1190,8 @@ mod tests {
                 show_symbol_values: Some(false),
                 show_indicators: Some(false),
                 show_indicator_values: Some(true),
+                show_symbol_logo: Some(false),
+                indicators_collapsed: Some(true),
             }),
             instrument_drawings: vec![WorkspaceInstrumentDrawingsState {
                 provider: "hyperliquid".to_string(),
@@ -2142,6 +2168,7 @@ mod tests {
             crosshair_style_custom: Some(true),
             axis_border_color: String::new(),
             axis_text_color: String::new(),
+            axis_borders_visible: None,
         });
 
         let sanitized = sanitize_workspace(workspace);
@@ -2150,6 +2177,39 @@ mod tests {
             .as_ref()
             .expect("chart remains available");
         assert!(chart.appearance.is_none());
+    }
+
+    #[test]
+    fn sanitizer_bounds_indicator_templates_and_drops_their_invalid_studies() {
+        let template = |name: &str| WorkspaceIndicatorTemplateState {
+            name: name.to_string(),
+            ..WorkspaceIndicatorTemplateState::default()
+        };
+        let mut workspace = default_workspace();
+        workspace.indicator_templates = (0..MAXIMUM_INDICATOR_TEMPLATES + 4)
+            .map(|index| template(&format!("Template {index}")))
+            .collect();
+        workspace
+            .indicator_templates
+            .insert(1, template("TEMPLATE 0"));
+        workspace.indicator_templates.insert(2, template(" "));
+        workspace.indicator_templates[0].studies = vec![WorkspaceChartStudyState {
+            local_id: 1,
+            ..WorkspaceChartStudyState::default()
+        }];
+
+        let sanitized = sanitize_workspace(workspace);
+
+        assert_eq!(
+            sanitized.indicator_templates.len(),
+            MAXIMUM_INDICATOR_TEMPLATES
+        );
+        assert_eq!(sanitized.indicator_templates[0].name, "Template 0");
+        assert_eq!(sanitized.indicator_templates[1].name, "Template 1");
+        assert!(
+            sanitized.indicator_templates[0].studies.is_empty(),
+            "a study without an implementation is dropped"
+        );
     }
 
     #[test]

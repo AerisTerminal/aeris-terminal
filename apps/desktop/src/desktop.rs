@@ -41,6 +41,7 @@ use frame_scheduler::{AppSource, DirtySet, FrameScheduler};
 mod frameless_title_bar;
 mod fullscreen_hint;
 mod indicator_menu;
+mod indicator_templates_view;
 mod keyboard_shortcuts;
 mod layouts_view;
 mod local_state;
@@ -138,13 +139,13 @@ use aeris_contracts::{
     WorkspaceChartIndicatorState, WorkspaceChartLegendState, WorkspaceChartPaneHeightState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceChromeState, WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState,
-    WorkspaceDrawingTemplateState, WorkspaceLayoutState, WorkspaceOrderBookDepthState,
-    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSavedLayoutState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    WorkspaceDrawingTemplateState, WorkspaceIndicatorTemplateState, WorkspaceLayoutState,
+    WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
@@ -196,7 +197,7 @@ use chart_context_menus::{
 use chart_pane_controller::ChartState;
 use chart_surface::{MarketWorkspaceState, market_workspace};
 use chart_toolbar_menus::{
-    chrome_overlay_layer, chrome_typeahead_blocked, chrome_typeahead_char,
+    ChromeOverlayHost, chrome_overlay_layer, chrome_typeahead_blocked, chrome_typeahead_char,
     timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
 };
 #[cfg(test)]
@@ -231,7 +232,8 @@ use gpui::{
 };
 use gpui_platform::application;
 use indicator_menu::{
-    IndicatorDialogState, indicator_dialog_content, indicator_selector, native_indicator,
+    IndicatorDialogState, IndicatorDialogTemplates, indicator_dialog_content, indicator_selector,
+    native_indicator,
 };
 use native_ui::{
     button::{Button, ButtonSize, ButtonVariant, close_button},
@@ -255,8 +257,8 @@ use native_ui::{
     switch::{Switch, SwitchRow},
     tab::{Tab, TabList},
     theme::{
-        PanelEdges, base_theme, field_border, field_surface, gpui_color, panel_corners,
-        panel_focus_border, platform_border_width, popover_surface,
+        PanelEdges, base_theme, field_border, field_surface, gpui_color, menu_surface,
+        panel_corners, panel_focus_border, platform_border_width, popover_surface,
     },
     tooltip::{TooltipSpec, with_tooltip},
 };
@@ -301,9 +303,10 @@ use terminal_chrome::{
     window_move_gesture_transition,
 };
 use terminal_chrome::{
-    WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, chrome_tooltip, exchange_mark,
-    fullscreen_escape_command, header_icon, mark_tile, series_glyph, terminal_header,
-    watchlist_arrow_step, watchlist_step, workspace_title_bar,
+    HEADER_CHEVRON_ICON, HEADER_CHEVRON_WIDTH, HeaderMenus, WindowCommand, WindowMoveGestureEvent,
+    WorkspaceTabBarState, chrome_tooltip, exchange_mark, fullscreen_escape_command, header_icon,
+    mark_tile, series_glyph, terminal_header, watchlist_arrow_step, watchlist_step,
+    workspace_title_bar,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, WorkspaceTabsRestore, restored_workspace_tab,
@@ -984,6 +987,12 @@ impl gpui::EventEmitter<ChartChromeChangedEvent> for WorkspaceSurface {}
 struct TimeframeFavoriteToggledEvent(ChartInterval);
 
 impl gpui::EventEmitter<TimeframeFavoriteToggledEvent> for WorkspaceSurface {}
+
+/// A pane's indicator menu starred or unstarred an indicator, named by its favorite
+/// identifier. Like timeframe favorites, the window applies it to every pane.
+struct IndicatorFavoriteToggledEvent(&'static str);
+
+impl gpui::EventEmitter<IndicatorFavoriteToggledEvent> for WorkspaceSurface {}
 
 /// Pane-only choices and feedback. Runtime-derived facts stay in the shared store.
 #[derive(Default)]
@@ -2791,6 +2800,7 @@ fn legend_settings_request(request: ChartSettingsRequest) -> Option<LegendSettin
 fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         order_quantity::attach_chart_trade_bar(chart, cx);
+        chart_surface::attach_chart_legend_symbol_mark(chart, cx);
         cx.observe(chart, |app, chart, cx| {
             if app
                 .persistence
@@ -5207,14 +5217,15 @@ enum PriceAxisMenuFlyout {
 }
 
 impl PriceAxisMenuFlyout {
-    const fn geometry(self) -> (f32, f32, f32, f32) {
+    /// The flyout's row count and the index of the root row that opens it.
+    const fn geometry(self) -> (f32, f32) {
         match self {
-            Self::None => (0.0, 0.0, 0.0, 0.0),
-            Self::Labels => (10.0, 1.0, 0.0, 0.0),
-            Self::Lines => (5.0, 0.0, 1.0, 0.0),
-            Self::ScaleMode => (4.0, 0.0, 4.0, 2.0),
-            Self::YAxis => (2.0, 0.0, 5.0, 2.0),
-            Self::Precision => (9.0, 0.0, 6.0, 2.0),
+            Self::None => (0.0, 0.0),
+            Self::Labels => (10.0, 0.0),
+            Self::Lines => (5.0, 1.0),
+            Self::ScaleMode => (4.0, 4.0),
+            Self::YAxis => (2.0, 5.0),
+            Self::Precision => (9.0, 6.0),
         }
     }
 }
@@ -5333,6 +5344,7 @@ impl ChartColorSetting {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChartSettingsAction {
     ToggleGrid,
+    ToggleAxisBorders,
     GridStyle(u8),
     CrosshairMode(u8),
     CrosshairWidth(u8),
@@ -5351,6 +5363,7 @@ enum ChartSettingsAction {
     ToggleExtendOrderLinesLeft,
     ToggleSymbolLegend,
     ToggleSymbolLegendValues,
+    ToggleSymbolLegendLogo,
     ToggleIndicatorLegend,
     ToggleIndicatorLegendValues,
     /// Applies to every chart: the Buy / quantity / Sell bar under the symbol legend.

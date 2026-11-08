@@ -10,7 +10,8 @@ const APP_NAVIGATION_MENU_GAP: f32 = 4.0;
 const APP_NAVIGATION_ICON_SIZE: f32 = 16.0;
 
 /// The page shown under the title bar, the pages besides the terminal, the terminal page's
-/// bottom panel and the start page with its layout menu and dialogs.
+/// bottom panel, the start page with its layout menu and dialogs, and the header's indicator
+/// template menu and dialogs.
 #[derive(Default)]
 pub(super) struct AppPages {
     pub(super) view: AppView,
@@ -18,6 +19,7 @@ pub(super) struct AppPages {
     pub(super) workflows: workflows_page::WorkflowsPage,
     pub(super) bottom_panel: bottom_panel::BottomPanelState,
     pub(super) layouts: layouts_view::LayoutsUi,
+    pub(super) indicator_templates: indicator_templates_view::IndicatorTemplatesUi,
 }
 
 pub(super) fn app_navigation_button(
@@ -87,7 +89,7 @@ pub(super) fn app_navigation_layer(
         .leading(
             header_icon(view.icon())
                 .with_size(px(APP_NAVIGATION_ICON_SIZE))
-                .color(gpui_color(colors.icon)),
+                .color(gpui_color(colors.text_secondary)),
         )
         .on_click(move |_, window, cx| {
             select_terminal.update(cx, |terminal, terminal_cx| {

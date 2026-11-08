@@ -145,6 +145,8 @@ legend_hide = छिपाएँ
 legend_show = दिखाएँ
 legend_settings = सेटिंग्स
 legend_remove = हटाएँ
+legend_collapse_indicators = इंडिकेटर लेजेंड समेटें
+legend_expand_indicators = इंडिकेटर लेजेंड फैलाएँ
 order_flow_cvd = CVD
 order_flow_delta = डेल्टा
 

@@ -1,14 +1,16 @@
 //! The screener page: every market the screening provider lists, with live statistics,
 //! sortable columns, category filters and search. Selecting a row opens it in the terminal.
 
+use super::chart_context_menus::clamp_panel_origin_within;
 use super::market_scan_view::{market_scans_tab, screener_tabs};
 use super::market_screener::{
-    AppView, MarketScreener, SCREENER_REFRESH_TICK, ScreenerCategory, ScreenerColumn, ScreenerRow,
-    ScreenerSort, ScreenerStatus, ScreenerTab, capture_time_label,
+    AppView, MarketScreener, ResolvedMarket, SCREENER_REFRESH_TICK, ScreenerCategory,
+    ScreenerColumn, ScreenerRow, ScreenerRowMenu, ScreenerSort, ScreenerStatus, ScreenerTab,
+    capture_time_label,
 };
 use super::*;
 use aeris_localization::{Text, panels, tr, tr_count};
-use gpui::uniform_list;
+use gpui::{MouseDownEvent, uniform_list};
 use std::cmp::Ordering as CmpOrdering;
 
 const PAGE_PADDING_X: f32 = 24.0;
@@ -24,6 +26,8 @@ pub(super) const MARKET_MIN_WIDTH: f32 = 200.0;
 pub(super) const EXCHANGE_LOGO_SIZE: f32 = 16.0;
 pub(super) const SORT_ICON_SIZE: f32 = 12.0;
 pub(super) const FOOTER_HEIGHT: f32 = 36.0;
+const ROW_MENU_WIDTH: f32 = 200.0;
+const ROW_MENU_ICON_SIZE: f32 = 16.0;
 
 #[derive(Clone, Copy)]
 struct ColumnSpec {
@@ -319,7 +323,7 @@ fn header_cell(
     let indicator = active.then(|| {
         header_icon(HugeIcon::ChevronDown)
             .with_size(px(SORT_ICON_SIZE))
-            .color(gpui_color(colors.icon_active))
+            .color(gpui_color(colors.text_default))
             .when(!sort.descending, |icon| icon.rotate(0.5))
     });
     let sort_terminal = terminal.clone();
@@ -351,7 +355,7 @@ fn header_cell(
             .when(active, |cell| {
                 cell.text_color(gpui_color(colors.text_default))
             })
-            .hover(move |cell| cell.text_color(gpui_color(colors.text_hover)))
+            .hover(move |cell| cell.text_color(gpui_color(colors.text_default)))
             .on_click(move |_, _, cx| {
                 sort_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.sort_market_screener(spec.column, terminal_cx);
@@ -459,6 +463,10 @@ fn table_row(
                 terminal.open_market_screener_row(&open_row, terminal_cx);
             });
         })
+        .on_mouse_down(
+            MouseButton::Right,
+            row_menu_on_right_click(terminal, &row.symbol, &row.exchange, &row.display_symbol),
+        )
         .child(
             rank_cell(theme)
                 .text_xs()
@@ -506,7 +514,7 @@ fn table_placeholder(screener: &MarketScreener, theme: &AerisTheme) -> AnyElemen
             .gap_2()
             .child(
                 Loader::new("market_screener_loader", header_icon(HugeIcon::Loader))
-                    .color(gpui_color(colors.icon)),
+                    .color(gpui_color(colors.text_secondary)),
             )
             .child(tr!(panels::SCREENER_LOADING)),
         (ScreenerStatus::Loading, Some(message)) => div().child(message.to_string()),
@@ -540,17 +548,16 @@ fn page_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
     let shown = screener.rows().len();
     let total = screener.counts().all;
-    let status = if let Some(symbol) = screener.opening_symbol() {
-        Some((
-            tr!(panels::SCREENER_OPENING, symbol = symbol),
-            colors.text_secondary,
-        ))
-    } else {
-        screener
-            .message()
-            .filter(|_| screener.status() == ScreenerStatus::Ready)
-            .map(|message| (message.to_string(), colors.text_warning))
-    };
+    let status = screener
+        .pending_selection_status()
+        .map(|text| (text, colors.text_secondary))
+        .or_else(|| {
+            screener
+                .message()
+                .filter(|_| screener.status() == ScreenerStatus::Ready)
+                .map(|message| (message.to_string(), colors.text_warning))
+        })
+        .or_else(|| watchlist_status_line(screener, theme));
     div()
         .w_full()
         .h(px(FOOTER_HEIGHT))
@@ -579,6 +586,107 @@ fn page_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
                 .child(text)
         }))
         .child(div().flex_none().child(tr!(panels::SCREENER_CAPTION)))
+}
+
+/// The latest watchlist addition from a row menu, for a page footer.
+pub(super) fn watchlist_status_line(
+    screener: &MarketScreener,
+    theme: &AerisTheme,
+) -> Option<(String, ThemeColor)> {
+    screener.watchlist_status().map(|(text, attention)| {
+        let color = if attention {
+            theme.colors.text_warning
+        } else {
+            theme.colors.text_secondary
+        };
+        (text, color)
+    })
+}
+
+/// The menu a right-clicked row opens at the pointer.
+pub(super) fn screener_row_menu_layer(
+    terminal: &Entity<TerminalApp>,
+    menu: &ScreenerRowMenu,
+    viewport: gpui::Size<Pixels>,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let panel_size = size(
+        px(ROW_MENU_WIDTH),
+        menu_panel_height(1, 0, theme, MenuScale::BASE, px(ROOT_REM_PX)),
+    );
+    let origin =
+        clamp_panel_origin_within(menu.anchor, viewport, panel_size, px(OVERLAY_EDGE_MARGIN));
+    let animation_origin =
+        PopupAnimationOrigin::from_trigger(menu.anchor, Bounds::new(origin, panel_size));
+    let add_terminal = terminal.clone();
+    let add_menu = menu.clone();
+    let add = MenuRow::compact(
+        "market_screener_row_add_to_watchlist",
+        tr!(panels::SCREENER_ADD_TO_WATCHLIST),
+        theme,
+    )
+    .leading_icon(header_icon(HugeIcon::Watchlist).with_size(px(ROW_MENU_ICON_SIZE)))
+    .on_click(move |_, _, cx| {
+        add_terminal.update(cx, |terminal, terminal_cx| {
+            terminal.add_screener_row_to_watchlist(&add_menu, terminal_cx);
+        });
+    });
+    let dismiss = terminal.clone();
+    let dismiss_right = terminal.clone();
+    div()
+        .id("market_screener_row_menu_scrim")
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .occlude()
+        .on_click(move |_, _, cx| {
+            dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_screener_row_menu(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            dismiss_right.update(cx, |terminal, terminal_cx| {
+                terminal.close_screener_row_menu(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(
+            MenuPanel::new("market_screener_row_menu", MenuPlacement::At(origin), theme)
+                .width(px(ROW_MENU_WIDTH))
+                .animate_from(animation_origin)
+                .child(add),
+        )
+        .into_any_element()
+}
+
+/// Opens a row's menu at a right click on it.
+pub(super) fn row_menu_on_right_click(
+    terminal: &Entity<TerminalApp>,
+    symbol: &str,
+    exchange: &str,
+    display_symbol: &str,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    let terminal = terminal.clone();
+    let (symbol, exchange, display_symbol) = (
+        symbol.to_string(),
+        exchange.to_string(),
+        display_symbol.to_string(),
+    );
+    move |event, _, cx| {
+        let menu = ScreenerRowMenu {
+            anchor: event.position,
+            symbol: symbol.clone(),
+            exchange: exchange.clone(),
+            display_symbol: display_symbol.clone(),
+        };
+        terminal.update(cx, |terminal, terminal_cx| {
+            terminal.open_screener_row_menu(menu, terminal_cx);
+        });
+        cx.stop_propagation();
+    }
 }
 
 impl TerminalApp {
@@ -657,6 +765,29 @@ impl TerminalApp {
         cx.notify();
     }
 
+    pub(super) fn open_screener_row_menu(&mut self, menu: ScreenerRowMenu, cx: &mut Context<Self>) {
+        self.pages.screener.open_row_menu(menu);
+        cx.notify();
+    }
+
+    pub(super) fn close_screener_row_menu(&mut self, cx: &mut Context<Self>) {
+        if self.pages.screener.close_row_menu() {
+            cx.notify();
+        }
+    }
+
+    /// Lists a row's market in the watchlist once its instrument resolves; the page stays.
+    pub(super) fn add_screener_row_to_watchlist(
+        &mut self,
+        menu: &ScreenerRowMenu,
+        cx: &mut Context<Self>,
+    ) {
+        self.pages
+            .screener
+            .add_to_watchlist(&menu.symbol, &menu.exchange, &menu.display_symbol);
+        cx.notify();
+    }
+
     pub(super) fn open_market_screener_row(&mut self, row: &ScreenerRow, cx: &mut Context<Self>) {
         self.pages
             .screener
@@ -668,18 +799,30 @@ impl TerminalApp {
     /// window back to the terminal with that instrument on the active chart.
     pub(super) fn poll_market_screener(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let outcome = self.pages.screener.poll();
-        if let Some(opened) = outcome.opened {
-            self.show_app_view(AppView::Terminal, window, cx);
-            match opened.interval {
-                Some(interval) => self.active_surface().update(cx, |surface, surface_cx| {
-                    surface.select_installed_instrument_on(
-                        &opened.instrument,
-                        interval,
-                        surface_cx,
-                    );
-                }),
-                None => self.select_watchlist_instrument(&opened.instrument, cx),
+        match outcome.resolved {
+            Some(ResolvedMarket::Open {
+                instrument,
+                interval,
+            }) => {
+                self.show_app_view(AppView::Terminal, window, cx);
+                match interval {
+                    Some(interval) => self.active_surface().update(cx, |surface, surface_cx| {
+                        surface.select_installed_instrument_on(&instrument, interval, surface_cx);
+                    }),
+                    None => self.select_watchlist_instrument(&instrument, cx),
+                }
             }
+            Some(ResolvedMarket::Watchlist {
+                instrument,
+                display_symbol,
+            }) => {
+                let added = self.add_watchlist_instrument(instrument, cx);
+                self.pages
+                    .screener
+                    .record_watchlist_outcome(display_symbol, added);
+                cx.notify();
+            }
+            None => {}
         }
         if outcome.changed {
             cx.notify();

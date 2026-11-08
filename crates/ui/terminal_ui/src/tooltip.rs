@@ -11,9 +11,9 @@ use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family, platform_typography,
 };
 use gpui::{
-    Anchor, AnimationExt, AnyElement, App, Bounds, BoxShadow, Context, Div, ElementId, Hsla,
-    IntoElement, PathBuilder, Pixels, Point, SharedString, Size, SpringAnimation, SpringConfig,
-    Task, Window, anchored, canvas, deferred, div, point, prelude::*, px,
+    Anchor, AnimationExt, AnyElement, App, Bounds, Context, Div, ElementId, Hsla, IntoElement,
+    PathBuilder, Pixels, Point, SharedString, Size, SpringAnimation, SpringConfig, Task, Window,
+    anchored, canvas, deferred, div, point, prelude::*, px,
 };
 
 /// Space between the trigger edge and the tooltip body; the tail reaches into it.
@@ -135,9 +135,8 @@ fn tail_triangle(
 }
 
 /// Paints the tail in the body's own layers so its edges continue the body's: the
-/// `border-popover` outer edge (starting past the body's outer ring, so the translucent edge
-/// is never doubled), the `surface-popover` fill that opens the body edge under the tail, the
-/// `border-popover-highlight` inner edge and the fill inside it.
+/// `border-secondary` edge (starting at the body's outer edge, so a translucent edge is never
+/// doubled) and the `surface-secondary` fill that opens the body edge under the tail.
 fn paint_tail(
     window: &mut Window,
     body: Bounds<Pixels>,
@@ -156,10 +155,8 @@ fn paint_tail(
     };
     let outward = placement.toward_trigger();
     let layers = [
-        (edge, edge, colors.border_popover),
-        (0.0, -edge, colors.surface_popover),
-        (0.0, -edge, colors.border_popover_highlight),
-        (-edge, -edge, colors.surface_popover),
+        (0.0, 0.0, colors.border_secondary),
+        (-edge, -edge, colors.surface_secondary),
     ];
     for (offset, depth, color) in layers {
         let [start, tip, end] = tail_triangle(base, outward, offset, depth);
@@ -235,20 +232,16 @@ impl TooltipSpec {
         self.show_delay
     }
 
-    /// The Theme System popover look: `surface-popover` with a `border-popover-highlight`
-    /// inner edge and a `border-popover` outer edge.
+    /// The Theme System floating-layer look: `surface-secondary` with a 1px
+    /// `border-secondary` edge.
     fn surface(&self, cx: &App) -> Div {
         let colors = self.theme.colors;
         let edge = px(self.theme.dimensions.border_width);
         let base = div()
             .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
             .border(edge)
-            .border_color(gpui_color(colors.border_popover_highlight))
-            .bg(gpui_color(colors.surface_popover))
-            .shadow(vec![
-                BoxShadow::new(px(0.0), px(0.0), gpui_color(colors.border_popover))
-                    .spread_radius(edge),
-            ])
+            .border_color(gpui_color(colors.border_secondary))
+            .bg(gpui_color(colors.surface_secondary))
             .font_family(platform_font_family())
             .font_weight(gpui::FontWeight(f32::from(
                 platform_typography().weight(TypographyRole::Normal),

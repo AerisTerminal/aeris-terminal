@@ -259,14 +259,14 @@ fn symbol_provider_menu(
             trailing = trailing.child(
                 header_icon(HugeIcon::CheckIcon)
                     .with_size(px(16.0))
-                    .color(gpui_color(colors.icon_active)),
+                    .color(gpui_color(colors.text_default)),
             );
         }
         if opens_flyout {
             trailing = trailing.child(
                 header_icon(HugeIcon::ArrowRight)
                     .with_size(px(16.0))
-                    .color(gpui_color(colors.icon)),
+                    .color(gpui_color(colors.text_secondary)),
             );
         }
         // A provider row can both be the current scope and open its flyout, so it carries
@@ -439,7 +439,6 @@ pub(super) fn instrument_dialog_row(
         instrument.label.clone(),
         theme,
     )
-    .resting_fill(theme.colors.surface)
     .highlighted(instrument_row_highlighted(
         checked,
         index,

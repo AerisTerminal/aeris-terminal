@@ -390,7 +390,7 @@ fn timeframe_menu_uses_dual_group_and_interval_containers() {
     );
     assert!((timeframe_flyout_offset(1) - CHART_CONTEXT_MENU_ROW_HEIGHT).abs() < f32::EPSILON);
     assert!(
-        (timeframe_flyout_height(1) - overlay_height(1.0, 0.0)).abs() < f32::EPSILON,
+        (timeframe_flyout_height(1) - overlay_height(1.0)).abs() < f32::EPSILON,
         "submenu height is its rows inside the shared menu panel chrome"
     );
     assert!(
@@ -2709,6 +2709,89 @@ mod timeframe_input {
         });
     }
 
+    fn chart_indicator_kinds(
+        surface: &Entity<WorkspaceSurface>,
+        cx: &VisualTestContext,
+    ) -> Vec<ChartIndicator> {
+        cx.read(|cx| {
+            surface
+                .read(cx)
+                .chart
+                .as_ref()
+                .map(|chart| {
+                    chart
+                        .read(cx)
+                        .indicator_states()
+                        .into_iter()
+                        .map(|state| state.indicator)
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    #[gpui::test]
+    fn an_indicator_template_replaces_every_indicator_as_one_undo_step(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        let template = cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                let chart = cx.new(|_| AerisChartView::new());
+                chart.update(cx, |chart, _| {
+                    chart.add_indicator(ChartIndicator::Volume).expect("volume");
+                    chart
+                        .add_indicator(ChartIndicator::VolumeProfile)
+                        .expect("volume profile");
+                });
+                surface.chart = Some(chart);
+                surface
+                    .indicator_template("Scalping".to_string(), cx)
+                    .expect("the chart has data")
+            })
+        });
+        assert_eq!(template.name, "Scalping");
+        assert!(template.order_flow.is_some(), "order flow is captured too");
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.clear_indicators(cx);
+                let chart = surface.chart.clone().expect("chart");
+                chart.update(cx, |chart, _| {
+                    chart
+                        .add_indicator(ChartIndicator::VolumeProfile)
+                        .expect("volume profile");
+                });
+                let settings = OrderFlowSettings {
+                    display_mode: aeris_chart_integration::FootprintDisplayMode::Delta,
+                    ..surface.chart_order_flow_settings(cx).expect("settings")
+                };
+                surface.set_chart_order_flow_settings(settings, cx);
+                assert!(surface.apply_indicator_template(&template, cx));
+            });
+        });
+        assert_eq!(
+            chart_indicator_kinds(&surface, cx),
+            [ChartIndicator::Volume, ChartIndicator::VolumeProfile],
+            "the template's indicators replace the chart's"
+        );
+        cx.read(|cx| {
+            assert_eq!(
+                surface
+                    .read(cx)
+                    .chart_order_flow_settings(cx)
+                    .map(|settings| settings.display_mode),
+                Some(aeris_chart_integration::FootprintDisplayMode::Delta),
+                "the chart keeps its footprint presentation"
+            );
+        });
+        cx.update(|_, cx| {
+            let chart = surface.read(cx).chart.clone().expect("chart");
+            chart.update(cx, |chart, cx| assert!(chart.undo(cx)));
+        });
+        assert_eq!(
+            chart_indicator_kinds(&surface, cx),
+            [ChartIndicator::VolumeProfile],
+            "one undo brings back the indicators the template replaced"
+        );
+    }
     #[gpui::test]
     fn volume_dialog_keeps_the_last_valid_preview_while_a_length_is_invalid(
         cx: &mut TestAppContext,
@@ -3637,6 +3720,126 @@ mod timeframe_input {
         assert_eq!(saved(cx), "");
     }
 
+    #[gpui::test]
+    fn an_indicator_template_saved_from_the_header_is_starred_applied_and_deleted(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                assert!(surface.add_indicator(ChartIndicator::Volume, cx));
+            });
+        });
+        let save = |name: &str, cx: &mut VisualTestContext| {
+            update_terminal(&terminal, cx, |terminal, window, cx| {
+                terminal.open_indicator_template_save_dialog(window, cx);
+                let input = terminal
+                    .pages
+                    .indicator_templates
+                    .save_input()
+                    .expect("the save dialog is open")
+                    .clone();
+                input.update(cx, |input, cx| input.set_value(name, window, cx));
+                terminal.save_indicator_template(window, cx);
+            });
+        };
+        let names = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                indicator_templates_view::indicator_templates_in_menu_order(
+                    terminal.read(cx).saved.indicator_templates(),
+                )
+                .into_iter()
+                .map(|(_, template)| template.name.clone())
+                .collect::<Vec<_>>()
+            })
+        };
+
+        save("   ", cx);
+        cx.read(|cx| {
+            let ui = &terminal.read(cx).pages.indicator_templates;
+            assert!(ui.modal_open(), "an empty name keeps the dialog open");
+            assert!(ui.save_error().is_some(), "and says why");
+        });
+        save("Scalping", cx);
+        save("Swing", cx);
+        assert_eq!(names(cx), ["Scalping", "Swing"]);
+        assert!(cx.read(|cx| !terminal.read(cx).pages.indicator_templates.modal_open()));
+
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.toggle_indicator_template_favorite(1, cx);
+        });
+        assert_eq!(
+            names(cx),
+            ["Swing", "Scalping"],
+            "starred templates come first"
+        );
+
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::clear_indicators));
+        assert_eq!(chart_indicator_kinds(&surface, cx), []);
+        update_terminal(&terminal, cx, |terminal, _, cx| {
+            terminal.apply_indicator_template(0, cx);
+        });
+        assert_eq!(
+            chart_indicator_kinds(&surface, cx),
+            [ChartIndicator::Volume],
+            "applying a template brings its indicators to the active chart"
+        );
+
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.request_indicator_template_delete(0, cx);
+            assert!(terminal.pages.indicator_templates.modal_open());
+            terminal.delete_indicator_template(window, cx);
+        });
+        assert_eq!(names(cx), ["Swing"]);
+    }
+
+    #[gpui::test]
+    fn starring_an_indicator_in_one_pane_reaches_every_tab_and_is_saved(cx: &mut TestAppContext) {
+        let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
+        let first = cx.read(|cx| terminal.read(cx).active_surface());
+        let star = |surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                surface.update(cx, |_, cx| {
+                    cx.emit(IndicatorFavoriteToggledEvent("rsi"));
+                });
+            });
+        };
+        let starred = |surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                surface
+                    .read(cx)
+                    .chart_chrome
+                    .indicator_favorites
+                    .contains("rsi")
+            })
+        };
+        let saved = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .chrome
+                    .preferences()
+                    .to_workspace_chrome()
+                    .indicator_favorites
+            })
+        };
+        update_terminal(&terminal, cx, |terminal, window, cx| {
+            terminal.add_workspace("Second", window, cx)
+        })
+        .expect("a second tab");
+        let second = cx.read(|cx| terminal.read(cx).active_surface());
+
+        star(&second, cx);
+        assert!(starred(&first, cx), "the other tab's pane shows the star");
+        assert!(starred(&second, cx));
+        assert_eq!(saved(cx), "rsi", "the favorite is saved with the chrome");
+
+        star(&first, cx);
+        assert!(!starred(&first, cx) && !starred(&second, cx));
+        assert_eq!(saved(cx), "");
+    }
     #[gpui::test]
     fn show_hidden_drawings_is_offered_while_a_drawing_is_hidden_on_its_own(
         cx: &mut TestAppContext,
@@ -5602,7 +5805,11 @@ fn chart_context_menu_stays_inside_the_window() {
     let width = px(CHART_CONTEXT_MENU_WIDTH);
     let overflow = clamp_chart_context_menu_origin(point(px(2000.0), px(2000.0)), viewport);
     assert!(overflow.x + width <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
-    assert!(overflow.y <= px(600.0) - px(OVERLAY_EDGE_MARGIN));
+    assert_eq!(
+        overflow.y,
+        px(600.0 - OVERLAY_EDGE_MARGIN - overlay_height(10.0)),
+        "the menu is exactly its ten rows, with no dividers between them"
+    );
     assert_eq!(
         clamp_chart_context_menu_origin(point(px(-20.0), px(-20.0)), size(px(800.0), px(600.0))),
         point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
@@ -5629,9 +5836,8 @@ fn capture_chart_submenu_opens_beside_its_row_inside_the_window() {
     );
     assert_eq!(
         right.y,
-        root.y
-            + px(super::CHART_CONTEXT_MENU_ROW_HEIGHT * 2.0
-                + super::CHART_CONTEXT_MENU_SEPARATOR_HEIGHT)
+        root.y + px(super::CHART_CONTEXT_MENU_ROW_HEIGHT * 2.0),
+        "the menu has no dividers above the capture row"
     );
 
     let near_right_edge = point(px(1200.0 - CHART_CONTEXT_MENU_WIDTH - 8.0), px(100.0));
@@ -5645,7 +5851,7 @@ fn capture_chart_submenu_opens_beside_its_row_inside_the_window() {
 
     let bottom = point(px(100.0), px(790.0));
     let clamped = super::clamp_chart_capture_flyout_origin(bottom, viewport);
-    assert!(clamped.y + px(super::overlay_height(2.0, 0.0)) <= px(800.0 - OVERLAY_EDGE_MARGIN));
+    assert!(clamped.y + px(super::overlay_height(2.0)) <= px(800.0 - OVERLAY_EDGE_MARGIN));
 }
 
 #[test]
@@ -6536,8 +6742,10 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
     let axis = ChartAxisAppearance {
         border_color: ChartAppearanceColor::Custom("#475569".to_string()),
         text_color: ChartAppearanceColor::Theme,
+        border_visible: false,
     };
     let persisted = persisted_chart_appearance(&appearance, &axis);
+    assert_eq!(persisted.axis_borders_visible, Some(false));
     assert_eq!(
         (
             persisted.axis_border_color.as_str(),
@@ -6579,10 +6787,12 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
         ChartAppearanceColor::Custom("#abcdef".to_string())
     );
 
-    // Axis colors were never flattened; an empty stored axis color follows the theme.
+    // Axis colors were never flattened; an empty stored axis color follows the theme, and a
+    // layout saved before the border choice existed keeps painting the borders.
     let mut cleared_axis = migrated.clone();
     cleared_axis.axis_border_color.clear();
     cleared_axis.axis_text_color.clear();
+    cleared_axis.axis_borders_visible = None;
     assert_eq!(
         restored_chart_axis(&cleared_axis),
         ChartAxisAppearance::default()
@@ -6643,19 +6853,41 @@ fn indicator_menu_keyboard_rows_skip_group_headings_across_both_groups() {
         IndicatorMenuEntry::Indicator(sma),
         IndicatorMenuEntry::Indicator(ema),
     ];
+    let none = super::chart_chrome::IndicatorFavorites::default();
     // Children: "Order flow", Delta, Big trades, "Indicators", SMA, EMA.
-    assert_eq!(indicator_menu_scroll_item(&both, 0), Some(1));
-    assert_eq!(indicator_menu_scroll_item(&both, 1), Some(2));
-    assert_eq!(indicator_menu_scroll_item(&both, 2), Some(4));
-    assert_eq!(indicator_menu_scroll_item(&both, 3), Some(5));
-    assert_eq!(indicator_menu_scroll_item(&both, 4), None);
+    assert_eq!(indicator_menu_scroll_item(&both, none, 0), Some(1));
+    assert_eq!(indicator_menu_scroll_item(&both, none, 1), Some(2));
+    assert_eq!(indicator_menu_scroll_item(&both, none, 2), Some(4));
+    assert_eq!(indicator_menu_scroll_item(&both, none, 3), Some(5));
+    assert_eq!(indicator_menu_scroll_item(&both, none, 4), None);
 
     let natives_only = [
         IndicatorMenuEntry::Indicator(sma),
         IndicatorMenuEntry::Indicator(ema),
     ];
-    assert_eq!(indicator_menu_scroll_item(&natives_only, 0), Some(1));
-    assert_eq!(indicator_menu_scroll_item(&natives_only, 1), Some(2));
+    assert_eq!(indicator_menu_scroll_item(&natives_only, none, 0), Some(1));
+    assert_eq!(indicator_menu_scroll_item(&natives_only, none, 1), Some(2));
+
+    let mut starred = none;
+    starred.toggle(IndicatorMenuEntry::Indicator(ema).favorite_identifier());
+    let with_favorite = [
+        IndicatorMenuEntry::Indicator(ema),
+        IndicatorMenuEntry::OrderFlow(OrderFlowMenuStudy::Delta),
+        IndicatorMenuEntry::Indicator(sma),
+    ];
+    // Children: "Favorites", EMA, "Order flow", Delta, "Indicators", SMA.
+    assert_eq!(
+        indicator_menu_scroll_item(&with_favorite, starred, 0),
+        Some(1)
+    );
+    assert_eq!(
+        indicator_menu_scroll_item(&with_favorite, starred, 1),
+        Some(3)
+    );
+    assert_eq!(
+        indicator_menu_scroll_item(&with_favorite, starred, 2),
+        Some(5)
+    );
 }
 
 #[test]

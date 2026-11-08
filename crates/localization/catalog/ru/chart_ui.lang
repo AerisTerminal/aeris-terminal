@@ -145,6 +145,8 @@ legend_hide = Скрыть
 legend_show = Показать
 legend_settings = Настройки
 legend_remove = Удалить
+legend_collapse_indicators = Свернуть легенду индикаторов
+legend_expand_indicators = Развернуть легенду индикаторов
 order_flow_cvd = CVD
 order_flow_delta = Дельта
 

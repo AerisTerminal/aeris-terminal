@@ -179,6 +179,31 @@ pub struct WorkspaceState {
     /// existed, which open with none; an invalid scan is dropped alone on load.
     #[prost(message, repeated, tag = "23")]
     pub screener_scans: Vec<WorkspaceScreenerScanState>,
+    /// User-named indicator templates shared by every chart, at most 32. Absent in documents
+    /// written before indicator templates existed, which open with none.
+    #[prost(message, repeated, tag = "24")]
+    pub indicator_templates: Vec<WorkspaceIndicatorTemplateState>,
+}
+
+/// One user-named indicator template: every indicator of a chart as it was saved. Applying it
+/// replaces a chart's indicators; the chart's footprint presentation is not part of it.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceIndicatorTemplateState {
+    #[prost(string, tag = "1")]
+    pub name: String,
+    /// Host-owned native indicators in creation order.
+    #[prost(message, repeated, tag = "2")]
+    pub indicators: Vec<WorkspaceChartIndicatorState>,
+    /// Native study graph in creation/dependency order.
+    #[prost(message, repeated, tag = "3")]
+    pub studies: Vec<WorkspaceChartStudyState>,
+    /// Order-flow indicators and their settings; the footprint display mode and rows it also
+    /// carries are not applied.
+    #[prost(message, optional, tag = "4")]
+    pub order_flow: Option<WorkspaceOrderFlowSettingsState>,
+    /// Starred templates are listed first.
+    #[prost(bool, tag = "5")]
+    pub favorite: bool,
 }
 
 /// One user-named saved screener scan: conditions over one chart interval, evaluated across
@@ -315,6 +340,10 @@ pub struct WorkspaceChromeState {
     /// Comma-separated starred timeframe labels such as `5m,1h`; unknown labels are skipped.
     #[prost(string, tag = "19")]
     pub timeframe_favorites: String,
+    /// Comma-separated starred indicator identifiers such as `sma,order_flow.big_trades`;
+    /// unknown identifiers are skipped.
+    #[prost(string, tag = "20")]
+    pub indicator_favorites: String,
 }
 
 /// A window-relative logical position in the chrome preferences.
@@ -556,7 +585,8 @@ pub struct WorkspaceInstrumentDrawingsState {
     pub locked_drawing_ids: Vec<u32>,
 }
 
-/// Chart legend presentation. Every absent field means shown.
+/// Chart legend presentation. Every absent field means shown, and absent `indicators_collapsed`
+/// means unfolded.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct WorkspaceChartLegendState {
     /// The symbol row.
@@ -571,6 +601,12 @@ pub struct WorkspaceChartLegendState {
     /// The readouts on those rows.
     #[prost(bool, optional, tag = "4")]
     pub show_indicator_values: Option<bool>,
+    /// The exchange logo ahead of the symbol row's title.
+    #[prost(bool, optional, tag = "5")]
+    pub show_symbol_logo: Option<bool>,
+    /// The price pane's indicator rows folded behind the legend toggle. Absent means unfolded.
+    #[prost(bool, optional, tag = "6")]
+    pub indicators_collapsed: Option<bool>,
 }
 
 /// Tags 4 and 5 held the retired footprint trade-bubble toggle and threshold; never reuse them.
@@ -749,6 +785,10 @@ pub struct WorkspaceChartAppearanceState {
     /// Empty in layouts saved before axis color control existed; restores as theme-following.
     #[prost(string, tag = "29")]
     pub axis_text_color: String,
+    /// Whether the axis border lines are painted. Absent in layouts saved before the choice
+    /// existed, which painted them.
+    #[prost(bool, optional, tag = "30")]
+    pub axis_borders_visible: Option<bool>,
 }
 
 /// Durable host-owned state for one native Study Runtime instance.

@@ -144,9 +144,9 @@ fn segmented_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColor
         SegmentedTabColors {
             fill: None,
             border: None,
-            text: colors.text_interactive,
-            hover_text: colors.text_hover,
-            active_text: colors.text_active,
+            text: colors.text_secondary,
+            hover_text: colors.text_default,
+            active_text: colors.text_default,
         }
     }
 }
@@ -159,12 +159,12 @@ fn sidebar_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColors 
         fill: selected.then_some(colors.active_bg),
         border: None,
         text: if selected {
-            colors.text_active
+            colors.text_default
         } else {
-            colors.text_interactive
+            colors.text_secondary
         },
-        hover_text: colors.text_hover,
-        active_text: colors.text_active,
+        hover_text: colors.text_default,
+        active_text: colors.text_default,
     }
 }
 
@@ -360,9 +360,9 @@ mod tests {
             let resting = segmented_tab_colors(&theme, false);
             assert_eq!(resting.fill, None);
             assert_eq!(resting.border, None);
-            assert_eq!(resting.text, colors.text_interactive);
-            assert_eq!(resting.hover_text, colors.text_hover);
-            assert_eq!(resting.active_text, colors.text_active);
+            assert_eq!(resting.text, colors.text_secondary);
+            assert_eq!(resting.hover_text, colors.text_default);
+            assert_eq!(resting.active_text, colors.text_default);
 
             let selected = segmented_tab_colors(&theme, true);
             assert_eq!(selected.fill, None);
@@ -377,10 +377,10 @@ mod tests {
         let colors = theme.colors;
         let resting = sidebar_tab_colors(&theme, false);
         assert_eq!(resting.fill, None);
-        assert_eq!(resting.text, colors.text_interactive);
+        assert_eq!(resting.text, colors.text_secondary);
         let selected = sidebar_tab_colors(&theme, true);
         assert_eq!(selected.fill, Some(colors.active_bg));
-        assert_eq!(selected.text, colors.text_active);
+        assert_eq!(selected.text, colors.text_default);
     }
 
     #[test]

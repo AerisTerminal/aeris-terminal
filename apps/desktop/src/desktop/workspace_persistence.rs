@@ -17,6 +17,7 @@ struct WorkspaceLayoutRequest {
     saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
     chart_chrome: aeris_contracts::WorkspaceChromeState,
     screener_scans: Vec<aeris_contracts::WorkspaceScreenerScanState>,
+    indicator_templates: Vec<aeris_contracts::WorkspaceIndicatorTemplateState>,
 }
 
 /// One save's document content; the persistence owner assigns the layout generation.
@@ -29,6 +30,7 @@ pub(super) struct WorkspaceSaveContent {
     pub(super) saved_layouts: Vec<Arc<WorkspaceSavedLayoutState>>,
     pub(super) chart_chrome: aeris_contracts::WorkspaceChromeState,
     pub(super) screener_scans: Vec<aeris_contracts::WorkspaceScreenerScanState>,
+    pub(super) indicator_templates: Vec<aeris_contracts::WorkspaceIndicatorTemplateState>,
 }
 
 struct WorkspaceLayoutCompletion {
@@ -201,6 +203,7 @@ impl WorkspaceLayoutPersistence {
             saved_layouts: content.saved_layouts,
             chart_chrome: content.chart_chrome,
             screener_scans: content.screener_scans,
+            indicator_templates: content.indicator_templates,
         });
         match self.wake.try_send(()) {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => {
@@ -242,6 +245,7 @@ impl WorkspaceLayoutPersistence {
             saved_layouts: Vec::new(),
             chart_chrome: aeris_contracts::WorkspaceChromeState::default(),
             screener_scans: Vec::new(),
+            indicator_templates: Vec::new(),
         })
     }
 
@@ -340,6 +344,7 @@ fn apply_workspace_save(document: &mut WorkspaceState, request: WorkspaceLayoutR
         .collect();
     document.chart_chrome = Some(request.chart_chrome);
     document.screener_scans = request.screener_scans;
+    document.indicator_templates = request.indicator_templates;
 }
 
 fn run_workspace_layout_persistence(
@@ -495,6 +500,7 @@ mod tests {
                     .collect(),
                 chart_chrome: aeris_contracts::WorkspaceChromeState::default(),
                 screener_scans: Vec::new(),
+                indicator_templates: Vec::new(),
             })
             .expect("request");
 
@@ -700,6 +706,16 @@ mod tests {
             }],
         };
 
+        let indicator_template = aeris_contracts::WorkspaceIndicatorTemplateState {
+            name: "Scalping".to_string(),
+            indicators: vec![WorkspaceChartIndicatorState {
+                kind: "volume".to_string(),
+                visible: true,
+                volume: None,
+            }],
+            favorite: true,
+            ..aeris_contracts::WorkspaceIndicatorTemplateState::default()
+        };
         writer
             .request_with_chart_settings(WorkspaceSaveContent {
                 active_workspace_id: 1,
@@ -710,6 +726,7 @@ mod tests {
                 saved_layouts: Vec::new(),
                 chart_chrome: chrome.clone(),
                 screener_scans: vec![scan.clone()],
+                indicator_templates: vec![indicator_template.clone()],
             })
             .expect("a chrome change requests a workspace save");
         let generation = writer
@@ -725,6 +742,7 @@ mod tests {
             "chrome preferences persist inside the workspace document"
         );
         assert_eq!(saved.screener_scans, vec![scan]);
+        assert_eq!(saved.indicator_templates, vec![indicator_template]);
         std::fs::remove_dir_all(&root).expect("fixture root removed");
     }
 

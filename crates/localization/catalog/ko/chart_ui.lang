@@ -145,6 +145,8 @@ legend_hide = 숨기기
 legend_show = 표시
 legend_settings = 설정
 legend_remove = 삭제
+legend_collapse_indicators = 지표 범례 접기
+legend_expand_indicators = 지표 범례 펼치기
 order_flow_cvd = CVD
 order_flow_delta = 델타
 

@@ -525,7 +525,7 @@ mod tests {
             "success page must reflect completion"
         );
         assert!(response.contains("--surface: #ffffff"));
-        assert!(response.contains("--surface: #171717"));
+        assert!(response.contains("--surface: #000000"));
         assert!(response.contains("var(--primary)"));
         let page_rules = response.replace(browser_platform_styles(), "");
         assert!(!page_rules.contains("var(--bullish)"));

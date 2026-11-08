@@ -74,8 +74,8 @@ Key facts for this roadmap (checked 2026-11-07):
   `aeris_charts_indicators` and 61 built-in chart studies (`IndicatorKind`). There is no
   formula or expression language anywhere (Aeris Charts or `study_sdk`); S11 and S12 build one
   in `market_runtime::scan`.
-- No released version has scans yet (1.8.1 shipped without them). Everything added to the saved
-  scan format before the first scan release costs no compatibility; after it, each change must be
+- Scans first ship in 1.9.0 (1.8.1 shipped without them). From that release on, each change to the
+  saved scan format must be
   additive (new tags and enum values; an older build drops only a scan it cannot read).
 
 ## Why we are building it

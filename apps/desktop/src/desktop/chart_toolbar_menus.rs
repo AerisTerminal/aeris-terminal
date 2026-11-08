@@ -1,10 +1,27 @@
 use super::*;
-use aeris_localization::{chart_menu, drawing, tr};
+use aeris_localization::{chart_menu, tr};
+
+/// What the window lends a pane's header menus: the Connections tab it drives and the saved
+/// indicator templates the indicator menu offers.
+#[derive(Clone, Copy)]
+pub(super) struct ChromeOverlayHost<'a> {
+    pub(super) connections: accounts_panel::ConnectionsView<'a>,
+    pub(super) indicator_templates: &'a [WorkspaceIndicatorTemplateState],
+}
+
+impl<'a> ChromeOverlayHost<'a> {
+    fn indicator_dialog_templates(self) -> IndicatorDialogTemplates<'a> {
+        IndicatorDialogTemplates {
+            terminal: self.connections.terminal,
+            saved: self.indicator_templates,
+        }
+    }
+}
 
 pub(super) fn chrome_overlay_layer(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
-    connections: accounts_panel::ConnectionsView<'_>,
+    host: ChromeOverlayHost<'_>,
     theme: &AerisTheme,
     chrome_height: f32,
     viewport: gpui::Size<Pixels>,
@@ -38,7 +55,7 @@ pub(super) fn chrome_overlay_layer(
     let phase = app_state.chrome.overlay_phase();
     let generation = app_state.chrome.overlay_generation();
     let closing = phase == ChromeOverlayPhase::Closing;
-    let panel = chrome_overlay_content(app_state, app, overlay, connections, extent, theme, cx);
+    let panel = chrome_overlay_content(app_state, app, overlay, host, extent, theme, cx);
     let close_app = app.clone();
     let move_app = app.clone();
     let panel = chrome_overlay_panel(
@@ -46,11 +63,14 @@ pub(super) fn chrome_overlay_layer(
         theme,
         ChromeOverlayPanelStyle {
             interval_popup: compact_panel,
-            frameless: menu_overlay,
-            primary_surface: matches!(
-                overlay,
-                ChromeOverlay::Instrument | ChromeOverlay::Indicator
-            ),
+            surface: match overlay {
+                _ if menu_overlay => ChromeOverlaySurface::Frameless,
+                ChromeOverlay::Instrument | ChromeOverlay::Indicator => {
+                    ChromeOverlaySurface::Primary
+                }
+                ChromeOverlay::Accounts => ChromeOverlaySurface::Floating,
+                _ => ChromeOverlaySurface::Menu,
+            },
         },
         closing,
         generation,
@@ -226,7 +246,7 @@ pub(super) fn chrome_overlay_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     overlay: ChromeOverlay,
-    connections: accounts_panel::ConnectionsView<'_>,
+    host: ChromeOverlayHost<'_>,
     extent: super::chrome_menu::ChromeMenuExtent,
     theme: &AerisTheme,
     cx: &App,
@@ -257,7 +277,7 @@ pub(super) fn chrome_overlay_content(
                     .symbol_entry
                     .browser()
                     .scoped_provider()
-                    .filter(|provider| connections.data.disconnected(*provider)),
+                    .filter(|provider| host.connections.data.disconnected(*provider)),
                 provider_menu_open: app_state.chrome.symbol_provider_menu_open(),
                 flyout_provider: app_state.chrome.symbol_scope_flyout_provider(),
                 learned_exchanges: app_state
@@ -278,6 +298,7 @@ pub(super) fn chrome_overlay_content(
                 keyboard_selection: app_state.chrome.selection(),
                 keyboard_active: app_state.chrome.list_keyboard_active(),
                 scroll: &app_state.scrolls.indicator,
+                templates: host.indicator_dialog_templates(),
             },
             theme,
             cx,
@@ -320,7 +341,7 @@ pub(super) fn chrome_overlay_content(
             accounts_panel::accounts_panel_content(
                 app_state,
                 app,
-                connections,
+                host.connections,
                 working_set,
                 accounts_panel::accounts_panel_size(extent),
                 theme,
@@ -335,10 +356,19 @@ pub(super) fn chrome_overlay_content(
 #[derive(Clone, Copy)]
 pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
+    surface: ChromeOverlaySurface,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChromeOverlaySurface {
     /// The content is one or more `MenuPanel`s that draw their own surface.
-    frameless: bool,
-    /// The symbol and indicator menus sit on `surface` instead of `surface-popover`.
-    primary_surface: bool,
+    Frameless,
+    /// Menus such as the quick timeframe popup: the primary `menu_surface`.
+    Menu,
+    /// The symbol and indicator menus: a `surface` fill inside the floating-layer edge.
+    Primary,
+    /// Floating panels such as Accounts: the secondary `popover_surface`.
+    Floating,
 }
 
 pub(super) fn chrome_overlay_panel(
@@ -352,18 +382,20 @@ pub(super) fn chrome_overlay_panel(
 ) -> impl IntoElement {
     let enter_offset = animation_origin.enter_offset();
     let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
+    let frameless = style.surface == ChromeOverlaySurface::Frameless;
     div()
         .id("chrome_overlay_panel")
         .relative()
         .flex_none()
-        .when(!style.frameless, |panel| {
-            popover_surface(panel, theme, radius)
+        .map(|panel| match style.surface {
+            ChromeOverlaySurface::Frameless => panel.max_h_full(),
+            ChromeOverlaySurface::Menu => menu_surface(panel, theme, radius),
+            ChromeOverlaySurface::Primary => {
+                popover_surface(panel, theme, radius).bg(gpui_color(theme.colors.surface))
+            }
+            ChromeOverlaySurface::Floating => popover_surface(panel, theme, radius),
         })
-        .when(style.primary_surface, |panel| {
-            panel.bg(gpui_color(theme.colors.surface))
-        })
-        .when(style.frameless, Styled::max_h_full)
-        .when(style.interval_popup && !style.frameless, |panel| {
+        .when(style.interval_popup && !frameless, |panel| {
             panel.max_h_full().overflow_y_scroll()
         })
         .when(!style.interval_popup, |panel| {
@@ -409,7 +441,7 @@ pub(super) fn timeframe_flyout_offset(group_index: usize) -> f32 {
 }
 
 pub(super) fn timeframe_flyout_height(interval_count: usize) -> f32 {
-    overlay_height(bounded_menu_count(interval_count), 0.0)
+    overlay_height(bounded_menu_count(interval_count))
 }
 
 fn bounded_menu_count(count: usize) -> f32 {
@@ -420,7 +452,7 @@ pub(super) fn timeframe_overlay_extent(
     group_count: usize,
     flyout: Option<(usize, usize)>,
 ) -> (f32, f32) {
-    let root_height = overlay_height(bounded_menu_count(group_count), 0.0);
+    let root_height = overlay_height(bounded_menu_count(group_count));
     let Some((group_index, interval_count)) = flyout else {
         return (TIMEFRAME_MENU_WIDTH, root_height);
     };
@@ -688,7 +720,7 @@ pub(super) fn time_zone_overlay_content(
                         trailing.child(
                             header_icon(HugeIcon::CheckIcon)
                                 .with_size(px(16.0))
-                                .color(gpui_color(colors.icon_active)),
+                                .color(gpui_color(colors.text_default)),
                         )
                     }),
             )
@@ -906,7 +938,7 @@ pub(super) fn timeframe_group_row(
     trailing = trailing.child(
         header_icon(HugeIcon::ArrowRight)
             .with_size(px(16.0))
-            .color(gpui_color(colors.icon)),
+            .color(gpui_color(colors.text_secondary)),
     );
     let row = MenuRow::compact(
         ("timeframe_overlay_group", group as u64),
@@ -988,26 +1020,9 @@ fn timeframe_favorite_star(
     favorite: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let label = if favorite {
-        tr!(drawing::REMOVE_FROM_FAVORITES)
-    } else {
-        tr!(drawing::ADD_TO_FAVORITES)
-    };
     let toggle = app.clone();
-    let star = if favorite {
-        // A starred timeframe keeps the warning-coloured star in every state.
-        Icon::new(HugeIcon::StarFilled.path()).color(gpui_color(theme.colors.warning))
-    } else {
-        Icon::new(HugeIcon::Star.path())
-    };
-    Button::new(("timeframe_favorite_star", index), theme)
+    super::chrome_menu::favorite_star_button(("timeframe_favorite_star", index), favorite, theme)
         .debug_selector(|| "timeframe_favorite_star".into())
-        .shares_container_hover()
-        .variant(ButtonVariant::Ghost)
-        .button_size(ButtonSize::Sm)
-        .icon(star)
-        .aria_label(label)
-        .tooltip(TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY))
         .on_press(move |_, _, cx| {
             toggle.update(cx, |_, app_cx| {
                 app_cx.emit(TimeframeFavoriteToggledEvent(interval));

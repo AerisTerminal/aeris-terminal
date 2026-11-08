@@ -171,13 +171,19 @@ pub(super) const fn window_move_gesture_transition(
     }
 }
 
+/// The window-owned menus the header shows beside the pane's own controls.
+pub(super) struct HeaderMenus {
+    pub(super) indicator_templates: AnyElement,
+    pub(super) layout: AnyElement,
+}
+
 pub(super) fn terminal_header(
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
-    layout_menu: AnyElement,
+    menus: HeaderMenus,
 ) -> impl IntoElement + use<> {
     let theme = state.theme;
-    let controls = header_controls(app, state, layout_menu);
+    let controls = header_controls(app, state, menus);
     div()
         .w_full()
         .h(px(theme.dimensions.app_header_height))
@@ -380,7 +386,7 @@ fn workspace_caption_control(
         .flex()
         .items_center()
         .justify_center()
-        .text_color(gpui_color(colors.icon))
+        .text_color(gpui_color(colors.text_secondary))
         .hover(move |control| {
             if close {
                 control
@@ -510,7 +516,7 @@ fn header_connection_presentation(state: &HeaderState) -> ConnectionPresentation
 pub(super) fn header_controls(
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
-    layout_menu: AnyElement,
+    menus: HeaderMenus,
 ) -> impl IntoElement {
     // Give the global controls an explicit, non-shrinking track. GPUI cannot
     // infer a stable intrinsic width for this mixed Button/avatar group, which
@@ -554,19 +560,30 @@ pub(super) fn header_controls(
             },
             &state.theme,
         ))
+        .child(header_divider(&state.theme))
         .child(timeframe_strip)
+        .child(header_divider(&state.theme))
         .child(chart_type_selector(
             app.clone(),
             state.chart_type,
             state.controls.enabled(HeaderControls::CHART_TYPE),
             &state.theme,
         ))
-        .child(indicator_selector(
-            app.clone(),
-            state.indicator_input,
-            state.controls.enabled(HeaderControls::INDICATOR),
-            &state.theme,
-        ))
+        .child(header_divider(&state.theme))
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(indicator_selector(
+                    app.clone(),
+                    state.indicator_input,
+                    state.controls.enabled(HeaderControls::INDICATOR),
+                    &state.theme,
+                ))
+                .child(menus.indicator_templates),
+        )
+        .child(header_divider(&state.theme))
         .child(chart_history_control(
             app.clone(),
             ChartHistoryControl::Undo,
@@ -579,6 +596,7 @@ pub(super) fn header_controls(
             state.chart_history,
             &state.theme,
         ))
+        .child(header_divider(&state.theme))
         .child(super::bar_replay::bar_replay_header_control(
             app,
             state.bar_replay_phase,
@@ -600,9 +618,18 @@ pub(super) fn header_controls(
         .flex()
         .items_center()
         .child(market_controls)
-        .child(layout_menu)
+        .child(menus.layout)
         .child(accounts)
         .child(time_zone)
+}
+
+/// The vertical rule between the header's chart control groups.
+fn header_divider(theme: &AerisTheme) -> Div {
+    div()
+        .flex_none()
+        .w(px(theme.dimensions.border_width))
+        .h(px(HEADER_DIVIDER_HEIGHT))
+        .bg(gpui_color(theme.colors.border_secondary))
 }
 
 /// Attribution follows the provider's held session, including recovery.
@@ -1296,8 +1323,8 @@ pub(super) fn series_selector(
             .label(label)
             .caret(header_icon(HugeIcon::ChevronDown)),
         None => button
-            .w(design_rems(TIMEFRAME_CHEVRON_WIDTH))
-            .icon(header_icon(HugeIcon::ChevronDown).with_size(px(TIMEFRAME_CHEVRON_ICON)))
+            .w(design_rems(HEADER_CHEVRON_WIDTH))
+            .icon(header_icon(HugeIcon::ChevronDown).with_size(px(HEADER_CHEVRON_ICON)))
             .aria_label(tr!(shell::SELECT_CHART_TIMEFRAME)),
     };
     let button = button
@@ -1346,14 +1373,17 @@ pub(super) fn series_selector(
     )
 }
 
+const HEADER_DIVIDER_HEIGHT: f32 = 20.0;
+
 /// The favorites and the timeframe menu trigger sit side by side as one strip, so they keep a
 /// narrower inset than the header's other buttons.
 const TIMEFRAME_STRIP_PADDING_X: f32 = 8.0;
 
-/// The lone chevron is a narrow strip at the strip's height, with a glyph the size of the
-/// labelled trigger's caret, so it reads as part of the favorites rather than a header button.
-const TIMEFRAME_CHEVRON_WIDTH: f32 = 20.0;
-const TIMEFRAME_CHEVRON_ICON: f32 = 14.0;
+/// A lone header chevron is a narrow strip at the header button's height, with a glyph the size
+/// of a labelled trigger's caret, so it reads as part of the control beside it rather than a
+/// header button of its own.
+pub(super) const HEADER_CHEVRON_WIDTH: f32 = 20.0;
+pub(super) const HEADER_CHEVRON_ICON: f32 = 14.0;
 
 fn timeframe_strip(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> Div {
     div()

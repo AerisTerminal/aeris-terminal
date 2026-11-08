@@ -11,15 +11,9 @@ macro_rules! platform_color_registry {
             surface_secondary => "surface-secondary",
             /// The workspace backdrop that shows through the gaps between docked panels.
             surface_backdrop => "surface-backdrop",
-            /// Floating-layer fill. Aeris declares it; presets fall back to `surface-secondary`.
-            surface_popover => "surface-popover",
             border => "border",
             border_secondary => "border-secondary",
             border_subtle => "border-subtle",
-            /// Floating-layer outer edge. Aeris declares it; presets fall back to `border-secondary`.
-            border_popover => "border-popover",
-            /// Floating-layer inner edge. Aeris declares it; presets fall back to transparent.
-            border_popover_highlight => "border-popover-highlight",
             text_default => "text-default",
             text_secondary => "text-secondary",
             text_muted => "text-muted",
@@ -27,14 +21,9 @@ macro_rules! platform_color_registry {
             text_negative => "text-negative",
             text_danger => "text-danger",
             text_warning => "text-warning",
-            text_interactive => "text-interactive",
-            text_hover => "text-hover",
-            text_active => "text-active",
             hover_bg => "hover-bg",
             active_bg => "active-bg",
             disabled_bg => "disabled-bg",
-            icon => "icon",
-            icon_active => "icon-active",
             positive => "positive",
             positive_subtle => "positive-subtle",
             negative => "negative",

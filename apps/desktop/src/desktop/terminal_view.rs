@@ -528,10 +528,13 @@ impl TerminalApp {
         chrome_overlay_layer(
             active.read(cx),
             active,
-            accounts_panel::ConnectionsView {
-                terminal,
-                data: self.provider_login.connections(),
-                provider_login: &self.provider_login,
+            ChromeOverlayHost {
+                connections: accounts_panel::ConnectionsView {
+                    terminal,
+                    data: self.provider_login.connections(),
+                    provider_login: &self.provider_login,
+                },
+                indicator_templates: self.saved.indicator_templates(),
             },
             &self.theme,
             chart_chrome::CHART_CHROME_HEIGHT + title_bar_row_height,
@@ -584,15 +587,18 @@ impl TerminalApp {
             .chart
             .as_ref()
             .is_some_and(|chart| chart.read(cx).has_market_data());
-        let layout_menu = self.layout_menu_button(
-            terminal,
-            self.layout_tab_has_unsaved_changes(self.tabs.active_index(), cx),
-        );
-        terminal_header(
-            surface,
-            active_header_state(workspace, &self.theme, has_data, cx),
-            layout_menu,
-        )
+        let state = active_header_state(workspace, &self.theme, has_data, cx);
+        let menus = HeaderMenus {
+            indicator_templates: self.indicator_template_menu_button(
+                terminal,
+                state.controls.enabled(HeaderControls::INDICATOR),
+            ),
+            layout: self.layout_menu_button(
+                terminal,
+                self.layout_tab_has_unsaved_changes(self.tabs.active_index(), cx),
+            ),
+        };
+        terminal_header(surface, state, menus)
     }
 }
 
@@ -710,6 +716,14 @@ impl TerminalApp {
                 &self.pages.screener,
                 &self.theme,
             ))
+            .children(self.pages.screener.row_menu().map(|menu| {
+                market_screener_view::screener_row_menu_layer(
+                    terminal,
+                    menu,
+                    window.viewport_size(),
+                    &self.theme,
+                )
+            }))
             .children(fullscreen_hint_layer(
                 self.window.fullscreen_hint(),
                 &self.theme,
@@ -912,6 +926,7 @@ impl TerminalApp {
             self.trading_confirmation_layer(terminal),
             workspace_price_alert_dialog(self.tabs.active(), &self.theme, cx),
             self.layouts_dialog_layer(terminal, cx),
+            self.indicator_templates_dialog_layer(terminal),
             self.trading_report_layer(terminal, cx),
         ]
         .into_iter()
@@ -1219,7 +1234,7 @@ fn workspace_tab_page_content(
         .child(
             header_icon(page.icon())
                 .with_size(px(WORKSPACE_TAB_EXCHANGE_GLYPH))
-                .color(gpui_color(theme.colors.icon)),
+                .color(gpui_color(theme.colors.text_secondary)),
         )
         .child(
             div()
@@ -1621,6 +1636,7 @@ pub(super) fn terminal_root(
             chart_settings_templates: Vec::new(),
             watchlist_entries: Vec::new(),
             drawing_templates: Vec::new(),
+            indicator_templates: Vec::new(),
             saved_layouts: Vec::new(),
             workspace_notice: None,
             restore_outcome: local_state::RestoreOutcome::Restored,
@@ -1643,6 +1659,7 @@ pub(super) struct TerminalShellInit {
     pub(super) chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     pub(super) watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
     pub(super) drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+    pub(super) indicator_templates: Vec<WorkspaceIndicatorTemplateState>,
     /// A tab showing no layout of this library is given a new one.
     pub(super) saved_layouts: Vec<WorkspaceSavedLayoutState>,
     pub(super) workspace_notice: Option<String>,
@@ -1825,6 +1842,7 @@ pub(super) fn workspace_tabs_root(
             chart_settings_templates: restored.state.chart_settings_templates.clone(),
             watchlist_entries: restored.state.watchlist_entries.clone(),
             drawing_templates: restored.state.drawing_templates.clone(),
+            indicator_templates: restored.state.indicator_templates.clone(),
             saved_layouts: restored.state.saved_layouts.clone(),
             workspace_notice: restored.notice,
             restore_outcome: restored.restore_outcome,

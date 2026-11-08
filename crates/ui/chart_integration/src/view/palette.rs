@@ -1,11 +1,11 @@
-//! Chart colors projected from the platform theme. The default Aeris preset leaves Aeris
-//! Charts' own theme colors untouched; every other preset pins the chart's theme-following
-//! colors to its platform tokens, so the engine never knows presets exist.
+//! Chart colors projected from the platform theme. Every preset, Aeris included, pins the
+//! chart's theme-following colors to its platform tokens, so the engine never knows presets
+//! exist and the chart always matches the platform surfaces around it.
 
 use super::export::chart_color;
 use super::{ChartAppearanceSettings, chart_color_hex};
-use aeris_charts_engine::{AppearanceColor, ChartTheme, FinancialThemeColors};
-use aeris_design_system::{AerisTheme, ThemeColor, ThemeMode, ThemePreset};
+use aeris_charts_engine::{AppearanceColor, ChartTheme};
+use aeris_design_system::{AerisTheme, ThemeColor, ThemeMode};
 
 /// The Aeris Charts theme for a platform color mode.
 pub(super) const fn chart_theme(mode: ThemeMode) -> ChartTheme {
@@ -31,6 +31,8 @@ pub struct ChartAxisAppearance {
     pub border_color: AppearanceColor,
     /// The price-axis labels. Time-axis labels keep the chart text color.
     pub text_color: AppearanceColor,
+    /// Whether the price- and time-axis border lines and their tick marks are painted.
+    pub border_visible: bool,
 }
 
 impl Default for ChartAxisAppearance {
@@ -38,6 +40,7 @@ impl Default for ChartAxisAppearance {
         Self {
             border_color: AppearanceColor::Theme,
             text_color: AppearanceColor::Theme,
+            border_visible: true,
         }
     }
 }
@@ -55,24 +58,8 @@ pub struct ChartThemeDefaults {
     pub axis_border: String,
 }
 
-impl ChartThemeDefaults {
-    fn engine(theme: ChartTheme) -> Self {
-        let colors = FinancialThemeColors::for_theme(theme);
-        Self {
-            background: colors.background.to_owned(),
-            text: colors.text.to_owned(),
-            grid: colors.grid.to_owned(),
-            crosshair: colors.crosshair.to_owned(),
-            bullish: colors.bullish.to_owned(),
-            bearish: colors.bearish.to_owned(),
-            // Aeris Charts paints axis borders with its border token, the grid's default.
-            axis_border: colors.grid.to_owned(),
-        }
-    }
-}
-
-/// Chart colors of a non-default platform preset, derived from its tokens the way Aeris
-/// Charts derives its own theme from the default Aeris tokens.
+/// Chart colors of a platform preset, derived from its tokens the way Aeris Charts derives
+/// its own theme from the Aeris tokens.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PresetPalette {
     defaults: ChartThemeDefaults,
@@ -81,15 +68,11 @@ pub(super) struct PresetPalette {
 }
 
 impl PresetPalette {
-    /// `None` for the Aeris preset, whose chart colors Aeris Charts owns.
-    pub(super) fn for_platform(theme: &AerisTheme) -> Option<Self> {
-        if theme.preset == ThemePreset::Aeris {
-            return None;
-        }
+    pub(super) fn for_platform(theme: &AerisTheme) -> Self {
         let colors = theme.colors;
         let opaque = |color: ThemeColor| css(color.over(colors.surface));
         let border = opaque(colors.border);
-        Some(Self {
+        Self {
             defaults: ChartThemeDefaults {
                 background: css(colors.surface),
                 text: css(colors.text_default),
@@ -102,7 +85,7 @@ impl PresetPalette {
             },
             muted_text: opaque(colors.text_secondary),
             separator_hover: opaque(colors.hover_bg),
-        })
+        }
     }
 
     pub(super) const fn defaults(&self) -> &ChartThemeDefaults {
@@ -141,17 +124,6 @@ impl PresetPalette {
     }
 }
 
-/// The defaults theme-following fields paint: the preset palette's, else Aeris Charts' own.
-pub(super) fn theme_defaults(
-    palette: Option<&PresetPalette>,
-    theme: ChartTheme,
-) -> ChartThemeDefaults {
-    palette.map_or_else(
-        || ChartThemeDefaults::engine(theme),
-        |palette| palette.defaults().clone(),
-    )
-}
-
 fn css(color: ThemeColor) -> String {
     chart_color_hex(chart_color(color))
 }
@@ -159,19 +131,24 @@ fn css(color: ThemeColor) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_design_system::ThemePreset;
 
     #[test]
-    fn the_aeris_preset_keeps_the_engine_theme() {
-        assert_eq!(PresetPalette::for_platform(&AerisTheme::dark()), None);
-        let defaults = theme_defaults(None, ChartTheme::Light);
-        assert_eq!(defaults, ChartThemeDefaults::engine(ChartTheme::Light));
+    fn the_aeris_preset_paints_its_own_platform_tokens() {
+        let theme = AerisTheme::dark();
+        let palette = PresetPalette::for_platform(&theme);
+        let defaults = palette.defaults();
+        assert_eq!(defaults.background, css(theme.colors.surface));
+        assert_eq!(defaults.background, "#000000");
+        assert_eq!(defaults.bullish.to_ascii_lowercase(), "#0b9981");
+        assert_eq!(defaults.bearish.to_ascii_lowercase(), "#f23645");
         assert_eq!(defaults.axis_border, defaults.grid);
     }
 
     #[test]
     fn a_preset_pins_only_theme_following_colors_to_its_tokens() {
         let theme = AerisTheme::resolve(ThemePreset::Dracula, ThemeMode::Dark);
-        let palette = PresetPalette::for_platform(&theme).expect("Dracula is a preset");
+        let palette = PresetPalette::for_platform(&theme);
         assert_eq!(palette.defaults().background, css(theme.colors.surface));
         assert_eq!(palette.defaults().bullish, css(theme.colors.bullish));
         let custom = AppearanceColor::Custom("#123456".into());

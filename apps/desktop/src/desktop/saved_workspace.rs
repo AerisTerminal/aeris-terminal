@@ -1,6 +1,6 @@
 //! The durable workspace state the terminal keeps beside its open tabs: the saved-layout
 //! library with the working drawing set of every layout an open tab shows, the user's chart
-//! settings and drawing style templates, and the workspace writer with the snapshot it last
+//! settings, indicator and drawing style templates, and the workspace writer with the snapshot it last
 //! accepted. The terminal composes the open tabs and watchlist into a snapshot; this owner
 //! decides whether that snapshot, the library or the templates changed since the last save.
 
@@ -8,13 +8,15 @@ use std::collections::BTreeMap;
 
 use super::chart_drawings::LayoutDrawings;
 use super::layout_library::LayoutLibrary;
-use super::local_state::{MAXIMUM_CHART_SETTINGS_TEMPLATES, MAXIMUM_DRAWING_TEMPLATES};
+use super::local_state::{
+    MAXIMUM_CHART_SETTINGS_TEMPLATES, MAXIMUM_DRAWING_TEMPLATES, MAXIMUM_INDICATOR_TEMPLATES,
+};
 use super::workspace_persistence::{WorkspaceLayoutPersistence, WorkspaceSaveContent};
 use super::{
     WorkspaceChartSettingsTemplateState, WorkspaceChromeState, WorkspaceDrawingTemplateState,
     WorkspaceTabState, WorkspaceWatchlistEntryState,
 };
-use aeris_contracts::WorkspaceScreenerScanState;
+use aeris_contracts::{WorkspaceIndicatorTemplateState, WorkspaceScreenerScanState};
 
 /// A change the compared snapshot does not show, so it is saved even when the snapshot is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +24,7 @@ pub(super) enum UnsavedEdit {
     ChartSettingsTemplates,
     DrawingTemplates,
     Watchlist,
+    IndicatorTemplates,
 }
 
 impl UnsavedEdit {
@@ -30,6 +33,7 @@ impl UnsavedEdit {
             Self::ChartSettingsTemplates => 1,
             Self::DrawingTemplates => 2,
             Self::Watchlist => 4,
+            Self::IndicatorTemplates => 8,
         }
     }
 }
@@ -70,6 +74,8 @@ pub(super) struct SavedWorkspace {
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     /// User-named drawing style templates of every kind, shared by every chart.
     drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+    /// User-named indicator templates, shared by every chart.
+    indicator_templates: Vec<WorkspaceIndicatorTemplateState>,
 }
 
 impl SavedWorkspace {
@@ -82,6 +88,7 @@ impl SavedWorkspace {
         layout_drawings: BTreeMap<u64, LayoutDrawings>,
         chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
         drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+        indicator_templates: Vec<WorkspaceIndicatorTemplateState>,
     ) -> Self {
         Self {
             writer,
@@ -92,6 +99,7 @@ impl SavedWorkspace {
             layout_drawings,
             chart_settings_templates,
             drawing_templates,
+            indicator_templates,
         }
     }
 
@@ -159,6 +167,52 @@ impl SavedWorkspace {
         true
     }
 
+    pub(super) fn indicator_templates(&self) -> &[WorkspaceIndicatorTemplateState] {
+        &self.indicator_templates
+    }
+
+    /// Stores `template`, replacing the template with its name in any letter case and keeping
+    /// that template's star. Refused when the name is new and the templates are full.
+    pub(super) fn store_indicator_template(
+        &mut self,
+        mut template: WorkspaceIndicatorTemplateState,
+    ) -> bool {
+        if let Some(existing) = self
+            .indicator_templates
+            .iter_mut()
+            .find(|existing| existing.name.eq_ignore_ascii_case(&template.name))
+        {
+            template.favorite = existing.favorite;
+            *existing = template;
+        } else if self.indicator_templates.len() < MAXIMUM_INDICATOR_TEMPLATES {
+            self.indicator_templates.push(template);
+        } else {
+            return false;
+        }
+        self.mark_unsaved(UnsavedEdit::IndicatorTemplates);
+        true
+    }
+
+    /// Removes the template at `index`; reports whether there was one.
+    pub(super) fn remove_indicator_template(&mut self, index: usize) -> bool {
+        if index >= self.indicator_templates.len() {
+            return false;
+        }
+        self.indicator_templates.remove(index);
+        self.mark_unsaved(UnsavedEdit::IndicatorTemplates);
+        true
+    }
+
+    /// Stars or unstars the template at `index`; reports whether there was one.
+    pub(super) fn toggle_indicator_template_favorite(&mut self, index: usize) -> bool {
+        let Some(template) = self.indicator_templates.get_mut(index) else {
+            return false;
+        };
+        template.favorite = !template.favorite;
+        self.mark_unsaved(UnsavedEdit::IndicatorTemplates);
+        true
+    }
+
     pub(super) fn drawing_templates(&self) -> &[WorkspaceDrawingTemplateState] {
         &self.drawing_templates
     }
@@ -215,6 +269,7 @@ impl SavedWorkspace {
             saved_layouts: self.layouts.states(),
             chart_chrome: snapshot.chart_chrome.clone(),
             screener_scans: snapshot.screener_scans.clone(),
+            indicator_templates: self.indicator_templates.clone(),
         }) {
             return WorkspaceSave::Failed(error);
         }
@@ -245,6 +300,7 @@ mod tests {
             restored,
             LayoutLibrary::new(Vec::new()),
             BTreeMap::new(),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         )
@@ -301,6 +357,7 @@ mod tests {
             UnsavedEdit::ChartSettingsTemplates,
             UnsavedEdit::DrawingTemplates,
             UnsavedEdit::Watchlist,
+            UnsavedEdit::IndicatorTemplates,
         ] {
             saved.mark_unsaved(edit);
             assert!(
@@ -342,6 +399,36 @@ mod tests {
         assert!(saved.store_chart_settings_template(chart_template("day")));
         assert!(saved.remove_chart_settings_template(0));
         assert!(!saved.remove_chart_settings_template(MAXIMUM_CHART_SETTINGS_TEMPLATES));
+    }
+
+    #[test]
+    fn indicator_templates_replace_by_name_keep_their_star_and_stay_bounded() {
+        let template = |name: &str| WorkspaceIndicatorTemplateState {
+            name: name.to_string(),
+            ..WorkspaceIndicatorTemplateState::default()
+        };
+        let mut saved = workspace(snapshot(1));
+        saved.record_saved(snapshot(1), saved.layouts().revision());
+        assert!(saved.store_indicator_template(template("Scalping")));
+        assert!(!saved.is_saved(&snapshot(1), saved.layouts().revision()));
+        assert!(saved.toggle_indicator_template_favorite(0));
+        let replaced = WorkspaceIndicatorTemplateState {
+            studies: vec![aeris_contracts::WorkspaceChartStudyState::default()],
+            ..template("SCALPING")
+        };
+        assert!(saved.store_indicator_template(replaced));
+        assert_eq!(saved.indicator_templates().len(), 1, "names ignore case");
+        let stored = &saved.indicator_templates()[0];
+        assert_eq!(stored.name, "SCALPING");
+        assert_eq!(stored.studies.len(), 1);
+        assert!(stored.favorite, "saving over a template keeps its star");
+        for index in 1..MAXIMUM_INDICATOR_TEMPLATES {
+            assert!(saved.store_indicator_template(template(&format!("T{index}"))));
+        }
+        assert!(!saved.store_indicator_template(template("Overflow")));
+        assert!(saved.remove_indicator_template(0));
+        assert!(!saved.remove_indicator_template(MAXIMUM_INDICATOR_TEMPLATES));
+        assert!(!saved.toggle_indicator_template_favorite(MAXIMUM_INDICATOR_TEMPLATES));
     }
 
     #[test]

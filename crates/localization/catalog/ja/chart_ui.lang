@@ -145,6 +145,8 @@ legend_hide = 非表示
 legend_show = 表示
 legend_settings = 設定
 legend_remove = 削除
+legend_collapse_indicators = インジケーターの凡例を折りたたむ
+legend_expand_indicators = インジケーターの凡例を展開
 order_flow_cvd = CVD
 order_flow_delta = デルタ
 

@@ -841,14 +841,12 @@ When changing shared platform tokens such as colors, typography, radii, or inter
 4. do not reintroduce one-off duplicate platform tokens in landing/auth/account CSS.
 
 Theme presets are the `[data-theme="<id>"]` blocks in `platform.css`, compiled into `ThemePreset` and
-`AerisTheme::resolve`; the desktop opens in `AerisTheme::initial()` (High Contrast, dark), while Aeris
-stays the stylesheet's `:root` palette; `themes.md` is their palette source and the preset blocks must match it.
-The popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`) is
-Aeris-only: it lives solely in `:root:not([data-theme])` and `.dark:not([data-theme])`, the
-design-system build rejects it in any other block, and presets resolve it to the CSS fallbacks
-(`surface-secondary`, `border-secondary`, transparent). They are platform-only: `crates/ui/chart_integration` projects a non-default
-preset onto Aeris Charts through its existing appearance and options APIs, and Aeris Charts never
-receives a preset identity and keeps its own default theme.
+`AerisTheme::resolve`; the desktop opens in `AerisTheme::initial()` (Aeris, dark), the stylesheet's
+`:root` palette; `themes.md` is their palette source and every theme block must match it. Floating
+layers sit on `surface-secondary` with a `border-secondary` edge, while dropdown and context menus
+sit on the primary `surface` with its `border` edge. Presets are platform-only:
+`crates/ui/chart_integration` projects every preset, Aeris included, onto Aeris Charts through its
+existing appearance and options APIs, and Aeris Charts never receives a preset identity.
 `--surface-backdrop` is the workspace page backdrop: every theme block, presets included, carries
 its own value, and it paints only the page background behind the workspace panel gaps and the
 rounded panel corner rings (`terminal_view.rs`, `theme.rs`), never a component fill. The website

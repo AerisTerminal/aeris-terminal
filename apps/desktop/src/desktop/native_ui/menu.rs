@@ -17,7 +17,7 @@ use super::{
     platform_font_weight,
     popup_fit::fit_to_window,
     rem_scale::ROOT_REM_PX,
-    theme::{gpui_color, platform_border_width, popover_surface},
+    theme::{gpui_color, menu_surface, platform_border_width},
 };
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -212,7 +212,7 @@ const fn row_ink(theme: &AerisTheme, destructive: bool, enabled: bool) -> RowInk
         },
         (false, true) => RowInk {
             label: colors.text_default,
-            icon: colors.icon,
+            icon: colors.text_secondary,
             hover: None,
         },
         (false, false) => RowInk {
@@ -295,7 +295,7 @@ impl MenuRow {
             kind,
             scale: MenuScale::BASE,
             theme: *theme,
-            resting_fill: theme.colors.surface_popover,
+            resting_fill: theme.colors.surface,
             label: label.into(),
             leading_icon: None,
             leading: None,
@@ -309,7 +309,7 @@ impl MenuRow {
     }
 
     /// The surface the row sits on, which its hover and highlight fills are blended over.
-    /// Rows default to `surface-popover`.
+    /// Rows default to the menu's `surface`.
     pub(crate) fn resting_fill(mut self, fill: ThemeColor) -> Self {
         self.resting_fill = fill;
         self
@@ -435,7 +435,7 @@ impl MenuRow {
         self.behavior.checked.filter(|checked| *checked).map(|_| {
             Icon::new(UiIcon::CheckIcon.path())
                 .with_size(px(16.0))
-                .color(gpui_color(self.theme.colors.icon_active))
+                .color(gpui_color(self.theme.colors.text_default))
                 .into_any_element()
         })
     }
@@ -603,7 +603,7 @@ pub(crate) const ANCHOR_GAP: Pixels = px(4.0);
 
 /// `Aeris`'s one menu surface: dropdowns, context menus, flyouts and select menus.
 ///
-/// The panel owns the flat menu look (the `popover_surface` fill and edges,
+/// The panel owns the flat menu look (the `menu_surface` fill and edge,
 /// `--radius-compact`, no cast shadow), its placement, scrolling, entry motion and click containment. Its content is
 /// inset from the rounded border: GPUI clips to rectangles, and any inset of at least
 /// `r(1 - 1/√2)` keeps a row's rectangular highlight inside the panel's rounded corner, so rows
@@ -739,7 +739,7 @@ impl RenderOnce for MenuPanel {
             .when_some(self.scroll, |body, scroll| body.track_scroll(&scroll));
         let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
         let frame = div().id(self.id.clone()).occlude().flex().flex_col();
-        let panel = popover_surface(frame, &self.theme, radius)
+        let panel = menu_surface(frame, &self.theme, radius)
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .text_color(gpui_color(colors.text_default))
@@ -929,7 +929,7 @@ mod tests {
             assert_eq!(highlighted.icon_ink, c.danger_hover);
             assert_eq!(highlighted.hover_ink, None);
             assert_eq!(row_ink(&theme, false, false).label, c.text_muted);
-            assert_eq!(row_ink(&theme, false, true).icon, c.icon);
+            assert_eq!(row_ink(&theme, false, true).icon, c.text_secondary);
             assert_eq!(row_ink(&theme, false, true).hover, None);
         }
     }

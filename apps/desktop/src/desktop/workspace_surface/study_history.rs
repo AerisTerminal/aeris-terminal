@@ -98,7 +98,7 @@ impl WorkspaceSurface {
 
     /// Registers the studies again under fresh local identities, so a removal of the originals
     /// still in flight cannot take them, and returns them as they are now known.
-    fn reinstate_runtime_studies(
+    pub(super) fn reinstate_runtime_studies(
         &mut self,
         studies: Vec<WorkspaceChartStudyState>,
         cx: &mut Context<Self>,

@@ -208,7 +208,7 @@ fn button_appearance(
                 hover_fill: colors.hover_bg,
                 hover_foreground: colors.text_default,
                 selected_fill: colors.active_bg,
-                selected_foreground: colors.text_active,
+                selected_foreground: colors.text_default,
                 // Disabled keeps the resting surface and outline; only the foreground mutes.
                 disabled_fill: None,
                 disabled_foreground: colors.text_muted,
@@ -274,15 +274,15 @@ fn button_appearance(
     appearance
 }
 
-/// The interactive text tokens a text toggle uses, so its on state differs from its off state
-/// by the text and icon colour alone.
+/// A text toggle rests on secondary text and turns on to default text, so its on state differs
+/// from its off state by the text and icon colour alone.
 const fn text_toggle_appearance(
     mut appearance: ButtonAppearance,
     theme: &AerisTheme,
 ) -> ButtonAppearance {
     let colors = theme.colors;
-    appearance.foreground = colors.text_interactive;
-    appearance.selected_foreground = colors.text_active;
+    appearance.foreground = colors.text_secondary;
+    appearance.selected_foreground = colors.text_default;
     appearance
 }
 
@@ -936,25 +936,25 @@ mod tests {
             flags.set(ButtonFlags::TEXT_TOGGLE, true);
             let off = ResolvedStyle::new(&toggle, flags);
             assert_eq!(off.fill, None);
-            assert_eq!(off.foreground, c.text_interactive);
+            assert_eq!(off.foreground, c.text_secondary);
             flags.set(ButtonFlags::SELECTED, true);
             let on = ResolvedStyle::new(&toggle, flags);
             assert_eq!(on.fill, None, "the on state adds no background");
-            assert_eq!(on.foreground, c.text_active);
+            assert_eq!(on.foreground, c.text_default);
             // Hover adds the same fill in both states and keeps each state's text, so a click
             // under the pointer always shows the new state.
             assert_eq!(
                 off.hover,
                 Some(super::HoverStyle {
                     fill: c.hover_bg,
-                    foreground: c.text_interactive,
+                    foreground: c.text_secondary,
                 })
             );
             assert_eq!(
                 on.hover,
                 Some(super::HoverStyle {
                     fill: c.hover_bg,
-                    foreground: c.text_active,
+                    foreground: c.text_default,
                 })
             );
         }
@@ -1274,7 +1274,7 @@ mod tests {
             assert_eq!(resolved.foreground, c.text_muted);
             // A ghost toggle that is on rests on the selected fill.
             assert_eq!(ghost.selected_fill, c.active_bg);
-            assert_eq!(ghost.selected_foreground, c.text_active);
+            assert_eq!(ghost.selected_foreground, c.text_default);
         }
     }
 

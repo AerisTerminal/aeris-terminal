@@ -1,4 +1,5 @@
 use super::*;
+use aeris_localization::drawing;
 
 pub(super) const CHROME_MENU_WIDTH: f32 = 960.0;
 pub(super) const CHROME_MENU_MIN_WIDTH: f32 = 320.0;
@@ -44,7 +45,7 @@ pub(super) fn chrome_menu_extent(
 }
 
 /// The symbol and indicator menu body. The chrome overlay panel around it draws the primary
-/// `surface` with the popover edges, so the body has no fill of its own.
+/// `surface` inside the floating-layer `border-secondary` edge, so the body has no fill of its own.
 pub(super) fn chrome_menu_surface(
     colors: &aeris_design_system::ThemeColors,
     extent: ChromeMenuExtent,
@@ -159,6 +160,33 @@ pub(super) fn chrome_menu_close_button(
             app.close_chrome_overlay(window, app_cx);
         });
     })
+}
+
+/// A menu row's own star target, warning-colored while starred. The caller handles the press
+/// so starring neither activates the row nor closes the menu.
+pub(super) fn favorite_star_button(
+    id: impl Into<gpui::ElementId>,
+    favorite: bool,
+    theme: &AerisTheme,
+) -> Button {
+    let label = if favorite {
+        tr!(drawing::REMOVE_FROM_FAVORITES)
+    } else {
+        tr!(drawing::ADD_TO_FAVORITES)
+    };
+    let star = if favorite {
+        Icon::new(HugeIcon::StarFilled.path()).color(gpui_color(theme.colors.warning))
+    } else {
+        Icon::new(HugeIcon::Star.path())
+    };
+    Button::new(id, theme)
+        .shares_container_hover()
+        .variant(ButtonVariant::Ghost)
+        .button_size(ButtonSize::Sm)
+        .icon(star)
+        .aria_label(label)
+        .tooltip(TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .tab_stop(false)
 }
 
 /// The add action at the trailing edge of searchable menu rows, shared by the symbol and

@@ -507,7 +507,7 @@ fn select_trigger(
         .trigger()
         .full_width()
         .text_xs()
-        .caret(chevron(colors.icon))
+        .caret(chevron(colors.text_secondary))
         .aria_label(label.map_or_else(|| value.clone(), |label| format!("{label}: {value}").into()))
         .on_click(on_click);
     match label {
@@ -761,7 +761,7 @@ fn step_button(id: &'static str, plus: bool, theme: &AerisTheme) -> Button {
         .child(
             header_icon(if plus { HugeIcon::Add } else { HugeIcon::Minus })
                 .with_size(px(12.0))
-                .color(gpui_color(theme.colors.icon)),
+                .color(gpui_color(theme.colors.text_secondary)),
         )
 }
 

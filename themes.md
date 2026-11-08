@@ -1,6 +1,6 @@
 # Theme presets
 
-Every Theme Studio theme in one place: the default Aeris theme plus eight presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme. The one exception is the popover layer (`--surface-popover`, `--border-popover`, `--border-popover-highlight`), which only Aeris defines.
+Every Theme Studio theme in one place: the default Aeris theme plus seven presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme.
 
 The surfaces come in three layers: `--surface` for pages and panels, `--surface-secondary` for subtle fills, and `--surface-backdrop` for the page backdrop that shows through the gaps between workspace panels. The backdrop belongs to the native desktop platform: web pages use `--surface` as their page background and never read `--surface-backdrop`.
 
@@ -25,288 +25,27 @@ document.documentElement.classList.toggle('dark');      // light / dark
 
 Components pick the colours up through the variables, for example `background: var(--surface)`, `color: var(--text-default)` or `background: var(--primary)`.
 
-Floating layers (menus, dialogs, tooltips) should read the popover tokens with a fallback, so Aeris gets its popover fill and highlight edge while presets fall back to their secondary surface and border:
-
-```css
-.popover {
-  background-color: var(--surface-popover, var(--surface-secondary));
-  box-shadow:
-    inset 0 0 0 1px var(--border-popover-highlight, transparent),
-    0 0 0 1px var(--border-popover, var(--border-secondary));
-}
-```
+Floating layers (menus, dialogs, tooltips) sit on `--surface-secondary` with a 1px `--border-secondary` edge in every theme.
 
 ## Themes
 
 | Theme | `data-theme` | Light | Dark |
 | --- | --- | --- | --- |
-| [Aeris (default)](#1-aeris-default) | none | Light | Dark |
-| [High Contrast](#2-high-contrast) | `high-contrast` | Light | Pure black |
-| [Tokyo Night](#3-tokyo-night) | `tokyo-night` | Day | Night |
-| [Catppuccin](#4-catppuccin) | `catppuccin` | Latte | Mocha |
-| [GitHub](#5-github) | `github` | GitHub Light | GitHub Dark |
-| [One Dark / Light](#6-one-dark--light) | `one` | Atom One Light | One Dark Pro |
-| [Dracula](#7-dracula) | `dracula` | Alucard | Dracula |
-| [Solarized](#8-solarized) | `solarized` | Solarized Light | Solarized Dark |
-| [Gruvbox](#9-gruvbox) | `gruvbox` | Gruvbox Light | Gruvbox Dark (medium) |
+| [Aeris (default)](#1-aeris-default) | none | Light | Pure black |
+| [Tokyo Night](#2-tokyo-night) | `tokyo-night` | Day | Night |
+| [Catppuccin](#3-catppuccin) | `catppuccin` | Latte | Mocha |
+| [GitHub](#4-github) | `github` | GitHub Light | GitHub Dark |
+| [One Dark / Light](#5-one-dark--light) | `one` | Atom One Light | One Dark Pro |
+| [Dracula](#6-dracula) | `dracula` | Alucard | Dracula |
+| [Solarized](#7-solarized) | `solarized` | Solarized Light | Solarized Dark |
+| [Gruvbox](#8-gruvbox) | `gruvbox` | Gruvbox Light | Gruvbox Dark (medium) |
 
 ## 1. Aeris (default)
 
-The default theme. It applies whenever no `data-theme` is set. Dark mode uses a `#171717` surface, not pure black, to keep light text from blooming. Menus, dialogs and tooltips sit on `--surface-popover` with a 1px `--border-popover` outer edge and a 1px `--border-popover-highlight` inner edge. Those three tokens are scoped to `:not([data-theme])`, so presets never inherit them.
+The default theme. It applies whenever no `data-theme` is set. Dark mode uses a pure black `#000000` surface with a `#171717` secondary surface and solid `#2c2c2c` / `#404040` borders. Light mode uses a strong `--border-secondary` and hover / active fills. Menus, dialogs and tooltips sit on `--surface-secondary` with a `--border-secondary` edge, like every preset.
 
 ```css
 :root {
-  /* Surfaces */
-  --surface: #ffffff;
-  --surface-secondary: #fafafa;
-  --surface-backdrop: #e5e5e5;
-
-  /* Borders */
-  --border: #0a0a0a33;
-  --border-secondary: #0a0a0a1a;
-  --border-subtle: #0a0a0a12;
-  --border-width: 1px;
-
-  /* Text */
-  --text-default: #0a0a0a;
-  --text-secondary: #0a0a0a94;
-  --text-muted: #0a0a0a40;
-  --text-positive: var(--positive);
-  --text-negative: var(--negative);
-  --text-danger: var(--danger);
-  --text-warning: #ff6900;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #0a0a0a94;
-  --text-hover: #0a0a0a;
-  --text-active: #0a0a0a;
-
-  /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
-  --hover-bg: #0a0a0a0d;
-  --active-bg: #0a0a0a0d;
-  --disabled-bg: #0a0a0a0d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #0a0a0a94;
-  --icon-active: #0a0a0a;
-
-  /* Status — gains / losses, success / failure. Shared with the main platform. */
-  --positive: #089981;
-  --positive-subtle: #dcf5f0;
-  --negative: #f7525f;
-  --negative-subtle: #ffe2e2;
-  --warning: #ff6900;
-  --warning-subtle: #ffedd4;
-  --indigo: #615fff;
-  --indigo-subtle: #e0e7ff;
-  --purple: #ad46ff;
-  --purple-subtle: #f3e8ff;
-
-  /* Actions */
-  --primary: #006EDD;
-  --primary-hover: color-mix(in srgb, var(--primary) 80%, transparent);
-  --primary-active: #0050b2;
-  --primary-disabled: color-mix(in srgb, var(--primary) 30%, var(--surface));
-  --primary-disabled-foreground: color-mix(in srgb, var(--primary) 65%, var(--surface));
-  --primary-subtle: color-mix(in srgb, var(--primary) 12%, var(--surface));
-  --primary-foreground: #ffffff;
-  --danger: #f7525f;
-  --danger-hover: #e5404d;
-  --danger-disabled: #ffc9c9;
-  --danger-disabled-foreground: #ffa2a2;
-  --danger-ring: #ffc9c9;
-  --danger-foreground: #ffffff;
-  --warning-hover: #e05c00;
-  --warning-foreground: #ffffff;
-
-  /* Buttons — neutral default button */
-  --button-fill: #0a0a0af2;
-  --button-fill-hover: #0a0a0ada;
-  --button-fill-active: #0a0a0ac2;
-  --button-fill-foreground: #fafafaf2;
-  --button-fill-subtle: #0a0a0a14;
-
-  /* Trade — dedicated buy / sell buttons. Hover and press darken the fill; no shadows. */
-  --buy: var(--primary);
-  --buy-hover: var(--primary-hover);
-  --buy-active: var(--primary-active);
-  --buy-disabled: var(--primary-disabled);
-  --buy-disabled-foreground: var(--primary-disabled-foreground);
-  --buy-foreground: var(--primary-foreground);
-  --sell: #f7525f;
-  --sell-hover: #e5404d;
-  --sell-active: #c9303c;
-  --sell-disabled: #ffc9c9;
-  --sell-disabled-foreground: #ffa2a2;
-  --sell-foreground: #ffffff;
-  /* Tinted buy / sell for resting order types (limit, stop). */
-  --buy-subtle: color-mix(in srgb, var(--buy) 12%, var(--surface));
-  --buy-subtle-hover: color-mix(in srgb, var(--buy) 20%, var(--surface));
-  --buy-subtle-active: color-mix(in srgb, var(--buy) 28%, var(--surface));
-  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #000000);
-  --sell-subtle: color-mix(in srgb, var(--sell) 12%, var(--surface));
-  --sell-subtle-hover: color-mix(in srgb, var(--sell) 20%, var(--surface));
-  --sell-subtle-active: color-mix(in srgb, var(--sell) 28%, var(--surface));
-  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #000000);
-
-  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
-  --book-bid-fill: color-mix(in srgb, var(--primary) 40%, var(--surface));
-  --book-bid-text: var(--primary);
-  --book-ask-fill: color-mix(in srgb, #ff2f5e 40%, var(--surface));
-  --book-ask-text: color-mix(in srgb, #ff2f5e 75%, #000000);
-  --book-fill-text: #000000;
-
-  /* Focus */
-  --ring-primary: var(--primary);
-
-  /* Radius */
-  --radius-small: 4px;
-  --radius-compact: 6px;
-  --radius-default: 8px;
-  --radius-medium: 14px;
-  --radius-large: 999px;
-
-  /* Chart */
-  --bullish: var(--positive);
-  --bearish: var(--negative);
-  /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
-}
-
-.dark {
-  /* Surfaces */
-  --surface: #171717;
-  --surface-secondary: #fafafa0f;
-  --surface-backdrop: #2a2a2a;
-
-  /* Borders */
-  --border: #fafafa1a;
-  --border-secondary: #fafafa26;
-  --border-subtle: #fafafa12;
-  --border-width: 1px;
-
-  /* Text */
-  --text-default: #fafafa;
-  --text-secondary: #fafafa8c;
-  --text-muted: #fafafa40;
-  --text-positive: var(--positive);
-  --text-negative: var(--negative);
-  --text-danger: #ffa2a2;
-  --text-warning: #ffb86a;
-  --text-interactive: #fafafa8c;
-  --text-hover: #fafafa;
-  --text-active: #fafafa;
-
-  /* Interaction states */
-  --hover-bg: #fafafa13;
-  --active-bg: #fafafa26;
-  --disabled-bg: #fafafa0d;
-
-  /* Icons */
-  --icon: #fafafa8c;
-  --icon-active: #fafafa;
-
-  /* Status — gains / losses, success / failure. Shared with the main platform. */
-  --positive: #089981;
-  --positive-subtle: #193c37;
-  --negative: #f7525f;
-  --negative-subtle: #532b2e;
-  --warning: #ff6900;
-  --warning-subtle: #7e2a0c;
-  --indigo: #615fff;
-  --indigo-subtle: #312c85;
-  --purple: #ad46ff;
-  --purple-subtle: #59168b;
-
-  /* Actions */
-  --primary: #006EDD;
-  --primary-hover: color-mix(in srgb, var(--primary) 80%, transparent);
-  --primary-active: #0050b2;
-  --primary-disabled: color-mix(in srgb, var(--primary) 35%, var(--surface));
-  --primary-disabled-foreground: color-mix(in srgb, var(--primary) 65%, white);
-  --primary-subtle: color-mix(in srgb, var(--primary) 22%, var(--surface));
-  --primary-foreground: #ffffff;
-  --danger: #f7525f;
-  --danger-hover: #f96a75;
-  --danger-disabled: #6b3135;
-  --danger-disabled-foreground: #d0646c;
-  --danger-ring: #c10007;
-  --danger-foreground: #ffffff;
-  --warning-hover: #ff7b1f;
-  --warning-foreground: #ffffff;
-
-  /* Buttons — neutral default button */
-  --button-fill: #fafafad9;
-  --button-fill-hover: #fafafac3;
-  --button-fill-active: #fafafaad;
-  --button-fill-foreground: #0a0a0ad9;
-  --button-fill-subtle: #fafafa14;
-
-  /* Trade — dedicated buy / sell buttons. Hover and press brighten the fill; no shadows. */
-  --buy: var(--primary);
-  --buy-hover: var(--primary-hover);
-  --buy-active: var(--primary-active);
-  --buy-disabled: var(--primary-disabled);
-  --buy-disabled-foreground: var(--primary-disabled-foreground);
-  --buy-foreground: var(--primary-foreground);
-  --sell: #f7525f;
-  --sell-hover: #f96a75;
-  --sell-active: #fb838c;
-  --sell-disabled: #6b3135;
-  --sell-disabled-foreground: #ae8e90;
-  --sell-foreground: #ffffff;
-  /* Tinted buy / sell for resting order types (limit, stop). */
-  --buy-subtle: color-mix(in srgb, var(--buy) 18%, var(--surface));
-  --buy-subtle-hover: color-mix(in srgb, var(--buy) 26%, var(--surface));
-  --buy-subtle-active: color-mix(in srgb, var(--buy) 34%, var(--surface));
-  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #ffffff);
-  --sell-subtle: color-mix(in srgb, var(--sell) 18%, var(--surface));
-  --sell-subtle-hover: color-mix(in srgb, var(--sell) 26%, var(--surface));
-  --sell-subtle-active: color-mix(in srgb, var(--sell) 34%, var(--surface));
-  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #ffffff);
-
-  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
-  --book-bid-fill: color-mix(in srgb, var(--primary) 35%, var(--surface));
-  --book-bid-text: color-mix(in srgb, var(--primary) 80%, #ffffff);
-  --book-ask-fill: color-mix(in srgb, #ff2f5e 35%, var(--surface));
-  --book-ask-text: color-mix(in srgb, #ff2f5e 85%, #ffffff);
-  --book-fill-text: #ffffff;
-
-  /* Focus */
-  --ring-primary: var(--primary);
-
-  /* Chart */
-  --bullish: var(--positive);
-  --bearish: var(--negative);
-  /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
-}
-
-/* Aeris-only popover layer. Presets leave these out, so components should read them with a fallback:
-   var(--surface-popover, var(--surface-secondary)) and var(--border-popover, var(--border-secondary)). */
-:root:not([data-theme]) {
-  --surface-popover: #ffffff;
-  --border-popover: var(--border);
-  --border-popover-highlight: #ffffffcc;
-}
-
-.dark:not([data-theme]) {
-  --surface-popover: #262626;
-  --border-popover: #000000cc;
-  --border-popover-highlight: #ffffff1a;
-}
-```
-
-## 2. High Contrast
-
-The earlier Aeris palette, kept for people who prefer a pure black screen. Dark mode uses a `#000000` surface with a `#171717` secondary surface and solid `#2c2c2c` / `#404040` borders. Light mode matches Aeris with a stronger `--border-secondary` and hover / active fills. Like the other presets, it has no popover layer, so menus, dialogs and tooltips sit on `--surface-secondary` with a `--border-secondary` edge.
-
-```css
-[data-theme="high-contrast"] {
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
@@ -322,26 +61,15 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   --text-default: #0a0a0a;
   --text-secondary: #0a0a0a94;
   --text-muted: #0a0a0a40;
-  --text-positive: var(--positive);
-  --text-negative: var(--negative);
+  --text-positive: #0b9981;
+  --text-negative: #f23645;
   --text-danger: var(--danger);
   --text-warning: #ff6900;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #0a0a0a94;
-  --text-hover: #0a0a0a;
-  --text-active: #0a0a0a;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
   --hover-bg: #0a0a0a14;
   --active-bg: #0a0a0a1f;
   --disabled-bg: #0a0a0a0d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #0a0a0a94;
-  --icon-active: #0a0a0a;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
@@ -420,14 +148,14 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   --radius-large: 999px;
 
   /* Chart */
-  --bullish: var(--positive);
-  --bearish: var(--negative);
+  --bullish: #0b9981;
+  --bearish: #f23645;
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #0b9981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f23645 35%, transparent);
 }
 
-[data-theme="high-contrast"].dark {
+.dark {
   /* Surfaces */
   --surface: #000000;
   --surface-secondary: #171717;
@@ -440,25 +168,18 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   --border-width: 1px;
 
   /* Text */
-  --text-default: #ededed;
+  --text-default: #c1c1c1;
   --text-secondary: #fafafa8c;
   --text-muted: #fafafa59;
-  --text-positive: var(--positive);
-  --text-negative: var(--negative);
+  --text-positive: #0b9981;
+  --text-negative: #f23645;
   --text-danger: #ffa2a2;
   --text-warning: #ffb86a;
-  --text-interactive: #fafafa8c;
-  --text-hover: #ededed;
-  --text-active: #ededed;
 
   /* Interaction states */
   --hover-bg: #fafafa1f;
   --active-bg: #fafafa26;
   --disabled-bg: #fafafa0d;
-
-  /* Icons */
-  --icon: #fafafa8c;
-  --icon-active: #ededed;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
@@ -530,15 +251,15 @@ The earlier Aeris palette, kept for people who prefer a pure black screen. Dark 
   --ring-primary: var(--primary);
 
   /* Chart */
-  --bullish: var(--positive);
-  --bearish: var(--negative);
+  --bullish: #0b9981;
+  --bearish: #f23645;
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #0b9981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f23645 35%, transparent);
 }
 ```
 
-## 3. Tokyo Night
+## 2. Tokyo Night
 
 Day (light) and Night (dark).
 
@@ -563,22 +284,11 @@ Day (light) and Night (dark).
   --text-negative: var(--negative);
   --text-danger: var(--danger);
   --text-warning: #b15c00;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #3760bf94;
-  --text-hover: #3760bf;
-  --text-active: #3760bf;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
   --hover-bg: #3760bf14;
   --active-bg: #3760bf1f;
   --disabled-bg: #3760bf0d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #3760bf94;
-  --icon-active: #3760bf;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #587539;
@@ -684,18 +394,11 @@ Day (light) and Night (dark).
   --text-negative: var(--negative);
   --text-danger: #e68fad;
   --text-warning: #efa988;
-  --text-interactive: #c0caf59e;
-  --text-hover: #c0caf5;
-  --text-active: #c0caf5;
 
   /* Interaction states */
   --hover-bg: #c0caf51f;
   --active-bg: #c0caf529;
   --disabled-bg: #c0caf50d;
-
-  /* Icons */
-  --icon: #c0caf59e;
-  --icon-active: #c0caf5;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #9ece6a;
@@ -775,7 +478,7 @@ Day (light) and Night (dark).
 }
 ```
 
-## 4. Catppuccin
+## 3. Catppuccin
 
 Latte (light) and Mocha (dark).
 
@@ -800,22 +503,11 @@ Latte (light) and Mocha (dark).
   --text-negative: var(--negative);
   --text-danger: var(--danger);
   --text-warning: #ce4c01;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #4c4f6994;
-  --text-hover: #4c4f69;
-  --text-active: #4c4f69;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
   --hover-bg: #4c4f6914;
   --active-bg: #4c4f691f;
   --disabled-bg: #4c4f690d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #4c4f6994;
-  --icon-active: #4c4f69;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #2b6c1d;
@@ -921,18 +613,11 @@ Latte (light) and Mocha (dark).
   --text-negative: var(--negative);
   --text-danger: #e8a2bf;
   --text-warning: #efbca2;
-  --text-interactive: #cdd6f49e;
-  --text-hover: #cdd6f4;
-  --text-active: #cdd6f4;
 
   /* Interaction states */
   --hover-bg: #cdd6f41f;
   --active-bg: #cdd6f429;
   --disabled-bg: #cdd6f40d;
-
-  /* Icons */
-  --icon: #cdd6f49e;
-  --icon-active: #cdd6f4;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #a6e3a1;
@@ -1012,7 +697,7 @@ Latte (light) and Mocha (dark).
 }
 ```
 
-## 5. GitHub
+## 4. GitHub
 
 GitHub Light (light) and GitHub Dark (dark).
 
@@ -1037,22 +722,11 @@ GitHub Light (light) and GitHub Dark (dark).
   --text-negative: var(--negative);
   --text-danger: var(--danger);
   --text-warning: #9a6700;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #1f232894;
-  --text-hover: #1f2328;
-  --text-active: #1f2328;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
   --hover-bg: #1f232814;
   --active-bg: #1f23281f;
   --disabled-bg: #1f23280d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #1f232894;
-  --icon-active: #1f2328;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #1a7f37;
@@ -1158,18 +832,11 @@ GitHub Light (light) and GitHub Dark (dark).
   --text-negative: var(--negative);
   --text-danger: #f3807c;
   --text-warning: #d7ae56;
-  --text-interactive: #e6edf39e;
-  --text-hover: #e6edf3;
-  --text-active: #e6edf3;
 
   /* Interaction states */
   --hover-bg: #e6edf31f;
   --active-bg: #e6edf329;
   --disabled-bg: #e6edf30d;
-
-  /* Icons */
-  --icon: #e6edf39e;
-  --icon-active: #e6edf3;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #3fb950;
@@ -1249,7 +916,7 @@ GitHub Light (light) and GitHub Dark (dark).
 }
 ```
 
-## 6. One Dark / Light
+## 5. One Dark / Light
 
 Atom One Light (light) and One Dark Pro (dark).
 
@@ -1274,22 +941,11 @@ Atom One Light (light) and One Dark Pro (dark).
   --text-negative: var(--negative);
   --text-danger: var(--danger);
   --text-warning: #9d6c01;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #383a4294;
-  --text-hover: #383a42;
-  --text-active: #383a42;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
   --hover-bg: #383a4214;
   --active-bg: #383a421f;
   --disabled-bg: #383a420d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #383a4294;
-  --icon-active: #383a42;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #50a14f;
@@ -1395,18 +1051,11 @@ Atom One Light (light) and One Dark Pro (dark).
   --text-negative: var(--negative);
   --text-danger: #d0818b;
   --text-warning: #c8a07c;
-  --text-interactive: #abb2bf9e;
-  --text-hover: #abb2bf;
-  --text-active: #abb2bf;
 
   /* Interaction states */
   --hover-bg: #abb2bf1f;
   --active-bg: #abb2bf29;
   --disabled-bg: #abb2bf0d;
-
-  /* Icons */
-  --icon: #abb2bf9e;
-  --icon-active: #abb2bf;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #98c379;
@@ -1486,7 +1135,7 @@ Atom One Light (light) and One Dark Pro (dark).
 }
 ```
 
-## 7. Dracula
+## 6. Dracula
 
 Alucard (light) and Dracula (dark).
 
@@ -1511,22 +1160,11 @@ Alucard (light) and Dracula (dark).
   --text-negative: var(--negative);
   --text-danger: var(--danger);
   --text-warning: #a34d14;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #1f1f1f94;
-  --text-hover: #1f1f1f;
-  --text-active: #1f1f1f;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
   --hover-bg: #1f1f1f14;
   --active-bg: #1f1f1f1f;
   --disabled-bg: #1f1f1f0d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #1f1f1f94;
-  --icon-active: #1f1f1f;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #14710a;
@@ -1632,18 +1270,11 @@ Alucard (light) and Dracula (dark).
   --text-negative: var(--negative);
   --text-danger: #fd8684;
   --text-warning: #fdc88e;
-  --text-interactive: #f8f8f29e;
-  --text-hover: #f8f8f2;
-  --text-active: #f8f8f2;
 
   /* Interaction states */
   --hover-bg: #f8f8f21f;
   --active-bg: #f8f8f229;
   --disabled-bg: #f8f8f20d;
-
-  /* Icons */
-  --icon: #f8f8f29e;
-  --icon-active: #f8f8f2;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #50fa7b;
@@ -1723,7 +1354,7 @@ Alucard (light) and Dracula (dark).
 }
 ```
 
-## 8. Solarized
+## 7. Solarized
 
 Solarized Light (light) and Solarized Dark (dark).
 
@@ -1748,22 +1379,11 @@ Solarized Light (light) and Solarized Dark (dark).
   --text-negative: var(--negative);
   --text-danger: var(--danger);
   --text-warning: #cb4b16;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #586e7594;
-  --text-hover: #586e75;
-  --text-active: #586e75;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
   --hover-bg: #586e7514;
   --active-bg: #586e751f;
   --disabled-bg: #586e750d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #586e7594;
-  --icon-active: #586e75;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #859900;
@@ -1869,18 +1489,11 @@ Solarized Light (light) and Solarized Dark (dark).
   --text-negative: var(--negative);
   --text-danger: #c65351;
   --text-warning: #bd6039;
-  --text-interactive: #93a1a19e;
-  --text-hover: #93a1a1;
-  --text-active: #93a1a1;
 
   /* Interaction states */
   --hover-bg: #93a1a11f;
   --active-bg: #93a1a129;
   --disabled-bg: #93a1a10d;
-
-  /* Icons */
-  --icon: #93a1a19e;
-  --icon-active: #93a1a1;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #859900;
@@ -1960,7 +1573,7 @@ Solarized Light (light) and Solarized Dark (dark).
 }
 ```
 
-## 9. Gruvbox
+## 8. Gruvbox
 
 Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
 
@@ -1985,22 +1598,11 @@ Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
   --text-negative: var(--negative);
   --text-danger: var(--danger);
   --text-warning: #af3a03;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #3c383694;
-  --text-hover: #3c3836;
-  --text-active: #3c3836;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
   --hover-bg: #3c383614;
   --active-bg: #3c38361f;
   --disabled-bg: #3c38360d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #3c383694;
-  --icon-active: #3c3836;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #79740e;
@@ -2106,18 +1708,11 @@ Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
   --text-negative: var(--negative);
   --text-danger: #f6755a;
   --text-warning: #f9973f;
-  --text-interactive: #ebdbb29e;
-  --text-hover: #ebdbb2;
-  --text-active: #ebdbb2;
 
   /* Interaction states */
   --hover-bg: #ebdbb21f;
   --active-bg: #ebdbb229;
   --disabled-bg: #ebdbb20d;
-
-  /* Icons */
-  --icon: #ebdbb29e;
-  --icon-active: #ebdbb2;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #b8bb26;

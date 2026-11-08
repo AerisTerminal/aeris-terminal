@@ -211,7 +211,7 @@ fn panel_title_bar(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> impl I
                 .child(
                     header_icon(HugeIcon::User)
                         .with_size(px(16.0))
-                        .color(gpui_color(colors.icon)),
+                        .color(gpui_color(colors.text_secondary)),
                 )
                 .child(
                     div()

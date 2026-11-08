@@ -59,6 +59,29 @@ impl LegendItem {
     }
 }
 
+/// The legend rows the options let through, and the price pane's collapse toggle.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct LegendPresentation {
+    pub(super) rows: Vec<LegendRow>,
+    /// Shown while the price pane has indicator rows to fold away or bring back.
+    pub(super) indicator_toggle: Option<IndicatorLegendToggle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum IndicatorLegendToggle {
+    Expanded,
+    Collapsed,
+}
+
+/// Host views the legend positions; the host owns their state and behavior.
+#[derive(Clone, Copy, Default)]
+pub(super) struct LegendHostContent<'a> {
+    /// Under the symbol row of the price pane.
+    pub(super) accessory: Option<&'a AnyView>,
+    /// Ahead of the symbol row's title.
+    pub(super) symbol_mark: Option<&'a AnyView>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct LegendRow {
     pub(super) item: LegendItem,
@@ -93,6 +116,9 @@ pub(super) struct LegendPalette {
     pub(super) muted: Rgba,
     pub(super) hover: Rgba,
     pub(super) danger: Rgba,
+    pub(super) surface: Rgba,
+    pub(super) border: Rgba,
+    pub(super) border_width: f32,
 }
 
 const LEGEND_VIEW_ICON: &str = "aeris/icons/ui/view.svg";
@@ -100,6 +126,7 @@ const LEGEND_VIEW_OFF_ICON: &str = "aeris/icons/ui/view-off.svg";
 const LEGEND_SETTINGS_ICON: &str = "aeris/icons/ui/settings.svg";
 const LEGEND_REMOVE_ICON: &str = "aeris/icons/ui/close.svg";
 const LEGEND_LOADING_ICON: &str = "aeris/icons/ui/loader.svg";
+const LEGEND_COLLAPSE_ICON: &str = "aeris/icons/ui/chevron-down.svg";
 /// One rotation of the legend's loading glyph.
 const LEGEND_LOADING_PERIOD: Duration = Duration::from_millis(700);
 
@@ -117,25 +144,29 @@ pub(super) fn legend_palette(theme: &AerisTheme) -> LegendPalette {
         muted: gpui_theme_color(colors.text_secondary),
         hover: gpui_theme_color(colors.hover_bg),
         danger: gpui_theme_color(colors.danger),
+        surface: gpui_theme_color(colors.surface),
+        border: gpui_theme_color(colors.border_secondary),
+        border_width: theme.dimensions.border_width,
     }
 }
 
 pub(super) fn chart_legend_layers(
     chart: &Entity<AerisChartView>,
-    rows: &[LegendRow],
+    presentation: &LegendPresentation,
     panes: &[LegendPaneLayout],
     theme: &AerisTheme,
     loading: bool,
-    accessory: Option<&AnyView>,
+    host: LegendHostContent<'_>,
 ) -> Vec<AnyElement> {
     let palette = legend_palette(theme);
+    let rows = &presentation.rows;
     panes
         .iter()
         .copied()
         .enumerate()
         .filter_map(|(pane_index, pane)| {
             let pane_rows = rows.iter().filter(|row| row.pane == pane_index);
-            let mut accessory = accessory.filter(|_| pane_index == 0).cloned();
+            let mut accessory = host.accessory.filter(|_| pane_index == 0).cloned();
             let follows_asset = rows
                 .iter()
                 .any(|row| row.pane == pane_index && row.item == LegendItem::Asset);
@@ -161,12 +192,22 @@ pub(super) fn chart_legend_layers(
             }
             for row in pane_rows {
                 row_count += 1;
-                layer = layer.child(chart_legend_row(chart, row, palette, loading));
+                layer = layer.child(chart_legend_row(
+                    chart,
+                    row,
+                    palette,
+                    loading,
+                    host.symbol_mark,
+                ));
                 if row.item == LegendItem::Asset
                     && let Some(accessory) = accessory.take()
                 {
                     layer = layer.child(legend_accessory(chart, accessory));
                 }
+            }
+            if let Some(toggle) = presentation.indicator_toggle.filter(|_| pane_index == 0) {
+                row_count += 1;
+                layer = layer.child(indicator_legend_toggle(chart, toggle, palette));
             }
             (row_count > 0).then(|| layer.into_any_element())
         })
@@ -192,11 +233,69 @@ fn legend_accessory(chart: &Entity<AerisChartView>, accessory: AnyView) -> AnyEl
         .into_any_element()
 }
 
+/// The price pane's fold control under its last legend row: the chevron points up to fold the
+/// indicator rows away and down to bring them back. Folding never hides an indicator.
+fn indicator_legend_toggle(
+    chart: &Entity<AerisChartView>,
+    toggle: IndicatorLegendToggle,
+    palette: LegendPalette,
+) -> AnyElement {
+    let action_chart = chart.clone();
+    let collapsed = toggle == IndicatorLegendToggle::Collapsed;
+    let label = if collapsed {
+        tr!(chart_ui::LEGEND_EXPAND_INDICATORS)
+    } else {
+        tr!(chart_ui::LEGEND_COLLAPSE_INDICATORS)
+    };
+    let glyph = svg()
+        .path(LEGEND_COLLAPSE_ICON)
+        .size(px(12.0))
+        .flex_none()
+        .text_color(palette.text);
+    let glyph = if collapsed {
+        glyph
+    } else {
+        glyph.with_transformation(Transformation::rotate(percentage(0.5)))
+    };
+    div()
+        .id("chart_legend_indicator_toggle")
+        .flex_none()
+        .mx_1()
+        .my_1()
+        .w(px(24.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(f32::from(
+            aeris_design_system::RadiusToken::Sm.logical_pixels(),
+        )))
+        .border(px(palette.border_width))
+        .border_color(palette.border)
+        .bg(palette.surface)
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(label)
+        .hover(|style| style.bg(palette.hover))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            action_chart.update(cx, |chart, chart_cx| {
+                if chart.toggle_indicator_legend_collapsed() {
+                    chart_cx.notify();
+                }
+            });
+            cx.stop_propagation();
+        })
+        .child(glyph)
+        .into_any_element()
+}
+
 fn chart_legend_row(
     chart: &Entity<AerisChartView>,
     row: &LegendRow,
     palette: LegendPalette,
     loading: bool,
+    symbol_mark: Option<&AnyView>,
 ) -> AnyElement {
     let group: SharedString = format!("chart-legend-row-{}", row.item.key()).into();
     let controls = legend_row_controls(chart, row, palette, &group);
@@ -247,6 +346,18 @@ fn chart_legend_row(
         .cursor(CursorStyle::Arrow)
         .hover(|style| style.bg(palette.hover))
         .children((loading && row.item == LegendItem::Asset).then(|| legend_loading_glyph(palette)))
+        .children(
+            symbol_mark
+                .filter(|_| row.item == LegendItem::Asset)
+                .map(|mark| {
+                    div()
+                        .flex_none()
+                        .h(px(LEGEND_ROW_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .child(mark.clone())
+                }),
+        )
         .child(
             div()
                 .flex_none()

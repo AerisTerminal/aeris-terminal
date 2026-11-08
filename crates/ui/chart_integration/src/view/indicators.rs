@@ -111,6 +111,22 @@ impl AerisChartView {
         restored
     }
 
+    /// Adds indicator instances as one trader's edit in the chart's undo history, such as the
+    /// indicators of a saved template. Volume already on the chart takes the given settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first native indicator creation error; the indicators added before it stay.
+    pub fn add_indicator_states(
+        &mut self,
+        states: &[ChartIndicatorState],
+    ) -> Result<(), ChartIndicatorError> {
+        self.engine.begin_history_group();
+        let added = self.recreate_indicators(states);
+        self.engine.end_history_group();
+        added
+    }
+
     fn recreate_indicators(
         &mut self,
         states: &[ChartIndicatorState],
@@ -183,8 +199,15 @@ impl AerisChartView {
         cleared |= self.remove_depth_heatmap();
         cleared
     }
+
+    #[cfg(test)]
     pub(super) fn legend_rows(&self) -> Vec<LegendRow> {
-        self.legend_rows_at(
+        self.legend_presentation().rows
+    }
+
+    /// The legend at the crosshair, or at the latest bar without one.
+    pub(super) fn legend_presentation(&self) -> LegendPresentation {
+        self.legend_presentation_at(
             self.engine
                 .crosshair
                 .map(|(x, _)| self.engine.time_scale.coordinate_to_index(x)),
@@ -193,6 +216,10 @@ impl AerisChartView {
 
     /// Legend rows reading out `logical_index`, or the latest bar when `None`.
     pub(super) fn legend_rows_at(&self, logical_index: Option<i64>) -> Vec<LegendRow> {
+        self.legend_presentation_at(logical_index).rows
+    }
+
+    fn legend_presentation_at(&self, logical_index: Option<i64>) -> LegendPresentation {
         let trailing = self
             .order_flow_state
             .iter()
@@ -273,8 +300,11 @@ impl AerisChartView {
             let title = tr!(chart_ui::LEGEND_DEPTH_HEATMAP);
             insert_price_pane_legend_row(&mut rows, item, title, heatmap.visible, false);
         }
-        apply_legend_options(&mut rows, self.legend_options);
-        rows
+        let indicator_toggle = apply_legend_options(&mut rows, self.legend_options);
+        LegendPresentation {
+            rows,
+            indicator_toggle,
+        }
     }
     fn volume_profile_visible(&self) -> Option<bool> {
         self.volume_profile
@@ -682,7 +712,13 @@ fn legend_row(
     })
 }
 
-fn apply_legend_options(rows: &mut Vec<LegendRow>, options: ChartLegendOptions) {
+/// Filters the rows by the legend options and reports the price pane's collapse toggle, which
+/// shows while that pane has indicator rows to fold. Other panes keep their rows: each one is
+/// the only label its pane has.
+fn apply_legend_options(
+    rows: &mut Vec<LegendRow>,
+    options: ChartLegendOptions,
+) -> Option<IndicatorLegendToggle> {
     rows.retain(|row| {
         if row.item == LegendItem::Asset {
             options.symbol
@@ -690,7 +726,19 @@ fn apply_legend_options(rows: &mut Vec<LegendRow>, options: ChartLegendOptions) 
             options.indicators
         }
     });
-    for row in rows {
+    let folds_price_pane = |row: &LegendRow| row.pane == 0 && row.item != LegendItem::Asset;
+    let toggle = rows
+        .iter()
+        .any(folds_price_pane)
+        .then_some(if options.indicators_collapsed {
+            IndicatorLegendToggle::Collapsed
+        } else {
+            IndicatorLegendToggle::Expanded
+        });
+    if options.indicators_collapsed {
+        rows.retain(|row| !folds_price_pane(row));
+    }
+    for row in rows.iter_mut() {
         let values_shown = if row.item == LegendItem::Asset {
             options.symbol_values
         } else {
@@ -700,6 +748,7 @@ fn apply_legend_options(rows: &mut Vec<LegendRow>, options: ChartLegendOptions) 
             row.values.clear();
         }
     }
+    toggle
 }
 
 /// The volume profile and big trades are engine-owned price-pane primitives, not series, so the

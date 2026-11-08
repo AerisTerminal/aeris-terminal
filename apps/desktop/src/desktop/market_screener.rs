@@ -454,25 +454,58 @@ pub(super) enum ScreenerStatus {
     Ready,
 }
 
+/// What the terminal does with a row's market once it resolves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectionPurpose {
+    /// Opens it on the active chart, on `interval` when one is given.
+    Open { interval: Option<ChartInterval> },
+    /// Lists it in the watchlist without leaving the page.
+    Watchlist,
+}
+
 struct PendingScreenerSelection {
     generation: u64,
     display_symbol: String,
-    interval: Option<ChartInterval>,
+    purpose: SelectionPurpose,
 }
 
-/// A row's market, resolved for the terminal to open.
-pub(super) struct OpenedMarket {
-    pub(super) instrument: InstallProviderInstrument,
-    /// The timeframe the chart opens on; `None` keeps the chart's own.
-    pub(super) interval: Option<ChartInterval>,
+/// A row's market, resolved for the terminal.
+pub(super) enum ResolvedMarket {
+    Open {
+        instrument: InstallProviderInstrument,
+        /// The timeframe the chart opens on; `None` keeps the chart's own.
+        interval: Option<ChartInterval>,
+    },
+    Watchlist {
+        instrument: InstallProviderInstrument,
+        display_symbol: String,
+    },
+}
+
+/// The market a right-clicked row names, kept while its menu is open.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ScreenerRowMenu {
+    /// Window position of the right click, where the menu opens.
+    pub(super) anchor: gpui::Point<Pixels>,
+    pub(super) symbol: String,
+    pub(super) exchange: String,
+    pub(super) display_symbol: String,
+}
+
+/// How adding a row's market to the watchlist ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WatchlistAddOutcome {
+    Added,
+    AlreadyListed,
+    Full,
 }
 
 /// What one poll of the screen consumer changed.
 #[derive(Default)]
 pub(super) struct ScreenerPoll {
     pub(super) changed: bool,
-    /// A screener row resolved to an installed instrument that the terminal should open.
-    pub(super) opened: Option<OpenedMarket>,
+    /// A row's market resolved to an installed instrument for the terminal to act on.
+    pub(super) resolved: Option<ResolvedMarket>,
 }
 
 pub(super) struct MarketScreener {
@@ -486,6 +519,9 @@ pub(super) struct MarketScreener {
     next_refresh_at: Option<Instant>,
     pending_selection: Option<PendingScreenerSelection>,
     message: Option<String>,
+    /// The latest row added to the watchlist from this page, until another row is acted on.
+    watchlist_outcome: Option<(String, WatchlistAddOutcome)>,
+    row_menu: Option<ScreenerRowMenu>,
     sort: ScreenerSort,
     category: ScreenerCategory,
     query: String,
@@ -515,6 +551,8 @@ impl Default for MarketScreener {
             next_refresh_at: None,
             pending_selection: None,
             message: None,
+            watchlist_outcome: None,
+            row_menu: None,
             sort: ScreenerSort::default(),
             category: ScreenerCategory::default(),
             query: String::new(),
@@ -572,10 +610,57 @@ impl MarketScreener {
         self.message.as_deref()
     }
 
-    pub(super) fn opening_symbol(&self) -> Option<&str> {
-        self.pending_selection
-            .as_ref()
-            .map(|selection| selection.display_symbol.as_str())
+    /// The footer line for a row selection still waiting on its market.
+    pub(super) fn pending_selection_status(&self) -> Option<String> {
+        let selection = self.pending_selection.as_ref()?;
+        let symbol = selection.display_symbol.as_str();
+        Some(match selection.purpose {
+            SelectionPurpose::Open { .. } => tr!(panels::SCREENER_OPENING, symbol = symbol),
+            SelectionPurpose::Watchlist => {
+                tr!(panels::SCREENER_ADDING_TO_WATCHLIST, symbol = symbol)
+            }
+        })
+    }
+
+    /// The footer line for the latest row added to the watchlist, with whether it calls
+    /// for attention.
+    pub(super) fn watchlist_status(&self) -> Option<(String, bool)> {
+        let (symbol, outcome) = self.watchlist_outcome.as_ref()?;
+        let symbol = symbol.as_str();
+        Some(match outcome {
+            WatchlistAddOutcome::Added => (
+                tr!(panels::SCREENER_ADDED_TO_WATCHLIST, symbol = symbol),
+                false,
+            ),
+            WatchlistAddOutcome::AlreadyListed => (
+                tr!(panels::SCREENER_ALREADY_IN_WATCHLIST, symbol = symbol),
+                false,
+            ),
+            WatchlistAddOutcome::Full => {
+                (tr!(panels::SCREENER_WATCHLIST_FULL, symbol = symbol), true)
+            }
+        })
+    }
+
+    pub(super) const fn row_menu(&self) -> Option<&ScreenerRowMenu> {
+        self.row_menu.as_ref()
+    }
+
+    pub(super) fn open_row_menu(&mut self, menu: ScreenerRowMenu) {
+        self.row_menu = Some(menu);
+    }
+
+    /// Closes the row menu, reporting whether it was open.
+    pub(super) fn close_row_menu(&mut self) -> bool {
+        self.row_menu.take().is_some()
+    }
+
+    pub(super) fn record_watchlist_outcome(
+        &mut self,
+        display_symbol: String,
+        outcome: WatchlistAddOutcome,
+    ) {
+        self.watchlist_outcome = Some((display_symbol, outcome));
     }
 
     pub(super) const fn tab(&self) -> ScreenerTab {
@@ -588,6 +673,7 @@ impl MarketScreener {
         if self.tab != tab {
             self.tab = tab;
             self.scans.close_menu();
+            self.row_menu = None;
             self.next_refresh_at = None;
         }
     }
@@ -643,6 +729,7 @@ impl MarketScreener {
 
     pub(super) fn stop_refreshing(&mut self) {
         self.refresh_task = None;
+        self.row_menu = None;
     }
 
     /// Refreshes the shown list when its cadence allows it. Returns whether the presentation
@@ -692,6 +779,34 @@ impl MarketScreener {
         display_symbol: &str,
         interval: Option<ChartInterval>,
     ) {
+        self.request_selection(
+            symbol,
+            exchange,
+            display_symbol,
+            SelectionPurpose::Open { interval },
+        );
+    }
+
+    /// Requests the instrument behind a presented row; the terminal lists it in the
+    /// watchlist once resolved, and the page stays shown.
+    pub(super) fn add_to_watchlist(&mut self, symbol: &str, exchange: &str, display_symbol: &str) {
+        self.request_selection(
+            symbol,
+            exchange,
+            display_symbol,
+            SelectionPurpose::Watchlist,
+        );
+    }
+
+    fn request_selection(
+        &mut self,
+        symbol: &str,
+        exchange: &str,
+        display_symbol: &str,
+        purpose: SelectionPurpose,
+    ) {
+        self.row_menu = None;
+        self.watchlist_outcome = None;
         let (Some(worker), Some(provider)) = (&self.worker, self.provider) else {
             return;
         };
@@ -708,13 +823,23 @@ impl MarketScreener {
             entitlement_id: provider.selection_entitlement_id.to_string(),
         };
         if worker.try_select_provider(request).is_err() {
-            self.message = Some(tr!(panels::SCREENER_OPEN_FAILED, symbol = display_symbol));
+            self.message = Some(match purpose {
+                SelectionPurpose::Open { .. } => {
+                    tr!(panels::SCREENER_OPEN_FAILED, symbol = display_symbol)
+                }
+                SelectionPurpose::Watchlist => {
+                    tr!(
+                        panels::SCREENER_WATCHLIST_ADD_FAILED,
+                        symbol = display_symbol
+                    )
+                }
+            });
             return;
         }
         self.pending_selection = Some(PendingScreenerSelection {
             generation,
             display_symbol: display_symbol.to_string(),
-            interval,
+            purpose,
         });
         self.message = None;
     }
@@ -728,6 +853,7 @@ impl MarketScreener {
         self.refresh_task = None;
         self.pending_screen = None;
         self.pending_selection = None;
+        self.row_menu = None;
         self.scans.lose_pending();
         self.worker.take()?.begin_retirement()
     }
@@ -772,7 +898,7 @@ impl MarketScreener {
                     aeris_desktop::market_worker::RuntimeProjection { event, .. },
                 ) => {
                     if let Some(event) = project_provider_catalog_event(event.value) {
-                        outcome.changed |= self.apply_catalog_event(event, &mut outcome.opened);
+                        outcome.changed |= self.apply_catalog_event(event, &mut outcome.resolved);
                     }
                 }
                 PaneProjectionEvent::LocalFailure {
@@ -802,7 +928,7 @@ impl MarketScreener {
     fn apply_catalog_event(
         &mut self,
         event: ProviderCatalogEvent,
-        opened: &mut Option<OpenedMarket>,
+        resolved: &mut Option<ResolvedMarket>,
     ) -> bool {
         match event {
             ProviderCatalogEvent::ScreenCompleted(screen)
@@ -838,14 +964,18 @@ impl MarketScreener {
                 .as_ref()
                 .is_some_and(|selection| selection.generation == command_generation) =>
             {
-                let interval = self
-                    .pending_selection
-                    .take()
-                    .and_then(|selection| selection.interval);
-                *opened = Some(OpenedMarket {
-                    instrument,
-                    interval,
-                });
+                if let Some(selection) = self.pending_selection.take() {
+                    *resolved = Some(match selection.purpose {
+                        SelectionPurpose::Open { interval } => ResolvedMarket::Open {
+                            instrument,
+                            interval,
+                        },
+                        SelectionPurpose::Watchlist => ResolvedMarket::Watchlist {
+                            instrument,
+                            display_symbol: selection.display_symbol,
+                        },
+                    });
+                }
                 true
             }
             ProviderCatalogEvent::CommandRejected { rejection, .. }
@@ -854,11 +984,15 @@ impl MarketScreener {
                 }) =>
             {
                 let selection = self.pending_selection.take();
-                self.message = selection.map(|selection| {
-                    tr!(
+                self.message = selection.map(|selection| match selection.purpose {
+                    SelectionPurpose::Open { .. } => tr!(
                         panels::SCREENER_SELECTION_UNAVAILABLE,
                         symbol = selection.display_symbol
-                    )
+                    ),
+                    SelectionPurpose::Watchlist => tr!(
+                        panels::SCREENER_WATCHLIST_ADD_FAILED,
+                        symbol = selection.display_symbol
+                    ),
                 });
                 true
             }
@@ -1037,5 +1171,75 @@ mod tests {
     #[test]
     fn capture_time_is_wall_clock_utc() {
         assert_eq!(capture_time_label(1_700_000_000_000), "22:13:20 UTC");
+    }
+
+    #[test]
+    fn a_row_added_to_the_watchlist_resolves_without_opening_and_reports_its_outcome() {
+        let mut screener = MarketScreener::default();
+        screener.open_row_menu(ScreenerRowMenu {
+            anchor: gpui::point(px(10.0), px(20.0)),
+            symbol: "BTC".to_string(),
+            exchange: "PERP".to_string(),
+            display_symbol: "BTC-PERP".to_string(),
+        });
+        screener.record_watchlist_outcome("ETH-PERP".to_string(), WatchlistAddOutcome::Added);
+        // Without a screen consumer nothing is requested, but acting on the row still closes
+        // its menu and retires the previous row's outcome.
+        screener.add_to_watchlist("BTC", "PERP", "BTC-PERP");
+        assert_eq!(screener.row_menu(), None);
+        assert_eq!(screener.watchlist_status(), None);
+        assert_eq!(screener.pending_selection_status(), None);
+
+        screener.pending_selection = Some(PendingScreenerSelection {
+            generation: 7,
+            display_symbol: "BTC-PERP".to_string(),
+            purpose: SelectionPurpose::Watchlist,
+        });
+        assert_eq!(
+            screener.pending_selection_status(),
+            Some(tr!(
+                panels::SCREENER_ADDING_TO_WATCHLIST,
+                symbol = "BTC-PERP"
+            ))
+        );
+        let instrument = InstallProviderInstrument {
+            instrument_id: "btc".to_string(),
+            ..InstallProviderInstrument::default()
+        };
+        let mut resolved = None;
+        assert!(!screener.apply_catalog_event(
+            ProviderCatalogEvent::SelectionInstalled {
+                command_generation: 6,
+                instrument: instrument.clone(),
+            },
+            &mut resolved,
+        ));
+        assert!(resolved.is_none(), "a stale selection resolves nothing");
+        assert!(screener.apply_catalog_event(
+            ProviderCatalogEvent::SelectionInstalled {
+                command_generation: 7,
+                instrument: instrument.clone(),
+            },
+            &mut resolved,
+        ));
+        let Some(ResolvedMarket::Watchlist {
+            instrument: listed,
+            display_symbol,
+        }) = resolved
+        else {
+            panic!("a watchlist selection resolves for the watchlist, not the chart");
+        };
+        assert_eq!(listed, instrument);
+        assert_eq!(display_symbol, "BTC-PERP");
+        assert_eq!(screener.pending_selection_status(), None);
+
+        screener.record_watchlist_outcome(display_symbol, WatchlistAddOutcome::Full);
+        assert_eq!(
+            screener.watchlist_status(),
+            Some((
+                tr!(panels::SCREENER_WATCHLIST_FULL, symbol = "BTC-PERP"),
+                true
+            ))
+        );
     }
 }

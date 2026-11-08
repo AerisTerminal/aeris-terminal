@@ -217,6 +217,13 @@ impl TerminalApp {
             },
         )
         .detach();
+        cx.subscribe(
+            surface,
+            |app, _surface, event: &IndicatorFavoriteToggledEvent, cx| {
+                app.toggle_indicator_favorite(event.0, cx);
+            },
+        )
+        .detach();
         surface.update(cx, |surface, cx| {
             surface.emit_initial_price_alert_restore_notice(cx);
             surface.emit_initial_chart_failure_notice(cx);
@@ -307,6 +314,7 @@ impl TerminalApp {
                 layout_drawings,
                 init.chart_settings_templates,
                 init.drawing_templates,
+                init.indicator_templates,
             ),
             chart_menus: ChartMenus::default(),
             overlays: OverlayStack::new(command_palette_input),
@@ -606,18 +614,25 @@ impl TerminalApp {
         }
     }
 
-    fn add_watchlist_instrument(
+    pub(super) fn add_watchlist_instrument(
         &mut self,
         instrument: InstallProviderInstrument,
         cx: &mut Context<Self>,
-    ) {
+    ) -> market_screener::WatchlistAddOutcome {
+        if self
+            .market_watch
+            .lists(&instrument.provider, &instrument.instrument_id)
+        {
+            return market_screener::WatchlistAddOutcome::AlreadyListed;
+        }
         if !self.market_watch.add(instrument) {
-            return;
+            return market_screener::WatchlistAddOutcome::Full;
         }
         self.sync_market_summaries(cx);
         self.saved.mark_unsaved(UnsavedEdit::Watchlist);
         self.record_layout_change(cx);
         cx.notify();
+        market_screener::WatchlistAddOutcome::Added
     }
 
     pub(super) fn remove_watchlist_instrument(
@@ -797,7 +812,7 @@ impl TerminalApp {
     /// tab, or the active pane's chrome or chart) rather than on a text field, so workspace
     /// shortcuts may act.
     pub(super) fn workspace_keyboard_focused(&self, window: &Window, cx: &App) -> bool {
-        if self.pages.layouts.covers_workspace() {
+        if self.pages.layouts.covers_workspace() || self.pages.indicator_templates.modal_open() {
             return false;
         }
         self.window.chrome_focus().is_focused(window)
@@ -1469,6 +1484,26 @@ impl TerminalApp {
         true
     }
 
+    /// Applies axis actions through the chart's axis appearance.
+    /// Returns whether `action` was an axis action.
+    fn apply_axis_settings_action(
+        surface: &Entity<WorkspaceSurface>,
+        action: ChartSettingsAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if action != ChartSettingsAction::ToggleAxisBorders {
+            return false;
+        }
+        let Some(mut axis) = surface.read(cx).chart_axis_appearance(cx) else {
+            return true;
+        };
+        axis.border_visible = !axis.border_visible;
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_axis_appearance(&axis, surface_cx);
+        });
+        true
+    }
+
     /// Applies legend actions through the chart, which owns the legend.
     /// Returns whether `action` was a legend action.
     fn apply_legend_settings_action(
@@ -1480,6 +1515,7 @@ impl TerminalApp {
             action,
             ChartSettingsAction::ToggleSymbolLegend
                 | ChartSettingsAction::ToggleSymbolLegendValues
+                | ChartSettingsAction::ToggleSymbolLegendLogo
                 | ChartSettingsAction::ToggleIndicatorLegend
                 | ChartSettingsAction::ToggleIndicatorLegendValues
         ) {
@@ -1493,6 +1529,7 @@ impl TerminalApp {
             ChartSettingsAction::ToggleSymbolLegendValues => {
                 legend.symbol_values = !legend.symbol_values;
             }
+            ChartSettingsAction::ToggleSymbolLegendLogo => legend.symbol_logo = !legend.symbol_logo,
             ChartSettingsAction::ToggleIndicatorLegend => legend.indicators = !legend.indicators,
             ChartSettingsAction::ToggleIndicatorLegendValues => {
                 legend.indicator_values = !legend.indicator_values;
@@ -1559,6 +1596,7 @@ impl TerminalApp {
             return;
         }
         if Self::apply_trading_visibility_action(&surface, action, cx)
+            || Self::apply_axis_settings_action(&surface, action, cx)
             || Self::apply_legend_settings_action(&surface, action, cx)
             || Self::apply_order_flow_settings_action(&surface, action, cx)
         {
@@ -1579,10 +1617,12 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleExtendOrderLinesLeft
             | ChartSettingsAction::ToggleSymbolLegend
             | ChartSettingsAction::ToggleSymbolLegendValues
+            | ChartSettingsAction::ToggleSymbolLegendLogo
             | ChartSettingsAction::ToggleIndicatorLegend
             | ChartSettingsAction::ToggleIndicatorLegendValues
             | ChartSettingsAction::ToggleChartTradeButtons
-            | ChartSettingsAction::ToggleFillGlow => unreachable!(),
+            | ChartSettingsAction::ToggleFillGlow
+            | ChartSettingsAction::ToggleAxisBorders => unreachable!(),
             ChartSettingsAction::CrosshairWidth(width) => {
                 appearance.crosshair_width = width.clamp(1, 4);
             }
@@ -1621,10 +1661,12 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleExtendOrderLinesLeft
             | ChartSettingsAction::ToggleSymbolLegend
             | ChartSettingsAction::ToggleSymbolLegendValues
+            | ChartSettingsAction::ToggleSymbolLegendLogo
             | ChartSettingsAction::ToggleIndicatorLegend
             | ChartSettingsAction::ToggleIndicatorLegendValues
             | ChartSettingsAction::ToggleChartTradeButtons
-            | ChartSettingsAction::ToggleFillGlow => unreachable!(),
+            | ChartSettingsAction::ToggleFillGlow
+            | ChartSettingsAction::ToggleAxisBorders => unreachable!(),
         });
         cx.notify();
     }
@@ -2680,6 +2722,29 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Stars or unstars an indicator, named by its favorite identifier, for every pane.
+    pub(super) fn toggle_indicator_favorite(
+        &mut self,
+        identifier: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.chrome
+            .preferences_mut()
+            .indicator_favorites
+            .toggle(identifier);
+        let favorites = self.chrome.preferences().indicator_favorites;
+        for workspace in self.tabs.iter() {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, surface_cx| {
+                    surface.chart_chrome.indicator_favorites = favorites;
+                    surface_cx.notify();
+                });
+            }
+        }
+        self.save_chart_chrome_preferences(cx);
+        cx.notify();
+    }
+
     pub(super) fn resize_workspace_split(
         &mut self,
         workspace_id: u64,
@@ -3597,8 +3662,8 @@ impl TerminalApp {
         true
     }
 
-    /// Closes the open profile menu, page menu, notifications popover or drawing tool menu,
-    /// reporting whether one was open for Escape to close.
+    /// Closes the open profile menu, page menu, notifications popover, drawing tool menu or
+    /// indicator template menu, reporting whether one was open for Escape to close.
     fn close_shell_menu_on_escape(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
         if self.overlays.is_open(OverlayKind::PlatformMenu) {
             self.close_platform_menu(window, cx);
@@ -3608,6 +3673,8 @@ impl TerminalApp {
             self.close_notifications(cx);
         } else if self.chrome.tool_menu().is_open() {
             self.close_drawing_tool_menu(cx);
+        } else if self.pages.indicator_templates.menu_open() {
+            self.close_indicator_template_menu(cx);
         } else {
             return false;
         }
@@ -3638,6 +3705,14 @@ impl TerminalApp {
         if self.pages.layouts.modal_open() {
             if event.keystroke.key.eq_ignore_ascii_case("escape") {
                 self.cancel_layout_modal(window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.pages.indicator_templates.modal_open() {
+            if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                self.cancel_indicator_template_dialog(window, cx);
                 window.prevent_default();
                 cx.stop_propagation();
             }

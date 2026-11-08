@@ -1,11 +1,18 @@
 //! Chart pane host and chart-surface notices.
 
+use super::assets::ExchangeLogo;
+use super::terminal_chrome::exchange_mark;
 use super::toaster::chart_status_card;
 use super::{
     AerisChartView, AerisTheme, AnyElement, ChartNoticePlacement, ChartState, ChartSurfaceNotice,
-    Div, Entity, HugeIcon, InteractiveElement, IntoElement, Loader, ParentElement, Role,
-    StatefulInteractiveElement, Styled, div, gpui_color, px,
+    Context, Div, Entity, HugeIcon, InteractiveElement, IntoElement, Loader, ParentElement, Render,
+    Role, StatefulInteractiveElement, Styled, WeakEntity, Window, WorkspaceSurface, div,
+    gpui_color, px,
 };
+use gpui::{AnyView, AppContext};
+
+/// Matches the exchange logo the watchlist draws beside each symbol.
+const LEGEND_SYMBOL_MARK_SIZE: f32 = 16.0;
 
 pub(super) struct MarketWorkspaceState<'a> {
     pub(super) pane_id: u64,
@@ -93,7 +100,7 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AerisTheme) -> AnyElement {
     if notice.label == ChartState::Loading.label() {
         let spinner = Loader::from_path("chart_notice_loader", HugeIcon::Loader.path())
             .with_size(px(40.0))
-            .color(gpui_color(theme.colors.icon));
+            .color(gpui_color(theme.colors.text_secondary));
         return opaque_status_overlay("chart_loading_status", notice, Some(spinner), theme)
             .into_any_element();
     }
@@ -118,4 +125,45 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AerisTheme) -> AnyElement {
         .justify_center()
         .child(card)
         .into_any_element()
+}
+
+/// The exchange logo the chart shows ahead of its symbol legend title, drawn from the
+/// surface's current instrument each frame so a symbol change on another provider follows.
+pub(super) struct ChartLegendSymbolMark {
+    surface: WeakEntity<WorkspaceSurface>,
+}
+
+/// Puts the surface's exchange logo ahead of the symbol legend of a chart the surface now
+/// shows; the chart's legend options decide whether it is drawn.
+pub(super) fn attach_chart_legend_symbol_mark(
+    chart: &Entity<AerisChartView>,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    let surface = cx.weak_entity();
+    let mark = AnyView::from(cx.new(|_| ChartLegendSymbolMark { surface }));
+    chart.update(cx, |chart, _| chart.set_legend_symbol_mark(Some(mark)));
+}
+
+impl Render for ChartLegendSymbolMark {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(surface) = self.surface.upgrade() else {
+            return div().into_any_element();
+        };
+        let state = surface.read(cx);
+        let logo = state
+            .product
+            .as_ref()
+            .and_then(|_| super::provider_presentation(state.provider))
+            .and_then(|descriptor| ExchangeLogo::for_logo_key(descriptor.logo_key));
+        match logo {
+            Some(logo) => exchange_mark(
+                logo,
+                px(LEGEND_SYMBOL_MARK_SIZE),
+                false,
+                &state.theme.colors,
+            )
+            .into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
 }

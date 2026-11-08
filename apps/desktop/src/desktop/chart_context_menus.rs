@@ -3,15 +3,13 @@ use super::*;
 use aeris_localization::{chart_menu, tr};
 use drawing_context_toolbar::{choice_glyph, width_glyph};
 
-pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
-    scaled_overlay_height(rows, separators, MenuScale::BASE)
+pub(super) fn overlay_height(rows: f32) -> f32 {
+    scaled_overlay_height(rows, MenuScale::BASE)
 }
 
-pub(super) fn scaled_overlay_height(rows: f32, separators: f32, scale: MenuScale) -> f32 {
+pub(super) fn scaled_overlay_height(rows: f32, scale: MenuScale) -> f32 {
     // The `MenuPanel` inset plus a 1px border allowance on each side, around the rows.
-    2.0 * (scale.len(MENU_PANEL_INSET) + 1.0)
-        + scale.len(CHART_CONTEXT_MENU_ROW_HEIGHT) * rows
-        + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
+    2.0 * (scale.len(MENU_PANEL_INSET) + 1.0) + scale.len(CHART_CONTEXT_MENU_ROW_HEIGHT) * rows
 }
 
 /// Top of a panel's first row below its origin: the 1px border allowance and the scaled inset.
@@ -24,9 +22,8 @@ pub(super) fn clamp_overlay_origin(
     viewport: gpui::Size<Pixels>,
     width: f32,
     rows: f32,
-    separators: f32,
 ) -> gpui::Point<Pixels> {
-    clamp_scaled_overlay_origin(origin, viewport, width, rows, separators, MenuScale::BASE)
+    clamp_scaled_overlay_origin(origin, viewport, width, rows, MenuScale::BASE)
 }
 
 fn clamp_scaled_overlay_origin(
@@ -34,11 +31,10 @@ fn clamp_scaled_overlay_origin(
     viewport: gpui::Size<Pixels>,
     width: f32,
     rows: f32,
-    separators: f32,
     scale: MenuScale,
 ) -> gpui::Point<Pixels> {
     let width = scale.px(width);
-    let height = px(scaled_overlay_height(rows, separators, scale));
+    let height = px(scaled_overlay_height(rows, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
     let max_x = (viewport.width - width - margin).max(margin);
     let max_y = (viewport.height - height - margin).max(margin);
@@ -57,15 +53,12 @@ pub(super) fn clamp_chart_context_menu_origin(
         viewport,
         CHART_CONTEXT_MENU_WIDTH,
         CHART_CONTEXT_MENU_ROWS,
-        CHART_CONTEXT_MENU_SEPARATORS,
     )
 }
 
 const CHART_CONTEXT_MENU_ROWS: f32 = 10.0;
-const CHART_CONTEXT_MENU_SEPARATORS: f32 = 5.0;
-/// The "Capture chart" row: third row, below one separator.
+/// The "Capture chart" row: the third row.
 const CAPTURE_CHART_ROW: f32 = 2.0;
-const CAPTURE_CHART_ROW_SEPARATORS_BEFORE: f32 = 1.0;
 
 /// The capture chart submenu opens beside its row, to the right when it fits and otherwise
 /// to the left, and stays inside the window.
@@ -75,7 +68,7 @@ pub(super) fn clamp_chart_capture_flyout_origin(
 ) -> gpui::Point<Pixels> {
     let scale = MenuScale::BASE;
     let width = scale.px(CHART_CAPTURE_FLYOUT_WIDTH);
-    let height = px(scaled_overlay_height(2.0, 0.0, scale));
+    let height = px(scaled_overlay_height(2.0, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
     let gap = px(PRICE_AXIS_FLYOUT_GAP);
     let right_x = root.x + scale.px(CHART_CONTEXT_MENU_WIDTH) + gap;
@@ -86,9 +79,7 @@ pub(super) fn clamp_chart_capture_flyout_origin(
     } else {
         left_x
     };
-    let row_y = root.y
-        + scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT) * CAPTURE_CHART_ROW
-        + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CAPTURE_CHART_ROW_SEPARATORS_BEFORE);
+    let row_y = root.y + scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT) * CAPTURE_CHART_ROW;
     point(
         x.max(margin),
         row_y
@@ -106,7 +97,7 @@ pub(super) fn clamp_price_axis_menu_origin(
 ) -> gpui::Point<Pixels> {
     let scale = MenuScale::BASE;
     let width = scale.px(CHART_CONTEXT_MENU_WIDTH);
-    let height = px(scaled_overlay_height(7.0, 2.0, scale));
+    let height = px(scaled_overlay_height(7.0, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
     let gap = px(PRICE_AXIS_MENU_GAP);
     let preferred_x = if axis_on_left {
@@ -127,15 +118,13 @@ pub(super) fn clamp_price_axis_flyout_origin(
     viewport: gpui::Size<Pixels>,
     flyout: PriceAxisMenuFlyout,
 ) -> gpui::Point<Pixels> {
-    let (rows, separators, row, separators_before) = flyout.geometry();
+    let (rows, row) = flyout.geometry();
     let scale = MenuScale::BASE;
     let width = scale.px(PRICE_AXIS_FLYOUT_WIDTH);
-    let height = px(scaled_overlay_height(rows, separators, scale));
+    let height = px(scaled_overlay_height(rows, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
     let gap = px(PRICE_AXIS_FLYOUT_GAP);
-    let parent_y = root.y
-        + scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT) * row
-        + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before);
+    let parent_y = root.y + scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT) * row;
     let left_x = root.x - width - gap;
     let right_x = root.x + scale.px(CHART_CONTEXT_MENU_WIDTH) + gap;
     let max_x = (viewport.width - width - margin).max(margin);
@@ -169,11 +158,7 @@ pub(super) fn chart_context_menu_layer(
         origin,
         size(
             scale.px(CHART_CONTEXT_MENU_WIDTH),
-            px(scaled_overlay_height(
-                CHART_CONTEXT_MENU_ROWS,
-                CHART_CONTEXT_MENU_SEPARATORS,
-                scale,
-            )),
+            px(scaled_overlay_height(CHART_CONTEXT_MENU_ROWS, scale)),
         ),
     );
     let animation_origin = PopupAnimationOrigin::from_trigger(menu.position, popup_bounds);
@@ -209,15 +194,12 @@ pub(super) fn chart_context_menu_layer(
             flyout_origin,
             size(
                 scale.px(CHART_CAPTURE_FLYOUT_WIDTH),
-                px(scaled_overlay_height(2.0, 0.0, scale)),
+                px(scaled_overlay_height(2.0, scale)),
             ),
         );
         let row_height = scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT);
-        let parent_y = origin.y
-            + first_row_offset(scale)
-            + row_height * CAPTURE_CHART_ROW
-            + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CAPTURE_CHART_ROW_SEPARATORS_BEFORE)
-            + row_height / 2.0;
+        let parent_y =
+            origin.y + first_row_offset(scale) + row_height * CAPTURE_CHART_ROW + row_height / 2.0;
         let parent_x = if flyout_origin.x < origin.x {
             origin.x
         } else {
@@ -255,10 +237,7 @@ pub(super) fn chart_context_menu_panel(
     let mut panel = MenuPanel::new("chart_context_menu", MenuPlacement::At(origin), theme)
         .scale(scale)
         .width(scale.px(CHART_CONTEXT_MENU_WIDTH));
-    for (index, item) in chart_context_menu_items(state).into_iter().enumerate() {
-        if matches!(index, 1 | 3 | 6 | 8 | 9) {
-            panel = panel.separator();
-        }
+    for item in chart_context_menu_items(state) {
         panel = panel.child(chart_context_menu_item(
             terminal,
             item,
@@ -504,7 +483,7 @@ pub(super) fn price_axis_menu_layer(
         origin,
         size(
             scale.px(CHART_CONTEXT_MENU_WIDTH),
-            px(scaled_overlay_height(7.0, 2.0, scale)),
+            px(scaled_overlay_height(7.0, scale)),
         ),
     );
     let root_animation_origin = PopupAnimationOrigin::from_trigger(menu.position, root_bounds);
@@ -536,20 +515,16 @@ pub(super) fn price_axis_menu_layer(
         );
     if menu.flyout != PriceAxisMenuFlyout::None {
         let flyout_origin = clamp_price_axis_flyout_origin(origin, viewport, menu.flyout);
-        let (rows, separators, row, separators_before) = menu.flyout.geometry();
+        let (rows, row) = menu.flyout.geometry();
         let flyout_bounds = Bounds::new(
             flyout_origin,
             size(
                 scale.px(PRICE_AXIS_FLYOUT_WIDTH),
-                px(scaled_overlay_height(rows, separators, scale)),
+                px(scaled_overlay_height(rows, scale)),
             ),
         );
         let row_height = scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT);
-        let parent_y = origin.y
-            + first_row_offset(scale)
-            + row_height * row
-            + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before)
-            + row_height / 2.0;
+        let parent_y = origin.y + first_row_offset(scale) + row_height * row + row_height / 2.0;
         let parent_x = if flyout_origin.x < origin.x {
             origin.x
         } else {
@@ -576,13 +551,7 @@ pub(super) fn price_axis_menu_panel(
     let mut panel = MenuPanel::new("price_axis_menu", MenuPlacement::At(origin), theme)
         .scale(scale)
         .width(scale.px(CHART_CONTEXT_MENU_WIDTH));
-    for (index, row) in price_axis_root_rows(menu.flyout, state)
-        .into_iter()
-        .enumerate()
-    {
-        if matches!(index, 2 | 4) {
-            panel = panel.separator();
-        }
+    for row in price_axis_root_rows(menu.flyout, state) {
         panel = panel.child(price_axis_menu_item(terminal, menu, row, theme, scale));
     }
     panel
@@ -606,13 +575,7 @@ pub(super) fn price_axis_flyout_panel(
     .scale(scale)
     .width(scale.px(PRICE_AXIS_FLYOUT_WIDTH))
     .max_height((viewport.height - px(2.0 * OVERLAY_EDGE_MARGIN)).max(px(0.0)));
-    for (index, row) in price_axis_flyout_rows(menu.flyout, state)
-        .into_iter()
-        .enumerate()
-    {
-        if menu.flyout == PriceAxisMenuFlyout::Labels && index == 9 {
-            panel = panel.separator();
-        }
+    for row in price_axis_flyout_rows(menu.flyout, state) {
         panel = panel.child(price_axis_menu_item(terminal, menu, row, theme, scale));
     }
     panel
@@ -875,7 +838,7 @@ pub(super) fn price_axis_menu_item(
             header_icon(HugeIcon::ArrowRight)
                 .with_size(icon_size)
                 .color(gpui_color(if enabled {
-                    colors.icon
+                    colors.text_secondary
                 } else {
                     colors.text_muted
                 })),
@@ -1099,7 +1062,7 @@ fn chart_settings_title_bar(
                 .child(
                     header_icon(HugeIcon::Settings)
                         .with_size(px(16.0))
-                        .color(gpui_color(colors.icon)),
+                        .color(gpui_color(colors.text_secondary)),
                 )
                 .child(
                     div()
@@ -1442,7 +1405,7 @@ fn chart_settings_template_menu(
         .trailing(
             header_icon(HugeIcon::ArrowRight)
                 .with_size(px(16.0))
-                .color(gpui_color(theme.colors.icon)),
+                .color(gpui_color(theme.colors.text_secondary)),
         )
         .on_hover(move |hovered, _, cx| {
             if *hovered {
@@ -1694,6 +1657,14 @@ impl ChoiceRow {
         self.enabled = enabled;
         self
     }
+}
+
+/// A further checkbox under a [`SwitchWithOption`], locked with it while its switch is off.
+#[derive(Clone, Copy)]
+struct SwitchOption {
+    label: &'static str,
+    checked: bool,
+    action: ChartSettingsAction,
 }
 
 /// A switch and the one option that refines it.
@@ -2113,6 +2084,13 @@ fn canvas_axis_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> An
     settings_group(
         tr!(chart_menu::AXES),
         [
+            settings_switch_row(
+                ui,
+                tr!(chart_menu::SHOW_AXIS_BORDERS),
+                None,
+                axis.border_visible,
+                ChartSettingsAction::ToggleAxisBorders,
+            ),
             settings_color_row(
                 ui,
                 tr!(chart_menu::BORDER),
@@ -2264,7 +2242,7 @@ fn chart_legend_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
     let groups = [
         settings_group(
             tr!(chart_menu::SYMBOL),
-            [settings_switch_with_option(
+            [settings_switch_with_options(
                 ui,
                 SwitchWithOption {
                     label: tr!(chart_menu::SYMBOL_LEGEND),
@@ -2275,6 +2253,11 @@ fn chart_legend_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
                     option_checked: legend.symbol_values,
                     option_action: ChartSettingsAction::ToggleSymbolLegendValues,
                 },
+                [SwitchOption {
+                    label: tr!(chart_menu::EXCHANGE_LOGO),
+                    checked: legend.symbol_logo,
+                    action: ChartSettingsAction::ToggleSymbolLegendLogo,
+                }],
             )],
             ui.theme,
         ),
@@ -2433,6 +2416,20 @@ fn settings_switch_row(
 /// option stays visible but locked while the switch is off, so turning the switch back on
 /// restores the earlier choice.
 fn settings_switch_with_option(ui: SettingsUi<'_>, row: SwitchWithOption) -> AnyElement {
+    settings_switch_with_options(ui, row, [])
+}
+
+/// [`settings_switch_with_option`] with further refining options below its first.
+fn settings_switch_with_options(
+    ui: SettingsUi<'_>,
+    row: SwitchWithOption,
+    more: impl IntoIterator<Item = SwitchOption>,
+) -> AnyElement {
+    let more = more.into_iter().map(|option| {
+        CheckboxRow::new(option.label, option.label, option.checked, ui.theme)
+            .disabled(!row.enabled)
+            .on_change(ui.apply_on_change(option.action))
+    });
     div()
         .pb_2()
         .child(settings_switch_row(
@@ -2447,6 +2444,7 @@ fn settings_switch_with_option(ui: SettingsUi<'_>, row: SwitchWithOption) -> Any
                 .disabled(!row.enabled)
                 .on_change(ui.apply_on_change(row.option_action)),
         )
+        .children(more)
         .into_any_element()
 }
 

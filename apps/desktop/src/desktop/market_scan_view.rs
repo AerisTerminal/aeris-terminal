@@ -11,8 +11,8 @@ use super::market_scan::{
 use super::market_screener::{MarketScreener, ScreenerTab};
 use super::market_screener_view::{
     CONTROL_HEIGHT, EXCHANGE_LOGO_SIZE, FOOTER_HEIGHT, MARKET_MIN_WIDTH, ROW_HEIGHT,
-    SORT_ICON_SIZE, TABLE_HEADER_HEIGHT, direction_color, rank_cell, table_cell,
-    table_inner_radius, table_row_frame,
+    SORT_ICON_SIZE, TABLE_HEADER_HEIGHT, direction_color, rank_cell, row_menu_on_right_click,
+    table_cell, table_inner_radius, table_row_frame, watchlist_status_line,
 };
 use super::saved_scans::MAXIMUM_SAVED_SCANS;
 use super::*;
@@ -853,7 +853,7 @@ fn header_cell(ui: Ui<'_>, index: usize, column: &ResultColumn, last: bool) -> D
     let indicator = active.then(|| {
         header_icon(HugeIcon::ChevronDown)
             .with_size(px(SORT_ICON_SIZE))
-            .color(gpui_color(colors.icon_active))
+            .color(gpui_color(colors.text_default))
             .when(!sort.descending, |icon| icon.rotate(0.5))
     });
     let direction = if active && sort.descending {
@@ -887,7 +887,7 @@ fn header_cell(ui: Ui<'_>, index: usize, column: &ResultColumn, last: bool) -> D
             .when(active, |cell| {
                 cell.text_color(gpui_color(colors.text_default))
             })
-            .hover(move |cell| cell.text_color(gpui_color(colors.text_hover)))
+            .hover(move |cell| cell.text_color(gpui_color(colors.text_default)))
             .on_click(move |_, _, cx| {
                 sort_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.sort_market_scan(target, terminal_cx);
@@ -915,7 +915,7 @@ fn results_body(ui: Ui<'_>, run: &ScanRun, columns: Rc<Vec<ResultColumn>>) -> An
                 .gap_2()
                 .child(
                     Loader::new("market_scan_loader", header_icon(HugeIcon::Loader))
-                        .color(gpui_color(colors.icon)),
+                        .color(gpui_color(colors.text_secondary)),
                 )
                 .child(tr!(panels::SCAN_WAITING))
         } else {
@@ -1012,6 +1012,10 @@ fn result_row(
                 terminal.open_market_scan_row(&open_row, terminal_cx);
             });
         })
+        .on_mouse_down(
+            MouseButton::Right,
+            row_menu_on_right_click(terminal, &row.symbol, &row.exchange, &row.display_symbol),
+        )
         .child(
             rank_cell(theme)
                 .text_xs()
@@ -1038,19 +1042,15 @@ fn results_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
         }
         None => (run_summary(run), colors.text_muted),
     });
-    let status = screener.opening_symbol().map_or_else(
-        || {
+    let status = screener
+        .pending_selection_status()
+        .map(|text| (text, colors.text_secondary))
+        .or_else(|| {
             screener
                 .message()
                 .map(|message| (message.to_string(), colors.text_warning))
-        },
-        |symbol| {
-            Some((
-                tr!(panels::SCREENER_OPENING, symbol = symbol),
-                colors.text_secondary,
-            ))
-        },
-    );
+        })
+        .or_else(|| watchlist_status_line(screener, theme));
     let line = |(text, color): (String, ThemeColor)| {
         div()
             .min_w_0()

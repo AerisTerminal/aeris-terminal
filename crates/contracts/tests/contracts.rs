@@ -1,13 +1,14 @@
 use aeris_contracts::{
-    InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartSettingsTemplateState,
-    WorkspaceChartState, WorkspaceChartStudyState, WorkspaceDrawingTemplateState,
-    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSavedLayoutState, WorkspaceScanComparison, WorkspaceScanConditionState,
-    WorkspaceScanMatchMode, WorkspaceScanOperandKind, WorkspaceScanOperandState,
-    WorkspaceScanStudyParameterState, WorkspaceScreenerScanState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartIndicatorState,
+    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceDrawingTemplateState, WorkspaceIndicatorTemplateState,
+    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspaceSavedLayoutState, WorkspaceScanComparison,
+    WorkspaceScanConditionState, WorkspaceScanMatchMode, WorkspaceScanOperandKind,
+    WorkspaceScanOperandState, WorkspaceScanStudyParameterState, WorkspaceScreenerScanState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -249,6 +250,25 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
                     ..WorkspaceScanOperandState::default()
                 }),
             }],
+        }],
+        indicator_templates: vec![WorkspaceIndicatorTemplateState {
+            name: "Scalping".into(),
+            indicators: vec![WorkspaceChartIndicatorState {
+                kind: "volume".into(),
+                visible: true,
+                volume: None,
+            }],
+            studies: vec![WorkspaceChartStudyState {
+                local_id: 1,
+                identifier: "builtin.sma".into(),
+                visible: true,
+                ..WorkspaceChartStudyState::default()
+            }],
+            order_flow: Some(WorkspaceOrderFlowSettingsState {
+                show_cumulative_delta: true,
+                ..WorkspaceOrderFlowSettingsState::default()
+            }),
+            favorite: true,
         }],
     };
     let decoded =

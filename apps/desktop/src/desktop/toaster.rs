@@ -1372,7 +1372,7 @@ pub(super) fn tone_icon(tone: ToastTone, theme: &AerisTheme) -> (HugeIcon, Theme
         ToastTone::Sell => (HugeIcon::CheckIcon, colors.sell),
         ToastTone::Warning => (HugeIcon::Info, colors.warning),
         ToastTone::Loss => (HugeIcon::Failure, colors.danger),
-        ToastTone::Muted => (HugeIcon::Info, colors.icon),
+        ToastTone::Muted => (HugeIcon::Info, colors.text_secondary),
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::language::LanguagePreference;
 use aeris_chart_integration::{
-    ChartDrawingKind, ChartDrawingStamp, ChartIndicatorChrome, ChartType,
+    BuiltinIndicator, ChartDrawingKind, ChartDrawingStamp, ChartIndicator, ChartIndicatorChrome,
+    ChartType,
 };
 use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
 use aeris_market_data::ChartInterval;
@@ -383,6 +384,8 @@ pub struct ChartChromePreferences {
     pub drawings: ChromeVisibility,
     /// The timeframes starred in the timeframe menu, offered as header buttons.
     pub timeframe_favorites: TimeframeFavorites,
+    /// The indicators starred in the indicator menu, listed first there.
+    pub indicator_favorites: IndicatorFavorites,
 }
 
 /// The timeframes the user starred, a bitset over [`ChartInterval::ALL`] so the preferences
@@ -431,6 +434,76 @@ impl TimeframeFavorites {
     fn encode(self) -> String {
         self.intervals()
             .map(ChartInterval::label)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// Favorite identifiers of the order-flow indicators, in the indicator menu's order. The
+/// chart indicators use their durable workspace identifiers.
+pub const ORDER_FLOW_FAVORITE_IDENTIFIERS: [&str; 5] = [
+    "order_flow.cumulative_delta",
+    "order_flow.delta",
+    "order_flow.big_trades",
+    "order_flow.order_book_depth",
+    "order_flow.depth_heatmap",
+];
+
+const _: () = assert!(
+    ORDER_FLOW_FAVORITE_IDENTIFIERS.len() + ChartIndicator::CATALOG_LEN <= u128::BITS as usize,
+    "every indicator favorite needs a bit"
+);
+
+/// Every indicator the menu can star, in bit order.
+fn indicator_favorite_catalog() -> impl Iterator<Item = &'static str> {
+    ORDER_FLOW_FAVORITE_IDENTIFIERS
+        .into_iter()
+        .chain(
+            ChartIndicator::ALL
+                .into_iter()
+                .map(ChartIndicator::identifier),
+        )
+        .chain(
+            BuiltinIndicator::ALL
+                .into_iter()
+                .map(BuiltinIndicator::identifier),
+        )
+}
+
+/// The indicators the user starred in the indicator menu, a bitset over the menu's catalog so
+/// the preferences stay `Copy`. On disk they are the identifiers; unknown ones are skipped so
+/// a newer document never fails to load.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IndicatorFavorites(u128);
+
+impl IndicatorFavorites {
+    fn bit(identifier: &str) -> u128 {
+        indicator_favorite_catalog()
+            .position(|candidate| candidate == identifier)
+            .map_or(0, |index| 1 << index)
+    }
+
+    #[must_use]
+    pub fn contains(self, identifier: &str) -> bool {
+        self.0 & Self::bit(identifier) != 0
+    }
+
+    pub fn toggle(&mut self, identifier: &str) {
+        self.0 ^= Self::bit(identifier);
+    }
+
+    fn parse(value: &str) -> Self {
+        Self(
+            value
+                .split(',')
+                .map(str::trim)
+                .fold(0, |bits, identifier| bits | Self::bit(identifier)),
+        )
+    }
+
+    fn encode(self) -> String {
+        indicator_favorite_catalog()
+            .filter(|identifier| self.contains(identifier))
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -647,6 +720,7 @@ impl Default for ChartChromePreferences {
             language: LanguagePreference::System,
             drawings: ChromeVisibility::Shown,
             timeframe_favorites: TimeframeFavorites::default(),
+            indicator_favorites: IndicatorFavorites::default(),
         }
     }
 }
@@ -686,6 +760,7 @@ impl ChartChromePreferences {
             language: self.language.identifier().to_string(),
             drawings_hidden: !self.drawings.shown(),
             timeframe_favorites: self.timeframe_favorites.encode(),
+            indicator_favorites: self.indicator_favorites.encode(),
         }
     }
 
@@ -735,6 +810,7 @@ impl ChartChromePreferences {
         preferences.language = LanguagePreference::from_identifier(&state.language);
         preferences.drawings = ChromeVisibility::from_shown(!state.drawings_hidden);
         preferences.timeframe_favorites = TimeframeFavorites::parse(&state.timeframe_favorites);
+        preferences.indicator_favorites = IndicatorFavorites::parse(&state.indicator_favorites);
         preferences
     }
 }
@@ -852,10 +928,10 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
 mod tests {
     use super::{
         ChartChromePreferences, ChromeVisibility, DesktopPersistence, DrawingFavorites,
-        ExchangeCode, INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
-        InstrumentSearchCategories, SymbolSearchScope, TimeframeFavorites, TradingShortcutMode,
-        WindowFrame, chart_chrome_path, filter_indicator_specs, indicator_search_key,
-        parse_chart_chrome_preferences,
+        ExchangeCode, INDICATOR_SPECS, IndicatorFavorites, IndicatorKind, IndicatorLocation,
+        IndicatorParameters, InstrumentSearchCategories, SymbolSearchScope, TimeframeFavorites,
+        TradingShortcutMode, WindowFrame, chart_chrome_path, filter_indicator_specs,
+        indicator_search_key, parse_chart_chrome_preferences,
     };
     use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
     use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
@@ -1095,6 +1171,7 @@ mod tests {
             language: crate::language::LanguagePreference::System,
             drawings: ChromeVisibility::Shown,
             timeframe_favorites: TimeframeFavorites::default(),
+            indicator_favorites: IndicatorFavorites::default(),
         }
     }
 
@@ -1197,6 +1274,34 @@ mod tests {
     }
 
     #[test]
+    fn indicator_favorites_round_trip_by_identifier_and_skip_unknown_ones() {
+        let mut favorites = IndicatorFavorites::default();
+        favorites.toggle("mfi");
+        favorites.toggle("sma");
+        favorites.toggle("order_flow.big_trades");
+        let state = ChartChromePreferences {
+            indicator_favorites: favorites,
+            ..ChartChromePreferences::default()
+        }
+        .to_workspace_chrome();
+        assert_eq!(
+            state.indicator_favorites, "order_flow.big_trades,sma,mfi",
+            "the menu's order: order flow, the chart indicators, then the built-ins"
+        );
+        assert_eq!(
+            ChartChromePreferences::from_workspace_chrome(Some(&state)).indicator_favorites,
+            favorites
+        );
+        let restored = IndicatorFavorites::parse(" rsi , retired,rsi");
+        assert!(restored.contains("rsi"));
+        assert!(!restored.contains("retired"));
+        assert_eq!(restored.encode(), "rsi");
+        favorites.toggle("sma");
+        assert!(!favorites.contains("sma"));
+        assert!(favorites.contains("mfi"));
+    }
+
+    #[test]
     fn timeframe_favorites_round_trip_by_label_and_skip_unknown_ones() {
         let mut favorites = TimeframeFavorites::default();
         favorites.toggle(ChartInterval::Hour1);
@@ -1255,6 +1360,7 @@ mod tests {
                 language: "system".to_string(),
                 drawings_hidden: false,
                 timeframe_favorites: String::new(),
+                indicator_favorites: String::new(),
             },
             "the document form keeps the legacy identifiers"
         );

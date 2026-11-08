@@ -161,6 +161,10 @@ impl MarketWatch {
         true
     }
 
+    pub(super) fn lists(&self, provider: &str, instrument_id: &str) -> bool {
+        self.position(provider, instrument_id).is_some()
+    }
+
     /// Unlists the instrument, closing its flag picker. Reports whether it was listed.
     pub(super) fn remove(&mut self, provider: &str, instrument_id: &str) -> bool {
         let before = self.entries.len();

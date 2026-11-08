@@ -158,6 +158,21 @@ fn legacy_chart_legend_shows_everything_and_explicit_choices_round_trip() {
         restored_chart_legend(Some(persisted_chart_legend(names_only))),
         names_only
     );
+    let defaults = ChartLegendOptions::default();
+    assert!(defaults.symbol_logo, "the exchange logo ships shown");
+    assert!(
+        !defaults.indicators_collapsed,
+        "indicator rows ship unfolded"
+    );
+    let folded_without_logo = ChartLegendOptions {
+        symbol_logo: false,
+        indicators_collapsed: true,
+        ..ChartLegendOptions::default()
+    };
+    assert_eq!(
+        restored_chart_legend(Some(persisted_chart_legend(folded_without_logo))),
+        folded_without_logo
+    );
 }
 
 #[test]

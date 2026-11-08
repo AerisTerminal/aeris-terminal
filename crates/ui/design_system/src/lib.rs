@@ -153,7 +153,6 @@ impl ThemeMode {
 pub enum ThemePreset {
     #[default]
     Aeris,
-    HighContrast,
     TokyoNight,
     Catppuccin,
     Github,
@@ -167,9 +166,8 @@ const _: () = assert!(ThemePreset::ALL.len() == PRESET_COUNT + 1);
 
 impl ThemePreset {
     /// Every preset in picker order, Aeris first.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 8] = [
         Self::Aeris,
-        Self::HighContrast,
         Self::TokyoNight,
         Self::Catppuccin,
         Self::Github,
@@ -193,7 +191,6 @@ impl ThemePreset {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Aeris => "Aeris",
-            Self::HighContrast => "High Contrast",
             Self::TokyoNight => "Tokyo Night",
             Self::Catppuccin => "Catppuccin",
             Self::Github => "GitHub",
@@ -214,14 +211,13 @@ impl ThemePreset {
     const fn generated_index(self) -> Option<usize> {
         match self {
             Self::Aeris => None,
-            Self::HighContrast => Some(0),
-            Self::TokyoNight => Some(1),
-            Self::Catppuccin => Some(2),
-            Self::Github => Some(3),
-            Self::One => Some(4),
-            Self::Dracula => Some(5),
-            Self::Solarized => Some(6),
-            Self::Gruvbox => Some(7),
+            Self::TokyoNight => Some(0),
+            Self::Catppuccin => Some(1),
+            Self::Github => Some(2),
+            Self::One => Some(3),
+            Self::Dracula => Some(4),
+            Self::Solarized => Some(5),
+            Self::Gruvbox => Some(6),
         }
     }
 }
@@ -505,10 +501,10 @@ impl AerisTheme {
         Self::resolve(ThemePreset::Aeris, mode)
     }
 
-    /// Resolves the theme the desktop opens with: High Contrast in dark mode.
+    /// Resolves the theme the desktop opens with: Aeris in dark mode.
     #[must_use]
     pub fn initial() -> Self {
-        Self::resolve(ThemePreset::HighContrast, ThemeMode::Dark)
+        Self::dark()
     }
 
     /// Resolves the dark mode of the Aeris preset.
@@ -629,31 +625,23 @@ mod tests {
         assert_eq!(light.border, ThemeColor::from_rgba8(10, 10, 10, 51));
         assert_eq!(
             light.border_secondary,
-            ThemeColor::from_rgba8(10, 10, 10, 26)
+            ThemeColor::from_rgba8(10, 10, 10, 51)
         );
         assert_eq!(
             light.danger_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
-        assert_eq!(dark.surface, ThemeColor::from_rgb8(23, 23, 23));
-        assert_eq!(
-            dark.surface_secondary,
-            ThemeColor::from_rgba8(250, 250, 250, 15)
-        );
-        assert_eq!(dark.border, ThemeColor::from_rgba8(250, 250, 250, 26));
-        assert_eq!(
-            dark.border_secondary,
-            ThemeColor::from_rgba8(250, 250, 250, 38)
-        );
+        assert_eq!(dark.surface, ThemeColor::from_rgb8(0, 0, 0));
+        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(23, 23, 23));
+        assert_eq!(dark.border, ThemeColor::from_rgb8(44, 44, 44));
+        assert_eq!(dark.border_secondary, ThemeColor::from_rgb8(64, 64, 64));
         assert_eq!(light.text_default, ThemeColor::from_rgb8(10, 10, 10));
-        assert_eq!(dark.text_default, ThemeColor::from_rgb8(250, 250, 250));
-        assert_eq!(dark.text_muted, ThemeColor::from_rgba8(250, 250, 250, 64));
+        assert_eq!(dark.text_default, ThemeColor::from_rgb8(193, 193, 193));
+        assert_eq!(dark.text_muted, ThemeColor::from_rgba8(250, 250, 250, 89));
         assert_eq!(
             light.text_secondary,
             ThemeColor::from_rgba8(10, 10, 10, 148)
         );
-        assert_eq!(light.text_interactive, light.text_secondary);
-        assert_eq!(light.icon, light.text_interactive);
         assert_eq!(light.text_muted, ThemeColor::from_rgba8(10, 10, 10, 64));
         assert_eq!(
             dark.text_secondary,
@@ -671,17 +659,19 @@ mod tests {
             light.primary_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
-        assert_eq!(light.bullish, light.positive);
-        assert_eq!(light.bearish, light.negative);
-        assert_eq!(dark.bullish, dark.positive);
-        assert_eq!(dark.bearish, dark.negative);
+        // The chart pair is its own literal, apart from the status pair.
+        for colors in [&light, &dark] {
+            assert_eq!(colors.bullish, ThemeColor::from_rgb8(11, 153, 129));
+            assert_eq!(colors.bearish, ThemeColor::from_rgb8(242, 54, 69));
+            assert_ne!(colors.bullish, colors.positive);
+        }
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
         assert_eq!(token_source(&light_tokens, "border"), "#0a0a0a33");
-        assert_eq!(token_source(&dark_tokens, "surface"), "#171717");
-        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa13");
+        assert_eq!(token_source(&dark_tokens, "surface"), "#000000");
+        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa1f");
         assert_eq!(token_source(&light_tokens, "text-muted"), "#0a0a0a40");
         assert_eq!(token_source(&light_tokens, "text-secondary"), "#0a0a0a94");
         assert_eq!(token_source(&dark_tokens, "text-secondary"), "#fafafa8c");
@@ -694,8 +684,8 @@ mod tests {
         assert_eq!(token_source(&dark_tokens, "button-fill"), "#fafafad9");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
         for tokens in [&light_tokens, &dark_tokens] {
-            assert_eq!(token_source(tokens, "bullish"), "var(--positive)");
-            assert_eq!(token_source(tokens, "bearish"), "var(--negative)");
+            assert_eq!(token_source(tokens, "bullish"), "#0b9981");
+            assert_eq!(token_source(tokens, "bearish"), "#f23645");
         }
         assert_eq!(
             token_source(&light_tokens, "ring-primary"),
@@ -710,17 +700,16 @@ mod tests {
     fn interaction_fills_composite_to_opaque_neutral_grays() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
-        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(10, 10, 10, 13));
-        assert_eq!(light.active_bg, light.hover_bg);
-        assert_eq!(dark.hover_bg, ThemeColor::from_rgba8(250, 250, 250, 19));
+        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(10, 10, 10, 20));
+        assert_eq!(light.active_bg, ThemeColor::from_rgba8(10, 10, 10, 31));
+        assert_eq!(dark.hover_bg, ThemeColor::from_rgba8(250, 250, 250, 31));
         assert_eq!(dark.active_bg, ThemeColor::from_rgba8(250, 250, 250, 38));
-        // Light mode selects with the hover fill; dark mode reads a step above hover.
+        // The pressed fill reads a step above hover in both modes.
+        assert!(light.active_bg.alpha() > light.hover_bg.alpha());
         assert!(dark.active_bg.alpha() > dark.hover_bg.alpha());
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
         assert!(hover_saturation.abs() < f32::EPSILON);
 
-        // Dark `surface-secondary` is a translucent tint, so resolve it over `surface` first.
-        let dark_secondary = dark.surface_secondary.over(dark.surface);
         for composited in [
             light.hover_bg.over(light.surface),
             light.active_bg.over(light.surface),
@@ -728,8 +717,8 @@ mod tests {
             dark.active_bg.over(dark.surface),
             light.hover_bg.over(light.surface_secondary),
             light.active_bg.over(light.surface_secondary),
-            dark.hover_bg.over(dark_secondary),
-            dark.active_bg.over(dark_secondary),
+            dark.hover_bg.over(dark.surface_secondary),
+            dark.active_bg.over(dark.surface_secondary),
         ] {
             assert!((composited.alpha() - 1.0).abs() < f32::EPSILON);
             assert!((composited.red() - composited.green()).abs() < f32::EPSILON);
@@ -746,7 +735,8 @@ mod tests {
         assert!(tinted.alpha() < 1.0);
         assert!(tinted.alpha() > dark.hover_bg.alpha());
 
-        let secondary = dark.surface_secondary.over(dark.surface);
+        let secondary = dark.surface_secondary;
+        assert!((secondary.alpha() - 1.0).abs() < f32::EPSILON);
         let hover = dark.hover_bg.over(secondary);
         assert!((hover.alpha() - 1.0).abs() < f32::EPSILON);
         // A hover over the dark secondary surface stays a subtle lift, never a near-white fill.
@@ -777,62 +767,6 @@ mod tests {
             dark.button_fill_foreground,
             ThemeColor::from_rgba8(10, 10, 10, 217)
         );
-    }
-
-    #[test]
-    fn popover_layer_tokens_match_the_platform_contract() {
-        let light = AerisTheme::light();
-        let dark = AerisTheme::dark();
-        assert_eq!(
-            light.colors.surface_popover,
-            ThemeColor::from_rgb8(255, 255, 255)
-        );
-        assert_eq!(light.colors.border_popover, light.colors.border);
-        assert_eq!(
-            light.colors.border_popover_highlight,
-            ThemeColor::from_rgba8(255, 255, 255, 204)
-        );
-        assert_eq!(
-            dark.colors.surface_popover,
-            ThemeColor::from_rgb8(38, 38, 38)
-        );
-        assert_eq!(
-            dark.colors.border_popover,
-            ThemeColor::from_rgba8(0, 0, 0, 204)
-        );
-        assert_eq!(
-            dark.colors.border_popover_highlight,
-            ThemeColor::from_rgba8(255, 255, 255, 26)
-        );
-        assert_eq!(
-            token_source(&light.color_tokens(), "border-popover"),
-            "var(--border)"
-        );
-        assert_eq!(
-            token_source(&dark.color_tokens(), "surface-popover"),
-            "#262626"
-        );
-
-        // Floating layers paint the popover fill over arbitrary content, so it stays opaque in
-        // every preset and mode. Presets declare no popover layer and fall back exactly as the
-        // stylesheet's `var(--surface-popover, var(--surface-secondary))` readers do.
-        for preset in ThemePreset::ALL {
-            for mode in [ThemeMode::Light, ThemeMode::Dark] {
-                let theme = AerisTheme::resolve(preset, mode);
-                let colors = theme.colors;
-                assert!((colors.surface_popover.alpha() - 1.0).abs() < f32::EPSILON);
-                if preset == ThemePreset::Aeris {
-                    continue;
-                }
-                assert_eq!(colors.surface_popover, colors.surface_secondary);
-                assert_eq!(colors.border_popover, colors.border_secondary);
-                assert!(colors.border_popover_highlight.alpha().abs() < f32::EPSILON);
-                let tokens = theme.color_tokens();
-                for (identifier, fallback) in crate::token_compiler::AERIS_ONLY_FALLBACKS {
-                    assert_eq!(token_source(&tokens, identifier), fallback);
-                }
-            }
-        }
     }
 
     #[test]
@@ -912,19 +846,19 @@ mod tests {
     fn big_trade_bubbles_are_translucent_chart_direction_colors() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
-        assert_eq!(light.buy_bubble, ThemeColor::from_rgba8(8, 153, 129, 89));
-        assert_eq!(light.sell_bubble, ThemeColor::from_rgba8(247, 82, 95, 89));
+        assert_eq!(light.buy_bubble, ThemeColor::from_rgba8(11, 153, 129, 89));
+        assert_eq!(light.sell_bubble, ThemeColor::from_rgba8(242, 54, 69, 89));
         assert_eq!(dark.buy_bubble, light.buy_bubble);
         assert_eq!(dark.sell_bubble, light.sell_bubble);
-        assert_eq!(light.buy_bubble.css_rgba(), "rgba(8, 153, 129, 0.3490)");
-        assert_eq!(light.bearish.css_rgba(), "rgba(247, 82, 95, 1.0000)");
+        assert_eq!(light.buy_bubble.css_rgba(), "rgba(11, 153, 129, 0.3490)");
+        assert_eq!(light.bearish.css_rgba(), "rgba(242, 54, 69, 1.0000)");
         assert_eq!(
             token_source(&AerisTheme::light().color_tokens(), "buy-bubble"),
-            "color-mix(in srgb, #089981 35%, transparent)"
+            "color-mix(in srgb, #0b9981 35%, transparent)"
         );
         assert_eq!(
             token_source(&AerisTheme::dark().color_tokens(), "sell-bubble"),
-            "color-mix(in srgb, #f7525f 35%, transparent)"
+            "color-mix(in srgb, #f23645 35%, transparent)"
         );
     }
 
@@ -971,9 +905,9 @@ mod tests {
         assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(255, 172, 191));
         assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(191, 35, 71));
         assert_eq!(light.book_fill_text, ThemeColor::from_rgb8(0, 0, 0));
-        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(15, 53, 92));
+        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(0, 39, 77));
         assert_eq!(dark.book_bid_text, ThemeColor::from_rgb8(51, 139, 228));
-        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(104, 31, 48));
+        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(89, 16, 33));
         assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 78, 118));
         assert_eq!(dark.book_fill_text, ThemeColor::from_rgb8(255, 255, 255));
 
@@ -1002,9 +936,9 @@ mod tests {
     fn semantic_status_tokens_match_the_platform_contract() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
-        assert_eq!(light.text_positive, light.positive);
-        assert_eq!(dark.text_positive, dark.positive);
-        assert_eq!(light.text_negative, ThemeColor::from_rgb8(247, 82, 95));
+        assert_eq!(light.text_positive, ThemeColor::from_rgb8(11, 153, 129));
+        assert_eq!(dark.text_positive, light.text_positive);
+        assert_eq!(light.text_negative, ThemeColor::from_rgb8(242, 54, 69));
         assert_eq!(dark.text_negative, light.text_negative);
         assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(220, 245, 240));
         assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(25, 60, 55));
@@ -1013,14 +947,8 @@ mod tests {
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
-        assert_eq!(
-            token_source(&light_tokens, "text-positive"),
-            "var(--positive)"
-        );
-        assert_eq!(
-            token_source(&light_tokens, "text-negative"),
-            "var(--negative)"
-        );
+        assert_eq!(token_source(&light_tokens, "text-positive"), "#0b9981");
+        assert_eq!(token_source(&dark_tokens, "text-negative"), "#f23645");
         assert_eq!(token_source(&light_tokens, "positive-subtle"), "#dcf5f0");
         assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#193c37");
         assert_eq!(token_source(&light_tokens, "negative-subtle"), "#ffe2e2");
@@ -1064,7 +992,6 @@ mod tests {
             ThemePreset::ALL.map(ThemePreset::id),
             [
                 "aeris",
-                "high-contrast",
                 "tokyo-night",
                 "catppuccin",
                 "github",
@@ -1087,27 +1014,14 @@ mod tests {
             }
         }
         assert_eq!(ThemePreset::from_id("missing"), None);
-        let high_contrast = AerisTheme::resolve(ThemePreset::HighContrast, ThemeMode::Dark);
-        assert_eq!(AerisTheme::initial(), high_contrast);
-        assert_eq!(AerisTheme::default(), high_contrast);
-        assert_eq!(high_contrast.colors.surface, ThemeColor::from_rgb8(0, 0, 0));
+        let initial = AerisTheme::initial();
+        assert_eq!(initial, AerisTheme::dark());
+        assert_eq!(AerisTheme::default(), initial);
+        assert_eq!(initial.colors.surface, ThemeColor::from_rgb8(0, 0, 0));
         assert_eq!(
-            token_source(&high_contrast.color_tokens(), "border-secondary"),
+            token_source(&initial.color_tokens(), "border-secondary"),
             "#404040"
         );
-        // The default theme paints the Aeris Charts market pair in both modes.
-        let high_contrast_light = AerisTheme::resolve(ThemePreset::HighContrast, ThemeMode::Light);
-        for (theme, engine) in [
-            (high_contrast, AerisTheme::dark()),
-            (high_contrast_light, AerisTheme::light()),
-        ] {
-            assert_eq!(theme.colors.bullish, engine.colors.bullish);
-            assert_eq!(theme.colors.bearish, engine.colors.bearish);
-            assert_eq!(theme.colors.positive_subtle, engine.colors.positive_subtle);
-            assert_eq!(theme.colors.negative_subtle, engine.colors.negative_subtle);
-            assert_eq!(theme.colors.buy_bubble, engine.colors.buy_bubble);
-            assert_eq!(theme.colors.sell_bubble, engine.colors.sell_bubble);
-        }
         let tokyo = AerisTheme::resolve(ThemePreset::TokyoNight, ThemeMode::Dark);
         assert_eq!(
             tokyo.colors.surface,
@@ -1162,12 +1076,6 @@ mod tests {
             [ThemeMode::Light, ThemeMode::Dark].map(|mode| AerisTheme::resolve(preset, mode))
         }) {
             for token in theme.color_tokens() {
-                let aeris_only = crate::token_compiler::AERIS_ONLY_FALLBACKS
-                    .iter()
-                    .any(|(identifier, _)| *identifier == token.canonical_identifier);
-                if aeris_only && theme.preset != ThemePreset::Aeris {
-                    continue;
-                }
                 let declaration = format!(
                     "{}: {};",
                     token.css_custom_property(),
@@ -1210,6 +1118,14 @@ mod tests {
             "--profit",
             "--loss",
             "--radius_",
+            "--text-interactive",
+            "--text-hover",
+            "--text-active",
+            "--icon:",
+            "--icon-active",
+            "--surface-popover",
+            "--border-popover",
+            "high-contrast",
         ] {
             assert!(!css.contains(retired), "retired token `{retired}` returned");
         }

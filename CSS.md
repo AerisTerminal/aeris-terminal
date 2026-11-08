@@ -14,7 +14,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Borders are 1px and use `theme.dimensions.border_width` (`--border-width`), never `border_1()` or `px(1.0)`.
 - Neutral text has three roles: `text-default` for content and labels, `text-secondary` for
   supporting text (AA 4.5:1 on every light and dark surface), and `text-muted` for placeholders and
-  disabled text. Interactive items use `text-interactive` / `text-hover` / `text-active`.
+  disabled text. Interactive items rest on `text-secondary` and turn `text-default` on hover,
+  press or selection.
 - Color choices a user can pick and store (the color picker swatches `swatch-*`, the
   `swatch-default` a new choice such as a watchlist flag starts with) and the
   `session-plan-level` chart line come from the color-choice tokens. Store a choice as
@@ -26,20 +27,21 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
-- Floating layers (menus, dialogs, popovers, toasts, hints, floating toolbars and the large
-  workspace panels) use `popover_surface` from `desktop/native_ui/theme.rs`, the Theme System
-  `.ui-popover`: an opaque `surface-popover` fill, a 1px `border-popover-highlight` inner edge
-  and a 1px `border-popover` outer edge (the CSS `inset 0 0 0 1px` / `0 0 0 1px` pair). The
-  popover tokens are Aeris-only; presets resolve them to `surface-secondary`, transparent and
-  `border-secondary`, exactly as CSS reads them with fallbacks. The outer edge is a solid ring,
-  not a cast shadow; no floating layer casts a shadow. Menus, dropdowns, select menus, dialogs,
-  the color picker and the large workspace panels use `--radius-compact` (`RadiusToken::Compact`).
+- Floating layers (dialogs, popovers, toasts, hints, floating toolbars and the large workspace
+  panels) use `popover_surface` from `desktop/native_ui/theme.rs`: a `surface-secondary` fill
+  with a 1px `border-secondary` edge, in every theme.
+- Dropdown menus (header dropdowns such as the time zone menu, context menus, flyouts and select
+  menus) sit on the primary surface instead: `menu_surface` paints `surface` with a 1px `border`
+  edge, and their rows use the primary-surface tokens. The symbol and indicator menus are large
+  panels: they keep the `surface` fill inside the floating-layer `border-secondary` edge.
+- No floating layer or menu casts a shadow. Menus, dropdowns, select menus, dialogs, the color
+  picker and the large workspace panels use `--radius-compact` (`RadiusToken::Compact`).
 - The workspace page background is `surface-backdrop`: it paints the gaps between panels and the
   corner ring of rounded panel corners, and nothing else. Panels, cards, fields and floating layers
   keep their own surface fills; never use `surface-backdrop` as a component fill. The website mirror
   declares the token for parity but never uses it, and Aeris Charts never receives it.
-- Tooltips (`terminal_ui::tooltip`) use the same popover look: `surface-popover`, the
-  `border-popover-highlight` / `border-popover` edges and `text-default`. A one-line
+- Tooltips (`terminal_ui::tooltip`) use the same floating-layer look: `surface-secondary`, a 1px
+  `border-secondary` edge and `text-default`. A one-line
   label is a `radius-large` pill; rich content (label/value rows) uses `radius-medium`. A tooltip
   opens beside its trigger on the caller's side (bottom by default, toward the content for edge
   sidebars), never at the cursor; top and bottom flip when the window edge leaves no room. It fades
@@ -64,8 +66,7 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   Connect), which uses `Default`.
 - Button labels always use the normal platform weight, trade buttons included.
 - A fill resolved with `.over(..)` is opaque only over an opaque backdrop. Resolve a translucent
-  fill over the opaque surface beneath it first. Dark Aeris `surface-secondary` is a translucent
-  tint, so never use it as the fill of a layer that floats over other content.
+  fill over the opaque surface beneath it first.
 - Menus, dialogs and popovers never dim, tint or blur what is behind them: their dismiss scrims
   paint nothing. A popover stays inside the window, flipping to the other side of its trigger
   when there is no room.
@@ -110,17 +111,18 @@ Sizes: `Sm` (24px, `text-xs`), `Default` (28px), `Lg` (32px, `--radius-default`)
 an icon is square. No control paints a press state: hover is the only pointer feedback, and a click
 shows itself by changing the control's state (selected, open, text), never by flashing a second fill.
 States and modifiers: `selected` (a toggle that is on), `text_toggle` (the on state
-changes only the text: `text-interactive` → `text-active`, no fill; hover adds `hover-bg` in both states
+changes only the text: `text-secondary` → `text-default`, no fill; hover adds `hover-bg` in both states
 and never changes the text; chart-header panel toggles), `open` (a trigger whose menu
 is open), `disabled`, `loading`, `round` (circle or pill), `danger_on_hover` (close / delete icons),
 `trigger` (label left, caret right), `full_width`. Every button label, trade buttons included, uses the
 normal platform weight; there is no bold button. `close_button` is the one close control.
 
 **`MenuPanel`** + **`MenuAnchor`** + **`MenuRow`** (`menu.rs`): every dropdown, context menu, flyout and
-select menu. The panel is a popover layer (see Rules). Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
+select menu. The panel draws the menu surface (see Rules). Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
 `checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. Rows rest on
-the panel's `surface-popover` fill. A `destructive` row
+the panel's `surface` fill; a row placed on another surface (the command palette dialog) names it
+with `resting_fill`. The chart and price-axis context menus have no dividers. A `destructive` row
 keeps the shared neutral row fills and colours only its label and glyph: `text-danger` at rest,
 `danger-hover` while hovered or highlighted, and `danger-disabled` with no hover while disabled.
 Pass glyphs through `leading_icon` so the row colours them.
@@ -131,8 +133,8 @@ the committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Pos
 
 **`TabList`** + **`Tab`** (`tab.rs`), the Theme System `.ui-tabs` / `.ui-tab`: tabs side by side
 (`gap-4`) over a 1px `border` baseline, with no track fill; each tab has no fill, a transparent 2px
-underline and `text-interactive` text, and hover / press change the text only (`text-hover` /
-`text-active`, never `hover-bg`); the selected tab's underline and text turn `primary`. Use for navigation tabs and one-tap presets such as order quantities;
+underline and `text-secondary` text, and hover / press change the text only (`text-default`,
+never `hover-bg`); the selected tab's underline and text turn `primary`. Use for navigation tabs and one-tap presets such as order quantities;
 a single-choice setting in a settings panel or indicator dialog is a dropdown instead. `compact()` on both the
 list and its tabs in dense panel headers (bottom panel, side panels);
 `TabList::sidebar` + `Tab::sidebar` for vertical section navigation.
@@ -159,17 +161,12 @@ while invalid.
 
 ## Theme presets
 
-The Theme CSS below is the default Aeris preset. `platform.css` also carries eight presets as
+The Theme CSS below is the default Aeris preset. `platform.css` also carries seven presets as
 `[data-theme="…"]` (light) and `[data-theme="…"].dark` (dark) blocks, copied value for value from
-`themes.md`: `high-contrast`, `tokyo-night`, `catppuccin`, `github`, `one`, `dracula`, `solarized`
-and `gruvbox`.
+`themes.md`: `tokyo-night`, `catppuccin`, `github`, `one`, `dracula`, `solarized` and `gruvbox`.
 Every preset block declares the same tokens as Aeris and only recolors the platform; radii and
 `--border-width` must match Aeris, and the build rejects a preset that misses a token or changes a shape
-token. The one exception is the Aeris-only popover layer (`--surface-popover`, `--border-popover`,
-`--border-popover-highlight`), declared in `:root:not([data-theme])` and `.dark:not([data-theme])`.
-The build rejects those tokens anywhere else and resolves them for presets to their CSS fallbacks
-(`var(--surface-secondary)`, `var(--border-secondary)` and `transparent`), so web components read
-them as `var(--surface-popover, var(--surface-secondary))` and `var(--border-popover, var(--border-secondary))`.
+token.
 The color choices (`--swatch-*` and `--session-plan-level`) are Aeris-owned, not part of the
 Theme System palette: a stored choice keeps its value, so they are declared once in their own
 `:root` block and the build rejects them in `.dark` and every preset block. Natively, `AerisTheme::resolve(ThemePreset, ThemeMode)` returns the cascaded palette, so UI code
@@ -186,7 +183,7 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
 
   /* Borders */
   --border: #0a0a0a33;
-  --border-secondary: #0a0a0a1a;
+  --border-secondary: #0a0a0a33;
   --border-subtle: #0a0a0a12;
   --border-width: 1px;
 
@@ -194,26 +191,15 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   --text-default: #0a0a0a;
   --text-secondary: #0a0a0a94;
   --text-muted: #0a0a0a40;
-  --text-positive: var(--positive);
-  --text-negative: var(--negative);
+  --text-positive: #0b9981;
+  --text-negative: #f23645;
   --text-danger: var(--danger);
   --text-warning: #ff6900;
-  /* Text on interactive items (buttons, tabs, links). Keep these values in
-     step with --icon / --icon-active: normal text = normal icon colour,
-     hover/active text = active icon colour. They are separate tokens on
-     purpose, never point one at the other. */
-  --text-interactive: #0a0a0a94;
-  --text-hover: #0a0a0a;
-  --text-active: #0a0a0a;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
-  --hover-bg: #0a0a0a0d;
-  --active-bg: #0a0a0a0d;
+  --hover-bg: #0a0a0a14;
+  --active-bg: #0a0a0a1f;
   --disabled-bg: #0a0a0a0d;
-
-  /* Icons — normal and hovered/pressed/selected */
-  --icon: #0a0a0a94;
-  --icon-active: #0a0a0a;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
@@ -292,45 +278,38 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   --radius-large: 999px;
 
   /* Chart */
-  --bullish: var(--positive);
-  --bearish: var(--negative);
+  --bullish: #0b9981;
+  --bearish: #f23645;
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
+  --buy-bubble: color-mix(in srgb, #0b9981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f23645 35%, transparent);
 }
 
 .dark {
   /* Surfaces */
-  --surface: #171717;
-  --surface-secondary: #fafafa0f;
-  --surface-backdrop: #2a2a2a;
+  --surface: #000000;
+  --surface-secondary: #171717;
+  --surface-backdrop: #262626;
 
   /* Borders */
-  --border: #fafafa1a;
-  --border-secondary: #fafafa26;
+  --border: #2c2c2c;
+  --border-secondary: #404040;
   --border-subtle: #fafafa12;
   --border-width: 1px;
 
   /* Text */
-  --text-default: #fafafa;
+  --text-default: #c1c1c1;
   --text-secondary: #fafafa8c;
-  --text-muted: #fafafa40;
-  --text-positive: var(--positive);
-  --text-negative: var(--negative);
+  --text-muted: #fafafa59;
+  --text-positive: #0b9981;
+  --text-negative: #f23645;
   --text-danger: #ffa2a2;
   --text-warning: #ffb86a;
-  --text-interactive: #fafafa8c;
-  --text-hover: #fafafa;
-  --text-active: #fafafa;
 
   /* Interaction states */
-  --hover-bg: #fafafa13;
+  --hover-bg: #fafafa1f;
   --active-bg: #fafafa26;
   --disabled-bg: #fafafa0d;
-
-  /* Icons */
-  --icon: #fafafa8c;
-  --icon-active: #fafafa;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
@@ -402,25 +381,11 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
   --ring-primary: var(--primary);
 
   /* Chart */
-  --bullish: var(--positive);
-  --bearish: var(--negative);
+  --bullish: #0b9981;
+  --bearish: #f23645;
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
-  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
-  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
-}
-
-/* Aeris-only popover layer. Presets leave these out, so components should read them with a fallback:
-   var(--surface-popover, var(--surface-secondary)) and var(--border-popover, var(--border-secondary)). */
-:root:not([data-theme]) {
-  --surface-popover: #ffffff;
-  --border-popover: var(--border);
-  --border-popover-highlight: #ffffffcc;
-}
-
-.dark:not([data-theme]) {
-  --surface-popover: #262626;
-  --border-popover: #000000cc;
-  --border-popover-highlight: #ffffff1a;
+  --buy-bubble: color-mix(in srgb, #0b9981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f23645 35%, transparent);
 }
 
 /* Color choices — the color picker swatches, the default a new color starts with, and the
