@@ -651,22 +651,12 @@ fn font_faces() -> Result<String, fmt::Error> {
     let fonts = [
         (
             platform_font_family(),
-            400,
-            aeris_design_system::PLATFORM_FONT_BYTES[0],
-        ),
-        (
-            platform_font_family(),
-            500,
-            aeris_design_system::PLATFORM_FONT_BYTES[1],
-        ),
-        (
-            platform_font_family(),
-            700,
-            aeris_design_system::PLATFORM_FONT_BYTES[2],
+            "200 800",
+            aeris_design_system::PLATFORM_FONT_BYTES,
         ),
         (
             brand_font_family(),
-            400,
+            "400",
             aeris_design_system::BRAND_FONT_BYTES,
         ),
     ];

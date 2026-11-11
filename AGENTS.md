@@ -251,7 +251,7 @@ violations and missing verification explicitly, and never describe them as satis
   Russian, Hindi, Simplified Chinese, Japanese, Korean), each with its CLDR plural rule; the
   profile menu's Language dropdown lists System plus each language under its own name, and the
   chart engine follows the same language through `engine_bridge::chart_language`. The platform
-  face is the bundled Inter (Regular/Medium/Bold), which covers Latin and Cyrillic in one family;
+  face is the bundled Manrope variable font (weights 200–800), which covers Latin and Cyrillic in one family;
   Devanagari, Chinese, Japanese and Korean glyphs come from the operating system's font fallback
   (DirectWrite, Core Text), so no CJK or Indic font is bundled. Faculty Glyphic stays brand-only.
   Prices and quantities keep the exchange's number format in every language.

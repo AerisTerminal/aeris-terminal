@@ -280,7 +280,7 @@ fn register_export_fonts() -> Result<(), String> {
     static REGISTERED: OnceLock<Result<(), String>> = OnceLock::new();
     REGISTERED
         .get_or_init(|| {
-            for face in PLATFORM_FONT_BYTES.iter().chain([&BRAND_FONT_BYTES]) {
+            for face in [PLATFORM_FONT_BYTES, BRAND_FONT_BYTES] {
                 register_font_data(face.to_vec())?;
             }
             Ok(())

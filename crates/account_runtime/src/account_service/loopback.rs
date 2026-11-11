@@ -30,21 +30,9 @@ const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 const PLATFORM_STYLESHEET: &str = include_str!("../../../ui/design_system/platform.css");
-/// Inter faces at the weights `platform.css` uses for normal, emphasis and strong text.
-const PLATFORM_FONTS: [(&[u8], u16); 3] = [
-    (
-        include_bytes!("../../../ui/design_system/assets/fonts/inter_regular.ttf"),
-        400,
-    ),
-    (
-        include_bytes!("../../../ui/design_system/assets/fonts/inter_medium.ttf"),
-        500,
-    ),
-    (
-        include_bytes!("../../../ui/design_system/assets/fonts/inter_bold.ttf"),
-        700,
-    ),
-];
+/// The variable Manrope face used by the platform stylesheet and its native UI.
+const PLATFORM_FONT: &[u8] =
+    include_bytes!("../../../ui/design_system/assets/fonts/manrope_variable.ttf");
 const BRAND_FONT: &[u8] = include_bytes!(
     "../../../ui/design_system/assets/fonts/faculty-glyphic/FacultyGlyphic-Regular.ttf"
 );
@@ -281,10 +269,8 @@ fn browser_platform_styles() -> &'static str {
 }
 
 fn browser_font_faces() -> String {
-    PLATFORM_FONTS
-        .iter()
-        .map(|&(face, weight)| ("Inter", face, weight))
-        .chain([("Faculty Glyphic", BRAND_FONT, 400)])
+    std::iter::once(("Manrope", PLATFORM_FONT, "200 800"))
+        .chain([("Faculty Glyphic", BRAND_FONT, "400")])
         .map(|(family, face, weight)| {
             let face = STANDARD.encode(face);
             format!(
@@ -530,10 +516,9 @@ mod tests {
         let page_rules = response.replace(browser_platform_styles(), "");
         assert!(!page_rules.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));
-        assert!(response.contains("font-family:\"Inter\""));
-        for weight in ["400", "500", "700"] {
-            assert!(response.contains(&format!("font-weight:{weight};font-display:swap")));
-        }
+        assert!(response.contains("font-family:\"Manrope\""));
+        assert!(response.contains("font-weight:200 800;font-display:swap"));
+        assert!(response.contains("font-weight:400;font-display:swap"));
         assert!(response.contains("font-family:\"Faculty Glyphic\""));
         assert!(response.contains("data:font/ttf;base64,"));
         assert!(response.contains("classList.toggle('dark',d)"));

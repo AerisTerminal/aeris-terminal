@@ -6114,9 +6114,7 @@ fn prepare_application(cx: &mut App) {
         );
     }
     if let Err(error) = cx.text_system().add_fonts(
-        PLATFORM_FONT_BYTES
-            .iter()
-            .map(|font| Cow::Borrowed(*font))
+        std::iter::once(Cow::Borrowed(PLATFORM_FONT_BYTES))
             .chain(std::iter::once(Cow::Borrowed(BRAND_FONT_BYTES)))
             .collect(),
     ) {

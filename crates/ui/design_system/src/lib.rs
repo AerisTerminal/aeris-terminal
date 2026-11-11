@@ -14,14 +14,9 @@ include!(concat!(env!("OUT_DIR"), "/platform_tokens.rs"));
 /// Canonical portable stylesheet shared with the native presentation layer.
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
-/// The bundled platform faces referenced by `platform.css`: Inter (`--font-sans`)
-/// at the regular, medium and bold weights. Inter covers Latin and Cyrillic, so every
-/// supported display language renders in one face.
-pub static PLATFORM_FONT_BYTES: [&[u8]; 3] = [
-    include_bytes!("../assets/fonts/inter_regular.ttf"),
-    include_bytes!("../assets/fonts/inter_medium.ttf"),
-    include_bytes!("../assets/fonts/inter_bold.ttf"),
-];
+/// The bundled variable Manrope face referenced by `platform.css` (`--font-sans`).
+/// Its weight axis covers every platform weight from 200 through 800.
+pub static PLATFORM_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/manrope_variable.ttf");
 
 /// Bundled Aeris brand face. It is intentionally separate from the platform
 /// typography so only explicit brand lockups opt into it.
@@ -1056,11 +1051,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         bundled_fonts.sort();
-        assert_eq!(
-            bundled_fonts,
-            ["inter_bold.ttf", "inter_medium.ttf", "inter_regular.ttf",]
-        );
-        assert!(font_dir.join("inter_license.txt").is_file());
+        assert_eq!(bundled_fonts, ["manrope_variable.ttf"]);
+        assert!(font_dir.join("manrope_license.txt").is_file());
         let brand_font = font_dir.join("faculty-glyphic/FacultyGlyphic-Regular.ttf");
         let brand_license = font_dir.join("faculty-glyphic/OFL.txt");
         assert!(brand_font.is_file());
@@ -1135,16 +1127,14 @@ mod tests {
     fn css_manifest_carries_the_portable_interaction_contract() {
         let css = include_str!("../platform.css");
         for required in [
-            "--font-sans: \"Inter\", sans-serif;",
-            "--font-weight-normal: 400;",
+            "--font-sans: \"Manrope\", sans-serif;",
+            "--font-weight-normal: 500;",
             "--font-weight-emphasis: 700;",
-            "--font-weight-strong: 700;",
+            "--font-weight-strong: 800;",
             "--font-feature-tabular-numerals: \"tnum\";",
-            "inter_regular.ttf",
-            "inter_medium.ttf",
-            "inter_bold.ttf",
-            "font-weight: 400;",
-            "font-weight: 500;",
+            "manrope_variable.ttf",
+            "font-weight: 200 800;",
+            "font-weight: var(--font-weight-normal);",
             "font-weight: var(--font-weight-strong);",
             "font-variant-numeric: tabular-nums;",
             "-webkit-font-smoothing: antialiased;",
@@ -1161,7 +1151,6 @@ mod tests {
         }
         assert!(!css.contains("HK Grotesk"));
         assert!(!css.contains("--font-mono"));
-        assert!(!css.contains("font-weight: 600;"));
         assert!(!css.contains("border-color: var(--primary);"));
         assert!(!css.contains("transform: scale("));
         assert!(css.contains("/* Chart */"));
@@ -1173,13 +1162,13 @@ mod tests {
         assert!(
             css.contains("--sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);")
         );
-        assert_eq!(platform_font_family(), "Inter");
-        assert_eq!(platform_font_stack(), "\"Inter\", sans-serif");
+        assert_eq!(platform_font_family(), "Manrope");
+        assert_eq!(platform_font_stack(), "\"Manrope\", sans-serif");
 
         let typography = platform_typography();
-        assert_eq!(typography.weight(TypographyRole::Normal), 400);
+        assert_eq!(typography.weight(TypographyRole::Normal), 500);
         assert_eq!(typography.weight(TypographyRole::Emphasis), 700);
-        assert_eq!(typography.weight(TypographyRole::Strong), 700);
+        assert_eq!(typography.weight(TypographyRole::Strong), 800);
         assert_eq!(typography.tabular_numerals_feature(), "tnum");
     }
 }
