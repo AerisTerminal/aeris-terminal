@@ -649,23 +649,21 @@ pub(super) fn escape(text: &str) -> String {
 /// The platform, numeric and brand faces, embedded so the report looks the same on any
 /// computer, and the rule that sets every numeric readout in the numeric face.
 fn font_faces() -> Result<String, fmt::Error> {
-    let fonts = [
-        (
-            platform_font_family(),
-            "100 900",
-            aeris_design_system::PLATFORM_FONT_BYTES,
-        ),
+    let platform_faces = aeris_design_system::PLATFORM_FONT_FACES
+        .iter()
+        .map(|face| (platform_font_family(), face.weight.to_string(), face.bytes));
+    let fonts = platform_faces.chain([
         (
             platform_numeric_font_family(),
-            "200 800",
+            "200 800".to_owned(),
             aeris_design_system::NUMERIC_FONT_BYTES,
         ),
         (
             brand_font_family(),
-            "400",
+            "400".to_owned(),
             aeris_design_system::BRAND_FONT_BYTES,
         ),
-    ];
+    ]);
     let mut faces = String::new();
     for (family, weight, bytes) in fonts {
         writeln!(

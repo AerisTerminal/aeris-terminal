@@ -14,9 +14,35 @@ include!(concat!(env!("OUT_DIR"), "/platform_tokens.rs"));
 /// Canonical portable stylesheet shared with the native presentation layer.
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
-/// The bundled Inter Variable face referenced by `platform.css` (`--font-sans`).
-/// Its weight axis covers every platform weight from 100 through 900.
-pub static PLATFORM_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/inter_variable.ttf");
+/// One bundled static face of the platform family at a single weight.
+#[derive(Clone, Copy)]
+pub struct PlatformFontFace {
+    pub weight: u16,
+    pub bytes: &'static [u8],
+}
+
+/// The bundled Inter faces referenced by `platform.css` (`--font-sans`), one static file
+/// per platform weight. Static faces are bundled instead of Inter's variable font because
+/// DirectWrite selects a variable font's named instance by weight and renders the platform
+/// weights too light.
+pub static PLATFORM_FONT_FACES: [PlatformFontFace; 4] = [
+    PlatformFontFace {
+        weight: 400,
+        bytes: include_bytes!("../assets/fonts/inter_regular.ttf"),
+    },
+    PlatformFontFace {
+        weight: 500,
+        bytes: include_bytes!("../assets/fonts/inter_medium.ttf"),
+    },
+    PlatformFontFace {
+        weight: 700,
+        bytes: include_bytes!("../assets/fonts/inter_bold.ttf"),
+    },
+    PlatformFontFace {
+        weight: 800,
+        bytes: include_bytes!("../assets/fonts/inter_extrabold.ttf"),
+    },
+];
 
 /// The bundled variable Manrope face referenced by `platform.css` (`--font-numeric`) for
 /// prices, quantities and other numeric readouts. Its weight axis covers 200 through 800.
@@ -618,9 +644,10 @@ impl RadiusToken {
 #[cfg(test)]
 mod tests {
     use super::{
-        AerisTheme, ColorToken, RadiusToken, ThemeColor, ThemeMode, ThemePreset, TypographyRole,
-        brand_font_family, platform_date_label, platform_font_family, platform_font_stack,
-        platform_numeric_font_family, platform_numeric_font_stack, platform_typography,
+        AerisTheme, ColorToken, PLATFORM_FONT_FACES, RadiusToken, ThemeColor, ThemeMode,
+        ThemePreset, TypographyRole, brand_font_family, platform_date_label, platform_font_family,
+        platform_font_stack, platform_numeric_font_family, platform_numeric_font_stack,
+        platform_typography,
     };
 
     #[test]
@@ -1083,7 +1110,13 @@ mod tests {
         bundled_fonts.sort();
         assert_eq!(
             bundled_fonts,
-            ["inter_variable.ttf", "manrope_variable.ttf"]
+            [
+                "inter_bold.ttf",
+                "inter_extrabold.ttf",
+                "inter_medium.ttf",
+                "inter_regular.ttf",
+                "manrope_variable.ttf"
+            ]
         );
         assert!(font_dir.join("inter_license.txt").is_file());
         assert!(font_dir.join("manrope_license.txt").is_file());
@@ -1161,14 +1194,16 @@ mod tests {
     fn css_manifest_carries_the_portable_interaction_contract() {
         let css = include_str!("../platform.css");
         for required in [
-            "--font-sans: \"Inter Variable\", sans-serif;",
+            "--font-sans: \"Inter\", sans-serif;",
             "--font-numeric: \"Manrope\", sans-serif;",
             "--font-weight-normal: 500;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 800;",
             "--font-feature-tabular-numerals: \"tnum\";",
-            "inter_variable.ttf",
-            "font-weight: 100 900;",
+            "inter_regular.ttf",
+            "inter_medium.ttf",
+            "inter_bold.ttf",
+            "inter_extrabold.ttf",
             "manrope_variable.ttf",
             "font-weight: 200 800;",
             "font-family: var(--font-numeric);",
@@ -1200,8 +1235,8 @@ mod tests {
         assert!(
             css.contains("--sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);")
         );
-        assert_eq!(platform_font_family(), "Inter Variable");
-        assert_eq!(platform_font_stack(), "\"Inter Variable\", sans-serif");
+        assert_eq!(platform_font_family(), "Inter");
+        assert_eq!(platform_font_stack(), "\"Inter\", sans-serif");
         assert_eq!(platform_numeric_font_family(), "Manrope");
         assert_eq!(platform_numeric_font_stack(), "\"Manrope\", sans-serif");
 
@@ -1210,5 +1245,30 @@ mod tests {
         assert_eq!(typography.weight(TypographyRole::Emphasis), 700);
         assert_eq!(typography.weight(TypographyRole::Strong), 800);
         assert_eq!(typography.tabular_numerals_feature(), "tnum");
+    }
+
+    #[test]
+    fn every_platform_weight_has_a_bundled_static_face() {
+        let css = include_str!("../platform.css");
+        let typography = platform_typography();
+        for role in [
+            TypographyRole::Normal,
+            TypographyRole::Emphasis,
+            TypographyRole::Strong,
+        ] {
+            let weight = typography.weight(role);
+            assert!(
+                PLATFORM_FONT_FACES.iter().any(|face| face.weight == weight),
+                "no bundled platform face for {role:?} weight {weight}"
+            );
+        }
+        for face in &PLATFORM_FONT_FACES {
+            assert!(face.bytes.starts_with(&[0, 1, 0, 0]), "not a TrueType face");
+            assert!(
+                css.contains(&format!("font-weight: {};", face.weight)),
+                "platform.css declares no face at weight {}",
+                face.weight
+            );
+        }
     }
 }

@@ -148,7 +148,7 @@ use aeris_contracts::{
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
-    AerisTheme, BRAND_FONT_BYTES, NUMERIC_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor,
+    AerisTheme, BRAND_FONT_BYTES, NUMERIC_FONT_BYTES, PLATFORM_FONT_FACES, RadiusToken, ThemeColor,
     TypographyRole,
 };
 use aeris_desktop::chart_chrome;
@@ -6116,8 +6116,10 @@ fn prepare_application(cx: &mut App) {
         );
     }
     if let Err(error) = cx.text_system().add_fonts(
-        [PLATFORM_FONT_BYTES, NUMERIC_FONT_BYTES, BRAND_FONT_BYTES]
-            .into_iter()
+        PLATFORM_FONT_FACES
+            .iter()
+            .map(|face| face.bytes)
+            .chain([NUMERIC_FONT_BYTES, BRAND_FONT_BYTES])
             .map(Cow::Borrowed)
             .collect(),
     ) {

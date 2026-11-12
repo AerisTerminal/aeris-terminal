@@ -78,15 +78,18 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   fading strength (the layer opacity and each dot's alpha) is animation, not a tint, and no other
   UI may borrow it as a shade. It never shows under reduced motion, and the Trading settings'
   Fill glow switch turns it off.
-- Typography uses the bundled Inter Variable face (weights 100–900) for platform text, the
-  bundled Manrope variable face (weights 200–800) for numbers, and the bundled Faculty Glyphic
-  Regular face only for brand/display text. Inter and Manrope both cover Latin and Cyrillic.
-  The normal platform weight (`--font-weight-normal`) is Regular 400; emphasis and strong text use
-  Bold 700. Changing numbers and data-panel rows (order book, time and sales, positions, orders,
+- Typography uses the bundled static Inter faces (Regular 400, Medium 500, Bold 700 and
+  ExtraBold 800, one file per weight) for platform text, the bundled Manrope variable face
+  (weights 200–800) for numbers, and the bundled Faculty Glyphic Regular face only for
+  brand/display text. Inter and Manrope both cover Latin and Cyrillic. Inter is bundled as
+  static faces because DirectWrite renders its variable font too light at the platform weights.
+  The normal platform weight (`--font-weight-normal`) is Medium 500, emphasis (`--font-weight-emphasis`)
+  is Bold 700 and strong (`--font-weight-strong`) is ExtraBold 800; every platform weight needs a
+  bundled face. Changing numbers and data-panel rows (order book, time and sales, positions, orders,
   trades, screener) and the chart's axes and price labels use Manrope tabular figures (`tnum`) so
   digits keep one width; native code applies both through `NumericText::numeric_text`. There is
   no separate mono platform face and no HK Grotesk dependency. The CSS `--font-sans` and native
-  `platform_font_family()` resolve to Inter Variable, and `--font-numeric` and
+  `platform_font_family()` resolve to Inter, and `--font-numeric` and
   `platform_numeric_font_family()` to Manrope; keep the web mirror in sync.
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
