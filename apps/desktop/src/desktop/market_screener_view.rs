@@ -110,7 +110,7 @@ pub(super) fn table_row_frame(height: f32) -> Div {
         .flex_none()
         .flex()
         .items_center()
-        .font_features(platform_tabular_numerals())
+        .numeric_text()
 }
 
 pub(super) fn direction_color(direction: Option<CmpOrdering>, theme: &AerisTheme) -> Hsla {
@@ -568,7 +568,7 @@ fn page_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
         .gap_4()
         .text_xs()
         .text_color(gpui_color(colors.text_muted))
-        .font_features(platform_tabular_numerals())
+        .numeric_text()
         .child(
             div()
                 .flex_none()

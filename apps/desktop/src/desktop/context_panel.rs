@@ -1,9 +1,9 @@
 use super::{
     AerisTheme, AnyElement, Button, ButtonSize, ButtonVariant, Context,
     ContextCredentialDialogState, ContextPanelTab, ContextSnapshot, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Tab,
-    TabList, Window, WorkspaceSurface, chrome_tooltip, close_button, div, gpui_color,
-    platform_tabular_numerals, px,
+    IntoElement, NumericText, ParentElement, Render, ScrollHandle, StatefulInteractiveElement,
+    Styled, Tab, TabList, Window, WorkspaceSurface, chrome_tooltip, close_button, div, gpui_color,
+    px,
 };
 use crate::desktop::native_ui::input::Input;
 use aeris_context_runtime::{
@@ -440,7 +440,7 @@ fn context_row(
                     div()
                         .text_xs()
                         .text_color(gpui_color(theme.colors.text_muted))
-                        .font_features(platform_tabular_numerals())
+                        .numeric_text()
                         .child(detail),
                 ),
         )

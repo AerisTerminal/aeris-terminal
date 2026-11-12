@@ -46,7 +46,7 @@ use aeris_charts_render_gpui::input::{GpuiChartInput, install_text_metrics};
 use aeris_charts_render_gpui::{AerisViewport, GpuiChartRenderer, PreparedAerisFrame};
 use aeris_design_system::{
     AerisTheme, ThemeColor, TypographyRole, platform_date_label, platform_font_family,
-    platform_font_stack, platform_typography,
+    platform_font_stack, platform_numeric_font_stack, platform_typography,
 };
 use aeris_localization::{chart_ui, tr};
 use aeris_observability::diagnostic;
@@ -119,7 +119,7 @@ const PLATFORM_DATE_FORMAT: &str = "dd-MM-yy";
 fn apply_platform_chrome_contract(engine: &mut ChartEngine, labels: TimeAxisLabels) {
     let options = serde_json::json!({
         "layout": {
-            "fontFamily": platform_font_stack(),
+            "fontFamily": platform_numeric_font_stack(),
         },
         "localization": {
             "dateFormat": PLATFORM_DATE_FORMAT,

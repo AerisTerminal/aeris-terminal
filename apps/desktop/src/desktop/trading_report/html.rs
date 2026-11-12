@@ -13,7 +13,7 @@ use super::statistics::{
 use super::{grid_price_text, market_price_text};
 use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeMode, brand_font_family, platform_font_family,
-    platform_font_stack,
+    platform_font_stack, platform_numeric_font_family, platform_numeric_font_stack,
 };
 use aeris_localization::{Text, panels, tr, tr_count};
 use aeris_trading::{AccountEnvironment, FixedPoint, OrderSide};
@@ -646,13 +646,19 @@ pub(super) fn escape(text: &str) -> String {
     out
 }
 
-/// The platform and brand faces, embedded so the report looks the same on any computer.
+/// The platform, numeric and brand faces, embedded so the report looks the same on any
+/// computer, and the rule that sets every numeric readout in the numeric face.
 fn font_faces() -> Result<String, fmt::Error> {
     let fonts = [
         (
             platform_font_family(),
-            "200 800",
+            "100 900",
             aeris_design_system::PLATFORM_FONT_BYTES,
+        ),
+        (
+            platform_numeric_font_family(),
+            "200 800",
+            aeris_design_system::NUMERIC_FONT_BYTES,
         ),
         (
             brand_font_family(),
@@ -668,6 +674,11 @@ fn font_faces() -> Result<String, fmt::Error> {
             data_uri("font/ttf", bytes)
         )?;
     }
+    writeln!(
+        faces,
+        ".number, .card .value, .facts dd, .stats dd, .chart text {{ font-family: {}; font-variant-numeric: tabular-nums; }}",
+        platform_numeric_font_stack()
+    )?;
     Ok(faces)
 }
 

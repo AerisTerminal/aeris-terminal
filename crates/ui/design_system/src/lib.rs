@@ -14,9 +14,13 @@ include!(concat!(env!("OUT_DIR"), "/platform_tokens.rs"));
 /// Canonical portable stylesheet shared with the native presentation layer.
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
-/// The bundled variable Manrope face referenced by `platform.css` (`--font-sans`).
-/// Its weight axis covers every platform weight from 200 through 800.
-pub static PLATFORM_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/manrope_variable.ttf");
+/// The bundled Inter Variable face referenced by `platform.css` (`--font-sans`).
+/// Its weight axis covers every platform weight from 100 through 900.
+pub static PLATFORM_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/inter_variable.ttf");
+
+/// The bundled variable Manrope face referenced by `platform.css` (`--font-numeric`) for
+/// prices, quantities and other numeric readouts. Its weight axis covers 200 through 800.
+pub static NUMERIC_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/manrope_variable.ttf");
 
 /// Bundled Aeris brand face. It is intentionally separate from the platform
 /// typography so only explicit brand lockups opt into it.
@@ -43,6 +47,8 @@ pub enum TypographyRole {
 pub struct PlatformTypography {
     stack: &'static str,
     family: &'static str,
+    numeric_stack: &'static str,
+    numeric_family: &'static str,
     normal_weight: u16,
     emphasis_weight: u16,
     strong_weight: u16,
@@ -58,6 +64,16 @@ impl PlatformTypography {
     #[must_use]
     pub const fn family(self) -> &'static str {
         self.family
+    }
+
+    #[must_use]
+    pub const fn numeric_stack(self) -> &'static str {
+        self.numeric_stack
+    }
+
+    #[must_use]
+    pub const fn numeric_family(self) -> &'static str {
+        self.numeric_family
     }
 
     #[must_use]
@@ -81,6 +97,8 @@ pub fn platform_typography() -> PlatformTypography {
     PlatformTypography {
         stack: FONT_STACK,
         family: FONT_FAMILY,
+        numeric_stack: NUMERIC_FONT_STACK,
+        numeric_family: NUMERIC_FONT_FAMILY,
         normal_weight: FONT_WEIGHT_NORMAL,
         emphasis_weight: FONT_WEIGHT_EMPHASIS,
         strong_weight: FONT_WEIGHT_STRONG,
@@ -101,6 +119,18 @@ pub fn platform_font_stack() -> &'static str {
 #[must_use]
 pub fn platform_font_family() -> &'static str {
     platform_typography().family()
+}
+
+/// Returns the `--font-numeric` value from `platform.css`.
+#[must_use]
+pub fn platform_numeric_font_stack() -> &'static str {
+    platform_typography().numeric_stack()
+}
+
+/// Returns the primary family from the canonical `--font-numeric` CSS value.
+#[must_use]
+pub fn platform_numeric_font_family() -> &'static str {
+    platform_typography().numeric_family()
 }
 
 /// Returns the dedicated Aeris brand font family.
@@ -590,7 +620,7 @@ mod tests {
     use super::{
         AerisTheme, ColorToken, RadiusToken, ThemeColor, ThemeMode, ThemePreset, TypographyRole,
         brand_font_family, platform_date_label, platform_font_family, platform_font_stack,
-        platform_typography,
+        platform_numeric_font_family, platform_numeric_font_stack, platform_typography,
     };
 
     #[test]
@@ -1051,7 +1081,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         bundled_fonts.sort();
-        assert_eq!(bundled_fonts, ["manrope_variable.ttf"]);
+        assert_eq!(
+            bundled_fonts,
+            ["inter_variable.ttf", "manrope_variable.ttf"]
+        );
+        assert!(font_dir.join("inter_license.txt").is_file());
         assert!(font_dir.join("manrope_license.txt").is_file());
         let brand_font = font_dir.join("faculty-glyphic/FacultyGlyphic-Regular.ttf");
         let brand_license = font_dir.join("faculty-glyphic/OFL.txt");
@@ -1127,13 +1161,17 @@ mod tests {
     fn css_manifest_carries_the_portable_interaction_contract() {
         let css = include_str!("../platform.css");
         for required in [
-            "--font-sans: \"Manrope\", sans-serif;",
+            "--font-sans: \"Inter Variable\", sans-serif;",
+            "--font-numeric: \"Manrope\", sans-serif;",
             "--font-weight-normal: 500;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 800;",
             "--font-feature-tabular-numerals: \"tnum\";",
+            "inter_variable.ttf",
+            "font-weight: 100 900;",
             "manrope_variable.ttf",
             "font-weight: 200 800;",
+            "font-family: var(--font-numeric);",
             "font-weight: var(--font-weight-normal);",
             "font-weight: var(--font-weight-strong);",
             "font-variant-numeric: tabular-nums;",
@@ -1162,8 +1200,10 @@ mod tests {
         assert!(
             css.contains("--sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);")
         );
-        assert_eq!(platform_font_family(), "Manrope");
-        assert_eq!(platform_font_stack(), "\"Manrope\", sans-serif");
+        assert_eq!(platform_font_family(), "Inter Variable");
+        assert_eq!(platform_font_stack(), "\"Inter Variable\", sans-serif");
+        assert_eq!(platform_numeric_font_family(), "Manrope");
+        assert_eq!(platform_numeric_font_stack(), "\"Manrope\", sans-serif");
 
         let typography = platform_typography();
         assert_eq!(typography.weight(TypographyRole::Normal), 500);

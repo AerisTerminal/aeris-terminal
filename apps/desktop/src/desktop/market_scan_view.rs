@@ -177,7 +177,7 @@ fn library(ui: Ui<'_>) -> Div {
     let count = div()
         .text_xs()
         .text_color(gpui_color(colors.text_muted))
-        .font_features(platform_tabular_numerals())
+        .numeric_text()
         .child(format!("{}/{MAXIMUM_SAVED_SCANS}", scans.saved().len()));
     div()
         .w(px(LIBRARY_WIDTH))
@@ -526,7 +526,7 @@ fn condition_row(ui: Ui<'_>, index: usize, condition: &ConditionDraft) -> Div {
                 .flex_none()
                 .text_xs()
                 .text_color(gpui_color(colors.text_muted))
-                .font_features(platform_tabular_numerals())
+                .numeric_text()
                 .child(number.to_string()),
         )
         .child(operand_controls(ui, index, ScanSide::Left, &condition.left))
@@ -1068,7 +1068,7 @@ fn results_footer(screener: &MarketScreener, theme: &AerisTheme) -> Div {
         .gap_4()
         .text_xs()
         .text_color(gpui_color(colors.text_muted))
-        .font_features(platform_tabular_numerals())
+        .numeric_text()
         .child(div().min_w_0().flex_1().children(summary.map(line)))
         .children(status.map(line))
         .child(div().flex_none().child(tr!(panels::SCAN_CAPTION)))

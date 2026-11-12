@@ -96,10 +96,7 @@ fn watchlist_table(
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let mut body = div()
-        .flex_1()
-        .min_h_0()
-        .font_features(platform_tabular_numerals());
+    let mut body = div().flex_1().min_h_0().numeric_text();
     if rows.is_empty() {
         body = body.child(
             div()

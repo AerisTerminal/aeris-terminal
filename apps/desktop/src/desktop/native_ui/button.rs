@@ -41,9 +41,10 @@ use gpui_base::Button as BaseButton;
 use crate::desktop::assets::UiIcon;
 
 use super::{
+    NumericText,
     icon::Icon,
     loader::Loader,
-    platform_font_weight, platform_tabular_numerals,
+    platform_font_weight,
     rem_scale::design_rems,
     theme::{gpui_color, platform_border_width},
     tooltip::{TooltipSpec, attach_tooltip},
@@ -765,7 +766,7 @@ fn style_frame(
         })
         .when(flags.has(ButtonFlags::FULL_WIDTH), Styled::w_full)
         .when(flags.has(ButtonFlags::TABULAR_NUMERALS), |button| {
-            button.font_features(platform_tabular_numerals())
+            button.numeric_text()
         })
         .when(flags.has(ButtonFlags::DISABLED), Styled::cursor_not_allowed)
         .when(flags.has(ButtonFlags::LOADING), |button| {

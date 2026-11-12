@@ -980,8 +980,7 @@ fn connection_tooltip_row(
         )
         .child(if numeric {
             div()
-                .font_family(aeris_design_system::platform_font_family())
-                .font_features(platform_tabular_numerals())
+                .numeric_text()
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_default))
                 .child(value)

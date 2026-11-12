@@ -4,7 +4,7 @@ use super::{
     AerisChartView, ChartHostEvent, ChartSettingsRequest, OrderFlowStudy, gpui_theme_color,
 };
 use aeris_charts_render::color::Color;
-use aeris_design_system::{AerisTheme, platform_typography};
+use aeris_design_system::{AerisTheme, platform_numeric_font_family, platform_typography};
 use aeris_localization::{chart_ui, tr};
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, CursorStyle, Entity, MouseButton, Rgba, Role,
@@ -319,6 +319,7 @@ fn chart_legend_row(
             .flex()
             .items_center()
             .whitespace_nowrap()
+            .font_family(platform_numeric_font_family())
             .font_features(platform_tabular_numerals())
             .text_color(color)
             .child(value.text)

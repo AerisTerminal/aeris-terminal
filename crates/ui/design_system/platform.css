@@ -1,4 +1,12 @@
 @font-face {
+  font-family: "Inter Variable";
+  src: url("./assets/fonts/inter_variable.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
   font-family: "Manrope";
   src: url("./assets/fonts/manrope_variable.ttf") format("truetype");
   font-style: normal;
@@ -7,7 +15,8 @@
 }
 
 :root {
-  --font-sans: "Manrope", sans-serif;
+  --font-sans: "Inter Variable", sans-serif;
+  --font-numeric: "Manrope", sans-serif;
   --font-weight-normal: 500;
   --font-weight-emphasis: 700;
   --font-weight-strong: 800;
@@ -1762,6 +1771,7 @@ body {
 }
 
 .platform-numeric-changing {
+  font-family: var(--font-numeric);
   font-feature-settings: var(--font-feature-tabular-numerals) 1;
   font-variant-numeric: tabular-nums;
 }

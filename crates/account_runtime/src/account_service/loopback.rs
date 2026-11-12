@@ -30,8 +30,11 @@ const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 const PLATFORM_STYLESHEET: &str = include_str!("../../../ui/design_system/platform.css");
-/// The variable Manrope face used by the platform stylesheet and its native UI.
+/// The Inter Variable face used by the platform stylesheet and its native UI.
 const PLATFORM_FONT: &[u8] =
+    include_bytes!("../../../ui/design_system/assets/fonts/inter_variable.ttf");
+/// The variable Manrope face the platform stylesheet uses for numeric readouts.
+const NUMERIC_FONT: &[u8] =
     include_bytes!("../../../ui/design_system/assets/fonts/manrope_variable.ttf");
 const BRAND_FONT: &[u8] = include_bytes!(
     "../../../ui/design_system/assets/fonts/faculty-glyphic/FacultyGlyphic-Regular.ttf"
@@ -269,8 +272,12 @@ fn browser_platform_styles() -> &'static str {
 }
 
 fn browser_font_faces() -> String {
-    std::iter::once(("Manrope", PLATFORM_FONT, "200 800"))
-        .chain([("Faculty Glyphic", BRAND_FONT, "400")])
+    [
+        ("Inter Variable", PLATFORM_FONT, "100 900"),
+        ("Manrope", NUMERIC_FONT, "200 800"),
+        ("Faculty Glyphic", BRAND_FONT, "400"),
+    ]
+    .into_iter()
         .map(|(family, face, weight)| {
             let face = STANDARD.encode(face);
             format!(
@@ -516,6 +523,8 @@ mod tests {
         let page_rules = response.replace(browser_platform_styles(), "");
         assert!(!page_rules.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));
+        assert!(response.contains("font-family:\"Inter Variable\""));
+        assert!(response.contains("font-weight:100 900;font-display:swap"));
         assert!(response.contains("font-family:\"Manrope\""));
         assert!(response.contains("font-weight:200 800;font-display:swap"));
         assert!(response.contains("font-weight:400;font-display:swap"));

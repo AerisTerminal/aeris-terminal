@@ -148,7 +148,8 @@ use aeris_contracts::{
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
-    AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, TypographyRole,
+    AerisTheme, BRAND_FONT_BYTES, NUMERIC_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor,
+    TypographyRole,
 };
 use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
@@ -236,6 +237,7 @@ use indicator_menu::{
     native_indicator,
 };
 use native_ui::{
+    NumericText,
     button::{Button, ButtonSize, ButtonVariant, close_button},
     checkbox::CheckboxRow,
     color_picker::{ColorPicker, normalize_hex_color, parse_hex_hsla, transparency_backdrop},
@@ -6114,8 +6116,9 @@ fn prepare_application(cx: &mut App) {
         );
     }
     if let Err(error) = cx.text_system().add_fonts(
-        std::iter::once(Cow::Borrowed(PLATFORM_FONT_BYTES))
-            .chain(std::iter::once(Cow::Borrowed(BRAND_FONT_BYTES)))
+        [PLATFORM_FONT_BYTES, NUMERIC_FONT_BYTES, BRAND_FONT_BYTES]
+            .into_iter()
+            .map(Cow::Borrowed)
             .collect(),
     ) {
         diagnostic!("Aeris bundled fonts unavailable, using system fallback: {error}");

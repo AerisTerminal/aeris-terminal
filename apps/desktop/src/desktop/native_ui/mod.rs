@@ -16,8 +16,8 @@ pub(crate) mod tooltip;
 
 use std::sync::Arc;
 
-use aeris_design_system::{TypographyRole, platform_typography};
-use gpui::{FontFeatures, FontWeight};
+use aeris_design_system::{TypographyRole, platform_numeric_font_family, platform_typography};
+use gpui::{FontFeatures, FontWeight, Styled};
 
 /// GPUI adapter for the semantic weights owned by `platform.css`.
 pub(crate) fn platform_font_weight(role: TypographyRole) -> FontWeight {
@@ -31,3 +31,13 @@ pub(crate) fn platform_tabular_numerals() -> FontFeatures {
         1,
     )]))
 }
+
+/// Numeric readouts render in the platform numeric face with tabular figures.
+pub(crate) trait NumericText: Styled + Sized {
+    fn numeric_text(self) -> Self {
+        self.font_family(platform_numeric_font_family())
+            .font_features(platform_tabular_numerals())
+    }
+}
+
+impl<T: Styled> NumericText for T {}

@@ -1391,7 +1391,7 @@ fn assert_platform_chart_theme(chart: &AerisChartView, platform: &AerisTheme) {
     );
     assert_eq!(
         options.layout.font_family,
-        aeris_design_system::platform_font_stack()
+        aeris_design_system::platform_numeric_font_stack()
     );
     assert_eq!(
         options.watermark.font_family,

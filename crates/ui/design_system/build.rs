@@ -46,7 +46,7 @@ fn main() {
     }
 }
 
-/// The first, quoted family of a CSS font stack such as `"Manrope", sans-serif`.
+/// The first, quoted family of a CSS font stack such as `"Inter Variable", sans-serif`.
 fn primary_family<'a>(stack: &'a str, property: &str) -> Result<&'a str, String> {
     stack
         .strip_prefix('"')
@@ -70,6 +70,13 @@ fn compile_tokens() -> Result<(), String> {
         &mut output,
         "FONT_FAMILY",
         primary_family(&stack, "font-sans")?,
+    );
+    let numeric_stack = resolve(&root, "font-numeric")?;
+    emit_string(&mut output, "NUMERIC_FONT_STACK", &numeric_stack);
+    emit_string(
+        &mut output,
+        "NUMERIC_FONT_FAMILY",
+        primary_family(&numeric_stack, "font-numeric")?,
     );
     emit_u16(
         &mut output,
