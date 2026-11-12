@@ -1,8 +1,8 @@
 use super::{
     AerisTheme, AnyElement, Button, ButtonSize, ButtonVariant, Context,
     ContextCredentialDialogState, ContextPanelTab, ContextSnapshot, Entity, InteractiveElement,
-    IntoElement, NumericText, ParentElement, Render, ScrollHandle, StatefulInteractiveElement,
-    Styled, Tab, TabList, Window, WorkspaceSurface, chrome_tooltip, close_button, div, gpui_color,
+    IntoElement, ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Tab,
+    TabList, Window, WorkspaceSurface, chrome_tooltip, close_button, div, gpui_color, numeric_text,
     px,
 };
 use crate::desktop::native_ui::input::Input;
@@ -440,7 +440,7 @@ fn context_row(
                     div()
                         .text_xs()
                         .text_color(gpui_color(theme.colors.text_muted))
-                        .numeric_text()
+                        .map(numeric_text)
                         .child(detail),
                 ),
         )

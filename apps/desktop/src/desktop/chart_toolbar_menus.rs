@@ -751,7 +751,7 @@ fn time_zone_badge(label: String, theme: &AerisTheme) -> impl IntoElement {
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
-        .numeric_text()
+        .map(numeric_text)
         .text_xs()
         .text_color(gpui_color(colors.text_muted))
         .child(label)

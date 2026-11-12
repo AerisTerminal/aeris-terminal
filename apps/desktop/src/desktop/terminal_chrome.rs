@@ -980,7 +980,7 @@ fn connection_tooltip_row(
         )
         .child(if numeric {
             div()
-                .numeric_text()
+                .map(numeric_text)
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_default))
                 .child(value)
@@ -1301,11 +1301,10 @@ pub(super) fn chrome_tooltip(
     .into_any_element()
 }
 
-/// The timeframe menu trigger. Without a label it is a lone chevron, used while a highlighted
-/// favorite already shows the selected timeframe.
+/// The timeframe menu trigger: a lone chevron beside the timeframe buttons, which already show
+/// the selected timeframe.
 pub(super) fn series_selector(
     app: Entity<WorkspaceSurface>,
-    label: Option<String>,
     pending: bool,
     theme: &AerisTheme,
     enabled: bool,
@@ -1315,18 +1314,10 @@ pub(super) fn series_selector(
     let button = Button::new("series_selector", theme)
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
-        .loading_icon(header_icon(HugeIcon::Loader));
-    let button = match label {
-        Some(label) => button
-            .px(design_rems(TIMEFRAME_STRIP_PADDING_X))
-            .label(label)
-            .caret(header_icon(HugeIcon::ChevronDown)),
-        None => button
-            .w(design_rems(HEADER_CHEVRON_WIDTH))
-            .icon(header_icon(HugeIcon::ChevronDown).with_size(px(HEADER_CHEVRON_ICON)))
-            .aria_label(tr!(shell::SELECT_CHART_TIMEFRAME)),
-    };
-    let button = button
+        .loading_icon(header_icon(HugeIcon::Loader))
+        .w(design_rems(HEADER_CHEVRON_WIDTH))
+        .icon(header_icon(HugeIcon::ChevronDown).with_size(px(HEADER_CHEVRON_ICON)))
+        .aria_label(tr!(shell::SELECT_CHART_TIMEFRAME))
         .disabled(!enabled)
         .loading(pending)
         .on_click(move |event, window, cx| {
@@ -1390,31 +1381,35 @@ fn timeframe_strip(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> Div {
         .flex()
         .items_center()
         .gap_1()
-        .children(timeframe_favorite_buttons(app, state))
+        .children(timeframe_quick_buttons(app, state))
         .child(series_selector(
             app.clone(),
-            (!state.timeframe_favorites.contains(&state.interval))
-                .then(|| state.series_label.clone()),
             state.pending.series,
             &state.theme,
             state.controls.enabled(HeaderControls::SERIES),
         ))
 }
 
-/// The starred timeframes' quick buttons: one press selects a timeframe, like its menu row.
-fn timeframe_favorite_buttons(
-    app: &Entity<WorkspaceSurface>,
-    state: &HeaderState,
-) -> Vec<AnyElement> {
+/// The starred timeframes' quick buttons, followed by the selected timeframe when it is not
+/// starred, so the selection always shows as its own button beside the menu chevron. One press
+/// selects a timeframe, like its menu row.
+fn timeframe_quick_buttons(app: &Entity<WorkspaceSurface>, state: &HeaderState) -> Vec<AnyElement> {
     let enabled = state.controls.enabled(HeaderControls::SERIES) && !state.pending.series;
+    let unstarred_selection = (!state.timeframe_favorites.contains(&state.interval)).then_some((
+        "timeframe_selected_button",
+        0,
+        state.interval,
+    ));
     state
         .timeframe_favorites
         .iter()
         .copied()
         .enumerate()
-        .map(|(index, interval)| {
+        .map(|(index, interval)| ("timeframe_favorite_button", index, interval))
+        .chain(unstarred_selection)
+        .map(|(id, index, interval)| {
             let app = app.clone();
-            Button::new(("timeframe_favorite_button", index), &state.theme)
+            Button::new((id, index), &state.theme)
                 .variant(ButtonVariant::Ghost)
                 .button_size(ButtonSize::Lg)
                 .px(design_rems(TIMEFRAME_STRIP_PADDING_X))

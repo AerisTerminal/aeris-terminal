@@ -1041,7 +1041,7 @@ fn account_summary_stats(summary: &AccountSummary, theme: &AerisTheme) -> [Div; 
                 value
                     .text_sm()
                     .font_weight(platform_font_weight(TypographyRole::Emphasis))
-                    .numeric_text(),
+                    .map(numeric_text),
             )
     };
     [
@@ -1871,7 +1871,7 @@ fn table_frame(height: f32) -> Div {
         .flex()
         .items_center()
         .text_xs()
-        .numeric_text()
+        .map(numeric_text)
 }
 
 /// A padded cell at least `width` wide for its content, followed by the column divider.

@@ -14,7 +14,6 @@ fn active_header_state(
         theme: *theme,
         provider: workspace.provider,
         instrument_label: terminal_instrument_label(workspace),
-        series_label: series_selector_label(workspace.selected_interval()),
         interval: workspace.selected_interval(),
         timeframe_favorites: workspace
             .chart_chrome
@@ -1211,7 +1210,7 @@ fn workspace_tab_content(
                 .flex_none()
                 .text_xs()
                 .whitespace_nowrap()
-                .numeric_text()
+                .map(numeric_text)
                 .text_color(gpui_color(change_color))
                 .child(change)
         }));

@@ -44,10 +44,6 @@ pub static PLATFORM_FONT_FACES: [PlatformFontFace; 4] = [
     },
 ];
 
-/// The bundled variable Manrope face referenced by `platform.css` (`--font-numeric`) for
-/// prices, quantities and other numeric readouts. Its weight axis covers 200 through 800.
-pub static NUMERIC_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/manrope_variable.ttf");
-
 /// Bundled Aeris brand face. It is intentionally separate from the platform
 /// typography so only explicit brand lockups opt into it.
 pub static BRAND_FONT_BYTES: &[u8] =
@@ -1114,12 +1110,10 @@ mod tests {
                 "inter_bold.ttf",
                 "inter_extrabold.ttf",
                 "inter_medium.ttf",
-                "inter_regular.ttf",
-                "manrope_variable.ttf"
+                "inter_regular.ttf"
             ]
         );
         assert!(font_dir.join("inter_license.txt").is_file());
-        assert!(font_dir.join("manrope_license.txt").is_file());
         let brand_font = font_dir.join("faculty-glyphic/FacultyGlyphic-Regular.ttf");
         let brand_license = font_dir.join("faculty-glyphic/OFL.txt");
         assert!(brand_font.is_file());
@@ -1195,7 +1189,7 @@ mod tests {
         let css = include_str!("../platform.css");
         for required in [
             "--font-sans: \"Inter\", sans-serif;",
-            "--font-numeric: \"Manrope\", sans-serif;",
+            "--font-numeric: \"Inter\", sans-serif;",
             "--font-weight-normal: 500;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 800;",
@@ -1204,8 +1198,6 @@ mod tests {
             "inter_medium.ttf",
             "inter_bold.ttf",
             "inter_extrabold.ttf",
-            "manrope_variable.ttf",
-            "font-weight: 200 800;",
             "font-family: var(--font-numeric);",
             "font-weight: var(--font-weight-normal);",
             "font-weight: var(--font-weight-strong);",
@@ -1237,8 +1229,8 @@ mod tests {
         );
         assert_eq!(platform_font_family(), "Inter");
         assert_eq!(platform_font_stack(), "\"Inter\", sans-serif");
-        assert_eq!(platform_numeric_font_family(), "Manrope");
-        assert_eq!(platform_numeric_font_stack(), "\"Manrope\", sans-serif");
+        assert_eq!(platform_numeric_font_family(), "Inter");
+        assert_eq!(platform_numeric_font_stack(), "\"Inter\", sans-serif");
 
         let typography = platform_typography();
         assert_eq!(typography.weight(TypographyRole::Normal), 500);

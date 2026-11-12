@@ -30,17 +30,9 @@
   font-display: swap;
 }
 
-@font-face {
-  font-family: "Manrope";
-  src: url("./assets/fonts/manrope_variable.ttf") format("truetype");
-  font-style: normal;
-  font-weight: 200 800;
-  font-display: swap;
-}
-
 :root {
   --font-sans: "Inter", sans-serif;
-  --font-numeric: "Manrope", sans-serif;
+  --font-numeric: "Inter", sans-serif;
   --font-weight-normal: 500;
   --font-weight-emphasis: 700;
   --font-weight-strong: 800;

@@ -23,13 +23,13 @@ use super::{
     fullscreen_escape_command, gpui_color, instrument_listing_refresh_needed,
     instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, project_provider_catalog_event,
-    publication_chart_state, reconciled_bridge_state, series_selector_label,
-    stabilized_connection_state, symbol_input_action, symbol_submit_decision,
-    timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
-    timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
-    timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
-    watchlist_arrow_step, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
-    window_move_gesture_transition, workspace_maximize_transition, workspace_split_ratio,
+    publication_chart_state, reconciled_bridge_state, stabilized_connection_state,
+    symbol_input_action, symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
+    timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
+    timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
+    timeframe_overlay_left, watchlist_arrow_step, watchlist_drag_destination,
+    watchlist_drag_translation, watchlist_step, window_move_gesture_transition,
+    workspace_maximize_transition, workspace_split_ratio,
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -6627,9 +6627,6 @@ fn contextual_labels_keep_contract_and_pending_series_truthful() {
         instrument_selector_label(Some(("MNQU6", "CME"))),
         "MNQU6 / CME"
     );
-    assert_eq!(series_selector_label(ChartInterval::Minute1), "1m");
-    assert_eq!(series_selector_label(ChartInterval::Minute5), "5m");
-    assert_eq!(series_selector_label(ChartInterval::Hour4), "4h");
 }
 
 #[test]

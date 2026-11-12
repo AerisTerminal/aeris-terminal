@@ -152,7 +152,7 @@ fn row_time(time: String, theme: &AerisTheme) -> Div {
         .text_xs()
         .line_height(px(ROW_TITLE_LINE_HEIGHT))
         .text_color(gpui_color(theme.colors.text_muted))
-        .numeric_text()
+        .map(numeric_text)
         .child(time)
 }
 
@@ -283,14 +283,14 @@ fn alert_row(index: usize, listed: ListedAlert, theme: &AerisTheme) -> AnyElemen
                     div()
                         .text_xs()
                         .text_color(gpui_color(colors.text_secondary))
-                        .numeric_text()
+                        .map(numeric_text)
                         .child(summary),
                 )
                 .children(trigger.map(|trigger| {
                     div()
                         .text_xs()
                         .text_color(gpui_color(colors.text_muted))
-                        .numeric_text()
+                        .map(numeric_text)
                         .child(trigger)
                 })),
         )

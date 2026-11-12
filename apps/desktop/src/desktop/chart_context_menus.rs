@@ -463,7 +463,7 @@ pub(super) fn copy_price_chip(
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
-        .numeric_text()
+        .map(numeric_text)
         .text_size(scale.rems(0.75))
         .text_color(gpui_color(ink))
         .child(price)

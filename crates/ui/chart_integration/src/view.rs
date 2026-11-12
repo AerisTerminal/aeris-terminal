@@ -120,6 +120,7 @@ fn apply_platform_chrome_contract(engine: &mut ChartEngine, labels: TimeAxisLabe
     let options = serde_json::json!({
         "layout": {
             "fontFamily": platform_numeric_font_stack(),
+            "fontWeight": platform_typography().weight(TypographyRole::Normal),
         },
         "localization": {
             "dateFormat": PLATFORM_DATE_FORMAT,

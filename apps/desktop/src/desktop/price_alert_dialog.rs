@@ -508,7 +508,7 @@ fn price_alert_dialog_subtitle(symbol: &str, price: &str) -> Div {
         .items_center()
         .gap_1()
         .child(tr!(drawing::ALERT_DIALOG_SUBTITLE, symbol = symbol))
-        .child(div().numeric_text().child(price.to_string()))
+        .child(div().map(numeric_text).child(price.to_string()))
 }
 
 fn price_alert_dialog_body(

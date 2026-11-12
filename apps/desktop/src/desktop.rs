@@ -148,8 +148,7 @@ use aeris_contracts::{
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
-    AerisTheme, BRAND_FONT_BYTES, NUMERIC_FONT_BYTES, PLATFORM_FONT_FACES, RadiusToken, ThemeColor,
-    TypographyRole,
+    AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_FACES, RadiusToken, ThemeColor, TypographyRole,
 };
 use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
@@ -237,7 +236,6 @@ use indicator_menu::{
     native_indicator,
 };
 use native_ui::{
-    NumericText,
     button::{Button, ButtonSize, ButtonVariant, close_button},
     checkbox::CheckboxRow,
     color_picker::{ColorPicker, normalize_hex_color, parse_hex_hsla, transparency_backdrop},
@@ -253,7 +251,7 @@ use native_ui::{
         MenuPlacement, MenuRow, MenuScale, MenuSide, PopupAnimationOrigin,
         animate_popup_from_origin, menu_panel_chrome_height, menu_panel_height,
     },
-    platform_font_weight, platform_tabular_numerals,
+    numeric_text, platform_font_weight, platform_tabular_numerals,
     rem_scale::{ROOT_REM_PX, design_rems, rem_scaled},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     switch::{Switch, SwitchRow},
@@ -2967,7 +2965,6 @@ struct HeaderState {
     theme: AerisTheme,
     provider: ProviderId,
     instrument_label: String,
-    series_label: String,
     interval: ChartInterval,
     /// Starred timeframes the provider offers, shown as quick buttons beside the selector.
     timeframe_favorites: Vec<ChartInterval>,
@@ -3696,10 +3693,6 @@ fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
             selection.instrument.exchange.as_str(),
         )
     }))
-}
-
-fn series_selector_label(selected: ChartInterval) -> String {
-    selected.label().to_string()
 }
 
 #[derive(Clone, Copy)]
@@ -6119,7 +6112,7 @@ fn prepare_application(cx: &mut App) {
         PLATFORM_FONT_FACES
             .iter()
             .map(|face| face.bytes)
-            .chain([NUMERIC_FONT_BYTES, BRAND_FONT_BYTES])
+            .chain([BRAND_FONT_BYTES])
             .map(Cow::Borrowed)
             .collect(),
     ) {

@@ -33,11 +33,8 @@ pub(crate) fn platform_tabular_numerals() -> FontFeatures {
 }
 
 /// Numeric readouts render in the platform numeric face with tabular figures.
-pub(crate) trait NumericText: Styled + Sized {
-    fn numeric_text(self) -> Self {
-        self.font_family(platform_numeric_font_family())
-            .font_features(platform_tabular_numerals())
-    }
+pub(crate) fn numeric_text<E: Styled>(element: E) -> E {
+    element
+        .font_family(platform_numeric_font_family())
+        .font_features(platform_tabular_numerals())
 }
-
-impl<T: Styled> NumericText for T {}

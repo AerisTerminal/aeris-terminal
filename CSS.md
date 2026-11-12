@@ -79,18 +79,19 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   UI may borrow it as a shade. It never shows under reduced motion, and the Trading settings'
   Fill glow switch turns it off.
 - Typography uses the bundled static Inter faces (Regular 400, Medium 500, Bold 700 and
-  ExtraBold 800, one file per weight) for platform text, the bundled Manrope variable face
-  (weights 200–800) for numbers, and the bundled Faculty Glyphic Regular face only for
-  brand/display text. Inter and Manrope both cover Latin and Cyrillic. Inter is bundled as
-  static faces because DirectWrite renders its variable font too light at the platform weights.
+  ExtraBold 800, one file per weight) for platform text and numbers, and the bundled Faculty
+  Glyphic Regular face only for brand/display text. Inter covers Latin and Cyrillic. Inter is
+  bundled as static, hinted faces because DirectWrite renders its variable font too light at the
+  platform weights, and an unhinted face looks soft at 100% display scale.
   The normal platform weight (`--font-weight-normal`) is Medium 500, emphasis (`--font-weight-emphasis`)
   is Bold 700 and strong (`--font-weight-strong`) is ExtraBold 800; every platform weight needs a
   bundled face. Changing numbers and data-panel rows (order book, time and sales, positions, orders,
-  trades, screener) and the chart's axes and price labels use Manrope tabular figures (`tnum`) so
-  digits keep one width; native code applies both through `NumericText::numeric_text`. There is
-  no separate mono platform face and no HK Grotesk dependency. The CSS `--font-sans` and native
-  `platform_font_family()` resolve to Inter, and `--font-numeric` and
-  `platform_numeric_font_family()` to Manrope; keep the web mirror in sync.
+  trades, screener) and the chart's axes and price labels use Inter tabular figures (`tnum`) so
+  digits keep one width; native code applies both through `native_ui::numeric_text`, and the
+  chart's axis labels paint at the normal platform weight (`layout.fontWeight`). There is no
+  separate mono platform face and no HK Grotesk dependency. The CSS `--font-sans` and
+  `--font-numeric` and native `platform_font_family()` and `platform_numeric_font_family()`
+  resolve to Inter; keep the web mirror in sync.
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
 
