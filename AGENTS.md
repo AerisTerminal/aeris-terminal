@@ -701,7 +701,12 @@ the check.
 The licensed Rithmic proto kit (the R|Protocol `proto` schema folder) remains outside Git. Its
 canonical local copy is `C:\rithmic_proto_kit\proto`; the repository reaches it through the ignored
 `rithmic_proto_kit` junction, which the adapter's build script reads as `rithmic_proto_kit/proto`.
-Do not vendor or modify that permanent copy.
+The backup copy is the R|Protocol API 0.89.0.0 download at
+`C:\Users\devraj\Downloads\Aeris\RProtocolAPI.0.89.0.0\0.89.0.0` (its `proto` folder holds the schemas).
+When the canonical copy or the junction is missing, point the junction at that backup folder.
+The build script silently compiles without Rithmic when `rithmic_proto_kit/proto` is absent, so
+confirm the junction resolves before any local build meant to include Rithmic.
+Do not vendor or modify either copy.
 
 ## Operating constraints
 
