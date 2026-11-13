@@ -1,0 +1,42 @@
+# Copiador de operaciones: la sección del panel de cuentas que copia las órdenes de una cuenta
+# de práctica a otras cuentas de práctica, y sus resultados de copia recientes.
+
+tab = Copiador de operaciones
+heading = Copiador de operaciones
+intro = Copia cada nueva orden simple de una cuenta de práctica de origen a las cuentas de práctica de destino de abajo, multiplicando exactamente su cantidad para cada destino. No se copian las órdenes bracket ni de plantilla, los cambios de órdenes, las cancelaciones ni los cierres de posición. Las cuentas de bróker nunca copian ni reciben copias.
+needs_two_accounts = Crea al menos dos cuentas de práctica en Cuentas de trading para copiar operaciones entre ellas.
+source_label = Cuenta de origen
+source_description = La cuenta de práctica cuyas nuevas órdenes simples se copian.
+choose_source = Elige una cuenta de práctica
+copying_label = Copia
+status_not_saved = Aún no hay un copiador guardado para esta cuenta.
+status_paused = La copia está en pausa. No se copia ninguna orden.
+status_active = La copia está activa. Destinos activos: {targets}
+status_all_targets_paused = La copia está activa, pero todos los destinos están en pausa.
+status_blocked = Un destino activo ya no es una cuenta de práctica, así que las órdenes de esta cuenta se rechazan hasta que se quite.
+targets_heading = Cuentas de práctica de destino
+no_targets = Aún no hay cuentas de destino. Añade una cuenta de práctica a la que copiar.
+multiplier_placeholder = Multiplicador
+target_detail = Cuenta de práctica · la cantidad copiada es la cantidad de origen × multiplicador
+target_unavailable = No es una cuenta de práctica. Quítala antes de guardar.
+target_enabled_aria = Copiar a {account}
+remove_target_aria = Quitar {account}
+add_target_label = Añadir destino
+add_target = Añadir cuenta
+add_target_description = Solo las cuentas de práctica pueden recibir copias.
+targets_full = Un copiador admite como máximo {maximum} destinos.
+unsaved_changes = Cambios sin guardar
+save = Guardar copiador
+recent_heading = Copias recientes
+recent_empty = No se han copiado órdenes de esta cuenta desde que se inició Aeris.
+dispatch_label = {side} {quantity} {symbol} → {account}
+dispatch_label_no_quantity = {side} {symbol} → {account}
+dispatch_copied_detail = La cuenta de destino aceptó la orden copiada.
+copied = Copiada
+refused = Rechazada
+problem_no_source = Elige una cuenta de práctica de origen.
+problem_no_targets = Añade al menos una cuenta de destino.
+problem_multiplier = Introduce un multiplicador mayor que cero, como 1, 2 o 0.5.
+problem_target_unavailable = {account} no es una cuenta de práctica. Quítala antes de guardar.
+problem_revision_exhausted = Este copiador llegó a su última revisión y ya no se puede cambiar.
+save_failed = No se pudo guardar el copiador: {error}

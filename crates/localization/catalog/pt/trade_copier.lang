@@ -1,0 +1,42 @@
+# Copiador de negócios: a seção do painel de contas que copia as ordens de uma conta simulada
+# para outras contas simuladas, e seus resultados de cópia recentes.
+
+tab = Copiador de negócios
+heading = Copiador de negócios
+intro = Copia cada nova ordem simples de uma conta simulada de origem para as contas simuladas de destino abaixo, multiplicando exatamente sua quantidade para cada destino. Ordens bracket e de modelo, alterações de ordens, cancelamentos e zeragens não são copiados. Contas de corretora nunca copiam nem recebem cópias.
+needs_two_accounts = Crie pelo menos duas contas simuladas em Contas de negociação para copiar negócios entre elas.
+source_label = Conta de origem
+source_description = A conta simulada cujas novas ordens simples são copiadas.
+choose_source = Escolha uma conta simulada
+copying_label = Cópia
+status_not_saved = Ainda não há um copiador salvo para esta conta.
+status_paused = A cópia está pausada. Nenhuma ordem é copiada.
+status_active = A cópia está ativa. Destinos ativos: {targets}
+status_all_targets_paused = A cópia está ativa, mas todos os destinos estão pausados.
+status_blocked = Um destino ativo não é mais uma conta simulada, então as ordens desta conta são recusadas até que ele seja removido.
+targets_heading = Contas simuladas de destino
+no_targets = Ainda não há contas de destino. Adicione uma conta simulada para receber as cópias.
+multiplier_placeholder = Multiplicador
+target_detail = Conta simulada · a quantidade copiada é a quantidade de origem × multiplicador
+target_unavailable = Não é uma conta simulada. Remova-a antes de salvar.
+target_enabled_aria = Copiar para {account}
+remove_target_aria = Remover {account}
+add_target_label = Adicionar destino
+add_target = Adicionar conta
+add_target_description = Somente contas simuladas podem receber cópias.
+targets_full = Um copiador tem no máximo {maximum} destinos.
+unsaved_changes = Alterações não salvas
+save = Salvar copiador
+recent_heading = Cópias recentes
+recent_empty = Nenhuma ordem desta conta foi copiada desde que o Aeris iniciou.
+dispatch_label = {side} {quantity} {symbol} → {account}
+dispatch_label_no_quantity = {side} {symbol} → {account}
+dispatch_copied_detail = A conta de destino aceitou a ordem copiada.
+copied = Copiada
+refused = Recusada
+problem_no_source = Escolha uma conta simulada de origem.
+problem_no_targets = Adicione pelo menos uma conta de destino.
+problem_multiplier = Informe um multiplicador maior que zero, como 1, 2 ou 0.5.
+problem_target_unavailable = {account} não é uma conta simulada. Remova-a antes de salvar.
+problem_revision_exhausted = Este copiador chegou à última revisão e não pode mais ser alterado.
+save_failed = Não foi possível salvar o copiador: {error}

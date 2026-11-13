@@ -1,0 +1,42 @@
+# トレードコピー：口座パネルで、練習口座の注文をほかの練習口座へコピーするセクションと、
+# その最近のコピー結果。
+
+tab = トレードコピー
+heading = トレードコピー
+intro = 練習用のコピー元口座で出された新しい単一注文を、下のコピー先練習口座へコピーします。数量はコピー先ごとの倍率で正確に掛け合わせます。ブラケット注文とテンプレート注文、注文の変更、取消、決済はコピーされません。ブローカー口座はコピー元にもコピー先にもなりません。
+needs_two_accounts = 口座間でトレードをコピーするには、「取引口座」で練習口座を2つ以上作成してください。
+source_label = コピー元口座
+source_description = 新しい単一注文がコピーされる練習口座です。
+choose_source = 練習口座を選択
+copying_label = コピー
+status_not_saved = この口座のコピー設定はまだ保存されていません。
+status_paused = コピーは一時停止中です。注文はコピーされません。
+status_active = コピーはオンです。有効なコピー先：{targets}
+status_all_targets_paused = コピーはオンですが、すべてのコピー先が一時停止中です。
+status_blocked = 有効なコピー先が練習口座ではなくなったため、削除するまでこの口座の注文は拒否されます。
+targets_heading = コピー先の練習口座
+no_targets = コピー先口座はまだありません。コピー先の練習口座を追加してください。
+multiplier_placeholder = 倍率
+target_detail = 練習口座 · コピー数量 = コピー元の数量 × 倍率
+target_unavailable = 練習口座ではありません。保存する前に削除してください。
+target_enabled_aria = {account} にコピー
+remove_target_aria = {account} を削除
+add_target_label = コピー先を追加
+add_target = 口座を追加
+add_target_description = コピーを受け取れるのは練習口座だけです。
+targets_full = コピー先は最大 {maximum} 件です。
+unsaved_changes = 未保存の変更があります
+save = コピー設定を保存
+recent_heading = 最近のコピー
+recent_empty = Aeris の起動以降、この口座からコピーされた注文はありません。
+dispatch_label = {side} {quantity} {symbol} → {account}
+dispatch_label_no_quantity = {side} {symbol} → {account}
+dispatch_copied_detail = コピー先口座がコピーされた注文を受け付けました。
+copied = コピー済み
+refused = 拒否
+problem_no_source = 練習用のコピー元口座を選択してください。
+problem_no_targets = コピー先口座を1つ以上追加してください。
+problem_multiplier = 1、2、0.5 など、0 より大きい倍率を入力してください。
+problem_target_unavailable = {account} は練習口座ではありません。保存する前に削除してください。
+problem_revision_exhausted = このコピー設定は最後のリビジョンに達したため、これ以上変更できません。
+save_failed = コピー設定を保存できませんでした：{error}

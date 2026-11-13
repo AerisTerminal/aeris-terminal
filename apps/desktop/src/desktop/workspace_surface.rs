@@ -2823,7 +2823,11 @@ impl WorkspaceSurface {
                 self.time_zone_input
                     .update(cx, |input, input_cx| input.focus(window, input_cx));
             }
-            ChromeOverlay::Timeframe | ChromeOverlay::ChartType | ChromeOverlay::Accounts => {
+            ChromeOverlay::Timeframe | ChromeOverlay::ChartType => {
+                self.chrome_focus.focus(window, cx);
+            }
+            ChromeOverlay::Accounts => {
+                self.sync_trade_copier_editor(window, cx);
                 self.chrome_focus.focus(window, cx);
             }
         }
@@ -2865,6 +2869,7 @@ impl WorkspaceSurface {
                 // An unfinished form or confirmation never outlives the panel that owns it.
                 self.trading_pnl.account_creator = None;
                 self.trading_pnl.account_delete_confirmation = None;
+                self.trading_pnl.trade_copier = None;
                 window.dispatch_action(Box::new(CancelProviderLogin), cx);
             }
             ChromeOverlay::Instrument | ChromeOverlay::Timeframe | ChromeOverlay::ChartType => {}

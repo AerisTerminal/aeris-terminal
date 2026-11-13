@@ -4102,6 +4102,193 @@ mod timeframe_input {
         std::fs::remove_dir_all(root).expect("remove test root");
     }
 
+    /// Adopts owner publications into the terminal's store until one satisfies `reached`,
+    /// as the subscription bridge would.
+    fn adopt_trading_until(
+        terminal: &Entity<TerminalApp>,
+        subscription: &aeris_trading_runtime::TradingSubscription,
+        reached: impl Fn(&aeris_trading_runtime::WorkingSet) -> bool,
+        cx: &mut VisualTestContext,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let update = subscription
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("owner publication");
+            let done = reached(&update.event.working_set);
+            update_terminal(terminal, cx, |terminal, _, cx| {
+                terminal.services.trading_store().update(cx, |store, cx| {
+                    store.apply_test_publication(update);
+                    cx.notify();
+                });
+            });
+            if done {
+                return;
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn the_trade_copier_tab_saves_its_draft_through_the_owner_and_drops_it_when_left(
+        cx: &mut TestAppContext,
+    ) {
+        use aeris_trading_runtime::{TradeCopierConfig, TradeCopierTarget};
+        let (owner, root, account, target, _, _) =
+            trading_store::real_owner_fill_fixture_for("hyperliquid");
+        let subscription = owner.subscribe().expect("owner subscription");
+        let (terminal, cx) = terminal_harness_with_product(
+            cx,
+            DesktopLifecycle::new_for_test_with_trading(owner.clone()),
+            None,
+            aeris_desktop::test_support::fixture_public_crypto(),
+        );
+        adopt_trading_until(&terminal, &subscription, |set| set.accounts.len() == 2, cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        update_terminal(&terminal, cx, |_, _, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.select_trading_account(account.clone(), cx);
+            });
+        });
+        open_accounts_tab(
+            &terminal,
+            &surface,
+            accounts_panel::AccountsTab::TradeCopier,
+            cx,
+        );
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            let editor = surface.trading_pnl.trade_copier.as_ref();
+            assert_eq!(
+                editor.and_then(|editor| editor.source()),
+                Some(&account),
+                "the section opens on the practice account the pane trades on"
+            );
+        });
+
+        update_terminal(&terminal, cx, |_, window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.add_trade_copier_target(target.clone(), window, cx);
+                let multiplier = surface
+                    .trading_pnl
+                    .trade_copier
+                    .as_ref()
+                    .and_then(|editor| editor.target_multiplier(&target))
+                    .cloned()
+                    .expect("the added target row");
+                multiplier.update(cx, |input, input_cx| input.set_value("2", window, input_cx));
+                surface.save_trade_copier(window, cx);
+                let editor = surface.trading_pnl.trade_copier.as_ref().expect("editor");
+                assert!(
+                    editor.is_saving(),
+                    "the save holds the editor until its reply"
+                );
+            });
+        });
+        cx.run_until_parked();
+        adopt_trading_until(
+            &terminal,
+            &subscription,
+            |set| !set.trade_copiers.is_empty(),
+            cx,
+        );
+        cx.read(|cx| {
+            let set = terminal
+                .read(cx)
+                .services
+                .trading_store()
+                .read(cx)
+                .current();
+            assert_eq!(
+                set.map(|set| set.trade_copiers.clone()),
+                Some(vec![TradeCopierConfig {
+                    source_account_id: account.clone(),
+                    revision: 1,
+                    enabled: true,
+                    targets: vec![TradeCopierTarget {
+                        account_id: target.clone(),
+                        quantity_multiplier: aeris_trading::FixedPoint::try_new(2, 0)
+                            .expect("multiplier"),
+                        enabled: true,
+                    }],
+                }]),
+                "the owner holds exactly the copier the editor described"
+            );
+            let editor = surface.read(cx).trading_pnl.trade_copier.as_ref();
+            let editor = editor.expect("the section stays open");
+            assert!(!editor.is_saving());
+            assert!(!editor.has_problem());
+        });
+
+        assert_the_trade_copier_draft_follows_its_tab(&terminal, &surface, &target, cx);
+        drop(subscription);
+        owner
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
+            .expect("owner stopped");
+        std::fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    fn open_accounts_tab(
+        terminal: &Entity<TerminalApp>,
+        surface: &Entity<WorkspaceSurface>,
+        tab: accounts_panel::AccountsTab,
+        cx: &mut VisualTestContext,
+    ) {
+        update_terminal(terminal, cx, |_, window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_accounts_panel(tab, window, cx);
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    /// Leaving the copier section drops its draft, returning reloads the saved copier, and
+    /// closing the panel drops the draft too.
+    fn assert_the_trade_copier_draft_follows_its_tab(
+        terminal: &Entity<TerminalApp>,
+        surface: &Entity<WorkspaceSurface>,
+        target: &aeris_trading::TradingAccountId,
+        cx: &mut VisualTestContext,
+    ) {
+        open_accounts_tab(
+            terminal,
+            surface,
+            accounts_panel::AccountsTab::TradingAccounts,
+            cx,
+        );
+        assert!(
+            cx.read(|cx| surface.read(cx).trading_pnl.trade_copier.is_none()),
+            "leaving the section drops its draft"
+        );
+        open_accounts_tab(
+            terminal,
+            surface,
+            accounts_panel::AccountsTab::TradeCopier,
+            cx,
+        );
+        cx.read(|cx| {
+            let multiplier = surface
+                .read(cx)
+                .trading_pnl
+                .trade_copier
+                .as_ref()
+                .and_then(|editor| editor.target_multiplier(target))
+                .map(|input| input.read(cx).value().to_string());
+            assert_eq!(
+                multiplier.as_deref(),
+                Some("2"),
+                "returning reloads the saved copier"
+            );
+        });
+        update_terminal(terminal, cx, |_, window, cx| {
+            surface.update(cx, |surface, cx| surface.close_chrome_overlay(window, cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| surface.read(cx).trading_pnl.trade_copier.is_none()),
+            "closing the panel drops the draft"
+        );
+    }
+
     #[gpui::test]
     fn saved_layouts_open_from_the_start_page_even_when_a_tab_shows_them(cx: &mut TestAppContext) {
         let (terminal, _additions, cx) = tabbed_terminal_harness(cx);

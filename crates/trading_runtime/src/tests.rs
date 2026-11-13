@@ -7136,6 +7136,154 @@ fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
         .expect("restarted service stops");
 }
 
+/// Copies the fixture account `aeris-sim-1` to `aeris-sim-2` at half and `aeris-sim-3` at
+/// double its quantity.
+fn register_halving_and_doubling_copier(service: &TradingService) -> TradeCopierConfig {
+    for id in ["aeris-sim-2", "aeris-sim-3"] {
+        service
+            .register_account(TradingAccount {
+                id: TradingAccountId::try_new(id).expect("account id"),
+                display_name: format!("SIM {id}"),
+                environment: AccountEnvironment::Simulated,
+                venue_id: "aeris-sim".to_string(),
+                broker_ref: None,
+                currency: "USD".to_string(),
+                currency_scale: 2,
+                starting_equity: None,
+            })
+            .expect("account registers");
+    }
+    let target = |id: &str, units, scale| TradeCopierTarget {
+        account_id: TradingAccountId::try_new(id).expect("target"),
+        quantity_multiplier: FixedPoint::try_new(units, scale).expect("multiplier"),
+        enabled: true,
+    };
+    let config = TradeCopierConfig {
+        source_account_id: TradingAccountId::try_new("aeris-sim-1").expect("source"),
+        revision: 1,
+        enabled: true,
+        targets: vec![target("aeris-sim-2", 5, 1), target("aeris-sim-3", 2, 0)],
+    };
+    service
+        .register_trade_copier(config.clone())
+        .expect("copier registers");
+    config
+}
+
+/// Places enough copied source orders, two dispatches each, to pass the dispatch bound and
+/// returns the newest order's client id.
+fn place_past_the_copy_dispatch_bound(service: &TradingService) -> String {
+    let orders = MAXIMUM_COPY_DISPATCHES / 2 + 1;
+    for index in 1..=orders {
+        let sequence = u64::try_from(index).expect("sequence") + 1;
+        let time = 1_000 + i64::try_from(index).expect("time");
+        service
+            .place_order_caller_priced(market_order(
+                &format!("copier-bound-{index}"),
+                OrderSide::Sell,
+                sequence,
+                time,
+            ))
+            .expect("source accepts");
+    }
+    format!("copier-bound-{orders}")
+}
+
+#[test]
+fn the_working_set_publishes_trade_copiers_and_their_bounded_recent_dispatches() {
+    let directory = TestDirectory::new("copier-working-set");
+    let (service, _clock, _feed) =
+        awaiting_quote_fixture(&directory, &instrument(), market_feed::route());
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut config = register_halving_and_doubling_copier(&service);
+    let source = config.source_account_id.clone();
+    let halved = config.targets[0].account_id.clone();
+    let doubled = config.targets[1].account_id.clone();
+    let working_set = || service.request(Command::WorkingSet).expect("working set");
+    let published = working_set();
+    assert_eq!(published.trade_copiers, vec![config.clone()]);
+    assert_eq!(published.copy_dispatches, []);
+
+    service
+        .place_order_caller_priced(market_order("copier-source", OrderSide::Buy, 1, 1_000))
+        .expect("source accepts");
+    let published = working_set();
+    assert_eq!(published.copy_dispatches.len(), 2);
+    let dispatch = |account: &TradingAccountId| {
+        published
+            .copy_dispatches
+            .iter()
+            .find(|dispatch| &dispatch.target_account_id == account)
+            .expect("one dispatch per target")
+            .clone()
+    };
+    let refused = dispatch(&halved);
+    assert_eq!(refused.source_account_id, source);
+    assert_eq!(refused.instrument_id, instrument().instrument_id);
+    assert_eq!(refused.side, OrderSide::Buy);
+    assert_eq!(refused.quantity, None, "half of one contract is not exact");
+    assert!(!refused.accepted);
+    assert!(refused.detail.is_some());
+    let copied = dispatch(&doubled);
+    assert_eq!(copied.source_client_order_id, "copier-source");
+    assert_eq!(
+        copied.quantity,
+        Some(FixedPoint::try_new(2, 0).expect("copied quantity"))
+    );
+    assert!(copied.accepted);
+    assert_eq!(copied.detail, None);
+    assert!(
+        published
+            .instruments
+            .iter()
+            .any(|terms| terms.instrument_id == instrument().instrument_id),
+        "a dispatch names an instrument the working set describes"
+    );
+
+    let newest = place_past_the_copy_dispatch_bound(&service);
+    let published = working_set();
+    assert_eq!(published.copy_dispatches.len(), MAXIMUM_COPY_DISPATCHES);
+    assert_eq!(
+        published
+            .copy_dispatches
+            .last()
+            .map(|dispatch| dispatch.source_client_order_id.as_str()),
+        Some(newest.as_str()),
+        "the newest dispatch is last"
+    );
+    assert!(
+        published
+            .copy_dispatches
+            .iter()
+            .all(|dispatch| dispatch.source_client_order_id != "copier-source"),
+        "the oldest dispatches are dropped past the bound"
+    );
+
+    config.revision = 2;
+    config.enabled = false;
+    service
+        .register_trade_copier(config.clone())
+        .expect("copier pauses");
+    service
+        .place_order_caller_priced(market_order("copier-paused", OrderSide::Buy, 999, 9_000))
+        .expect("source accepts");
+    let published = working_set();
+    assert_eq!(published.trade_copiers, vec![config]);
+    assert_eq!(
+        published
+            .copy_dispatches
+            .last()
+            .map(|dispatch| dispatch.source_client_order_id.as_str()),
+        Some(newest.as_str()),
+        "a paused copier copies nothing"
+    );
+    service
+        .shutdown_after_owner_exit_for_test()
+        .expect("service stops");
+}
+
 #[test]
 fn bracket_strategy_templates_are_revisioned_and_restart_safe() {
     let directory = TestDirectory::new("strategy-template");

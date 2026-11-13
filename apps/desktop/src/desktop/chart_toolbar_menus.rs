@@ -345,6 +345,7 @@ pub(super) fn chrome_overlay_content(
                 working_set,
                 accounts_panel::accounts_panel_size(extent),
                 theme,
+                cx,
             )
             .into_any_element()
         }

@@ -94,6 +94,7 @@ mod terminal_chrome;
 mod terminal_view;
 mod time_sales_panel;
 mod toaster;
+mod trade_copier_view;
 mod trading_hotkeys;
 mod trading_report;
 mod update;
@@ -1007,6 +1008,7 @@ struct TradingPaneState {
     )>,
     account_creator: Option<PracticeAccountFormState>,
     account_delete_confirmation: Option<aeris_trading::TradingAccountId>,
+    trade_copier: Option<trade_copier_view::TradeCopierEditor>,
 }
 
 #[cfg(test)]

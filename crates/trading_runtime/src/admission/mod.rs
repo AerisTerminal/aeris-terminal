@@ -737,8 +737,10 @@ impl TradingCore {
                 let mirrored_client_order_id = client_id
                     .as_ref()
                     .map_or_else(|_| String::new(), |id| id.as_str().to_string());
+                let quantity = multiply_quantity(command.quantity, target.quantity_multiplier);
+                let mirrored_quantity = quantity.as_ref().ok().copied();
                 let result = client_id.and_then(|client_order_id| {
-                    let quantity = multiply_quantity(command.quantity, target.quantity_multiplier)?;
+                    let quantity = quantity?;
                     self.stage_single_order(
                         &mut step,
                         PlaceOrder {
@@ -751,7 +753,11 @@ impl TradingCore {
                     )
                 });
                 let dispatch = TradeCopyDispatch {
+                    source_account_id: command.account_id.clone(),
                     source_client_order_id: command.client_order_id.as_str().to_string(),
+                    instrument_id: command.instrument_id.clone(),
+                    side: command.side,
+                    quantity: mirrored_quantity,
                     target_account_id: target.account_id,
                     mirrored_client_order_id,
                     accepted: result.is_ok(),

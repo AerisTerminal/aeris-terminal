@@ -1,0 +1,41 @@
+# 跟单器：账户面板中把一个模拟账户的订单复制到其他模拟账户的区域，以及其最近的复制结果。
+
+tab = 跟单器
+heading = 跟单器
+intro = 将模拟源账户上的每笔新单一订单复制到下方的目标模拟账户，并按每个目标的倍数精确换算其数量。括号单和模板订单、订单修改、撤单和平仓不会被复制。经纪商账户永远不会复制或接收复制。
+needs_two_accounts = 请在“交易账户”中至少创建两个模拟账户，才能在它们之间复制交易。
+source_label = 源账户
+source_description = 其新单一订单会被复制的模拟账户。
+choose_source = 选择模拟账户
+copying_label = 复制
+status_not_saved = 此账户尚未保存跟单器。
+status_paused = 复制已暂停，不会复制任何订单。
+status_active = 复制已开启。活动目标：{targets}
+status_all_targets_paused = 复制已开启，但所有目标均已暂停。
+status_blocked = 有一个活动目标已不再是模拟账户，因此在将其移除之前，此账户的订单会被拒绝。
+targets_heading = 目标模拟账户
+no_targets = 还没有目标账户。请添加一个要复制到的模拟账户。
+multiplier_placeholder = 倍数
+target_detail = 模拟账户 · 复制数量 = 源数量 × 倍数
+target_unavailable = 不是模拟账户。保存前请将其移除。
+target_enabled_aria = 复制到 {account}
+remove_target_aria = 移除 {account}
+add_target_label = 添加目标
+add_target = 添加账户
+add_target_description = 只有模拟账户可以接收复制。
+targets_full = 一个跟单器最多有 {maximum} 个目标。
+unsaved_changes = 有未保存的更改
+save = 保存跟单器
+recent_heading = 最近的复制
+recent_empty = 自 Aeris 启动以来，尚未从此账户复制任何订单。
+dispatch_label = {side} {quantity} {symbol} → {account}
+dispatch_label_no_quantity = {side} {symbol} → {account}
+dispatch_copied_detail = 目标账户已接受复制的订单。
+copied = 已复制
+refused = 已拒绝
+problem_no_source = 请选择一个模拟源账户。
+problem_no_targets = 请至少添加一个目标账户。
+problem_multiplier = 请输入大于零的倍数，例如 1、2 或 0.5。
+problem_target_unavailable = {account} 不是模拟账户。保存前请将其移除。
+problem_revision_exhausted = 此跟单器已达到最后一个修订版本，无法再更改。
+save_failed = 无法保存跟单器：{error}

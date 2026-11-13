@@ -1,0 +1,42 @@
+# Trade copier: the Accounts panel section that copies a practice account's orders to other
+# practice accounts, and its recent copy results.
+
+tab = Trade copier
+heading = Trade copier
+intro = Copies each new single order placed on a practice source account to the practice target accounts below, multiplying its quantity exactly for each target. Bracket and template orders, order changes, cancels and flatten are not copied. Broker accounts never copy or receive copies.
+needs_two_accounts = Create at least two practice accounts under Trading accounts to copy trades between them.
+source_label = Source account
+source_description = The practice account whose new single orders are copied.
+choose_source = Choose a practice account
+copying_label = Copying
+status_not_saved = No copier is saved for this account yet.
+status_paused = Copying is paused. No orders are copied.
+status_active = Copying is on. Active targets: {targets}
+status_all_targets_paused = Copying is on, but every target is paused.
+status_blocked = An active target is no longer a practice account, so orders on this account are refused until it is removed.
+targets_heading = Target practice accounts
+no_targets = No target accounts yet. Add a practice account to copy to.
+multiplier_placeholder = Multiplier
+target_detail = Practice account · copied quantity is the source quantity × multiplier
+target_unavailable = Not a practice account. Remove it before saving.
+target_enabled_aria = Copy to {account}
+remove_target_aria = Remove {account}
+add_target_label = Add target
+add_target = Add account
+add_target_description = Only practice accounts can receive copies.
+targets_full = A copier holds at most {maximum} targets.
+unsaved_changes = Unsaved changes
+save = Save copier
+recent_heading = Recent copies
+recent_empty = No orders have been copied from this account since Aeris started.
+dispatch_label = {side} {quantity} {symbol} → {account}
+dispatch_label_no_quantity = {side} {symbol} → {account}
+dispatch_copied_detail = The target account accepted the copied order.
+copied = Copied
+refused = Refused
+problem_no_source = Choose a practice source account.
+problem_no_targets = Add at least one target account.
+problem_multiplier = Enter a multiplier above zero, such as 1, 2 or 0.5.
+problem_target_unavailable = {account} is not a practice account. Remove it before saving.
+problem_revision_exhausted = This copier has reached its last revision and cannot be changed.
+save_failed = The copier could not be saved: {error}

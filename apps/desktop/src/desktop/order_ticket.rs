@@ -1672,7 +1672,7 @@ pub(super) fn ticket_status(
 }
 
 /// An exact quantity without trailing fractional zeros.
-fn format_quantity(value: aeris_trading::FixedPoint) -> String {
+pub(super) fn format_quantity(value: aeris_trading::FixedPoint) -> String {
     let scale = u32::from(value.scale());
     let units = value.units();
     let sign = if units < 0 { "-" } else { "" };

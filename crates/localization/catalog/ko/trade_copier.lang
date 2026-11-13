@@ -1,0 +1,42 @@
+# 거래 복사기: 계좌 패널에서 모의 계좌의 주문을 다른 모의 계좌로 복사하는 섹션과
+# 최근 복사 결과.
+
+tab = 거래 복사기
+heading = 거래 복사기
+intro = 모의 원본 계좌의 모든 새 단일 주문을 아래 대상 모의 계좌로 복사하며, 대상마다 수량을 정확히 배수로 곱합니다. 브래킷 및 템플릿 주문, 주문 변경, 취소, 청산은 복사되지 않습니다. 브로커 계좌는 복사하거나 복사를 받지 않습니다.
+needs_two_accounts = 계좌 간에 거래를 복사하려면 트레이딩 계좌에서 모의 계좌를 두 개 이상 만드세요.
+source_label = 원본 계좌
+source_description = 새 단일 주문이 복사되는 모의 계좌입니다.
+choose_source = 모의 계좌 선택
+copying_label = 복사
+status_not_saved = 이 계좌에 저장된 복사기가 아직 없습니다.
+status_paused = 복사가 일시 중지되었습니다. 주문이 복사되지 않습니다.
+status_active = 복사가 켜져 있습니다. 활성 대상: {targets}
+status_all_targets_paused = 복사가 켜져 있지만 모든 대상이 일시 중지되었습니다.
+status_blocked = 활성 대상이 더 이상 모의 계좌가 아니므로, 제거할 때까지 이 계좌의 주문이 거부됩니다.
+targets_heading = 대상 모의 계좌
+no_targets = 아직 대상 계좌가 없습니다. 복사받을 모의 계좌를 추가하세요.
+multiplier_placeholder = 배수
+target_detail = 모의 계좌 · 복사 수량 = 원본 수량 × 배수
+target_unavailable = 모의 계좌가 아닙니다. 저장하기 전에 제거하세요.
+target_enabled_aria = {account}(으)로 복사
+remove_target_aria = {account} 제거
+add_target_label = 대상 추가
+add_target = 계좌 추가
+add_target_description = 모의 계좌만 복사를 받을 수 있습니다.
+targets_full = 복사기의 대상은 최대 {maximum}개입니다.
+unsaved_changes = 저장되지 않은 변경 사항
+save = 복사기 저장
+recent_heading = 최근 복사
+recent_empty = Aeris가 시작된 이후 이 계좌에서 복사된 주문이 없습니다.
+dispatch_label = {side} {quantity} {symbol} → {account}
+dispatch_label_no_quantity = {side} {symbol} → {account}
+dispatch_copied_detail = 대상 계좌가 복사된 주문을 수락했습니다.
+copied = 복사됨
+refused = 거부됨
+problem_no_source = 모의 원본 계좌를 선택하세요.
+problem_no_targets = 대상 계좌를 하나 이상 추가하세요.
+problem_multiplier = 1, 2, 0.5처럼 0보다 큰 배수를 입력하세요.
+problem_target_unavailable = {account}은(는) 모의 계좌가 아닙니다. 저장하기 전에 제거하세요.
+problem_revision_exhausted = 이 복사기는 마지막 리비전에 도달하여 더 이상 변경할 수 없습니다.
+save_failed = 복사기를 저장할 수 없습니다: {error}

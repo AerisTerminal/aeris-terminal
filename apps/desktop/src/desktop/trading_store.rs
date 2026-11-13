@@ -744,6 +744,8 @@ mod tests {
                     venue_notices: vec![],
                     workflows: vec![],
                     order_templates: vec![],
+                    trade_copiers: vec![],
+                    copy_dispatches: vec![],
                 }),
             },
         }

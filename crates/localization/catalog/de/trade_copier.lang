@@ -1,0 +1,42 @@
+# Trade-Kopierer: der Bereich im Kontenfenster, der die Orders eines Übungskontos auf andere
+# Übungskonten kopiert, und seine letzten Kopierergebnisse.
+
+tab = Trade-Kopierer
+heading = Trade-Kopierer
+intro = Kopiert jede neue Einzelorder eines Übungs-Quellkontos auf die Ziel-Übungskonten unten und multipliziert ihre Menge für jedes Ziel exakt. Bracket- und Vorlagenorders, Orderänderungen, Stornierungen und Glattstellungen werden nicht kopiert. Brokerkonten kopieren nie und empfangen keine Kopien.
+needs_two_accounts = Legen Sie unter Handelskonten mindestens zwei Übungskonten an, um Trades zwischen ihnen zu kopieren.
+source_label = Quellkonto
+source_description = Das Übungskonto, dessen neue Einzelorders kopiert werden.
+choose_source = Übungskonto wählen
+copying_label = Kopieren
+status_not_saved = Für dieses Konto ist noch kein Kopierer gespeichert.
+status_paused = Das Kopieren ist pausiert. Es werden keine Orders kopiert.
+status_active = Das Kopieren ist aktiv. Aktive Ziele: {targets}
+status_all_targets_paused = Das Kopieren ist aktiv, aber alle Ziele sind pausiert.
+status_blocked = Ein aktives Ziel ist kein Übungskonto mehr, daher werden Orders auf diesem Konto abgelehnt, bis es entfernt ist.
+targets_heading = Ziel-Übungskonten
+no_targets = Noch keine Zielkonten. Fügen Sie ein Übungskonto als Ziel hinzu.
+multiplier_placeholder = Multiplikator
+target_detail = Übungskonto · kopierte Menge ist die Quellmenge × Multiplikator
+target_unavailable = Kein Übungskonto. Entfernen Sie es vor dem Speichern.
+target_enabled_aria = Auf {account} kopieren
+remove_target_aria = {account} entfernen
+add_target_label = Ziel hinzufügen
+add_target = Konto hinzufügen
+add_target_description = Nur Übungskonten können Kopien empfangen.
+targets_full = Ein Kopierer hat höchstens {maximum} Ziele.
+unsaved_changes = Nicht gespeicherte Änderungen
+save = Kopierer speichern
+recent_heading = Letzte Kopien
+recent_empty = Seit dem Start von Aeris wurden von diesem Konto keine Orders kopiert.
+dispatch_label = {side} {quantity} {symbol} → {account}
+dispatch_label_no_quantity = {side} {symbol} → {account}
+dispatch_copied_detail = Das Zielkonto hat die kopierte Order angenommen.
+copied = Kopiert
+refused = Abgelehnt
+problem_no_source = Wählen Sie ein Übungs-Quellkonto.
+problem_no_targets = Fügen Sie mindestens ein Zielkonto hinzu.
+problem_multiplier = Geben Sie einen Multiplikator über null ein, etwa 1, 2 oder 0.5.
+problem_target_unavailable = {account} ist kein Übungskonto. Entfernen Sie es vor dem Speichern.
+problem_revision_exhausted = Dieser Kopierer hat seine letzte Revision erreicht und kann nicht mehr geändert werden.
+save_failed = Der Kopierer konnte nicht gespeichert werden: {error}

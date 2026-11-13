@@ -520,7 +520,7 @@ violations and missing verification explicitly, and never describe them as satis
   500 fills per historical cycle prefix, and carry the registered terms of the instruments
   they reference. Exact average entry and exit prices are presented at the instrument's
   price-grid precision (`PriceGrid::display_decimals`); an unknown grid shows the exact value. The working set projects registered terms only for
-  open orders, open positions, its fills window, ticket interests and workflows; its newest event and fill windows each
+  open orders, open positions, its fills window, ticket interests, workflows and copy dispatches; its newest event and fill windows each
   have a 500-row limit, and round trips use at most 500 fills plus open positions. Every
   closed round trip carries its durable exit fill ID, distinct even for partial exits of
   one cycle; an open round trip has no exit fill ID. Active
@@ -537,6 +537,18 @@ violations and missing verification explicitly, and never describe them as satis
   `service.snapshot()`, `trading_service.snapshot()` or `trading().snapshot()` on the owner.
   `desktop_trading_reads_come_from_trading_store` checks these calls under `apps/desktop/src`.
   Trading updates are applied on subscription wakes, not a render-path or 250 ms timer.
+- Trade copiers are owned by `trading_runtime` (`copier.rs`, the V6 copier tables): one
+  revisioned copier per practice source account with 1 to `MAXIMUM_COPIER_TARGETS` (32)
+  practice targets, each with an exact quantity multiplier. The owner refuses a broker source or
+  target on save and refuses a source order while an enabled target is no longer a practice
+  account. Only single `place_order` placements are copied; brackets, template orders,
+  modifications, cancels and flatten are not. The working set publishes every saved copier and
+  the owner's newest `MAXIMUM_COPY_DISPATCHES` (128) copy results, oldest first; those results
+  are process-local and never persisted. The desktop Accounts panel's Trade copier section
+  (`desktop/trade_copier_view.rs`) edits one inline draft per pane, dropped when the section or
+  panel closes, checks it with the owner's `TradeCopierConfig::validate` and sends only the saved
+  configuration through `register_trade_copier`. There is no remove command: pausing the copier
+  or a target stops copying.
 - The desktop bottom panel keeps recent fill-based round trips as its live trade head.
   It requests owner-projected historical closed-trade pages per account through the
   read-only history worker on a background thread, merges accounts newest-first and

@@ -11,7 +11,7 @@ use super::big_trades_dialog::{
     control_strip, described_setting_row, settings_group, settings_groups,
 };
 use super::*;
-use aeris_localization::{common, tr, trading};
+use aeris_localization::{common, tr, trade_copier, trading};
 
 const HEADER_HEIGHT: f32 = 44.0;
 const SIDEBAR_WIDTH: f32 = 184.0;
@@ -24,15 +24,17 @@ pub(super) enum AccountsTab {
     #[default]
     Connections,
     TradingAccounts,
+    TradeCopier,
 }
 
 impl AccountsTab {
-    const ALL: [Self; 2] = [Self::Connections, Self::TradingAccounts];
+    const ALL: [Self; 3] = [Self::Connections, Self::TradingAccounts, Self::TradeCopier];
 
     fn label(self) -> &'static str {
         match self {
             Self::Connections => tr!(trading::CONNECTIONS_TAB),
             Self::TradingAccounts => tr!(trading::TRADING_ACCOUNTS_TAB),
+            Self::TradeCopier => tr!(trade_copier::TAB),
         }
     }
 
@@ -40,6 +42,7 @@ impl AccountsTab {
         match self {
             Self::Connections => HugeIcon::Chart,
             Self::TradingAccounts => HugeIcon::User,
+            Self::TradeCopier => HugeIcon::Copy,
         }
     }
 }
@@ -93,8 +96,19 @@ impl WorkspaceSurface {
         self.trading_pnl.account_creator = None;
         self.trading_pnl.account_delete_confirmation = None;
         window.dispatch_action(Box::new(CancelProviderLogin), cx);
+        self.sync_trade_copier_editor(window, cx);
         self.chrome_focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// The trade copier draft exists only while its section is shown, so leaving the
+    /// section discards unsaved edits like any other unfinished form.
+    pub(super) fn sync_trade_copier_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chrome.accounts_tab() == AccountsTab::TradeCopier {
+            self.open_trade_copier_editor(window, cx);
+        } else {
+            self.trading_pnl.trade_copier = None;
+        }
     }
 
     /// Follows a title-bar drag; the layer clamps the stored origin inside the window.
@@ -147,11 +161,15 @@ pub(super) fn accounts_panel_content(
     working_set: Option<&aeris_trading_runtime::WorkingSet>,
     panel_size: gpui::Size<Pixels>,
     theme: &AerisTheme,
+    cx: &App,
 ) -> impl IntoElement {
     let tab = app_state.chrome.accounts_tab();
     let groups = match tab {
         AccountsTab::Connections => connections_groups(connections, theme),
         AccountsTab::TradingAccounts => trading_account_groups(app_state, app, working_set, theme),
+        AccountsTab::TradeCopier => {
+            super::trade_copier_view::trade_copier_groups(app_state, app, working_set, theme, cx)
+        }
     };
     div()
         .id("accounts_panel")
@@ -480,7 +498,7 @@ fn trading_account_groups(
 
 /// A `radius-large` pill: a neutral badge passes its `border-subtle` edge, a tinted badge
 /// pairs a `-subtle` fill with its text color and has none.
-fn pill(
+pub(super) fn pill(
     label: &'static str,
     background: ThemeColor,
     text: ThemeColor,

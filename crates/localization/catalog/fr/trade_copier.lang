@@ -1,0 +1,42 @@
+# Copieur de trades : la section du panneau des comptes qui copie les ordres d'un compte
+# d'entraînement vers d'autres comptes d'entraînement, et ses derniers résultats de copie.
+
+tab = Copieur de trades
+heading = Copieur de trades
+intro = Copie chaque nouvel ordre simple d'un compte d'entraînement source vers les comptes d'entraînement cibles ci-dessous, en multipliant exactement sa quantité pour chaque cible. Les ordres bracket et de modèle, les modifications d'ordres, les annulations et les clôtures ne sont pas copiés. Les comptes de courtier ne copient ni ne reçoivent jamais de copies.
+needs_two_accounts = Créez au moins deux comptes d'entraînement dans Comptes de trading pour copier des trades entre eux.
+source_label = Compte source
+source_description = Le compte d'entraînement dont les nouveaux ordres simples sont copiés.
+choose_source = Choisir un compte d'entraînement
+copying_label = Copie
+status_not_saved = Aucun copieur n'est encore enregistré pour ce compte.
+status_paused = La copie est en pause. Aucun ordre n'est copié.
+status_active = La copie est active. Cibles actives : {targets}
+status_all_targets_paused = La copie est active, mais toutes les cibles sont en pause.
+status_blocked = Une cible active n'est plus un compte d'entraînement : les ordres de ce compte sont refusés tant qu'elle n'est pas retirée.
+targets_heading = Comptes d'entraînement cibles
+no_targets = Aucun compte cible pour l'instant. Ajoutez un compte d'entraînement vers lequel copier.
+multiplier_placeholder = Multiplicateur
+target_detail = Compte d'entraînement · quantité copiée = quantité source × multiplicateur
+target_unavailable = Ce n'est pas un compte d'entraînement. Retirez-le avant d'enregistrer.
+target_enabled_aria = Copier vers {account}
+remove_target_aria = Retirer {account}
+add_target_label = Ajouter une cible
+add_target = Ajouter un compte
+add_target_description = Seuls les comptes d'entraînement peuvent recevoir des copies.
+targets_full = Un copieur compte au plus {maximum} cibles.
+unsaved_changes = Modifications non enregistrées
+save = Enregistrer le copieur
+recent_heading = Copies récentes
+recent_empty = Aucun ordre de ce compte n'a été copié depuis le démarrage d'Aeris.
+dispatch_label = {side} {quantity} {symbol} → {account}
+dispatch_label_no_quantity = {side} {symbol} → {account}
+dispatch_copied_detail = Le compte cible a accepté l'ordre copié.
+copied = Copié
+refused = Refusé
+problem_no_source = Choisissez un compte d'entraînement source.
+problem_no_targets = Ajoutez au moins un compte cible.
+problem_multiplier = Saisissez un multiplicateur supérieur à zéro, comme 1, 2 ou 0.5.
+problem_target_unavailable = {account} n'est pas un compte d'entraînement. Retirez-le avant d'enregistrer.
+problem_revision_exhausted = Ce copieur a atteint sa dernière révision et ne peut plus être modifié.
+save_failed = Le copieur n'a pas pu être enregistré : {error}

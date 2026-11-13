@@ -51,7 +51,8 @@ use self::market::feed::{MarketFeedInbox, QuoteBook};
 pub use self::market::gating::ExecutionPolicy;
 use crate::book::OrderBook;
 pub use crate::copier::{
-    MAXIMUM_COPIER_TARGETS, TradeCopierConfig, TradeCopierTarget, TradeCopyDispatch,
+    MAXIMUM_COPIER_TARGETS, MAXIMUM_COPY_DISPATCHES, TradeCopierConfig, TradeCopierTarget,
+    TradeCopyDispatch,
 };
 pub use crate::discipline::{DisciplineState, FAST_STOP_REENTRY_NANOS};
 pub use crate::order_templates::{
@@ -125,7 +126,6 @@ use std::{
 pub(crate) const COMMAND_CAPACITY: usize = 256;
 pub(crate) const REPLY_CAPACITY: usize = 1;
 pub(crate) const MAXIMUM_OPEN_ORDERS: usize = 4_096;
-pub(crate) const MAXIMUM_COPY_DISPATCHES: usize = 128;
 pub(crate) const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
 pub(crate) const BROKER_VENUE_UNAVAILABLE: &str = "broker venue is not connected";
 pub(crate) const VENUE_UNSUPPORTED: &str = "trading account venue is not supported";

@@ -12,7 +12,8 @@ use crate::service::Command;
 use crate::{
     BracketView, GroupKind, OrderGroup, PlannedLeg, PositionPnl, PositionProtection,
     ProtectionRole, ProtectionView, RecoveryNotice, RiskLock, RiskMeter, RiskProfile, SessionPlan,
-    TradeRoundTrip, TradingInstrument, VenueNotice, WorkflowView,
+    TradeCopierConfig, TradeCopyDispatch, TradeRoundTrip, TradingInstrument, VenueNotice,
+    WorkflowView,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::market::{FeedReason, FeedState};
@@ -48,8 +49,8 @@ pub struct WorkingSet {
     pub revision: u64,
     pub accounts: Vec<TradingAccount>,
     /// Registered terms for open orders, positions, the fills window, current ticket
-    /// interests and workflows, so a closed position's recent fills still name their
-    /// instrument.
+    /// interests, workflows and recent copy dispatches, so a closed position's recent fills
+    /// still name their instrument.
     pub instruments: Vec<TradingInstrument>,
     pub orders: Vec<Order>,
     /// The newest events, newest first, as in the snapshot window.
@@ -84,6 +85,11 @@ pub struct WorkingSet {
     /// Every user-managed order template, by identity; at most
     /// [`crate::MAXIMUM_ORDER_TEMPLATES`].
     pub order_templates: Vec<crate::OrderTemplate>,
+    /// Every saved trade copier, one per source account, enabled or not.
+    pub trade_copiers: Vec<TradeCopierConfig>,
+    /// The newest copy dispatches of this process, oldest first; at most
+    /// [`crate::MAXIMUM_COPY_DISPATCHES`].
+    pub copy_dispatches: Vec<TradeCopyDispatch>,
 }
 
 struct WorkingGroupViews {
@@ -474,6 +480,11 @@ impl crate::TradingCore {
             .chain(fills.iter().map(|fill| &fill.instrument_id))
             .chain(self.ticket_interest.keys())
             .chain(self.workflow_instruments())
+            .chain(
+                self.copy_dispatches
+                    .iter()
+                    .map(|dispatch| &dispatch.instrument_id),
+            )
             .collect::<BTreeSet<&InstrumentId>>();
         let WorkingGroupViews {
             groups: order_groups,
@@ -535,6 +546,8 @@ impl crate::TradingCore {
             venue_notices: self.broker_sync.notices(),
             workflows: self.workflow_views(),
             order_templates: self.state.order_templates.values().cloned().collect(),
+            trade_copiers: self.state.trade_copiers.values().cloned().collect(),
+            copy_dispatches: self.copy_dispatches.iter().cloned().collect(),
         })
     }
 
