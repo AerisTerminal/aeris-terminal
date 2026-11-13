@@ -291,6 +291,30 @@ shortcut_change_aria = Cambiar el atajo de {command}
 shortcut_clear_aria = Quitar el atajo de {command}
 shortcut_reset_aria = Restablecer el atajo predeterminado de {command}
 
+## Diálogo de grabación de mercado
+market_recording = Grabación de mercado
+market_recording_subtitle = Graba operaciones, cotizaciones y profundidad en vivo en este equipo para su propia revisión.
+market_recording_note = La grabación está desactivada hasta que elija un instrumento. Un instrumento se graba mientras un gráfico, un libro de órdenes o una lista de seguimiento lo transmite. La profundidad orden por orden nunca se graba.
+market_recording_record = Grabar {symbol}
+market_recording_no_chart = Abra un gráfico de un instrumento para grabarlo.
+market_recording_limit = Puede grabar hasta {maximum} instrumentos.
+market_recording_list = Grabaciones
+market_recording_none = Aún no hay grabaciones.
+market_recording_checking = Comprobando las grabaciones…
+market_recording_usage = {used} de {cap} en uso
+market_recording_cap = Límite de tamaño
+market_recording_cap_description = Las grabaciones más antiguas se eliminan primero para no superar el límite.
+market_recording_delete_aria = Eliminar las grabaciones de {symbol}
+market_recording_delete_all = Eliminar todas las grabaciones
+market_recording_confirm_delete_all = Confirmar eliminar todo
+market_recording_dropped = Eventos omitidos mientras la grabación estaba ocupada: {events}
+market_recording_storage_failed = La grabación se detuvo porque no se pudo escribir en la carpeta de grabaciones.
+market_recording_too_many_files = La grabación se detuvo porque la carpeta de grabaciones contiene demasiados archivos.
+market_recording_busy = La grabación está ocupada. Inténtelo de nuevo en un momento.
+market_recording_unavailable = La grabación no pudo aplicar este cambio.
+size_megabytes = {value} MB
+size_gigabytes = {value} GB
+
 ## Pantalla de inicio de sesión
 sign_in_checking = Comprobando su sesión guardada…
 sign_in_browser_wait = Termine de iniciar sesión en su navegador.

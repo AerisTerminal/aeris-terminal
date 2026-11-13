@@ -19,6 +19,8 @@ pub(super) enum OverlayKind {
     /// The notifications popover beside the panel rail's bell.
     Notifications,
     KeyboardShortcuts,
+    /// The market recording dialog, opened from the profile menu.
+    MarketRecording,
     CommandPalette,
 }
 
@@ -45,6 +47,7 @@ enum AppOverlay {
         tab: NotificationsTab,
     },
     KeyboardShortcuts,
+    MarketRecording,
     CommandPalette {
         /// The highlighted result row.
         selection: usize,
@@ -60,6 +63,7 @@ impl AppOverlay {
             Self::AppNavigation(_) => OverlayKind::AppNavigation,
             Self::Notifications { .. } => OverlayKind::Notifications,
             Self::KeyboardShortcuts => OverlayKind::KeyboardShortcuts,
+            Self::MarketRecording => OverlayKind::MarketRecording,
             Self::CommandPalette { .. } => OverlayKind::CommandPalette,
         }
     }
@@ -203,6 +207,11 @@ impl OverlayStack {
         self.replace(AppOverlay::KeyboardShortcuts)
     }
 
+    /// Opens the market recording dialog, returning the other overlay it replaced.
+    pub(super) fn open_market_recording(&mut self) -> Option<OverlayKind> {
+        self.replace(AppOverlay::MarketRecording)
+    }
+
     pub(super) const fn command_palette_input(&self) -> &Entity<InputState> {
         &self.command_palette_input
     }
@@ -319,6 +328,11 @@ mod tests {
             None,
             "reopening the same overlay replaces nothing else"
         );
+        assert_eq!(
+            overlays.open_market_recording(),
+            Some(OverlayKind::KeyboardShortcuts)
+        );
+        assert!(overlays.is_open(OverlayKind::MarketRecording));
     }
 
     #[gpui::test]
@@ -395,6 +409,7 @@ mod tests {
         assert!(OverlayKind::AppNavigation.pins_title_bar());
         assert!(!OverlayKind::Notifications.pins_title_bar());
         assert!(!OverlayKind::KeyboardShortcuts.pins_title_bar());
+        assert!(!OverlayKind::MarketRecording.pins_title_bar());
         assert!(!OverlayKind::CommandPalette.pins_title_bar());
     }
 

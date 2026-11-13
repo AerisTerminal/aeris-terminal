@@ -5085,11 +5085,91 @@ mod tests {
             );
         }
     }
+    /// Market history stays on demand and is never persisted. The one exception
+    /// is the opt-in recorder of live trades, quotes and aggregate depth under
+    /// the data root's `recordings` directory; its file mutations are confined
+    /// to these exact sites, each counted and reasoned.
+    const MARKET_RECORDING_FILE_MUTATIONS: &[(&str, &str, usize, &str)] = &[
+        (
+            "crates/market_runtime/src/market_service/recording/writer.rs",
+            "OpenOptions",
+            2,
+            "the import and the one create_new open of a new segment; segments are raw \
+             appends because they only grow and a torn tail is ignored on read",
+        ),
+        (
+            "crates/market_runtime/src/market_service/recording/writer.rs",
+            "create_dir",
+            2,
+            "creates the instrument and session directories under the recordings directory",
+        ),
+        (
+            "crates/market_runtime/src/market_service/recording/writer.rs",
+            "write_file_durably",
+            1,
+            "writes each instrument's index file through the platform durable writer",
+        ),
+        (
+            "crates/market_runtime/src/market_service/recording/store.rs",
+            "remove_file",
+            2,
+            "removes indexed segments and instrument index files for cap eviction and \
+             user deletion",
+        ),
+        (
+            "crates/market_runtime/src/market_service/recording/store.rs",
+            "remove_dir",
+            1,
+            "removes the session or instrument directory the recorder emptied",
+        ),
+    ];
+
     #[test]
     fn market_history_is_on_demand_and_nonpersistent() {
         assert!(
             !manifest("crates/market_runtime/Cargo.toml").contains("aeris_local_storage"),
             "market runtime must not persist market history"
+        );
+        let mutations = [
+            "OpenOptions",
+            "File::create",
+            "create_dir",
+            "remove_file",
+            "remove_dir",
+            "write_file_durably",
+            "fs::write(",
+            "fs::rename(",
+            "fs::copy(",
+            "replace_file",
+            "::move_file",
+            "StagedFile",
+            "DurableContainer",
+        ];
+        let mut observed = std::collections::BTreeMap::new();
+        for path in production_sources_under("crates/market_runtime/src") {
+            let contents = fs::read_to_string(&path).expect("source");
+            let production = production_prefix(&contents);
+            let relative = relative_string(&path);
+            for mutation in mutations {
+                let count = production.matches(mutation).count();
+                if count > 0 {
+                    observed.insert((relative.clone(), mutation), count);
+                }
+            }
+        }
+        let expected = MARKET_RECORDING_FILE_MUTATIONS
+            .iter()
+            .map(|(path, mutation, count, reason)| {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{path} {mutation} requires an explicit reason"
+                );
+                (((*path).to_string(), *mutation), *count)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            observed, expected,
+            "market runtime file mutations belong only to the counted recording sites"
         );
     }
 

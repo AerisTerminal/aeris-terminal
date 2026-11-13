@@ -291,6 +291,30 @@ shortcut_change_aria = {command} का शॉर्टकट बदलें
 shortcut_clear_aria = {command} का शॉर्टकट हटाएँ
 shortcut_reset_aria = {command} का डिफ़ॉल्ट शॉर्टकट वापस लाएँ
 
+## Market recording dialog
+market_recording = मार्केट रिकॉर्डिंग
+market_recording_subtitle = आपकी अपनी समीक्षा के लिए लाइव ट्रेड, कोट और डेप्थ इसी कंप्यूटर पर रिकॉर्ड करता है।
+market_recording_note = जब तक आप कोई इंस्ट्रूमेंट नहीं चुनते, रिकॉर्डिंग बंद रहती है। कोई इंस्ट्रूमेंट तब रिकॉर्ड होता है जब कोई चार्ट, ऑर्डर बुक या वॉचलिस्ट उसे स्ट्रीम करती है। हर ऑर्डर की अलग डेप्थ कभी रिकॉर्ड नहीं होती।
+market_recording_record = {symbol} रिकॉर्ड करें
+market_recording_no_chart = किसी इंस्ट्रूमेंट को रिकॉर्ड करने के लिए उसका चार्ट खोलें।
+market_recording_limit = आप अधिकतम {maximum} इंस्ट्रूमेंट रिकॉर्ड कर सकते हैं।
+market_recording_list = रिकॉर्डिंग
+market_recording_none = अभी कोई रिकॉर्डिंग नहीं है।
+market_recording_checking = रिकॉर्डिंग जाँची जा रही हैं…
+market_recording_usage = {cap} में से {used} उपयोग में
+market_recording_cap = आकार सीमा
+market_recording_cap_description = सीमा के भीतर रहने के लिए सबसे पुरानी रिकॉर्डिंग पहले हटाई जाती हैं।
+market_recording_delete_aria = {symbol} की रिकॉर्डिंग हटाएँ
+market_recording_delete_all = सभी रिकॉर्डिंग हटाएँ
+market_recording_confirm_delete_all = सभी हटाने की पुष्टि करें
+market_recording_dropped = रिकॉर्डर व्यस्त रहने के दौरान छोड़े गए इवेंट: {events}
+market_recording_storage_failed = रिकॉर्डिंग रुक गई क्योंकि रिकॉर्डिंग फ़ोल्डर में लिखा नहीं जा सका।
+market_recording_too_many_files = रिकॉर्डिंग रुक गई क्योंकि रिकॉर्डिंग फ़ोल्डर में बहुत अधिक फ़ाइलें हैं।
+market_recording_busy = रिकॉर्डर व्यस्त है। थोड़ी देर में फिर से आज़माएँ।
+market_recording_unavailable = रिकॉर्डर यह बदलाव लागू नहीं कर सका।
+size_megabytes = {value} MB
+size_gigabytes = {value} GB
+
 ## Sign-in gate
 sign_in_checking = आपका सेव किया गया साइन-इन जाँचा जा रहा है…
 sign_in_browser_wait = अपने ब्राउज़र में साइन इन पूरा करें।

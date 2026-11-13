@@ -2,14 +2,14 @@ use aeris_contracts::{
     InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartIndicatorState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceDrawingTemplateState, WorkspaceIndicatorTemplateState,
-    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderBookState,
-    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSavedLayoutState, WorkspaceScanComparison, WorkspaceScanConditionState,
-    WorkspaceScanMatchMode, WorkspaceScanOperandKind, WorkspaceScanOperandState,
-    WorkspaceScanStudyParameterState, WorkspaceScreenerScanState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceMarketRecordingState,
+    WorkspaceOrderBookState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspaceRecordedInstrumentState, WorkspaceSavedLayoutState,
+    WorkspaceScanComparison, WorkspaceScanConditionState, WorkspaceScanMatchMode,
+    WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScanStudyParameterState,
+    WorkspaceScreenerScanState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -277,7 +277,33 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
             }),
             favorite: true,
         }],
+        market_recording: None,
     };
+    let decoded =
+        WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");
+    assert_eq!(decoded, workspace);
+}
+
+#[test]
+fn market_recording_round_trips_and_older_workspaces_keep_their_bytes() {
+    let mut workspace = WorkspaceState {
+        workspace_revision: 3,
+        workspace_tabs: vec![workspace_tab()],
+        ..WorkspaceState::default()
+    };
+    let bytes = workspace.encode_to_vec();
+    let decoded = WorkspaceState::decode(bytes.as_slice()).expect("legacy workspace decodes");
+    assert_eq!(decoded.market_recording, None);
+    assert_eq!(decoded.encode_to_vec(), bytes);
+
+    workspace.market_recording = Some(WorkspaceMarketRecordingState {
+        instruments: vec![WorkspaceRecordedInstrumentState {
+            provider: "provider-a".into(),
+            instrument_id: "instrument-1".into(),
+            display_symbol: "ABC".into(),
+        }],
+        capacity_bytes: 2 * 1024 * 1024 * 1024,
+    });
     let decoded =
         WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");
     assert_eq!(decoded, workspace);

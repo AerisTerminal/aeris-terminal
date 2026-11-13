@@ -183,6 +183,33 @@ pub struct WorkspaceState {
     /// written before indicator templates existed, which open with none.
     #[prost(message, repeated, tag = "24")]
     pub indicator_templates: Vec<WorkspaceIndicatorTemplateState>,
+    /// The opt-in local market recording choice. Absent in documents written before
+    /// recording existed and whenever nothing is chosen, so recording stays off.
+    #[prost(message, optional, tag = "25")]
+    pub market_recording: Option<WorkspaceMarketRecordingState>,
+}
+
+/// The instruments the user chose to record and the size cap of every recording together.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceMarketRecordingState {
+    /// At most 16 instruments; duplicates and invalid identities are dropped on load.
+    #[prost(message, repeated, tag = "1")]
+    pub instruments: Vec<WorkspaceRecordedInstrumentState>,
+    /// The cap in bytes; zero or a value out of range uses the default cap.
+    #[prost(uint64, tag = "2")]
+    pub capacity_bytes: u64,
+}
+
+/// One recorded instrument by its opaque runtime identities.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceRecordedInstrumentState {
+    #[prost(string, tag = "1")]
+    pub provider: String,
+    #[prost(string, tag = "2")]
+    pub instrument_id: String,
+    /// The symbol shown for the instrument when it was chosen.
+    #[prost(string, tag = "3")]
+    pub display_symbol: String,
 }
 
 /// One user-named indicator template: every indicator of a chart as it was saved. Applying it

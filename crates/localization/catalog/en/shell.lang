@@ -291,6 +291,30 @@ shortcut_change_aria = Change the shortcut for {command}
 shortcut_clear_aria = Remove the shortcut for {command}
 shortcut_reset_aria = Restore the default shortcut for {command}
 
+## Market recording dialog
+market_recording = Market recording
+market_recording_subtitle = Records live trades, quotes and depth on this computer for your own review.
+market_recording_note = Recording is off until you choose an instrument. An instrument is recorded while a chart, order book or watchlist streams it. Order-by-order depth is never recorded.
+market_recording_record = Record {symbol}
+market_recording_no_chart = Open a chart on an instrument to record it.
+market_recording_limit = You can record up to {maximum} instruments.
+market_recording_list = Recordings
+market_recording_none = No recordings yet.
+market_recording_checking = Checking recordings…
+market_recording_usage = {used} of {cap} used
+market_recording_cap = Size limit
+market_recording_cap_description = The oldest recordings are deleted first to stay under the limit.
+market_recording_delete_aria = Delete the recordings of {symbol}
+market_recording_delete_all = Delete all recordings
+market_recording_confirm_delete_all = Confirm delete all
+market_recording_dropped = Events skipped while the recorder was busy: {events}
+market_recording_storage_failed = Recording stopped because the recordings folder could not be written.
+market_recording_too_many_files = Recording stopped because the recordings folder holds too many files.
+market_recording_busy = The recorder is busy. Try again in a moment.
+market_recording_unavailable = The recorder could not apply this change.
+size_megabytes = {value} MB
+size_gigabytes = {value} GB
+
 ## Sign-in gate
 sign_in_checking = Checking your saved sign-in…
 sign_in_browser_wait = Finish signing in in your browser.

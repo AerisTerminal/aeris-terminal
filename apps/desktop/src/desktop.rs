@@ -45,6 +45,7 @@ mod indicator_templates_view;
 mod keyboard_shortcuts;
 mod layouts_view;
 mod local_state;
+mod market_recording;
 mod studies_controller;
 mod workspace_migrations;
 #[cfg(test)]
@@ -5446,6 +5447,7 @@ struct TerminalApp {
     provider_login: provider_login::ProviderLoginFlow,
     chrome: AppChrome,
     shortcut_editor: keyboard_shortcuts::ShortcutEditor,
+    recording: market_recording::MarketRecordingUi,
 }
 
 fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {

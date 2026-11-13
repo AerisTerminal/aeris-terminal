@@ -289,6 +289,30 @@ shortcut_change_aria = 更改 {command} 的快捷键
 shortcut_clear_aria = 清除 {command} 的快捷键
 shortcut_reset_aria = 恢复 {command} 的默认快捷键
 
+## 市场录制对话框
+market_recording = 市场录制
+market_recording_subtitle = 在本机录制实时成交、报价和深度，供您自行复盘。
+market_recording_note = 在您选择品种之前，录制保持关闭。品种在图表、订单簿或自选列表接收其行情时被录制。逐笔委托深度永远不会被录制。
+market_recording_record = 录制 {symbol}
+market_recording_no_chart = 打开某个品种的图表即可录制它。
+market_recording_limit = 最多可录制 {maximum} 个品种。
+market_recording_list = 录制内容
+market_recording_none = 暂无录制内容。
+market_recording_checking = 正在检查录制内容…
+market_recording_usage = 已用 {used}，共 {cap}
+market_recording_cap = 大小上限
+market_recording_cap_description = 为保持在上限以内，会先删除最早的录制内容。
+market_recording_delete_aria = 删除 {symbol} 的录制内容
+market_recording_delete_all = 删除全部录制内容
+market_recording_confirm_delete_all = 确认全部删除
+market_recording_dropped = 录制器繁忙时跳过的事件：{events}
+market_recording_storage_failed = 录制已停止，因为无法写入录制文件夹。
+market_recording_too_many_files = 录制已停止，因为录制文件夹中的文件过多。
+market_recording_busy = 录制器繁忙，请稍后再试。
+market_recording_unavailable = 录制器无法应用此更改。
+size_megabytes = {value} MB
+size_gigabytes = {value} GB
+
 ## 登录界面
 sign_in_checking = 正在检查已保存的登录…
 sign_in_browser_wait = 请在浏览器中完成登录。

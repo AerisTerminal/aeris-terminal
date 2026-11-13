@@ -36,6 +36,7 @@ pub(super) struct OwnedCoordinatorChannels {
     pub(super) quotes: Arc<Mutex<super::quotes::QuoteBook>>,
     pub(super) trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
     pub(super) outbox: Arc<super::outbox::ConsumerOutbox>,
+    pub(super) recording: Arc<super::recording::MarketRecording>,
 }
 
 struct FeedChannels {
@@ -43,6 +44,7 @@ struct FeedChannels {
     quotes: Arc<Mutex<super::quotes::QuoteBook>>,
     trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
     outbox: Arc<super::outbox::ConsumerOutbox>,
+    recording: Arc<super::recording::MarketRecording>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -87,6 +89,7 @@ pub(super) fn spawn_coordinator(
                 quotes,
                 trading_feed,
                 outbox,
+                recording,
             } = channels;
             {
                 let dispatch = providers.dispatch();
@@ -101,9 +104,12 @@ pub(super) fn spawn_coordinator(
                         quotes,
                         trading_feed,
                         outbox,
+                        recording: Arc::clone(&recording),
                     },
                 );
             }
+            // The coordinator's tap is gone, so the recorder drains, synchronizes and stops.
+            recording.close();
             // A history worker may be blocked on a full bounded completion
             // channel. Close that receiver before joining provider workers.
             drop(commands);
@@ -130,6 +136,7 @@ fn run_coordinator(
     coordinator.quotes = feeds.quotes;
     coordinator.trading_feed = feeds.trading_feed;
     coordinator.outbox = feeds.outbox;
+    coordinator.recording = super::recording::RecordingTap::attached(feeds.recording);
     let demand_flushers = coordinator
         .providers
         .records
@@ -336,6 +343,7 @@ impl<'a> Coordinator<'a> {
             command_fences: super::CommandFences::default(),
             pending_selections: BTreeMap::new(),
             selection_epochs: BTreeMap::new(),
+            recording: super::recording::RecordingTap::detached(),
         }
     }
 }
@@ -979,6 +987,8 @@ pub(super) struct Coordinator<'a> {
     pub(super) pending_selections:
         BTreeMap<ConsumerId, (ClientId, super::SelectionRequest, String)>,
     pub(super) selection_epochs: BTreeMap<ConsumerId, std::collections::BTreeSet<u64>>,
+    /// Forwards accepted events of the user's recorded instruments.
+    pub(super) recording: super::recording::RecordingTap,
 }
 
 impl Coordinator<'_> {
@@ -3617,6 +3627,7 @@ mod tests {
             command_fences: super::super::CommandFences::default(),
             pending_selections: BTreeMap::new(),
             selection_epochs: BTreeMap::new(),
+            recording: super::super::recording::RecordingTap::detached(),
         }
     }
 

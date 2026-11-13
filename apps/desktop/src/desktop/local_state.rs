@@ -415,6 +415,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         chart_chrome: None,
         screener_scans: Vec::new(),
         indicator_templates: Vec::new(),
+        market_recording: None,
     }
 }
 
@@ -490,6 +491,10 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     workspace.default_chart_settings = None;
     sanitize_watchlist(&mut workspace);
     workspace.screener_scans = super::saved_scans::sanitize_saved_scans(&workspace.screener_scans);
+    workspace.market_recording = super::market_recording::MarketRecordingChoice::from_workspace(
+        workspace.market_recording.as_ref(),
+    )
+    .to_workspace();
     // The migration chain has already lifted the document to the current schema; keep the
     // revision stamp here as the invariant for paths that never pass through a file.
     workspace.schema_revision = workspace.schema_revision.max(CURRENT_WORKSPACE_SCHEMA);

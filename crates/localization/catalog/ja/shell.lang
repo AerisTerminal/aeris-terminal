@@ -289,6 +289,30 @@ shortcut_change_aria = {command} のショートカットを変更
 shortcut_clear_aria = {command} のショートカットを解除
 shortcut_reset_aria = {command} の既定のショートカットに戻す
 
+## マーケット記録のダイアログ
+market_recording = マーケット記録
+market_recording_subtitle = ライブの約定、気配値、板情報をこのコンピューターに記録し、ご自身の振り返りに使えます。
+market_recording_note = 銘柄を選ぶまで記録はオフです。銘柄はチャート、板、ウォッチリストが配信を受けている間に記録されます。注文ごとの板情報は記録されません。
+market_recording_record = {symbol} を記録
+market_recording_no_chart = 記録するには銘柄のチャートを開いてください。
+market_recording_limit = 記録できる銘柄は最大 {maximum} 件です。
+market_recording_list = 記録
+market_recording_none = まだ記録はありません。
+market_recording_checking = 記録を確認しています…
+market_recording_usage = {cap} 中 {used} を使用
+market_recording_cap = サイズの上限
+market_recording_cap_description = 上限を超えないよう、古い記録から削除されます。
+market_recording_delete_aria = {symbol} の記録を削除
+market_recording_delete_all = すべての記録を削除
+market_recording_confirm_delete_all = すべて削除を確定
+market_recording_dropped = 記録処理が混雑している間にスキップしたイベント: {events}
+market_recording_storage_failed = 記録フォルダーに書き込めなかったため、記録を停止しました。
+market_recording_too_many_files = 記録フォルダーのファイルが多すぎるため、記録を停止しました。
+market_recording_busy = 記録処理が混雑しています。少し待ってからもう一度お試しください。
+market_recording_unavailable = この変更を記録に適用できませんでした。
+size_megabytes = {value} MB
+size_gigabytes = {value} GB
+
 ## サインイン画面
 sign_in_checking = 保存済みのサインインを確認しています…
 sign_in_browser_wait = ブラウザーでサインインを完了してください。

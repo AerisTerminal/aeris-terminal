@@ -330,6 +330,7 @@ pub(super) fn platform_menu_layer(
         ))
         .separator()
         .child(keyboard_shortcuts_row(terminal, theme))
+        .child(market_recording_row(terminal, theme))
         .separator()
         .child(about_section(
             details,
@@ -428,7 +429,7 @@ impl PlatformMenuLayout {
             + separator
             + LANGUAGE_SECTION_HEIGHT
             + separator
-            + CHART_CONTEXT_MENU_ROW_HEIGHT
+            + 2.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
             + separator
             + about_section_height(self.about_details, self.attribution)
     }
@@ -1091,6 +1092,22 @@ fn language_choice_label(preference: LanguagePreference) -> &'static str {
     }
 }
 
+fn market_recording_row(terminal: &Entity<TerminalApp>, theme: &AerisTheme) -> AnyElement {
+    let open = terminal.clone();
+    MenuRow::compact(
+        "platform_menu_market_recording",
+        tr!(shell::MARKET_RECORDING),
+        theme,
+    )
+    .leading_icon(header_icon(HugeIcon::Download).with_size(px(16.0)))
+    .on_click(move |_, window, cx| {
+        open.update(cx, |terminal, terminal_cx| {
+            terminal.open_market_recording(window, terminal_cx);
+        });
+    })
+    .into_any_element()
+}
+
 fn keyboard_shortcuts_row(terminal: &Entity<TerminalApp>, theme: &AerisTheme) -> AnyElement {
     let open = terminal.clone();
     MenuRow::compact(
@@ -1537,7 +1554,7 @@ mod tests {
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
             + LANGUAGE_SECTION_HEIGHT
-            + CHART_CONTEXT_MENU_ROW_HEIGHT
+            + 2.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
             + 4.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
             + about_section_height(2, None);
         assert!((development.height(panel_chrome) - expected).abs() < f32::EPSILON);
@@ -1550,7 +1567,7 @@ mod tests {
         };
         let expected = panel_chrome
             + IDENTITY_HEIGHT
-            + 3.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
+            + 4.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
             + ACCOUNT_ERROR_HEIGHT
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT

@@ -464,3 +464,9 @@ pub use market_service::{
     QuoteSubscription, RECENT_LADDER_TRADE_RETENTION_NANOS, RithmicLoginSummary, RithmicServer,
     built_in_provider_presentations, published_provider_descriptors,
 };
+pub use market_service::{
+    DEFAULT_RECORDING_CAPACITY_BYTES, MAXIMUM_RECORDED_INSTRUMENTS,
+    MAXIMUM_RECORDING_CAPACITY_BYTES, MINIMUM_RECORDING_CAPACITY_BYTES, MarketRecordingError,
+    MarketRecordingFailure, MarketRecordingSettings, MarketRecordingStatus, MarketRecordingUsage,
+    RECORDINGS_DIRECTORY, RecordedInstrument,
+};

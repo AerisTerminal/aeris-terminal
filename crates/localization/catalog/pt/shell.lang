@@ -291,6 +291,30 @@ shortcut_change_aria = Alterar o atalho de {command}
 shortcut_clear_aria = Remover o atalho de {command}
 shortcut_reset_aria = Restaurar o atalho padrão de {command}
 
+## Diálogo de gravação de mercado
+market_recording = Gravação de mercado
+market_recording_subtitle = Grava negócios, cotações e profundidade ao vivo neste computador para sua própria análise.
+market_recording_note = A gravação fica desligada até você escolher um instrumento. Um instrumento é gravado enquanto um gráfico, livro de ofertas ou lista de observação o transmite. A profundidade ordem a ordem nunca é gravada.
+market_recording_record = Gravar {symbol}
+market_recording_no_chart = Abra um gráfico de um instrumento para gravá-lo.
+market_recording_limit = É possível gravar até {maximum} instrumentos.
+market_recording_list = Gravações
+market_recording_none = Nenhuma gravação ainda.
+market_recording_checking = Verificando as gravações…
+market_recording_usage = {used} de {cap} em uso
+market_recording_cap = Limite de tamanho
+market_recording_cap_description = As gravações mais antigas são excluídas primeiro para ficar abaixo do limite.
+market_recording_delete_aria = Excluir as gravações de {symbol}
+market_recording_delete_all = Excluir todas as gravações
+market_recording_confirm_delete_all = Confirmar excluir tudo
+market_recording_dropped = Eventos ignorados enquanto o gravador estava ocupado: {events}
+market_recording_storage_failed = A gravação parou porque não foi possível gravar na pasta de gravações.
+market_recording_too_many_files = A gravação parou porque a pasta de gravações tem arquivos demais.
+market_recording_busy = O gravador está ocupado. Tente novamente em instantes.
+market_recording_unavailable = O gravador não conseguiu aplicar esta alteração.
+size_megabytes = {value} MB
+size_gigabytes = {value} GB
+
 ## Tela de login
 sign_in_checking = Verificando seu login salvo…
 sign_in_browser_wait = Conclua o login no seu navegador.

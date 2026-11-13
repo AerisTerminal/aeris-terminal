@@ -1354,6 +1354,8 @@ impl Coordinator<'_> {
             self.provider_epochs.drop_event();
             return;
         }
+        self.recording
+            .offer(event.provider, &event.kind, &self.catalog);
         let ProviderEvent {
             provider,
             wire_generation: generation,

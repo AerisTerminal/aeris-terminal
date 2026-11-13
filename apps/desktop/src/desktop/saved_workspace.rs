@@ -16,7 +16,9 @@ use super::{
     WorkspaceChartSettingsTemplateState, WorkspaceChromeState, WorkspaceDrawingTemplateState,
     WorkspaceTabState, WorkspaceWatchlistEntryState,
 };
-use aeris_contracts::{WorkspaceIndicatorTemplateState, WorkspaceScreenerScanState};
+use aeris_contracts::{
+    WorkspaceIndicatorTemplateState, WorkspaceMarketRecordingState, WorkspaceScreenerScanState,
+};
 
 /// A change the compared snapshot does not show, so it is saved even when the snapshot is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +49,8 @@ pub(super) struct WorkspaceSnapshot {
     /// Chart chrome preferences persist with the document through the same writer.
     pub(super) chart_chrome: WorkspaceChromeState,
     pub(super) screener_scans: Vec<WorkspaceScreenerScanState>,
+    /// The market recording choice; `None` while nothing is recorded at the default cap.
+    pub(super) market_recording: Option<WorkspaceMarketRecordingState>,
 }
 
 /// What a save request did.
@@ -270,6 +274,7 @@ impl SavedWorkspace {
             chart_chrome: snapshot.chart_chrome.clone(),
             screener_scans: snapshot.screener_scans.clone(),
             indicator_templates: self.indicator_templates.clone(),
+            market_recording: snapshot.market_recording.clone(),
         }) {
             return WorkspaceSave::Failed(error);
         }

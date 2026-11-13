@@ -74,7 +74,14 @@ mod scripted_provider;
 pub use scripted_provider::ScriptedQuoteProvider;
 pub(crate) mod clock;
 pub(crate) mod reconnect;
+mod recording;
 use alerts::PriceAlertRegistry;
+pub use recording::{
+    DEFAULT_RECORDING_CAPACITY_BYTES, MAXIMUM_RECORDED_INSTRUMENTS,
+    MAXIMUM_RECORDING_CAPACITY_BYTES, MINIMUM_RECORDING_CAPACITY_BYTES, MarketRecordingError,
+    MarketRecordingFailure, MarketRecordingSettings, MarketRecordingStatus, MarketRecordingUsage,
+    RECORDINGS_DIRECTORY, RecordedInstrument,
+};
 
 const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
@@ -236,6 +243,7 @@ struct MarketRuntime {
     quotes: Arc<Mutex<quotes::QuoteBook>>,
     trading_feed: Arc<trading_feed::TradingFeedOutbox>,
     outbox: Arc<outbox::ConsumerOutbox>,
+    recording: Arc<recording::MarketRecording>,
 }
 
 struct MarketServiceProviders {

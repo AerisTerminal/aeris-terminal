@@ -30,6 +30,7 @@ struct RuntimeChannels {
     latest: Arc<Mutex<super::quotes::QuoteBook>>,
     trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
     outbox: Arc<super::outbox::ConsumerOutbox>,
+    recording: Arc<super::recording::MarketRecording>,
 }
 
 struct MarketQuoteInterestSink(MarketService);
@@ -990,6 +991,9 @@ impl MarketService {
         let quotes = Arc::new(Mutex::new(super::quotes::QuoteBook::default()));
         let trading_feed = Arc::new(super::trading_feed::TradingFeedOutbox::default());
         let outbox = Arc::new(super::outbox::ConsumerOutbox::default());
+        let recording = Arc::new(super::recording::MarketRecording::new(Arc::new(
+            super::clock::SystemClock,
+        )));
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
         let start_context = super::ProviderStartContext {
@@ -1011,6 +1015,7 @@ impl MarketService {
                 quotes: Arc::clone(&quotes),
                 trading_feed: Arc::clone(&trading_feed),
                 outbox: Arc::clone(&outbox),
+                recording: Arc::clone(&recording),
             },
             Arc::clone(&shutdown),
             Arc::new(super::clock::SystemClock),
@@ -1029,6 +1034,7 @@ impl MarketService {
                 latest: quotes,
                 trading_feed,
                 outbox,
+                recording,
             },
         );
         Ok(market)
@@ -1048,6 +1054,7 @@ impl MarketService {
             latest: quotes,
             trading_feed,
             outbox,
+            recording,
         } = channels;
         let super::ProviderStartContext { rithmic_login } = context;
         let shutdown_wake = commands.clone();
@@ -1067,6 +1074,7 @@ impl MarketService {
                 quotes,
                 trading_feed,
                 outbox,
+                recording,
             }),
         }
     }
@@ -1992,6 +2000,9 @@ mod tests {
                 latest: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
                 trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
                 outbox: Arc::new(super::super::outbox::ConsumerOutbox::default()),
+                recording: Arc::new(super::super::recording::MarketRecording::new(Arc::new(
+                    super::super::clock::SystemClock,
+                ))),
             },
         );
         assert_eq!(service.provider_presentations()[0].id, "rithmic");
@@ -2027,6 +2038,9 @@ mod tests {
                 latest: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
                 trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
                 outbox: Arc::new(super::super::outbox::ConsumerOutbox::default()),
+                recording: Arc::new(super::super::recording::MarketRecording::new(Arc::new(
+                    super::super::clock::SystemClock,
+                ))),
             },
         );
         let service_for_thread = service.clone();

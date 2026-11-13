@@ -291,6 +291,30 @@ shortcut_change_aria = Tastenkürzel für {command} ändern
 shortcut_clear_aria = Tastenkürzel für {command} entfernen
 shortcut_reset_aria = Standard-Tastenkürzel für {command} wiederherstellen
 
+## Dialog der Marktaufzeichnung
+market_recording = Marktaufzeichnung
+market_recording_subtitle = Zeichnet Live-Trades, Kurse und Markttiefe auf diesem Computer für Ihre eigene Auswertung auf.
+market_recording_note = Die Aufzeichnung ist aus, bis Sie ein Instrument auswählen. Ein Instrument wird aufgezeichnet, solange ein Chart, ein Orderbuch oder eine Watchlist es streamt. Die Markttiefe einzelner Orders wird nie aufgezeichnet.
+market_recording_record = {symbol} aufzeichnen
+market_recording_no_chart = Öffnen Sie einen Chart mit einem Instrument, um es aufzuzeichnen.
+market_recording_limit = Sie können bis zu {maximum} Instrumente aufzeichnen.
+market_recording_list = Aufzeichnungen
+market_recording_none = Noch keine Aufzeichnungen.
+market_recording_checking = Aufzeichnungen werden geprüft…
+market_recording_usage = {used} von {cap} belegt
+market_recording_cap = Größenlimit
+market_recording_cap_description = Die ältesten Aufzeichnungen werden zuerst gelöscht, damit das Limit eingehalten wird.
+market_recording_delete_aria = Aufzeichnungen von {symbol} löschen
+market_recording_delete_all = Alle Aufzeichnungen löschen
+market_recording_confirm_delete_all = Löschen aller bestätigen
+market_recording_dropped = Übersprungene Ereignisse, während die Aufzeichnung ausgelastet war: {events}
+market_recording_storage_failed = Die Aufzeichnung wurde angehalten, weil der Aufzeichnungsordner nicht beschrieben werden konnte.
+market_recording_too_many_files = Die Aufzeichnung wurde angehalten, weil der Aufzeichnungsordner zu viele Dateien enthält.
+market_recording_busy = Die Aufzeichnung ist ausgelastet. Versuchen Sie es gleich noch einmal.
+market_recording_unavailable = Die Aufzeichnung konnte diese Änderung nicht übernehmen.
+size_megabytes = {value} MB
+size_gigabytes = {value} GB
+
 ## Anmeldeseite
 sign_in_checking = Ihre gespeicherte Anmeldung wird geprüft…
 sign_in_browser_wait = Schließen Sie die Anmeldung in Ihrem Browser ab.

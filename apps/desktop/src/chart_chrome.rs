@@ -878,6 +878,12 @@ impl DesktopPersistence {
         self
     }
 
+    /// The instance's data root, which holds every durable file of this desktop.
+    #[must_use]
+    pub fn data_root(&self) -> &Path {
+        &self.root
+    }
+
     #[must_use]
     pub fn workspace_path(&self) -> PathBuf {
         self.root.join("workspace-state.pb")

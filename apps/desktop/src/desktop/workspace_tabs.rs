@@ -276,13 +276,21 @@ impl TerminalApp {
             layout_tabs::now_unix_ms(&lifecycle),
             cx,
         );
+        let recording = market_recording::MarketRecordingUi::restore(
+            market_recording::MarketRecordingChoice::from_workspace(
+                init.workspace_document.market_recording.as_ref(),
+            ),
+        );
         let restored = WorkspaceSnapshot {
             layout: workspace_layout_tabs(tabs.as_slice(), cx),
             active_workspace_id: tabs.active().id,
             watchlist: init.watchlist_entries.clone(),
             chart_chrome: init.chart_chrome.to_workspace_chrome(),
             screener_scans: init.workspace_document.screener_scans.clone(),
+            market_recording: recording.saved_state(),
         };
+        // Only the tabbed shell owns the workspace document the choice is saved in.
+        let records_market = init.workspace_shell == WorkspaceShellKind::Tabs;
         let mut pages = app_navigation::AppPages::default();
         pages
             .screener
@@ -324,7 +332,11 @@ impl TerminalApp {
             provider_login: provider_login::ProviderLoginFlow::default(),
             chrome: AppChrome::new(init.chart_chrome),
             shortcut_editor: keyboard_shortcuts::ShortcutEditor::default(),
+            recording,
         };
+        if records_market {
+            terminal.start_market_recording();
+        }
         terminal.post_workspace_restore_notice(&restore_outcome, cx);
         terminal
     }
@@ -2811,6 +2823,7 @@ impl TerminalApp {
             watchlist: self.watchlist_entries(),
             chart_chrome: self.chrome.preferences().to_workspace_chrome(),
             screener_scans: self.pages.screener.scans.saved_states(),
+            market_recording: self.recording.saved_state(),
         };
         match self.saved.save_if_changed(snapshot) {
             WorkspaceSave::Failed(error) => self.notices.show_workspace_error(error),
@@ -3730,6 +3743,14 @@ impl TerminalApp {
         if self.overlays.is_open(OverlayKind::KeyboardShortcuts) {
             if event.keystroke.key.as_str() == "escape" {
                 self.close_keyboard_shortcuts(window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.overlays.is_open(OverlayKind::MarketRecording) {
+            if event.keystroke.key.as_str() == "escape" {
+                self.close_market_recording(window, cx);
                 window.prevent_default();
                 cx.stop_propagation();
             }

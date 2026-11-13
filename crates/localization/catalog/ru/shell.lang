@@ -293,6 +293,30 @@ shortcut_change_aria = Изменить сочетание для «{command}»
 shortcut_clear_aria = Убрать сочетание для «{command}»
 shortcut_reset_aria = Вернуть стандартное сочетание для «{command}»
 
+## Диалог записи рынка
+market_recording = Запись рынка
+market_recording_subtitle = Записывает живые сделки, котировки и стакан на этом компьютере для вашего собственного анализа.
+market_recording_note = Запись выключена, пока вы не выберете инструмент. Инструмент записывается, пока его транслирует график, стакан или список наблюдения. Глубина по отдельным заявкам никогда не записывается.
+market_recording_record = Записывать {symbol}
+market_recording_no_chart = Откройте график инструмента, чтобы записывать его.
+market_recording_limit = Можно записывать не более {maximum} инструментов.
+market_recording_list = Записи
+market_recording_none = Записей пока нет.
+market_recording_checking = Проверка записей…
+market_recording_usage = Занято {used} из {cap}
+market_recording_cap = Ограничение размера
+market_recording_cap_description = Чтобы не превышать ограничение, сначала удаляются самые старые записи.
+market_recording_delete_aria = Удалить записи {symbol}
+market_recording_delete_all = Удалить все записи
+market_recording_confirm_delete_all = Подтвердить удаление всех
+market_recording_dropped = Событий пропущено, пока запись была перегружена: {events}
+market_recording_storage_failed = Запись остановлена: не удалось записать данные в папку записей.
+market_recording_too_many_files = Запись остановлена: в папке записей слишком много файлов.
+market_recording_busy = Запись перегружена. Повторите попытку через мгновение.
+market_recording_unavailable = Не удалось применить это изменение к записи.
+size_megabytes = {value} МБ
+size_gigabytes = {value} ГБ
+
 ## Окно входа
 sign_in_checking = Проверка сохранённого входа…
 sign_in_browser_wait = Завершите вход в браузере.

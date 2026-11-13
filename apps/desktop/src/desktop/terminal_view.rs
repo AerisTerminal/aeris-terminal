@@ -734,6 +734,7 @@ impl TerminalApp {
             .children(self.platform_menu_overlay(terminal, window.viewport_size(), cx))
             .children(self.app_navigation_overlay(terminal, window.viewport_size()))
             .children(self.keyboard_shortcuts_layer(terminal))
+            .children(self.market_recording_layer(terminal, cx))
             .children(self.rendered_command_palette(terminal, cx))
             .children(self.trading_confirmation_layer(terminal))
             .children(self.layouts_dialog_layer(terminal, cx))
@@ -764,6 +765,7 @@ impl TerminalApp {
             .children(self.platform_menu_overlay(terminal, window.viewport_size(), cx))
             .children(self.app_navigation_overlay(terminal, window.viewport_size()))
             .children(self.keyboard_shortcuts_layer(terminal))
+            .children(self.market_recording_layer(terminal, cx))
             .children(self.rendered_command_palette(terminal, cx))
             .children(self.trading_confirmation_layer(terminal))
             .children(self.layouts_dialog_layer(terminal, cx))
@@ -795,6 +797,7 @@ impl TerminalApp {
             .children(self.platform_menu_overlay(terminal, window.viewport_size(), cx))
             .children(self.app_navigation_overlay(terminal, window.viewport_size()))
             .children(self.keyboard_shortcuts_layer(terminal))
+            .children(self.market_recording_layer(terminal, cx))
             .children(self.rendered_command_palette(terminal, cx))
             .children(self.trading_confirmation_layer(terminal))
             .children(self.layouts_dialog_layer(terminal, cx))
@@ -924,6 +927,7 @@ impl TerminalApp {
     ) -> impl Iterator<Item = AnyElement> + use<> {
         [
             self.keyboard_shortcuts_layer(terminal),
+            self.market_recording_layer(terminal, cx),
             self.rendered_command_palette(terminal, cx),
             self.trading_confirmation_layer(terminal),
             workspace_price_alert_dialog(self.tabs.active(), &self.theme, cx),
@@ -941,6 +945,7 @@ impl TerminalApp {
     pub(super) fn trading_hotkeys_enabled(&self, window: &Window, cx: &App) -> bool {
         self.pages.view == market_screener::AppView::Terminal
             && !self.overlays.is_open(OverlayKind::KeyboardShortcuts)
+            && !self.overlays.is_open(OverlayKind::MarketRecording)
             && self.workspace_keyboard_focused(window, cx)
     }
 

@@ -259,7 +259,25 @@ violations and missing verification explicitly, and never describe them as satis
   (DirectWrite, Core Text), so no CJK or Indic font is bundled. Faculty Glyphic stays brand-only.
   Prices and quantities keep the exchange's number format in every language.
 - Market history is loaded on demand and bounded; do not restore market-history persistence or a
-  second desktop-owned market-state model.
+  second desktop-owned market-state model. The one exception is the opt-in market recorder
+  (`market_service/recording/`): off by default, it records only live trades, quotes and
+  aggregate depth for at most `MAXIMUM_RECORDED_INSTRUMENTS` (16) user-chosen instruments while
+  they stream for other demand, never order levels. The coordinator tap forwards accepted events
+  to the one `aeris-market-recorder` thread through a bounded `try_send` queue (4,096 events,
+  8 MiB in flight) and counts every drop, which the writer marks with a gap frame. Files live
+  only under the data root's `recordings` directory as checksummed framed segments (32 MiB
+  rotation) carrying instrument scales and provenance; the total stays under the user's cap
+  (default 2 GiB, 256 MiB to 64 GiB) by evicting the oldest segments first. A writer never
+  appends to an existing segment, and a torn or corrupt tail is detected by frame length and
+  checksum and ignored by the decoder. Each instrument's index is written through
+  `write_file_durably`, and the user can delete one instrument's recordings or all of them.
+  Recordings never feed charts, history or the canonical series; no replay reads them yet.
+  `market_history_is_on_demand_and_nonpersistent` counts every file mutation in
+  `market_runtime` production source and allows only the exact reasoned recorder sites in
+  `writer.rs` and `store.rs`. The desktop keeps only the user's choice
+  (`desktop/market_recording.rs`, the profile menu's Market recording dialog) in
+  `WorkspaceState.market_recording` (tag 25); a document without it records nothing and keeps
+  its bytes, and the runtime never persists the choice.
 - `aeris_contracts` holds only the persisted workspace schema: the prost messages in
   `messages.rs`, including the `InstallProviderInstrument` and `SeriesKey` identities a saved
   pane stores. In-process catalog, status and provider-presentation types belong to

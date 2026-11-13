@@ -292,6 +292,30 @@ shortcut_change_aria = Modifier le raccourci de {command}
 shortcut_clear_aria = Retirer le raccourci de {command}
 shortcut_reset_aria = Rétablir le raccourci par défaut de {command}
 
+## Boîte de dialogue de l'enregistrement du marché
+market_recording = Enregistrement du marché
+market_recording_subtitle = Enregistre les transactions, cotations et la profondeur en direct sur cet ordinateur pour votre propre analyse.
+market_recording_note = L'enregistrement est désactivé tant que vous ne choisissez pas d'instrument. Un instrument est enregistré pendant qu'un graphique, un carnet d'ordres ou une liste de suivi le diffuse. La profondeur ordre par ordre n'est jamais enregistrée.
+market_recording_record = Enregistrer {symbol}
+market_recording_no_chart = Ouvrez un graphique sur un instrument pour l'enregistrer.
+market_recording_limit = Vous pouvez enregistrer jusqu'à {maximum} instruments.
+market_recording_list = Enregistrements
+market_recording_none = Aucun enregistrement pour l'instant.
+market_recording_checking = Vérification des enregistrements…
+market_recording_usage = {used} utilisés sur {cap}
+market_recording_cap = Taille maximale
+market_recording_cap_description = Les enregistrements les plus anciens sont supprimés en premier pour rester sous la limite.
+market_recording_delete_aria = Supprimer les enregistrements de {symbol}
+market_recording_delete_all = Supprimer tous les enregistrements
+market_recording_confirm_delete_all = Confirmer la suppression totale
+market_recording_dropped = Événements ignorés pendant que l'enregistreur était occupé : {events}
+market_recording_storage_failed = L'enregistrement s'est arrêté car le dossier des enregistrements n'a pas pu être écrit.
+market_recording_too_many_files = L'enregistrement s'est arrêté car le dossier des enregistrements contient trop de fichiers.
+market_recording_busy = L'enregistreur est occupé. Réessayez dans un instant.
+market_recording_unavailable = L'enregistreur n'a pas pu appliquer cette modification.
+size_megabytes = {value} Mo
+size_gigabytes = {value} Go
+
 ## Écran de connexion
 sign_in_checking = Vérification de votre connexion enregistrée…
 sign_in_browser_wait = Terminez la connexion dans votre navigateur.

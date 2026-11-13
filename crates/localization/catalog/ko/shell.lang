@@ -289,6 +289,30 @@ shortcut_change_aria = {command} 단축키 변경
 shortcut_clear_aria = {command} 단축키 지우기
 shortcut_reset_aria = {command} 기본 단축키로 되돌리기
 
+## 시장 기록 대화상자
+market_recording = 시장 기록
+market_recording_subtitle = 실시간 체결, 호가, 시장 심도를 이 컴퓨터에 기록해 직접 검토할 수 있습니다.
+market_recording_note = 종목을 선택하기 전까지 기록은 꺼져 있습니다. 차트, 호가창 또는 관심 목록이 종목을 스트리밍하는 동안 기록됩니다. 주문별 심도는 기록되지 않습니다.
+market_recording_record = {symbol} 기록
+market_recording_no_chart = 기록하려면 종목의 차트를 여세요.
+market_recording_limit = 종목은 최대 {maximum}개까지 기록할 수 있습니다.
+market_recording_list = 기록
+market_recording_none = 아직 기록이 없습니다.
+market_recording_checking = 기록을 확인하는 중…
+market_recording_usage = {cap} 중 {used} 사용
+market_recording_cap = 크기 한도
+market_recording_cap_description = 한도를 넘지 않도록 가장 오래된 기록부터 삭제됩니다.
+market_recording_delete_aria = {symbol} 기록 삭제
+market_recording_delete_all = 모든 기록 삭제
+market_recording_confirm_delete_all = 모두 삭제 확인
+market_recording_dropped = 기록기가 바쁜 동안 건너뛴 이벤트: {events}
+market_recording_storage_failed = 기록 폴더에 쓸 수 없어 기록이 중지되었습니다.
+market_recording_too_many_files = 기록 폴더에 파일이 너무 많아 기록이 중지되었습니다.
+market_recording_busy = 기록기가 바쁩니다. 잠시 후 다시 시도하세요.
+market_recording_unavailable = 기록기가 이 변경을 적용하지 못했습니다.
+size_megabytes = {value} MB
+size_gigabytes = {value} GB
+
 ## 로그인 화면
 sign_in_checking = 저장된 로그인 확인 중…
 sign_in_browser_wait = 브라우저에서 로그인을 완료하세요.
