@@ -253,6 +253,7 @@ fn scripted_hyperliquid_coordinator(
                 lifecycle: None,
                 hyperliquid: Some(channels),
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         )]),

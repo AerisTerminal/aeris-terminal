@@ -394,6 +394,23 @@ replay_book_live = The order book shows live prices, so it doesn't trade the bar
 replay_ticket_notice = Bar replay: orders trade the replay, not your account.
 replay_cancel_summary = Cancel every working order in the bar replay.
 replay_flatten_summary = Cancel the bar replay's working orders and close its position at the newest bar's close.
+recording_replay_label = Replay · {symbol}
+recording_replay_play = Play replay
+recording_replay_pause = Pause replay
+recording_replay_restart = Play the replay again from the start
+recording_replay_speed = Replay speed
+recording_replay_seek = Move the replay clock
+recording_replay_ended = Ended
+recording_replay_gaps = Missing data: {gaps}
+recording_replay_close = Close replay
+recording_replay_no_trading = A recorded market replay doesn't trade. Close the replay to trade on this chart.
+recording_replay_open_failed = The replay couldn't open
+recording_replay_not_configured = Aeris couldn't find your recordings folder yet. Try again in a moment.
+recording_replay_not_found = That recorded session is no longer on this computer.
+recording_replay_empty = That recorded session holds no market events.
+recording_replay_unreadable = That recorded session's files couldn't be read.
+recording_replay_too_many = You can replay up to {maximum} recordings at once. Close one and try again.
+recording_replay_not_shown = The replay couldn't be shown on this chart, so it was closed.
 
 ## Trading command notices
 trading_command_failed = Trading command failed

@@ -310,6 +310,10 @@ market_recording_storage_failed = 記録フォルダーに書き込めなかっ�
 market_recording_too_many_files = 記録フォルダーのファイルが多すぎるため、記録を停止しました。
 market_recording_busy = 記録処理が混雑しています。少し待ってからもう一度お試しください。
 market_recording_unavailable = この変更を記録に適用できませんでした。
+market_recording_open_replay = リプレイを開く
+market_recording_open_replay_aria = アクティブなチャートで {symbol} のリプレイを開く
+market_recording_sessions = 記録セッション
+market_recording_session = {start} · {size}
 size_megabytes = {value} MB
 size_gigabytes = {value} GB
 

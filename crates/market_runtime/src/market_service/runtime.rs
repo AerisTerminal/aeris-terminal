@@ -196,7 +196,7 @@ impl ProviderRuntimeRegistry {
         (spec.descriptor.start)(spec, completions, wake, engine, active_workers, context)
     }
 
-    fn start_history_runtime(
+    pub(super) fn start_history_runtime(
         spec: ProviderRuntimeSpec,
         completions: &SyncSender<Command>,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
@@ -338,6 +338,7 @@ impl ProviderRuntimeRegistry {
                 events: realtime_events,
                 binding,
             }),
+            recorded: None,
             catalog: ProviderCatalogChannels {
                 enabled,
                 channels: Box::new(ProviderCatalogChannelImpl::new(
@@ -448,6 +449,7 @@ impl ProviderRuntimeRegistry {
                 display_events,
             }),
             rithmic: None,
+            recorded: None,
             catalog: ProviderCatalogChannels {
                 enabled,
                 channels: Box::new(ProviderCatalogChannelImpl::new(
@@ -616,6 +618,7 @@ impl ProviderRuntimeRegistry {
                         lifecycle: Some(&record.lifecycle),
                         hyperliquid: record.hyperliquid.as_ref(),
                         rithmic: record.rithmic.as_ref(),
+                        recorded: record.recorded.as_ref(),
                         catalog,
                     },
                 )
@@ -626,7 +629,8 @@ impl ProviderRuntimeRegistry {
             let Some(record) = records.get(provider_id) else {
                 continue;
             };
-            if record.hyperliquid.is_some() || record.rithmic.is_some() {
+            if record.hyperliquid.is_some() || record.rithmic.is_some() || record.recorded.is_some()
+            {
                 lanes.push(ProviderEventLane::Realtime(provider_id));
             }
             if record.catalog.is_some() {
@@ -807,6 +811,15 @@ impl ProviderDispatch<'_> {
                             kind: wire.kind,
                         }),
                     )
+                })
+                .or_else(|| {
+                    self.records
+                        .get(provider_id)?
+                        .recorded?
+                        .events
+                        .try_recv()
+                        .ok()
+                        .map(ProviderRuntimeEvent::BoundRealtime)
                 }),
             ProviderEventLane::Catalog(provider_id) => self
                 .records
@@ -973,6 +986,7 @@ impl MarketService {
         Self::start_composed(vec![
             ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), true),
             ProviderRuntimeSpec::hyperliquid(Box::<LiveHyperliquidHistory>::default(), true),
+            ProviderRuntimeSpec::recording_replay(),
         ])
     }
 
@@ -994,10 +1008,15 @@ impl MarketService {
         let recording = Arc::new(super::recording::MarketRecording::new(Arc::new(
             super::clock::SystemClock,
         )));
+        let recording_replays = Arc::new(super::recording::RecordingReplays::new(
+            Arc::clone(&recording),
+            Arc::new(super::clock::SystemClock),
+        ));
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
         let start_context = super::ProviderStartContext {
             rithmic_login: RithmicLoginRevision::default(),
+            recording_replays,
         };
         let provider_registry = ProviderRuntimeRegistry::start(
             providers,
@@ -1056,7 +1075,10 @@ impl MarketService {
             outbox,
             recording,
         } = channels;
-        let super::ProviderStartContext { rithmic_login } = context;
+        let super::ProviderStartContext {
+            rithmic_login,
+            recording_replays,
+        } = context;
         let shutdown_wake = commands.clone();
         let MarketServiceProviders {
             presentations: provider_presentations,
@@ -1075,6 +1097,7 @@ impl MarketService {
                 trading_feed,
                 outbox,
                 recording,
+                recording_replays,
             }),
         }
     }
@@ -1991,6 +2014,12 @@ mod tests {
             Vec::new(),
             super::super::ProviderStartContext {
                 rithmic_login: RithmicLoginRevision::default(),
+                recording_replays: Arc::new(super::super::recording::RecordingReplays::new(
+                    Arc::new(super::super::recording::MarketRecording::new(Arc::new(
+                        super::super::clock::SystemClock,
+                    ))),
+                    Arc::new(super::super::clock::SystemClock),
+                )),
             },
             MarketServiceProviders {
                 presentations: vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
@@ -2029,6 +2058,12 @@ mod tests {
             Vec::new(),
             super::super::ProviderStartContext {
                 rithmic_login: RithmicLoginRevision::default(),
+                recording_replays: Arc::new(super::super::recording::RecordingReplays::new(
+                    Arc::new(super::super::recording::MarketRecording::new(Arc::new(
+                        super::super::clock::SystemClock,
+                    ))),
+                    Arc::new(super::super::clock::SystemClock),
+                )),
             },
             MarketServiceProviders {
                 presentations: vec![],

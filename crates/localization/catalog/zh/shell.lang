@@ -310,6 +310,10 @@ market_recording_storage_failed = 录制已停止，因为无法写入录制文�
 market_recording_too_many_files = 录制已停止，因为录制文件夹中的文件过多。
 market_recording_busy = 录制器繁忙，请稍后再试。
 market_recording_unavailable = 录制器无法应用此更改。
+market_recording_open_replay = 打开回放
+market_recording_open_replay_aria = 在当前图表上打开 {symbol} 的回放
+market_recording_sessions = 已录制的时段
+market_recording_session = {start} · {size}
 size_megabytes = {value} MB
 size_gigabytes = {value} GB
 

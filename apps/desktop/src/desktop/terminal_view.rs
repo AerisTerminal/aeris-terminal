@@ -50,6 +50,7 @@ fn active_header_state(
         },
         chart_history: workspace.chart_history_state(cx),
         bar_replay_phase: workspace.bar_replay_phase(cx),
+        recording_replay: workspace.recording_replay_on(),
         controls: HeaderControls::from_state(
             workspace.symbol_entry.input().is_some()
                 || workspace.symbol_entry.browser().has_results(),

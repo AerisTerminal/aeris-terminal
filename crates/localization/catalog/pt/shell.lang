@@ -312,6 +312,10 @@ market_recording_storage_failed = A gravação parou porque não foi possível g
 market_recording_too_many_files = A gravação parou porque a pasta de gravações tem arquivos demais.
 market_recording_busy = O gravador está ocupado. Tente novamente em instantes.
 market_recording_unavailable = O gravador não conseguiu aplicar esta alteração.
+market_recording_open_replay = Abrir replay
+market_recording_open_replay_aria = Abrir um replay de {symbol} no gráfico ativo
+market_recording_sessions = Sessões gravadas
+market_recording_session = {start} · {size}
 size_megabytes = {value} MB
 size_gigabytes = {value} GB
 

@@ -271,7 +271,24 @@ violations and missing verification explicitly, and never describe them as satis
   appends to an existing segment, and a torn or corrupt tail is detected by frame length and
   checksum and ignored by the decoder. Each instrument's index is written through
   `write_file_durably`, and the user can delete one instrument's recordings or all of them.
-  Recordings never feed charts, history or the canonical series; no replay reads them yet.
+  Recordings never feed a live provider's charts, history or canonical series; only replay reads
+  them. Replay (`recording/reader.rs`, `recording/replay.rs`) is one registered local source
+  (`ConnectMethod::Local`: no symbol menu entry, connection row or provider artwork).
+  `MarketService::open_recording_replay` opens at most `MAXIMUM_RECORDING_REPLAYS` (4) recorded
+  sessions, each read sequentially through a bounded cursor (1,024 decoded events ahead of its
+  clock, one frame payload at a time) on the `aeris-recording-replay` worker and paced by its own
+  clock (play, pause, 1x to 100x, seek, ended at the last event). Events and the history built from
+  the recorded trades up to the clock pass through the coordinator under the replay's own
+  instrument and epochs, never the recorded provider's; a seek starts a new source session whose
+  epoch drops everything queued before it. A missing, evicted or damaged segment is a counted gap;
+  replay writes nothing, and a replay instrument carries no contract terms, so trading never admits
+  it. The desktop opens a replay from the Market recording dialog onto the active pane
+  (`desktop/recording_replay.rs`), which holds it only while the pane shows it and restores the
+  previous instrument on close. That pane refuses every order entry at the click or key (chart,
+  ticket, quantity, ladder and the trading shortcuts; only the kill switch still locks the
+  accounts) and cannot start bar replay; symbol sync never relays the replay to another pane, the
+  replay's drawings stay out of the layout's drawing set, and the pane is saved with its previous
+  instrument, never the replay.
   `market_history_is_on_demand_and_nonpersistent` counts every file mutation in
   `market_runtime` production source and allows only the exact reasoned recorder sites in
   `writer.rs` and `store.rs`. The desktop keeps only the user's choice

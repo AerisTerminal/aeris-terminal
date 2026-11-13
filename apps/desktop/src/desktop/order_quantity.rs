@@ -305,6 +305,7 @@ impl Render for ChartTradeBar {
         // instead of the account.
         let replaying = state.bar_replay_on(cx);
         let ready = product.is_some()
+            && !state.recording_replay_on()
             && (replaying
                 || (account.is_some() && state.selected_account_lock_reason(cx).is_none()));
         let order = MarketOrderTarget {
@@ -373,7 +374,9 @@ fn trade_bar_order_button(
             .on_click(move |_, _, cx| {
                 // Checked at the click: a bar drawn before replay started must not send an
                 // account order from a chart that now shows the past.
-                if surface.read(cx).bar_replay_on(cx) {
+                if surface.read(cx).recording_replay_on() {
+                    surface.read(cx).refuse_recording_replay_order();
+                } else if surface.read(cx).bar_replay_on(cx) {
                     surface.update(cx, |surface, surface_cx| {
                         surface.place_bar_replay_market_order(side, quantity, surface_cx);
                     });

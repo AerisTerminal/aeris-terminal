@@ -7,12 +7,26 @@
 //! with a gap frame. Order-level (market-by-order) data is never recorded.
 //! Files stay under the data root's `recordings` directory, rotate by size and
 //! are evicted oldest first to keep the total under the user's cap.
+//! Recordings are read back only by the replay source (`replay.rs`), which
+//! shows a recorded session as its own instrument and never feeds the recorded
+//! provider's history or canonical series.
 
 mod format;
+mod reader;
+mod replay;
 mod store;
 mod tap;
 mod writer;
 
+pub(super) use replay::{
+    ENTITLEMENT_ID as REPLAY_ENTITLEMENT_ID, HISTORY_WORKER_NAME as REPLAY_HISTORY_WORKER_NAME,
+    PROVIDER_ID as REPLAY_PROVIDER_ID, RecordingReplays, ReplaySession,
+    WorkerMessage as ReplayWorkerMessage, start_runtime as start_replay_runtime,
+};
+pub use replay::{
+    MAXIMUM_RECORDING_REPLAYS, RecordingReplayControl, RecordingReplayError, RecordingReplayId,
+    RecordingReplayPlayback, RecordingReplaySpeed, RecordingReplayStatus,
+};
 pub(super) use tap::RecordingTap;
 
 use super::clock::Clock;
@@ -97,12 +111,21 @@ pub enum MarketRecordingFailure {
     TooManyFiles,
 }
 
+/// One continuous recording of an instrument, from one writer start to its stop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketRecordingSession {
+    pub started_unix_millis: u64,
+    pub bytes: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketRecordingUsage {
     pub instrument: RecordedInstrument,
     pub display_symbol: String,
     pub bytes: u64,
     pub recording: bool,
+    /// Recorded sessions that a replay can open, oldest first.
+    pub sessions: Vec<MarketRecordingSession>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -243,6 +266,14 @@ impl MarketRecording {
         status
     }
 
+    /// The recordings directory once recording is configured with a data root.
+    pub(super) fn recordings_directory(&self) -> Option<PathBuf> {
+        self.state()
+            .worker
+            .as_ref()
+            .map(|worker| worker.data_root.join(RECORDINGS_DIRECTORY))
+    }
+
     fn tap_view(
         &self,
     ) -> (
@@ -330,7 +361,11 @@ fn validate(settings: &MarketRecordingSettings) -> Result<(), MarketRecordingErr
     for instrument in &settings.instruments {
         let valid =
             |field: &str| !field.is_empty() && field.len() <= MAXIMUM_MARKET_DATA_FIELD_BYTES;
-        if !valid(&instrument.provider_id) || !valid(&instrument.instrument_id) {
+        // A replay is a copy of a recording, never recorded again.
+        if !valid(&instrument.provider_id)
+            || !valid(&instrument.instrument_id)
+            || instrument.provider_id == replay::PROVIDER_ID
+        {
             return Err(MarketRecordingError::InvalidInstrument);
         }
         if !seen.insert(instrument) {
@@ -681,6 +716,17 @@ mod tests {
         assert_eq!(
             recording.configure(settings(&root, vec![recorded("")])),
             Err(MarketRecordingError::InvalidInstrument)
+        );
+        assert_eq!(
+            recording.configure(settings(
+                &root,
+                vec![RecordedInstrument {
+                    provider_id: replay::PROVIDER_ID.into(),
+                    instrument_id: INSTRUMENT.into(),
+                }]
+            )),
+            Err(MarketRecordingError::InvalidInstrument),
+            "a replay is never recorded again"
         );
         for capacity_bytes in [
             MINIMUM_RECORDING_CAPACITY_BYTES - 1,

@@ -390,6 +390,23 @@ replay_book_live = 板はライブ価格を表示しているため、バーリ�
 replay_ticket_notice = バーリプレイ：注文は口座ではなくリプレイで取引されます。
 replay_cancel_summary = バーリプレイの有効な注文をすべて取り消します。
 replay_flatten_summary = バーリプレイの有効な注文を取り消し、最新バーの終値でポジションを決済します。
+recording_replay_label = リプレイ · {symbol}
+recording_replay_play = リプレイを再生
+recording_replay_pause = リプレイを一時停止
+recording_replay_restart = リプレイを最初から再生
+recording_replay_speed = リプレイ速度
+recording_replay_seek = リプレイの時刻を移動
+recording_replay_ended = 終了
+recording_replay_gaps = 欠落データ: {gaps}
+recording_replay_close = リプレイを閉じる
+recording_replay_no_trading = 記録した相場のリプレイでは取引しません。このチャートで取引するにはリプレイを閉じてください。
+recording_replay_open_failed = リプレイを開けませんでした
+recording_replay_not_configured = Aeris は記録フォルダーをまだ見つけていません。しばらくしてからもう一度お試しください。
+recording_replay_not_found = その記録セッションはこのコンピューターにもうありません。
+recording_replay_empty = その記録セッションには相場イベントがありません。
+recording_replay_unreadable = その記録セッションのファイルを読み取れませんでした。
+recording_replay_too_many = 同時にリプレイできる記録は最大 {maximum} 件です。1 件閉じてからもう一度お試しください。
+recording_replay_not_shown = このチャートにリプレイを表示できなかったため、閉じました。
 
 ## 取引コマンドの通知
 trading_command_failed = 取引コマンドに失敗しました

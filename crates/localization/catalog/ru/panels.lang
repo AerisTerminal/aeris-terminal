@@ -399,6 +399,23 @@ replay_book_live = Стакан показывает живые цены, поэ
 replay_ticket_notice = Бар-реплей: ордера торгуют в реплее, а не на вашем счёте.
 replay_cancel_summary = Отменить все рабочие ордера бар-реплея.
 replay_flatten_summary = Отменить рабочие ордера бар-реплея и закрыть его позицию по закрытию последнего бара.
+recording_replay_label = Реплей · {symbol}
+recording_replay_play = Воспроизвести реплей
+recording_replay_pause = Приостановить реплей
+recording_replay_restart = Воспроизвести реплей заново с начала
+recording_replay_speed = Скорость реплея
+recording_replay_seek = Переместить часы реплея
+recording_replay_ended = Завершён
+recording_replay_gaps = Пропущенные данные: {gaps}
+recording_replay_close = Закрыть реплей
+recording_replay_no_trading = Реплей записанного рынка не торгует. Закройте реплей, чтобы торговать на этом графике.
+recording_replay_open_failed = Не удалось открыть реплей
+recording_replay_not_configured = Aeris ещё не нашёл папку с записями. Повторите попытку через мгновение.
+recording_replay_not_found = Этой записанной сессии больше нет на этом компьютере.
+recording_replay_empty = В этой записанной сессии нет рыночных событий.
+recording_replay_unreadable = Не удалось прочитать файлы этой записанной сессии.
+recording_replay_too_many = Одновременно можно воспроизводить записей: не более {maximum}. Закройте одну и повторите попытку.
+recording_replay_not_shown = Реплей не удалось показать на этом графике, поэтому он закрыт.
 
 ## Уведомления о торговых командах
 trading_command_failed = Торговая команда не выполнена

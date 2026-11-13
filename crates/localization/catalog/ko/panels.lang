@@ -390,6 +390,23 @@ replay_book_live = 호가창은 실시간 가격을 표시하므로 봉 리플�
 replay_ticket_notice = 봉 리플레이: 주문은 계좌가 아니라 리플레이에서 거래됩니다.
 replay_cancel_summary = 봉 리플레이의 모든 대기 주문을 취소합니다.
 replay_flatten_summary = 봉 리플레이의 대기 주문을 취소하고 최신 봉의 종가로 포지션을 청산합니다.
+recording_replay_label = 리플레이 · {symbol}
+recording_replay_play = 리플레이 재생
+recording_replay_pause = 리플레이 일시 정지
+recording_replay_restart = 리플레이를 처음부터 다시 재생
+recording_replay_speed = 리플레이 속도
+recording_replay_seek = 리플레이 시각 이동
+recording_replay_ended = 종료됨
+recording_replay_gaps = 누락된 데이터: {gaps}
+recording_replay_close = 리플레이 닫기
+recording_replay_no_trading = 기록된 시장 리플레이에서는 거래하지 않습니다. 이 차트에서 거래하려면 리플레이를 닫으세요.
+recording_replay_open_failed = 리플레이를 열 수 없습니다
+recording_replay_not_configured = Aeris가 아직 기록 폴더를 찾지 못했습니다. 잠시 후 다시 시도하세요.
+recording_replay_not_found = 해당 기록 세션이 더 이상 이 컴퓨터에 없습니다.
+recording_replay_empty = 해당 기록 세션에 시장 이벤트가 없습니다.
+recording_replay_unreadable = 해당 기록 세션의 파일을 읽을 수 없습니다.
+recording_replay_too_many = 한 번에 최대 {maximum}개의 기록을 리플레이할 수 있습니다. 하나를 닫고 다시 시도하세요.
+recording_replay_not_shown = 이 차트에 리플레이를 표시할 수 없어 닫았습니다.
 
 ## 트레이딩 명령 알림
 trading_command_failed = 트레이딩 명령 실패

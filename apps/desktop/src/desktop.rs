@@ -46,6 +46,7 @@ mod keyboard_shortcuts;
 mod layouts_view;
 mod local_state;
 mod market_recording;
+mod recording_replay;
 mod studies_controller;
 mod workspace_migrations;
 #[cfg(test)]
@@ -959,6 +960,7 @@ struct WorkspaceSurface {
     persistence: pane_persistence::PanePersistence,
     observed_chart: ObservedChart,
     bar_replay: bar_replay::BarReplayHost,
+    recording_replay: recording_replay::RecordingReplayHost,
     pending_chart_context_menu: Option<ChartContextRequest>,
     pending_pane_activate: PaneActivationRequest,
     pending_settings_request: Option<LegendSettingsRequest>,
@@ -1105,7 +1107,11 @@ impl DataConnections {
     /// Whether the runtime reported no stored connection for a provider that needs one.
     fn disconnected(&self, provider: ProviderId) -> bool {
         match provider.descriptor().map(|descriptor| descriptor.connect) {
-            Some(aeris_market_runtime::ConnectMethod::Public) | None => false,
+            Some(
+                aeris_market_runtime::ConnectMethod::Public
+                | aeris_market_runtime::ConnectMethod::Local,
+            )
+            | None => false,
             Some(aeris_market_runtime::ConnectMethod::VaultCredentials { .. }) => self
                 .view(provider)
                 .is_some_and(provider_login::ProviderLoginView::missing),
@@ -2019,6 +2025,8 @@ enum ChartIntentRejection {
     InvalidQuantity,
     PlannedLegKept,
     Unsupported,
+    /// The chart replays a market recording, which never trades.
+    RecordingReplay,
 }
 
 impl ChartIntentRejection {
@@ -2033,6 +2041,7 @@ impl ChartIntentRejection {
             Self::InvalidQuantity => tr!(workspace::INTENT_INVALID_QUANTITY),
             Self::PlannedLegKept => tr!(workspace::INTENT_PLANNED_LEG_KEPT),
             Self::Unsupported => tr!(workspace::INTENT_UNSUPPORTED),
+            Self::RecordingReplay => tr!(panels::RECORDING_REPLAY_NO_TRADING),
         }
     }
 }
@@ -2589,6 +2598,16 @@ fn dispatch_chart_trading_intent(
         reject_chart_intent(&chart, sequence, ChartIntentRejection::Incomplete, app, cx);
         return;
     }
+    if app.recording_replay_on() {
+        reject_chart_intent(
+            &chart,
+            sequence,
+            ChartIntentRejection::RecordingReplay,
+            app,
+            cx,
+        );
+        return;
+    }
     // A replaying chart shows past prices, so it trades the replay's own session, never the
     // account.
     if chart.read(cx).bar_replay_on() {
@@ -2993,6 +3012,8 @@ struct HeaderState {
     pending: HeaderPendingState,
     chart_history: ChartHistoryState,
     bar_replay_phase: aeris_chart_integration::ChartReplayPhase,
+    /// A recording replay already moves this chart's clock, so bar replay cannot start.
+    recording_replay: bool,
     controls: HeaderControls,
     connection_state: FeedConnectionState,
     transport_rtt_nanos: Option<u64>,
@@ -4860,6 +4881,10 @@ fn subscribe_order_book_trading(
             move |_, event: &OrderBookLevelClick, _, cx| {
                 let order_entry = {
                     let surface = click_workspace.read(cx);
+                    if surface.recording_replay_on() {
+                        surface.refuse_recording_replay_order();
+                        return;
+                    }
                     // The ladder shows live prices; a replaying chart trades only the past.
                     if surface.bar_replay_on(cx) {
                         surface.lifecycle.trading_feedback().record_for_pane(
@@ -5469,19 +5494,25 @@ fn workspace_tab_state(workspace: &WorkspaceTab, cx: &App) -> WorkspaceTabState 
             .iter()
             .filter_map(|pane| {
                 let surface = pane.surface.read(cx);
-                let instrument = surface.product.clone()?;
-                let viewport = surface.chart.as_ref().map_or(
-                    surface.persistence.restored_viewport(),
-                    |chart| {
-                        let chart = chart.read(cx);
-                        durable_workspace_viewport(
-                            surface.persistence.restored_viewport(),
-                            chart.has_market_data(),
-                            chart.is_at_latest(),
-                            chart.visible_time_range_unix_nanos(),
-                        )
-                    },
-                );
+                // A recording replay is never saved: the pane keeps the instrument it showed
+                // before the replay, opening at its latest bars.
+                let instrument = surface.persisted_product()?;
+                let viewport = if surface.recording_replay_on() {
+                    None
+                } else {
+                    surface.chart.as_ref().map_or(
+                        surface.persistence.restored_viewport(),
+                        |chart| {
+                            let chart = chart.read(cx);
+                            durable_workspace_viewport(
+                                surface.persistence.restored_viewport(),
+                                chart.has_market_data(),
+                                chart.is_at_latest(),
+                                chart.visible_time_range_unix_nanos(),
+                            )
+                        },
+                    )
+                };
                 Some(WorkspacePaneState {
                     pane_id: pane.id,
                     consumer_id: pane.consumer_id,

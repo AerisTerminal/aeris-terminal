@@ -9,7 +9,8 @@ use aeris_localization::{shell, tr};
 use aeris_market_runtime::{
     DEFAULT_RECORDING_CAPACITY_BYTES, MAXIMUM_RECORDED_INSTRUMENTS,
     MAXIMUM_RECORDING_CAPACITY_BYTES, MINIMUM_RECORDING_CAPACITY_BYTES, MarketRecordingError,
-    MarketRecordingFailure, MarketRecordingSettings, MarketRecordingStatus, RecordedInstrument,
+    MarketRecordingFailure, MarketRecordingSession, MarketRecordingSettings, MarketRecordingStatus,
+    RecordedInstrument, is_recording_replay_provider,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -19,6 +20,9 @@ const CAPACITY_CHOICES: [u64; 6] = [512 * MIB, GIB, 2 * GIB, 5 * GIB, 10 * GIB, 
 /// How often the open dialog reads the runtime's published usage again.
 const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const MARKET_RECORDING_MAX_HEIGHT: f32 = 600.0;
+/// The newest recorded sessions the session chooser lists for one instrument.
+const MAXIMUM_LISTED_SESSIONS: usize = 12;
+const NANOS_PER_MILLI: i64 = 1_000_000;
 
 /// One instrument the user chose to record, with the symbol shown when it was chosen.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,6 +217,8 @@ pub(super) struct MarketRecordingUi {
     choice: MarketRecordingChoice,
     refusal: Option<RecordingRefusal>,
     confirming_delete_all: bool,
+    /// The instrument whose recorded sessions the dialog lists to choose a replay from.
+    choosing_session: Option<RecordedInstrument>,
     /// Repaints the open dialog with fresh usage; dropping it stops the refresh.
     refresh: Option<gpui::Task<()>>,
 }
@@ -292,6 +298,7 @@ impl TerminalApp {
     pub(super) fn close_market_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.recording.refresh = None;
         self.recording.confirming_delete_all = false;
+        self.recording.choosing_session = None;
         if self.overlays.close(OverlayKind::MarketRecording) {
             self.focus_workspace(window, cx);
             cx.notify();
@@ -359,6 +366,38 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// A row's Open replay: opens its only recorded session, or lists its sessions to choose.
+    fn choose_recording_replay(
+        &mut self,
+        instrument: RecordedInstrument,
+        sessions: &[MarketRecordingSession],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let [only] = sessions {
+            self.open_recording_replay(instrument, only.started_unix_millis, window, cx);
+            return;
+        }
+        self.recording.choosing_session =
+            (self.recording.choosing_session.as_ref() != Some(&instrument)).then_some(instrument);
+        cx.notify();
+    }
+
+    /// Closes the dialog and replays the session on the active chart.
+    fn open_recording_replay(
+        &mut self,
+        instrument: RecordedInstrument,
+        session_started_unix_millis: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_market_recording(window, cx);
+        let surface = self.active_surface().clone();
+        surface.update(cx, |surface, surface_cx| {
+            surface.open_recording_replay(instrument, session_started_unix_millis, surface_cx);
+        });
+    }
+
     pub(super) fn market_recording_layer(
         &self,
         terminal: &Entity<Self>,
@@ -372,6 +411,7 @@ impl TerminalApp {
                     .read(cx)
                     .product
                     .as_ref()
+                    .filter(|product| !is_recording_replay_provider(&product.provider))
                     .map(ChosenInstrument::from_product);
                 market_recording_dialog(
                     terminal,
@@ -381,6 +421,7 @@ impl TerminalApp {
                         current,
                         refusal: self.recording.refusal,
                         confirming_delete_all: self.recording.confirming_delete_all,
+                        choosing_session: self.recording.choosing_session.as_ref(),
                     },
                     &self.theme,
                 )
@@ -394,6 +435,7 @@ struct MarketRecordingView<'a> {
     current: Option<ChosenInstrument>,
     refusal: Option<RecordingRefusal>,
     confirming_delete_all: bool,
+    choosing_session: Option<&'a RecordedInstrument>,
 }
 
 /// One listed recording: an instrument with files, a chosen one, or both.
@@ -401,6 +443,8 @@ struct RecordingEntry {
     chosen: ChosenInstrument,
     bytes: u64,
     recording: bool,
+    /// Its recorded sessions, oldest first.
+    sessions: Vec<MarketRecordingSession>,
 }
 
 fn recording_entries(view: &MarketRecordingView<'_>) -> Vec<RecordingEntry> {
@@ -415,6 +459,7 @@ fn recording_entries(view: &MarketRecordingView<'_>) -> Vec<RecordingEntry> {
             },
             bytes: usage.bytes,
             recording: view.choice.contains(&usage.instrument),
+            sessions: usage.sessions.clone(),
         })
         .collect::<Vec<_>>();
     for chosen in &view.choice.instruments {
@@ -426,6 +471,7 @@ fn recording_entries(view: &MarketRecordingView<'_>) -> Vec<RecordingEntry> {
                 chosen: chosen.clone(),
                 bytes: 0,
                 recording: true,
+                sessions: Vec::new(),
             });
         }
     }
@@ -678,31 +724,105 @@ fn recordings_section(
         .gap_1()
         .child(section_heading(tr!(shell::MARKET_RECORDING_LIST), theme))
         .children(empty)
-        .children(
-            entries
-                .into_iter()
-                .enumerate()
-                .map(|(index, entry)| recording_row(terminal, index, entry, theme)),
-        )
+        .children(entries.into_iter().enumerate().map(|(index, entry)| {
+            let choosing = view.choosing_session == Some(&entry.chosen.instrument);
+            recording_row(terminal, index, entry, choosing, theme)
+        }))
         .into_any_element()
+}
+
+/// The time a recorded session started, for the session chooser.
+fn session_label(session: &MarketRecordingSession) -> String {
+    let started = i64::try_from(session.started_unix_millis)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(NANOS_PER_MILLI);
+    tr!(
+        shell::MARKET_RECORDING_SESSION,
+        start = super::recording_replay::recorded_time_label(started),
+        size = size_label(session.bytes)
+    )
+}
+
+/// The newest sessions of a recording, newest first, for the session chooser.
+fn listed_sessions(
+    sessions: &[MarketRecordingSession],
+) -> impl Iterator<Item = &MarketRecordingSession> {
+    sessions.iter().rev().take(MAXIMUM_LISTED_SESSIONS)
+}
+
+fn session_chooser(
+    terminal: &Entity<TerminalApp>,
+    index: usize,
+    instrument: &RecordedInstrument,
+    sessions: &[MarketRecordingSession],
+    theme: &AerisTheme,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .pl_4()
+        .child(section_heading(
+            tr!(shell::MARKET_RECORDING_SESSIONS),
+            theme,
+        ))
+        .children(
+            listed_sessions(sessions)
+                .enumerate()
+                .map(|(position, session)| {
+                    let open = terminal.clone();
+                    let instrument = instrument.clone();
+                    let started = session.started_unix_millis;
+                    Button::new(
+                        (
+                            "market_recording_session",
+                            index * MAXIMUM_LISTED_SESSIONS + position,
+                        ),
+                        theme,
+                    )
+                    .variant(ButtonVariant::Ghost)
+                    .button_size(ButtonSize::Sm)
+                    .tabular_numerals()
+                    .icon(header_icon(HugeIcon::Play))
+                    .label(session_label(session))
+                    .on_press(move |_, window, cx| {
+                        let instrument = instrument.clone();
+                        open.update(cx, |terminal, terminal_cx| {
+                            terminal.open_recording_replay(
+                                instrument,
+                                started,
+                                window,
+                                terminal_cx,
+                            );
+                        });
+                    })
+                }),
+        )
 }
 
 fn recording_row(
     terminal: &Entity<TerminalApp>,
     index: usize,
     entry: RecordingEntry,
+    choosing: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
     let RecordingEntry {
         chosen,
         bytes,
         recording,
+        sessions,
     } = entry;
     let symbol = shown_symbol(&chosen).to_string();
     let toggle = terminal.clone();
     let delete = terminal.clone();
+    let replay = terminal.clone();
     let instrument = chosen.instrument.clone();
-    div()
+    let replay_instrument = chosen.instrument.clone();
+    let chooser =
+        choosing.then(|| session_chooser(terminal, index, &chosen.instrument, &sessions, theme));
+    let replay_sessions = sessions.clone();
+    let row = div()
         .flex()
         .items_center()
         .gap_2()
@@ -724,6 +844,29 @@ fn recording_row(
             ),
         )
         .child(
+            Button::new(("market_recording_replay", index), theme)
+                .variant(ButtonVariant::Ghost)
+                .icon(header_icon(HugeIcon::Play))
+                .label(tr!(shell::MARKET_RECORDING_OPEN_REPLAY))
+                .aria_label(tr!(
+                    shell::MARKET_RECORDING_OPEN_REPLAY_ARIA,
+                    symbol = symbol
+                ))
+                .selected(choosing)
+                .disabled(sessions.is_empty())
+                .on_press(move |_, window, cx| {
+                    let instrument = replay_instrument.clone();
+                    replay.update(cx, |terminal, terminal_cx| {
+                        terminal.choose_recording_replay(
+                            instrument,
+                            &replay_sessions,
+                            window,
+                            terminal_cx,
+                        );
+                    });
+                }),
+        )
+        .child(
             Button::new(("market_recording_delete", index), theme)
                 .variant(ButtonVariant::Ghost)
                 .icon(header_icon(HugeIcon::Trash))
@@ -736,7 +879,13 @@ fn recording_row(
                         terminal.delete_market_recordings(Some(instrument), terminal_cx);
                     });
                 }),
-        )
+        );
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(row)
+        .children(chooser)
         .into_any_element()
 }
 
@@ -818,6 +967,25 @@ mod tests {
                 .len(),
             MAXIMUM_RECORDED_INSTRUMENTS
         );
+    }
+
+    #[test]
+    fn the_session_chooser_lists_the_newest_sessions_first_within_its_bound() {
+        let sessions = (0..20_u64)
+            .map(|index| MarketRecordingSession {
+                started_unix_millis: index * 1_000,
+                bytes: MIB,
+            })
+            .collect::<Vec<_>>();
+        let listed = listed_sessions(&sessions)
+            .map(|session| session.started_unix_millis)
+            .collect::<Vec<_>>();
+        assert_eq!(listed.len(), MAXIMUM_LISTED_SESSIONS);
+        assert_eq!(listed.first(), Some(&19_000));
+        assert_eq!(listed.last(), Some(&8_000));
+        let label = session_label(&sessions[1]);
+        assert!(label.contains("00:00:01 UTC"), "{label}");
+        assert!(label.ends_with(&size_label(MIB)), "{label}");
     }
 
     #[test]

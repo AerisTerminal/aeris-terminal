@@ -51,6 +51,11 @@ impl RecordingTap {
         kind: &ProviderEventKind,
         catalog: &BTreeMap<(String, String), InstallProviderInstrument>,
     ) {
+        // A replay re-emits recorded events; recording them again would copy
+        // the recording into itself.
+        if provider == super::replay::PROVIDER_ID {
+            return;
+        }
         let Some(revision) = self
             .recording
             .as_ref()

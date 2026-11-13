@@ -1155,6 +1155,10 @@ fn order_button(
         .on_click(move |_, _, cx| {
             // Replay is checked at the click, so an order never reaches the account from a
             // chart that started replaying after the ticket was drawn.
+            if app.read(cx).recording_replay_on() {
+                app.read(cx).refuse_recording_replay_order();
+                return;
+            }
             if app.read(cx).bar_replay_on(cx) {
                 let order = super::bar_replay_trading::ReplayTicketOrder {
                     side,
@@ -1228,6 +1232,10 @@ fn cancel_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -
         .aria_label(tr!(panels::TICKET_CANCEL_WORKING))
         .disabled(view.replay.is_none() && account.is_none())
         .on_click(move |_, _, cx| {
+            if app.read(cx).recording_replay_on() {
+                app.read(cx).refuse_recording_replay_order();
+                return;
+            }
             if app.read(cx).bar_replay_on(cx) {
                 app.update(cx, WorkspaceSurface::cancel_bar_replay_orders);
                 return;
@@ -1260,6 +1268,10 @@ fn flat_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> 
         .aria_label(tr!(panels::TICKET_FLATTEN))
         .disabled((view.replay.is_none() && account.is_none()) || instrument.is_none())
         .on_click(move |_, _, cx| {
+            if app.read(cx).recording_replay_on() {
+                app.read(cx).refuse_recording_replay_order();
+                return;
+            }
             if app.read(cx).bar_replay_on(cx) {
                 app.update(cx, WorkspaceSurface::flatten_bar_replay);
                 return;

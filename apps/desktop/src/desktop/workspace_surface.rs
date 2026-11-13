@@ -175,6 +175,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         persistence: init.persistence,
         observed_chart: ObservedChart::default(),
         bar_replay: bar_replay::BarReplayHost::default(),
+        recording_replay: recording_replay::RecordingReplayHost::default(),
         pending_chart_context_menu: None,
         pending_pane_activate: PaneActivationRequest::None,
         pending_settings_request: None,
@@ -6838,6 +6839,10 @@ impl WorkspaceSurface {
         instrument: &InstallProviderInstrument,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A recording replay belongs to the pane that opened it.
+        if aeris_market_runtime::is_recording_replay_provider(&instrument.provider) {
+            return false;
+        }
         let selected = self.select_installed_instrument(instrument, cx);
         // A relayed selection must never bounce back through the tab's sync.
         self.pending_linked_instrument = None;

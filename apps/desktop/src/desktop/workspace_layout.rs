@@ -523,7 +523,7 @@ pub(super) fn workspace_market_area(
         theme,
     );
     let below = [
-        super::bar_replay::bar_replay_panel(active_surface, theme, cx),
+        docked_replay_panel(active_surface, theme, cx),
         workspace_context_panel(surface, active_surface, theme),
     ];
     let center = workspace_center_column(grid, below, center_edges, active_surface, theme);
@@ -609,6 +609,16 @@ fn workspace_center_column(
                 surface.set_context_panel_height(height, surface_cx);
             });
         })
+}
+
+/// The active pane's recording replay controls, or else its bar replay controls.
+fn docked_replay_panel(
+    active_surface: &Entity<WorkspaceSurface>,
+    theme: &AerisTheme,
+    cx: &App,
+) -> Option<AnyElement> {
+    super::recording_replay::recording_replay_panel(active_surface, theme, cx)
+        .or_else(|| super::bar_replay::bar_replay_panel(active_surface, theme, cx))
 }
 
 fn workspace_context_panel(

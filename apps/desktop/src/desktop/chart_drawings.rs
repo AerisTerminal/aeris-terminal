@@ -10,6 +10,7 @@
 
 use aeris_chart_integration::{AerisChartView, saved_drawings_document};
 use aeris_contracts::{InstallProviderInstrument, WorkspaceInstrumentDrawingsState};
+use aeris_market_runtime::is_recording_replay_provider;
 use aeris_observability::diagnostic;
 
 /// Instruments one layout keeps drawings for.
@@ -232,8 +233,12 @@ pub(super) struct PaneDrawingSync {
 
 impl PaneDrawingSync {
     /// Starts a chart built for `instrument`, after `capture_outgoing` recorded the replaced one.
+    /// A recording replay's instrument exists only while that replay is open, so its chart
+    /// keeps its drawings to itself and never enters the layout's drawing set.
     pub(super) fn begin_chart(&mut self, instrument: Option<&InstallProviderInstrument>) {
-        self.chart_instrument = instrument.map(DrawingInstrument::of);
+        self.chart_instrument = instrument
+            .filter(|instrument| !is_recording_replay_provider(&instrument.provider))
+            .map(DrawingInstrument::of);
         self.applied_revision = 0;
         self.pending_import = self.chart_instrument.is_some();
     }
@@ -505,5 +510,34 @@ mod tests {
         assert_eq!(legacy_pane_drawings(legacy, &[], None), None);
         assert_eq!(legacy_pane_drawings("", &[], Some(&instrument)), None);
         assert_eq!(legacy_pane_drawings("[x]", &[], Some(&instrument)), None);
+    }
+
+    #[test]
+    fn a_recording_replay_chart_never_enters_the_layout_drawings() {
+        let replay_provider = aeris_market_runtime::published_provider_descriptors()
+            .iter()
+            .map(|descriptor| descriptor.id)
+            .find(|id| is_recording_replay_provider(id))
+            .expect("the replay source is registered");
+        let replay = InstallProviderInstrument {
+            provider: replay_provider.to_string(),
+            instrument_id: "recording-replay-1".to_string(),
+            ..InstallProviderInstrument::default()
+        };
+        let mut sync = PaneDrawingSync::default();
+        sync.begin_chart(Some(&replay));
+        assert_eq!(sync.chart_instrument, None);
+        assert!(!sync.pending_import, "a replay chart imports nothing");
+        let mut layout = LayoutDrawings::from_saved(&[]);
+        assert_eq!(sync.publish(None, &mut layout), Ok(false));
+        assert_eq!(ids(&layout.entries()), Vec::<&str>::new());
+
+        let live = InstallProviderInstrument {
+            provider: "hyperliquid".to_string(),
+            instrument_id: "BTC".to_string(),
+            ..InstallProviderInstrument::default()
+        };
+        sync.begin_chart(Some(&live));
+        assert_eq!(sync.chart_instrument, Some(instrument("BTC")));
     }
 }

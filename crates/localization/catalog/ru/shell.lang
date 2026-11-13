@@ -314,6 +314,10 @@ market_recording_storage_failed = Запись остановлена: не уд
 market_recording_too_many_files = Запись остановлена: в папке записей слишком много файлов.
 market_recording_busy = Запись перегружена. Повторите попытку через мгновение.
 market_recording_unavailable = Не удалось применить это изменение к записи.
+market_recording_open_replay = Открыть реплей
+market_recording_open_replay_aria = Открыть реплей {symbol} на активном графике
+market_recording_sessions = Записанные сессии
+market_recording_session = {start} · {size}
 size_megabytes = {value} МБ
 size_gigabytes = {value} ГБ
 

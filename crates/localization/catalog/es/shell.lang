@@ -312,6 +312,10 @@ market_recording_storage_failed = La grabación se detuvo porque no se pudo escr
 market_recording_too_many_files = La grabación se detuvo porque la carpeta de grabaciones contiene demasiados archivos.
 market_recording_busy = La grabación está ocupada. Inténtelo de nuevo en un momento.
 market_recording_unavailable = La grabación no pudo aplicar este cambio.
+market_recording_open_replay = Abrir repetición
+market_recording_open_replay_aria = Abrir una repetición de {symbol} en el gráfico activo
+market_recording_sessions = Sesiones grabadas
+market_recording_session = {start} · {size}
 size_megabytes = {value} MB
 size_gigabytes = {value} GB
 

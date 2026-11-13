@@ -4,8 +4,8 @@
 use super::format::{self, FrameRef, InstrumentFrame};
 use super::store::{self, RecordingStore, SegmentOrder, StoredInstrument};
 use super::{
-    MarketRecordingFailure, MarketRecordingStatus, MarketRecordingUsage, RecordedInstrument,
-    RecorderShared,
+    MarketRecordingFailure, MarketRecordingSession, MarketRecordingStatus, MarketRecordingUsage,
+    RecordedInstrument, RecorderShared,
 };
 use crate::market_service::clock::Clock;
 use aeris_market_data::{DepthSnapshot, EventMetadata, MarketTrade, TopOfBookQuote};
@@ -549,6 +549,17 @@ impl Writer {
                         display_symbol: stored.display_symbol.clone(),
                         bytes: stored.bytes,
                         recording: false,
+                        sessions: store
+                            .sessions_of(&super::store::instrument_key(
+                                &stored.provider_id,
+                                &stored.instrument_id,
+                            ))
+                            .into_iter()
+                            .map(|(started_unix_millis, bytes)| MarketRecordingSession {
+                                started_unix_millis,
+                                bytes,
+                            })
+                            .collect(),
                     },
                 );
             }
@@ -568,6 +579,7 @@ impl Writer {
                     display_symbol,
                     bytes: 0,
                     recording: false,
+                    sessions: Vec::new(),
                 })
                 .recording = true;
         }
@@ -582,6 +594,48 @@ impl Writer {
     }
 }
 
+/// Writes recorded sessions for the reader and replay tests.
+#[cfg(test)]
+pub(super) mod test_sessions {
+    use super::super::fixtures::{INSTRUMENT, install, recorded};
+    use super::{InstrumentFrame, RecordedEvent, RecorderControl, RecorderMessage, Writer};
+    use crate::market_service::clock::ScriptedClock;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// The wall time every session written here starts at.
+    pub(in crate::market_service::recording) const SESSION_UNIX_NANOS: i64 =
+        1_700_000_000_000_000_000;
+    pub(in crate::market_service::recording) const SESSION_MILLIS: u64 = 1_700_000_000_000;
+
+    /// Records one session of `INSTRUMENT` under the recordings `directory`,
+    /// rotating segments past `segment_bytes`. Each event carries the count of
+    /// events the tap dropped before it.
+    pub(in crate::market_service::recording) fn record_session(
+        directory: &Path,
+        segment_bytes: u64,
+        events: Vec<(RecordedEvent, u64)>,
+    ) {
+        let clock = Arc::new(ScriptedClock::new(SESSION_UNIX_NANOS));
+        let mut writer = Writer::new(directory.to_path_buf(), clock, Arc::default());
+        writer.segment_bytes = segment_bytes;
+        writer.control(RecorderControl::Configure {
+            instruments: vec![recorded(INSTRUMENT)],
+            capacity_bytes: super::super::DEFAULT_RECORDING_CAPACITY_BYTES,
+        });
+        writer.handle(RecorderMessage::Instrument(InstrumentFrame::from_install(
+            &install(INSTRUMENT),
+        )));
+        for (event, dropped_before) in events {
+            writer.handle(RecorderMessage::Event {
+                event,
+                dropped_before,
+                reserved_bytes: 0,
+            });
+        }
+        writer.finish();
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::{

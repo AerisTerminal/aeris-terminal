@@ -78,9 +78,11 @@ mod recording;
 use alerts::PriceAlertRegistry;
 pub use recording::{
     DEFAULT_RECORDING_CAPACITY_BYTES, MAXIMUM_RECORDED_INSTRUMENTS,
-    MAXIMUM_RECORDING_CAPACITY_BYTES, MINIMUM_RECORDING_CAPACITY_BYTES, MarketRecordingError,
-    MarketRecordingFailure, MarketRecordingSettings, MarketRecordingStatus, MarketRecordingUsage,
-    RECORDINGS_DIRECTORY, RecordedInstrument,
+    MAXIMUM_RECORDING_CAPACITY_BYTES, MAXIMUM_RECORDING_REPLAYS, MINIMUM_RECORDING_CAPACITY_BYTES,
+    MarketRecordingError, MarketRecordingFailure, MarketRecordingSession, MarketRecordingSettings,
+    MarketRecordingStatus, MarketRecordingUsage, RECORDINGS_DIRECTORY, RecordedInstrument,
+    RecordingReplayControl, RecordingReplayError, RecordingReplayId, RecordingReplayPlayback,
+    RecordingReplaySpeed, RecordingReplayStatus,
 };
 
 const COMMAND_CAPACITY: usize = 64;
@@ -244,6 +246,7 @@ struct MarketRuntime {
     trading_feed: Arc<trading_feed::TradingFeedOutbox>,
     outbox: Arc<outbox::ConsumerOutbox>,
     recording: Arc<recording::MarketRecording>,
+    recording_replays: Arc<recording::RecordingReplays>,
 }
 
 struct MarketServiceProviders {
@@ -895,6 +898,9 @@ struct ProviderCapabilities {
     /// Instruments that may hold an order-level subscription at once. Each
     /// canonical order-level book holds at most `MAXIMUM_ORDER_LEVEL_ORDERS`.
     maximum_order_level_instruments: usize,
+    /// Whether a live series silent while its calendar is open is recovered.
+    /// A source whose silence is chosen (a paused replay) never recovers for it.
+    recovers_silence: bool,
 }
 
 /// Which provider session a resolved catalog instrument belongs to.
@@ -940,6 +946,7 @@ enum LiveModel {
 /// Shared provider-owned state that runtime starters attach to.
 struct ProviderStartContext {
     rithmic_login: crate::rithmic_realtime::RithmicLoginRevision,
+    recording_replays: Arc<recording::RecordingReplays>,
 }
 
 type ProviderRuntimeStarter = fn(
@@ -1048,6 +1055,7 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         instrument_missing_detail: "Rithmic instrument is not installed",
         catalog_session_binding: CatalogSessionBinding::ResolvingSession,
         maximum_order_level_instruments: 8,
+        recovers_silence: true,
     },
     start: ProviderRuntimeRegistry::start_rithmic_runtime,
     flush_demand: flush_rithmic_provider_demand,
@@ -1119,6 +1127,7 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     instrument_missing_detail: "Hyperliquid instrument is not installed",
     catalog_session_binding: CatalogSessionBinding::CurrentSession,
     maximum_order_level_instruments: 0,
+    recovers_silence: true,
 };
 
 fn hyperliquid_candle_interval(period: BarPeriod) -> Result<String, String> {
@@ -1127,8 +1136,83 @@ fn hyperliquid_candle_interval(period: BarPeriod) -> Result<String, String> {
         .map_err(|_| "Hyperliquid history is unavailable for this interval".to_string())
 }
 
-const BUILT_IN_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] =
-    &[RITHMIC_DESCRIPTOR, HYPERLIQUID_DESCRIPTOR];
+/// Local recordings replayed as their own source; never searched or listed
+/// as a connection, and opened only from the market recording list.
+const RECORDING_REPLAY_PRESENTATION: ProviderPresentationDescriptor =
+    ProviderPresentationDescriptor {
+        id: recording::REPLAY_PROVIDER_ID,
+        display_name: "Recording replay",
+        chart_interval_labels: &[
+            "1s", "5s", "10s", "15s", "30s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
+        ],
+        daily_bars: crate::ProviderDailyBarCadence::FixedDay,
+        search_hint: "",
+        logo_key: "",
+        broker_venue_id: None,
+        attribution: None,
+        catalog_symbol: ProviderCatalogSymbol::ProviderSymbol,
+        selection_entitlement_id: recording::REPLAY_ENTITLEMENT_ID,
+        catalog_refresh_on_startup: false,
+        ready_label_suffix: "",
+        feed_level: crate::ProviderFeedLevel::PriceLevels,
+        search_categories_available: false,
+        market_screen_available: false,
+        market_scan_available: false,
+        trades_available: true,
+        connection_kind: crate::ProviderConnectionKind::Local,
+    };
+
+const RECORDING_REPLAY_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: recording::REPLAY_PROVIDER_ID,
+    presentation: &RECORDING_REPLAY_PRESENTATION,
+    login_schema: None,
+    capabilities: ProviderCapabilities {
+        account_id: recording::REPLAY_ENTITLEMENT_ID,
+        engine: EngineProviderCapabilities {
+            historical_bars: true,
+            realtime_bars: true,
+            streams: StreamRequirements::BARS
+                .with(MarketStream::Trades)
+                .with(MarketStream::Quotes)
+                .with(MarketStream::Depth),
+        },
+        // Replays run on their own clock, so the venue's wall-clock calendar
+        // never closes one.
+        always_open: true,
+        concurrency: ConcurrencyLimits {
+            maximum_sessions: 1,
+        },
+        depth: Some(DepthCapabilities),
+        quotes: Some(QuoteCapability::DedicatedTopOfBook),
+        reconnect: reconnect::ReconnectPolicy::hyperliquid(),
+        history: ProviderHistoryCapabilities {
+            worker: recording::REPLAY_HISTORY_WORKER_NAME,
+            supported_period: recording_replay_supported_period,
+        },
+        recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
+        alert_demand_update: AlertDemandUpdate::MarkDirty,
+        live_model: LiveModel::TradeBuilt,
+        calendar_bar_stamp: calendar::CalendarBarStamp::TradingDateMidnightUtc,
+        overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
+        candle_requires_connected: false,
+        candle_correction_detail: "Recording replay serves no provider candles",
+        candle_wire_interval: None,
+        candle_demand_policy: CandleDemandPolicy::SessionManaged,
+        trade_demand_policy: TradeDemandPolicy::SessionManaged,
+        instrument_missing_detail: "Recording replay is closed",
+        catalog_session_binding: CatalogSessionBinding::CurrentSession,
+        maximum_order_level_instruments: 0,
+        recovers_silence: false,
+    },
+    start: recording::start_replay_runtime,
+    flush_demand: flush_recording_replay_demand,
+};
+
+const BUILT_IN_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
+    RITHMIC_DESCRIPTOR,
+    HYPERLIQUID_DESCRIPTOR,
+    RECORDING_REPLAY_DESCRIPTOR,
+];
 
 /// Built-in provider presentation metadata for provider-neutral desktop UI.
 #[must_use]
@@ -1162,12 +1246,32 @@ pub fn published_provider_descriptors() -> &'static [descriptors::ProviderDescri
         .as_slice()
 }
 
+/// Whether a provider identity is the local recording replay source. Its
+/// instruments never trade, and surfaces never persist or default to them.
+#[must_use]
+pub fn is_recording_replay_provider(provider_id: &str) -> bool {
+    provider_id == RECORDING_REPLAY_DESCRIPTOR.id
+}
+
 fn flush_rithmic_provider_demand(coordinator: &mut Coordinator<'_>) {
     coordinator.flush_rithmic_demand();
 }
 
 fn flush_hyperliquid_provider_demand(coordinator: &mut Coordinator<'_>) {
     coordinator.flush_hyperliquid_demand();
+}
+
+fn flush_recording_replay_demand(coordinator: &mut Coordinator<'_>) {
+    coordinator.flush_session_managed_demand(RECORDING_REPLAY_DESCRIPTOR.id);
+}
+
+/// Replays build fixed-period bars from recorded trades; calendar periods
+/// would need the recorded venue's sessions at the replay clock.
+fn recording_replay_supported_period(period: BarPeriod) -> Result<(), String> {
+    match period {
+        BarPeriod::Time { seconds } if seconds > 0 => Ok(()),
+        _ => Err("Recording replay serves time-based bars only".to_string()),
+    }
 }
 
 fn rithmic_supported_period(period: BarPeriod) -> Result<(), String> {
@@ -1208,6 +1312,17 @@ impl ProviderRuntimeSpec {
             descriptor: HYPERLIQUID_DESCRIPTOR,
             history: Some(history),
             realtime: ProviderRealtimeSpec { enabled },
+            #[cfg(any(test, feature = "replay"))]
+            scripted: None,
+        }
+    }
+
+    /// The replay starter supplies its own history source from the recordings.
+    fn recording_replay() -> Self {
+        Self {
+            descriptor: RECORDING_REPLAY_DESCRIPTOR,
+            history: None,
+            realtime: ProviderRealtimeSpec { enabled: true },
             #[cfg(any(test, feature = "replay"))]
             scripted: None,
         }
@@ -1328,9 +1443,17 @@ struct ProviderRuntimeRecord {
     lifecycle: Arc<ProviderRuntimeLifecycle>,
     hyperliquid: Option<HyperliquidChannels>,
     rithmic: Option<RithmicChannels>,
+    recorded: Option<RecordedSourceChannels>,
     catalog: ProviderCatalogChannels,
     workers: Vec<thread::JoinHandle<()>>,
 }
+
+/// A local source whose worker stamps registry epochs on its own events.
+struct RecordedSourceChannels {
+    controls: SyncSender<recording::ReplayWorkerMessage>,
+    events: Receiver<ProviderEvent>,
+}
+
 struct RithmicChannels {
     controls: SyncSender<RithmicRealtimeControl>,
     events: Receiver<RithmicRealtimeEvent>,
@@ -1405,6 +1528,7 @@ struct ProviderDispatchRecord<'a> {
     lifecycle: Option<&'a ProviderRuntimeLifecycle>,
     hyperliquid: Option<&'a HyperliquidChannels>,
     rithmic: Option<&'a RithmicChannels>,
+    recorded: Option<&'a RecordedSourceChannels>,
     catalog: Option<&'a dyn ProviderCatalogChannel>,
 }
 

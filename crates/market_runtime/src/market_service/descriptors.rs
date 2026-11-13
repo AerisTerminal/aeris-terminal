@@ -14,7 +14,11 @@ use crate::{CadenceError, resolve_series_key};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectMethod {
     Public,
-    VaultCredentials { schema: &'static LoginSchema },
+    VaultCredentials {
+        schema: &'static LoginSchema,
+    },
+    /// A local source with no connection to manage.
+    Local,
 }
 
 /// What a login field asks for; surfaces choose its control and wording from it.
@@ -79,6 +83,7 @@ impl ProviderDescriptor {
         let presentation = registration.presentation;
         let connect = match presentation.connection_kind {
             ProviderConnectionKind::Public => ConnectMethod::Public,
+            ProviderConnectionKind::Local => ConnectMethod::Local,
             ProviderConnectionKind::Credentials => ConnectMethod::VaultCredentials {
                 schema: registration
                     .login_schema

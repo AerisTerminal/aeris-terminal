@@ -312,6 +312,10 @@ market_recording_storage_failed = Recording stopped because the recordings folde
 market_recording_too_many_files = Recording stopped because the recordings folder holds too many files.
 market_recording_busy = The recorder is busy. Try again in a moment.
 market_recording_unavailable = The recorder could not apply this change.
+market_recording_open_replay = Open replay
+market_recording_open_replay_aria = Open a replay of {symbol} on the active chart
+market_recording_sessions = Recorded sessions
+market_recording_session = {start} · {size}
 size_megabytes = {value} MB
 size_gigabytes = {value} GB
 

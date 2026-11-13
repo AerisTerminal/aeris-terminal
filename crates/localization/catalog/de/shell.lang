@@ -312,6 +312,10 @@ market_recording_storage_failed = Die Aufzeichnung wurde angehalten, weil der Au
 market_recording_too_many_files = Die Aufzeichnung wurde angehalten, weil der Aufzeichnungsordner zu viele Dateien enthält.
 market_recording_busy = Die Aufzeichnung ist ausgelastet. Versuchen Sie es gleich noch einmal.
 market_recording_unavailable = Die Aufzeichnung konnte diese Änderung nicht übernehmen.
+market_recording_open_replay = Replay öffnen
+market_recording_open_replay_aria = Ein Replay von {symbol} im aktiven Chart öffnen
+market_recording_sessions = Aufgezeichnete Sitzungen
+market_recording_session = {start} · {size}
 size_megabytes = {value} MB
 size_gigabytes = {value} GB
 

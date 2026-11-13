@@ -226,9 +226,13 @@ fn put_depth_levels(out: &mut Vec<u8>, levels: &[DepthLevel]) -> Result<(), Enco
     Ok(())
 }
 
-#[cfg(test)]
 pub(super) mod decode {
     //! Segment reader: everything up to the first incomplete or damaged frame.
+    //!
+    //! `SegmentFrames` reads one frame at a time and holds at most one frame
+    //! payload (`MAXIMUM_FRAME_PAYLOAD_BYTES`), so a segment of any size is read
+    //! in bounded memory. A torn or corrupt tail ends the segment; the frames
+    //! before it stay usable.
 
     use super::{
         CHECKSUM_BYTES, FORMAT_VERSION, FRAME_HEADER_BYTES, InstrumentFrame, KIND_DEPTH, KIND_GAP,
@@ -240,6 +244,7 @@ pub(super) mod decode {
         QuoteLevel, TopOfBookQuote,
     };
     use sha2::{Digest, Sha256};
+    use std::io::{self, Read};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) enum RecordedFrame {
@@ -258,62 +263,131 @@ pub(super) mod decode {
         Corrupt { offset: usize },
     }
 
+    #[cfg(test)]
     pub(crate) struct DecodedSegment {
         pub(crate) frames: Vec<RecordedFrame>,
         pub(crate) tail: SegmentTail,
     }
 
+    #[cfg(test)]
     pub(crate) fn decode_segment(bytes: &[u8]) -> DecodedSegment {
+        let mut reader = SegmentFrames::new(bytes);
         let mut frames = Vec::new();
-        if bytes.len() < SEGMENT_HEADER_BYTES {
-            return DecodedSegment {
-                frames,
-                tail: SegmentTail::Truncated { offset: 0 },
-            };
+        while let Some(frame) = reader.next_frame() {
+            frames.push(frame);
         }
-        if bytes[..SEGMENT_MAGIC.len()] != SEGMENT_MAGIC
-            || bytes[SEGMENT_MAGIC.len()..SEGMENT_HEADER_BYTES] != FORMAT_VERSION.to_le_bytes()
-        {
-            return DecodedSegment {
-                frames,
-                tail: SegmentTail::Corrupt { offset: 0 },
-            };
+        DecodedSegment {
+            frames,
+            tail: reader.tail().unwrap_or(SegmentTail::Complete),
         }
-        let mut offset = SEGMENT_HEADER_BYTES;
-        let mut instrument: Option<InstrumentFrame> = None;
-        let tail = loop {
-            if offset == bytes.len() {
-                break SegmentTail::Complete;
+    }
+
+    /// Streams the frames of one segment in file order.
+    pub(crate) struct SegmentFrames<R> {
+        reader: R,
+        offset: usize,
+        instrument: Option<InstrumentFrame>,
+        payload: Vec<u8>,
+        tail: Option<SegmentTail>,
+    }
+
+    impl<R: Read> SegmentFrames<R> {
+        pub(crate) fn new(mut reader: R) -> Self {
+            let mut header = [0; SEGMENT_HEADER_BYTES];
+            let tail = match fill(&mut reader, &mut header) {
+                Ok(read) if read < SEGMENT_HEADER_BYTES => {
+                    Some(SegmentTail::Truncated { offset: 0 })
+                }
+                Ok(_)
+                    if header[..SEGMENT_MAGIC.len()] != SEGMENT_MAGIC
+                        || header[SEGMENT_MAGIC.len()..] != FORMAT_VERSION.to_le_bytes() =>
+                {
+                    Some(SegmentTail::Corrupt { offset: 0 })
+                }
+                Ok(_) => None,
+                Err(_) => Some(SegmentTail::Truncated { offset: 0 }),
+            };
+            Self {
+                reader,
+                offset: SEGMENT_HEADER_BYTES,
+                instrument: None,
+                payload: Vec::new(),
+                tail,
             }
-            if bytes.len() - offset < FRAME_HEADER_BYTES {
-                break SegmentTail::Truncated { offset };
+        }
+
+        /// The segment's instrument frame, once read.
+        pub(crate) fn instrument(&self) -> Option<&InstrumentFrame> {
+            self.instrument.as_ref()
+        }
+
+        /// Where reading stopped; `None` while frames may follow.
+        pub(crate) const fn tail(&self) -> Option<SegmentTail> {
+            self.tail
+        }
+
+        /// The next intact frame, or `None` once the segment ended.
+        pub(crate) fn next_frame(&mut self) -> Option<RecordedFrame> {
+            if self.tail.is_some() {
+                return None;
+            }
+            match self.read_frame() {
+                Ok(frame) => Some(frame),
+                Err(tail) => {
+                    self.tail = Some(tail);
+                    None
+                }
+            }
+        }
+
+        fn read_frame(&mut self) -> Result<RecordedFrame, SegmentTail> {
+            let offset = self.offset;
+            let mut header = [0; FRAME_HEADER_BYTES];
+            match fill(&mut self.reader, &mut header) {
+                Ok(0) => return Err(SegmentTail::Complete),
+                Ok(read) if read < FRAME_HEADER_BYTES => {
+                    return Err(SegmentTail::Truncated { offset });
+                }
+                Ok(_) => {}
+                Err(_) => return Err(SegmentTail::Truncated { offset }),
             }
             let mut length = [0; 4];
-            length.copy_from_slice(&bytes[offset..offset + 4]);
-            let Ok(length) = usize::try_from(u32::from_le_bytes(length)) else {
-                break SegmentTail::Corrupt { offset };
-            };
+            length.copy_from_slice(&header[..4]);
+            let length = usize::try_from(u32::from_le_bytes(length))
+                .map_err(|_| SegmentTail::Corrupt { offset })?;
             if length > MAXIMUM_FRAME_PAYLOAD_BYTES {
-                break SegmentTail::Corrupt { offset };
+                return Err(SegmentTail::Corrupt { offset });
             }
-            let payload_start = offset + FRAME_HEADER_BYTES;
-            if bytes.len() - payload_start < length {
-                break SegmentTail::Truncated { offset };
+            self.payload.resize(length, 0);
+            match fill(&mut self.reader, &mut self.payload) {
+                Ok(read) if read == length => {}
+                Ok(_) | Err(_) => return Err(SegmentTail::Truncated { offset }),
             }
-            let payload = &bytes[payload_start..payload_start + length];
-            if Sha256::digest(payload)[..CHECKSUM_BYTES] != bytes[offset + 4..payload_start] {
-                break SegmentTail::Corrupt { offset };
+            if Sha256::digest(&self.payload)[..CHECKSUM_BYTES] != header[4..] {
+                return Err(SegmentTail::Corrupt { offset });
             }
-            let Ok(frame) = decode_payload(payload, instrument.as_ref()) else {
-                break SegmentTail::Corrupt { offset };
-            };
-            if let RecordedFrame::Instrument(header) = &frame {
-                instrument = Some(header.clone());
+            let frame = decode_payload(&self.payload, self.instrument.as_ref())
+                .map_err(|Malformed| SegmentTail::Corrupt { offset })?;
+            if let RecordedFrame::Instrument(instrument) = &frame {
+                self.instrument = Some(instrument.clone());
             }
-            frames.push(frame);
-            offset = payload_start + length;
-        };
-        DecodedSegment { frames, tail }
+            self.offset = offset + FRAME_HEADER_BYTES + length;
+            Ok(frame)
+        }
+    }
+
+    /// Reads until `buffer` is full or the input ends, returning the bytes read.
+    fn fill(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut read = 0;
+        while read < buffer.len() {
+            match reader.read(&mut buffer[read..]) {
+                Ok(0) => break,
+                Ok(count) => read += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(read)
     }
 
     /// The payload does not match the frame layout.

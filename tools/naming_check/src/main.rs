@@ -5088,7 +5088,8 @@ mod tests {
     /// Market history stays on demand and is never persisted. The one exception
     /// is the opt-in recorder of live trades, quotes and aggregate depth under
     /// the data root's `recordings` directory; its file mutations are confined
-    /// to these exact sites, each counted and reasoned.
+    /// to these exact sites, each counted and reasoned. Recording replay only
+    /// reads those files, so it adds no site.
     const MARKET_RECORDING_FILE_MUTATIONS: &[(&str, &str, usize, &str)] = &[
         (
             "crates/market_runtime/src/market_service/recording/writer.rs",

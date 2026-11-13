@@ -395,6 +395,23 @@ replay_book_live = El libro de órdenes muestra precios en vivo, así que no ope
 replay_ticket_notice = Repetición de barras: las órdenes operan en la repetición, no en su cuenta.
 replay_cancel_summary = Cancelar todas las órdenes activas de la repetición de barras.
 replay_flatten_summary = Cancelar las órdenes activas de la repetición de barras y cerrar su posición al cierre de la barra más reciente.
+recording_replay_label = Repetición · {symbol}
+recording_replay_play = Reproducir la repetición
+recording_replay_pause = Pausar la repetición
+recording_replay_restart = Reproducir la repetición de nuevo desde el inicio
+recording_replay_speed = Velocidad de la repetición
+recording_replay_seek = Mover el reloj de la repetición
+recording_replay_ended = Terminada
+recording_replay_gaps = Datos faltantes: {gaps}
+recording_replay_close = Cerrar la repetición
+recording_replay_no_trading = Una repetición de mercado grabada no opera. Cierre la repetición para operar en este gráfico.
+recording_replay_open_failed = No se pudo abrir la repetición
+recording_replay_not_configured = Aeris aún no encuentra su carpeta de grabaciones. Inténtelo de nuevo en un momento.
+recording_replay_not_found = Esa sesión grabada ya no está en este equipo.
+recording_replay_empty = Esa sesión grabada no contiene eventos de mercado.
+recording_replay_unreadable = No se pudieron leer los archivos de esa sesión grabada.
+recording_replay_too_many = Puede repetir hasta {maximum} grabaciones a la vez. Cierre una e inténtelo de nuevo.
+recording_replay_not_shown = La repetición no se pudo mostrar en este gráfico, así que se cerró.
 
 ## Avisos de comandos de trading
 trading_command_failed = El comando de trading falló

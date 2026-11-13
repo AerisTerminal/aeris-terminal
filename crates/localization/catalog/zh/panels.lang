@@ -390,6 +390,23 @@ replay_book_live = 订单簿显示实时价格，因此不会在 K 线回放中�
 replay_ticket_notice = K 线回放：订单在回放中成交，而不是在您的账户中。
 replay_cancel_summary = 撤销 K 线回放中的所有挂单。
 replay_flatten_summary = 撤销 K 线回放的挂单，并以最新 K 线的收盘价平掉其持仓。
+recording_replay_label = 回放 · {symbol}
+recording_replay_play = 播放回放
+recording_replay_pause = 暂停回放
+recording_replay_restart = 从头重新播放回放
+recording_replay_speed = 回放速度
+recording_replay_seek = 移动回放时钟
+recording_replay_ended = 已结束
+recording_replay_gaps = 缺失数据：{gaps}
+recording_replay_close = 关闭回放
+recording_replay_no_trading = 已录制行情的回放不进行交易。请关闭回放后在此图表上交易。
+recording_replay_open_failed = 无法打开回放
+recording_replay_not_configured = Aeris 尚未找到您的录制文件夹。请稍后重试。
+recording_replay_not_found = 该录制时段已不在此电脑上。
+recording_replay_empty = 该录制时段不包含任何行情事件。
+recording_replay_unreadable = 无法读取该录制时段的文件。
+recording_replay_too_many = 最多可同时回放 {maximum} 个录制。请关闭一个后重试。
+recording_replay_not_shown = 无法在此图表上显示回放，因此已将其关闭。
 
 ## 交易命令通知
 trading_command_failed = 交易命令失败

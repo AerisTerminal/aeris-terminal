@@ -312,6 +312,10 @@ market_recording_storage_failed = रिकॉर्डिंग रुक ग�
 market_recording_too_many_files = रिकॉर्डिंग रुक गई क्योंकि रिकॉर्डिंग फ़ोल्डर में बहुत अधिक फ़ाइलें हैं।
 market_recording_busy = रिकॉर्डर व्यस्त है। थोड़ी देर में फिर से आज़माएँ।
 market_recording_unavailable = रिकॉर्डर यह बदलाव लागू नहीं कर सका।
+market_recording_open_replay = रीप्ले खोलें
+market_recording_open_replay_aria = सक्रिय चार्ट पर {symbol} का रीप्ले खोलें
+market_recording_sessions = रिकॉर्ड किए गए सत्र
+market_recording_session = {start} · {size}
 size_megabytes = {value} MB
 size_gigabytes = {value} GB
 

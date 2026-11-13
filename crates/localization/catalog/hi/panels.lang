@@ -394,6 +394,23 @@ replay_book_live = ऑर्डर बुक लाइव कीमतें द
 replay_ticket_notice = बार रीप्ले: ऑर्डर रीप्ले में ट्रेड होते हैं, आपके खाते में नहीं।
 replay_cancel_summary = बार रीप्ले के सभी सक्रिय ऑर्डर रद्द करें।
 replay_flatten_summary = बार रीप्ले के सक्रिय ऑर्डर रद्द करें और उसकी पोज़िशन नवीनतम बार के क्लोज़ पर बंद करें।
+recording_replay_label = रीप्ले · {symbol}
+recording_replay_play = रीप्ले चलाएँ
+recording_replay_pause = रीप्ले रोकें
+recording_replay_restart = रीप्ले को शुरू से फिर चलाएँ
+recording_replay_speed = रीप्ले की गति
+recording_replay_seek = रीप्ले की घड़ी आगे-पीछे करें
+recording_replay_ended = समाप्त
+recording_replay_gaps = छूटा डेटा: {gaps}
+recording_replay_close = रीप्ले बंद करें
+recording_replay_no_trading = रिकॉर्ड किए गए बाज़ार का रीप्ले ट्रेड नहीं करता। इस चार्ट पर ट्रेड करने के लिए रीप्ले बंद करें।
+recording_replay_open_failed = रीप्ले नहीं खुल सका
+recording_replay_not_configured = Aeris को अभी आपका रिकॉर्डिंग फ़ोल्डर नहीं मिला। थोड़ी देर में फिर से कोशिश करें।
+recording_replay_not_found = वह रिकॉर्ड किया गया सत्र अब इस कंप्यूटर पर नहीं है।
+recording_replay_empty = उस रिकॉर्ड किए गए सत्र में कोई बाज़ार इवेंट नहीं है।
+recording_replay_unreadable = उस रिकॉर्ड किए गए सत्र की फ़ाइलें पढ़ी नहीं जा सकीं।
+recording_replay_too_many = आप एक साथ अधिकतम {maximum} रिकॉर्डिंग का रीप्ले कर सकते हैं। एक बंद करें और फिर से कोशिश करें।
+recording_replay_not_shown = रीप्ले इस चार्ट पर नहीं दिखाया जा सका, इसलिए उसे बंद कर दिया गया।
 
 ## Trading command notices
 trading_command_failed = ट्रेडिंग कमांड विफल रहा

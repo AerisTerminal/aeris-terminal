@@ -394,6 +394,23 @@ replay_book_live = Das Orderbuch zeigt Live-Kurse und handelt daher nicht im Bar
 replay_ticket_notice = Bar-Replay: Orders handeln im Replay, nicht auf Ihrem Konto.
 replay_cancel_summary = Alle offenen Orders im Bar-Replay stornieren.
 replay_flatten_summary = Die offenen Orders des Bar-Replays stornieren und seine Position zum Schlusskurs des neuesten Balkens schließen.
+recording_replay_label = Replay · {symbol}
+recording_replay_play = Replay abspielen
+recording_replay_pause = Replay pausieren
+recording_replay_restart = Replay erneut von Anfang an abspielen
+recording_replay_speed = Replay-Geschwindigkeit
+recording_replay_seek = Replay-Zeit verschieben
+recording_replay_ended = Beendet
+recording_replay_gaps = Fehlende Daten: {gaps}
+recording_replay_close = Replay schließen
+recording_replay_no_trading = Ein Replay aufgezeichneter Marktdaten handelt nicht. Schließen Sie das Replay, um in diesem Chart zu handeln.
+recording_replay_open_failed = Das Replay konnte nicht geöffnet werden
+recording_replay_not_configured = Aeris hat Ihren Aufzeichnungsordner noch nicht gefunden. Versuchen Sie es gleich noch einmal.
+recording_replay_not_found = Diese aufgezeichnete Sitzung ist nicht mehr auf diesem Computer.
+recording_replay_empty = Diese aufgezeichnete Sitzung enthält keine Marktereignisse.
+recording_replay_unreadable = Die Dateien dieser aufgezeichneten Sitzung konnten nicht gelesen werden.
+recording_replay_too_many = Sie können bis zu {maximum} Aufzeichnungen gleichzeitig abspielen. Schließen Sie eine und versuchen Sie es erneut.
+recording_replay_not_shown = Das Replay konnte in diesem Chart nicht angezeigt werden und wurde geschlossen.
 
 ## Hinweise zu Handelsbefehlen
 trading_command_failed = Handelsbefehl fehlgeschlagen

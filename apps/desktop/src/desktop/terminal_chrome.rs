@@ -600,7 +600,7 @@ pub(super) fn header_controls(
         .child(super::bar_replay::bar_replay_header_control(
             app,
             state.bar_replay_phase,
-            state.controls.enabled(HeaderControls::CHART_TYPE),
+            state.controls.enabled(HeaderControls::CHART_TYPE) && !state.recording_replay,
             &state.theme,
         ));
     let accounts = accounts_selector(app.clone(), state.account_label, &state.theme);

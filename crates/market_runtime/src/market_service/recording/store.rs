@@ -293,6 +293,17 @@ impl RecordingStore {
             .collect()
     }
 
+    /// Each recorded session of the instrument with its indexed bytes, oldest first.
+    pub(super) fn sessions_of(&self, key: &str) -> Vec<(u64, u64)> {
+        let mut sessions = BTreeMap::<u64, u64>::new();
+        for (order, bytes) in &self.segments {
+            if order.instrument_key == key {
+                *sessions.entry(order.session_millis).or_default() += bytes;
+            }
+        }
+        sessions.into_iter().collect()
+    }
+
     /// Deletes every indexed segment of the instrument, its index file and the
     /// directories left empty.
     pub(super) fn remove_instrument(&mut self, key: &str) -> io::Result<()> {

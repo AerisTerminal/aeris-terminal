@@ -356,7 +356,8 @@ fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> V
                 aeris_market_runtime::ConnectMethod::VaultCredentials { .. } => {
                     credential_group(connections, provider, index, theme)
                 }
-                aeris_market_runtime::ConnectMethod::Public => settings_group(
+                aeris_market_runtime::ConnectMethod::Public
+                | aeris_market_runtime::ConnectMethod::Local => settings_group(
                     descriptor.display_name,
                     [described_setting_row(
                         descriptor.display_name,
@@ -384,6 +385,7 @@ fn connection_provider_ids(
 ) -> Vec<ProviderId> {
     descriptors
         .iter()
+        .filter(|descriptor| descriptor.connect != aeris_market_runtime::ConnectMethod::Local)
         .map(|descriptor| ProviderId(descriptor.id))
         .collect()
 }
@@ -944,16 +946,29 @@ mod provider_descriptor_tests {
                 .collect::<Vec<_>>(),
             published
                 .iter()
+                .filter(
+                    |descriptor| descriptor.connect != aeris_market_runtime::ConnectMethod::Local
+                )
                 .map(|descriptor| descriptor.id)
                 .collect::<Vec<_>>()
+        );
+        assert!(
+            published
+                .iter()
+                .any(|descriptor| descriptor.connect == aeris_market_runtime::ConnectMethod::Local)
         );
         let mut descriptors = published.to_vec();
         let mut fixture = descriptors[0].clone();
         fixture.id = "fixture-third";
         fixture.symbol_browser = false;
+        fixture.connect = aeris_market_runtime::ConnectMethod::Public;
         descriptors.push(fixture);
         let providers = connection_provider_ids(&descriptors);
-        assert_eq!(providers.len(), descriptors.len());
+        assert_eq!(
+            providers.len(),
+            descriptors.len() - 1,
+            "the local replay source has no connection row"
+        );
         assert_eq!(
             providers.last().map(|provider| provider.id()),
             Some("fixture-third")

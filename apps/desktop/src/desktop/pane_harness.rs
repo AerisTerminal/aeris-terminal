@@ -6978,3 +6978,97 @@ fn pane_harness_order_book_columns_and_highlights_survive_save_and_restore(
         );
     });
 }
+
+/// A pane showing a recording replay refuses chart orders before they reach an account,
+/// and the workspace saves the instrument it showed before the replay, never the replay.
+#[gpui::test]
+fn pane_harness_recording_replay_refuses_orders_and_is_never_saved(cx: &mut TestAppContext) {
+    let (owner, root, _, _, instrument, _) =
+        trading_store::real_owner_fill_fixture_for("hyperliquid");
+    let subscription = owner.subscribe().expect("owner subscription");
+    let mut product = aeris_desktop::test_support::fixture_public_crypto();
+    product.instrument_id = instrument.as_str().into();
+    let (mut harness, cx) = PaneHarness::open_with_product_and_owner(
+        WorkspaceSurfaceRestore::default(),
+        false,
+        product,
+        ChartInterval::Minute1,
+        Some(owner.clone()),
+        cx,
+    );
+    harness.publish_snapshot(120, cx);
+    harness.adopt_owner_publication(&subscription, cx);
+    cx.run_until_parked();
+    let replay_provider = aeris_market_runtime::published_provider_descriptors()
+        .iter()
+        .map(|descriptor| descriptor.id)
+        .find(|id| aeris_market_runtime::is_recording_replay_provider(id))
+        .expect("the replay source is registered");
+
+    harness.pane.update(cx, |pane, cx| {
+        assert!(!pane.recording_replay_on());
+        assert_eq!(pane.persisted_product().as_ref(), pane.product.as_ref());
+        let mut replay = pane.product.clone().expect("live instrument");
+        replay.provider = replay_provider.into();
+        replay.instrument_id = "replay-fixture".into();
+        pane.product = Some(replay);
+        assert!(pane.recording_replay_on());
+        assert_eq!(
+            pane.persisted_product(),
+            None,
+            "a replay opened without an earlier instrument saves no instrument"
+        );
+
+        let chart = pane.chart.clone().expect("chart");
+        let intent = ChartTradingIntent {
+            sequence: 7,
+            action: ChartTradingIntentAction::ClosePosition,
+            account_id: None,
+            drawing_id: None,
+            order_id: None,
+            position_id: Some(
+                aeris_chart_integration::ChartPositionId::new("position:replay")
+                    .expect("position id"),
+            ),
+            pane_index: None,
+            price_scale: None,
+            side: None,
+            kind: None,
+            role: None,
+            price: None,
+            price_tick_index: None,
+            stop_price: None,
+            take_profit_price: None,
+            stop_loss_price: None,
+            quantity: None,
+            bracket_id: None,
+            oco_group_id: None,
+            base_revision: 0,
+        };
+        dispatch_chart_trading_intent(chart, &intent, pane, cx);
+        pane.refuse_recording_replay_order();
+        let refusals = pane
+            .lifecycle
+            .trading_feedback()
+            .take_request_results()
+            .into_iter()
+            .map(|(_, _, feedback)| (feedback.message, feedback.is_error))
+            .collect::<Vec<_>>();
+        let refused = (
+            aeris_localization::tr!(aeris_localization::panels::RECORDING_REPLAY_NO_TRADING)
+                .to_string(),
+            true,
+        );
+        assert_eq!(refusals, [refused.clone(), refused]);
+    });
+    assert!(
+        subscription
+            .recv_timeout(Duration::from_millis(300))
+            .is_none(),
+        "no replay order reaches the trading owner"
+    );
+    owner
+        .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
+        .expect("owner stopped");
+    std::fs::remove_dir_all(root).expect("remove test root");
+}

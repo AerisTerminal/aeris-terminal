@@ -395,6 +395,23 @@ replay_book_live = Le carnet d'ordres affiche les prix en direct, il ne trade do
 replay_ticket_notice = Relecture de barres : les ordres tradent la relecture, pas votre compte.
 replay_cancel_summary = Annuler tous les ordres en cours de la relecture de barres.
 replay_flatten_summary = Annuler les ordres en cours de la relecture de barres et clôturer sa position à la clôture de la barre la plus récente.
+recording_replay_label = Relecture · {symbol}
+recording_replay_play = Lire la relecture
+recording_replay_pause = Mettre la relecture en pause
+recording_replay_restart = Relire depuis le début
+recording_replay_speed = Vitesse de relecture
+recording_replay_seek = Déplacer l'horloge de la relecture
+recording_replay_ended = Terminée
+recording_replay_gaps = Données manquantes : {gaps}
+recording_replay_close = Fermer la relecture
+recording_replay_no_trading = Une relecture de marché enregistrée ne trade pas. Fermez la relecture pour trader sur ce graphique.
+recording_replay_open_failed = La relecture n'a pas pu s'ouvrir
+recording_replay_not_configured = Aeris n'a pas encore trouvé votre dossier d'enregistrements. Réessayez dans un instant.
+recording_replay_not_found = Cette session enregistrée n'est plus sur cet ordinateur.
+recording_replay_empty = Cette session enregistrée ne contient aucun événement de marché.
+recording_replay_unreadable = Les fichiers de cette session enregistrée n'ont pas pu être lus.
+recording_replay_too_many = Vous pouvez relire jusqu'à {maximum} enregistrements à la fois. Fermez-en un et réessayez.
+recording_replay_not_shown = La relecture n'a pas pu s'afficher sur ce graphique, elle a donc été fermée.
 
 ## Notifications des commandes de trading
 trading_command_failed = Échec de la commande de trading

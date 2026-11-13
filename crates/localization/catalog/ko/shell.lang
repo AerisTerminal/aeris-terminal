@@ -310,6 +310,10 @@ market_recording_storage_failed = 기록 폴더에 쓸 수 없어 기록이 중�
 market_recording_too_many_files = 기록 폴더에 파일이 너무 많아 기록이 중지되었습니다.
 market_recording_busy = 기록기가 바쁩니다. 잠시 후 다시 시도하세요.
 market_recording_unavailable = 기록기가 이 변경을 적용하지 못했습니다.
+market_recording_open_replay = 리플레이 열기
+market_recording_open_replay_aria = 활성 차트에서 {symbol} 리플레이 열기
+market_recording_sessions = 기록된 세션
+market_recording_session = {start} · {size}
 size_megabytes = {value} MB
 size_gigabytes = {value} GB
 

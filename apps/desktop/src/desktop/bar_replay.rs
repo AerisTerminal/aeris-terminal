@@ -187,6 +187,9 @@ impl WorkspaceSurface {
     /// running replay.
     pub(super) fn toggle_bar_replay(&mut self, cx: &mut Context<Self>) {
         let phase = self.bar_replay_phase(cx);
+        if phase == ChartReplayPhase::Off && self.recording_replay_on() {
+            return;
+        }
         self.run_bar_replay(header_command(phase), cx);
     }
 

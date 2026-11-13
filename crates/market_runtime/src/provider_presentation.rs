@@ -7,6 +7,9 @@ pub enum ProviderConnectionKind {
     Credentials,
     /// The provider is available without account credentials.
     Public,
+    /// The source reads data already on this machine; it has no connection to
+    /// manage and opens only from the surface that owns that data.
+    Local,
 }
 
 /// Which persisted instrument identity is accepted by a provider catalog.

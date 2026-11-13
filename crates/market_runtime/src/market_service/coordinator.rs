@@ -302,6 +302,17 @@ impl<'a> Coordinator<'a> {
                     clock.as_ref(),
                 );
             }
+            if let Some(channels) = record.recorded {
+                provider_registry.register(
+                    id,
+                    Box::new(super::recording::ReplaySession {
+                        controls: channels.controls.clone(),
+                        history: record.history.clone(),
+                    }),
+                    record.descriptor.capabilities.reconnect,
+                    clock.as_ref(),
+                );
+            }
         }
         Self {
             engine,
@@ -3331,6 +3342,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: Some(channel),
             },
         );
@@ -4730,6 +4742,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -6343,6 +6356,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -6615,6 +6629,7 @@ mod tests {
                     lifecycle: None,
                     hyperliquid: None,
                     rithmic: None,
+                    recorded: None,
                     catalog: None,
                 },
             );
@@ -6987,6 +7002,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -7168,6 +7184,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -7208,6 +7225,7 @@ mod tests {
                             super::super::provider_session::RithmicBinding::default(),
                         )),
                     }))),
+                    recorded: None,
                     catalog: None,
                 },
             )]),
@@ -7240,6 +7258,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -7307,6 +7326,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -7792,6 +7812,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -7974,6 +7995,10 @@ mod tests {
     }
 
     fn scripted_watchdog_recovery(provider: &'static str, unknown: bool) {
+        scripted_watchdog(provider, unknown, true);
+    }
+
+    fn scripted_watchdog(provider: &'static str, unknown: bool, recovers: bool) {
         use super::super::clock::{Clock, ScriptedClock};
         use chrono::{DateTime, Utc};
 
@@ -8035,6 +8060,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -8055,7 +8081,7 @@ mod tests {
         coordinator.recover_stalled_live_series();
         assert_eq!(
             history_rx.try_iter().count(),
-            usize::from(!unknown),
+            usize::from(!unknown && recovers),
             "{provider}: normal open threshold"
         );
         if unknown {
@@ -8121,6 +8147,13 @@ mod tests {
     #[test]
     fn watchdog_unknown_series_waits_for_long_threshold_before_one_recovery() {
         scripted_watchdog_recovery("rithmic", true);
+    }
+
+    /// A paused or ended replay is silent by choice; recovering it would
+    /// reload history at the same clock forever.
+    #[test]
+    fn watchdog_never_recovers_a_silent_recording_replay() {
+        scripted_watchdog(super::super::RECORDING_REPLAY_DESCRIPTOR.id, false, false);
     }
 
     /// Rithmic Test answers a closed-market current replay with zero bars. That
@@ -9418,6 +9451,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );
@@ -10256,6 +10290,7 @@ mod tests {
                     lifecycle: None,
                     hyperliquid: None,
                     rithmic: None,
+                    recorded: None,
                     catalog: Some(&catalog),
                 },
             );
@@ -10355,6 +10390,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: Some(&catalog),
             },
         );
@@ -10449,6 +10485,7 @@ mod tests {
                 lifecycle: None,
                 hyperliquid: None,
                 rithmic: None,
+                recorded: None,
                 catalog: None,
             },
         );

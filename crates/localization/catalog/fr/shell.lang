@@ -313,6 +313,10 @@ market_recording_storage_failed = L'enregistrement s'est arrêté car le dossier
 market_recording_too_many_files = L'enregistrement s'est arrêté car le dossier des enregistrements contient trop de fichiers.
 market_recording_busy = L'enregistreur est occupé. Réessayez dans un instant.
 market_recording_unavailable = L'enregistreur n'a pas pu appliquer cette modification.
+market_recording_open_replay = Ouvrir la relecture
+market_recording_open_replay_aria = Ouvrir une relecture de {symbol} sur le graphique actif
+market_recording_sessions = Sessions enregistrées
+market_recording_session = {start} · {size}
 size_megabytes = {value} Mo
 size_gigabytes = {value} Go
 

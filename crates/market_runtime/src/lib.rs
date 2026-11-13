@@ -462,11 +462,13 @@ pub use market_service::descriptors::{
 pub use market_service::{
     BrokerVenueLink, MAXIMUM_RECENT_LADDER_TRADES, MarketService, MarketServiceStatus,
     QuoteSubscription, RECENT_LADDER_TRADE_RETENTION_NANOS, RithmicLoginSummary, RithmicServer,
-    built_in_provider_presentations, published_provider_descriptors,
+    built_in_provider_presentations, is_recording_replay_provider, published_provider_descriptors,
 };
 pub use market_service::{
     DEFAULT_RECORDING_CAPACITY_BYTES, MAXIMUM_RECORDED_INSTRUMENTS,
-    MAXIMUM_RECORDING_CAPACITY_BYTES, MINIMUM_RECORDING_CAPACITY_BYTES, MarketRecordingError,
-    MarketRecordingFailure, MarketRecordingSettings, MarketRecordingStatus, MarketRecordingUsage,
-    RECORDINGS_DIRECTORY, RecordedInstrument,
+    MAXIMUM_RECORDING_CAPACITY_BYTES, MAXIMUM_RECORDING_REPLAYS, MINIMUM_RECORDING_CAPACITY_BYTES,
+    MarketRecordingError, MarketRecordingFailure, MarketRecordingSession, MarketRecordingSettings,
+    MarketRecordingStatus, MarketRecordingUsage, RECORDINGS_DIRECTORY, RecordedInstrument,
+    RecordingReplayControl, RecordingReplayError, RecordingReplayId, RecordingReplayPlayback,
+    RecordingReplaySpeed, RecordingReplayStatus,
 };

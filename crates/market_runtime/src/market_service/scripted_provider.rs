@@ -169,6 +169,7 @@ fn start_scripted_runtime(
             display_events,
         }),
         rithmic: None,
+        recorded: None,
         catalog: ProviderCatalogChannels {
             enabled: false,
             channels: Box::new(UnavailableCatalog),

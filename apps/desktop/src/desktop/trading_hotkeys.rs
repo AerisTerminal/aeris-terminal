@@ -316,6 +316,9 @@ impl TerminalApp {
 
     fn drawing_bracket_summary(&self, long: bool, cx: &App) -> Result<String, String> {
         let surface = self.active_surface().read(cx);
+        if surface.recording_replay_on() {
+            return Err(tr!(panels::RECORDING_REPLAY_NO_TRADING).to_string());
+        }
         if surface.bar_replay_on(cx) {
             let product = surface
                 .product
@@ -359,6 +362,9 @@ impl TerminalApp {
         let surface = self.active_surface();
         let surface = surface.read(cx);
         let trading = &surface.trading_pnl;
+        if hotkey != TradingHotkey::KillSwitch && surface.recording_replay_on() {
+            return Err(tr!(panels::RECORDING_REPLAY_NO_TRADING).to_string());
+        }
         if surface.bar_replay_on(cx) {
             return replay_hotkey_summary(hotkey, surface).map_err(str::to_string);
         }
@@ -427,6 +433,11 @@ impl TerminalApp {
 
     fn send_trading_hotkey(&self, hotkey: TradingHotkey, cx: &mut Context<Self>) {
         let surface = self.active_surface().clone();
+        // Checked at the key: a replay opened after the confirmation never trades.
+        if hotkey != TradingHotkey::KillSwitch && surface.read(cx).recording_replay_on() {
+            surface.read(cx).refuse_recording_replay_order();
+            return;
+        }
         if hotkey != TradingHotkey::KillSwitch && surface.read(cx).bar_replay_on(cx) {
             let quantity = self.trading_order_entry(cx).1;
             surface.update(cx, |surface, surface_cx| match hotkey {

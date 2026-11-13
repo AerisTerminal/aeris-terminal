@@ -10,8 +10,11 @@ fn every_registered_provider_has_a_complete_published_descriptor() {
             .find(|descriptor| descriptor.id == registration.id)
             .expect("registered provider has a published descriptor");
         assert_ne!(descriptor.display_name, "");
-        assert_ne!(descriptor.logo_key, "");
-        assert!(descriptor.symbol_browser);
+        // A local source is opened from the surface that owns its data, so it
+        // has no symbol browser or provider artwork; every network source has both.
+        let local = descriptor.connect == descriptors::ConnectMethod::Local;
+        assert_eq!(descriptor.logo_key.is_empty(), local);
+        assert_eq!(descriptor.symbol_browser, !local);
         assert_eq!(
             descriptor.autoload_catalog,
             registration.presentation.catalog_refresh_on_startup
@@ -292,7 +295,7 @@ fn registered_providers_declare_their_feed_level() {
 #[test]
 fn registered_provider_capabilities_match_presentations_and_streams() {
     let descriptors = BUILT_IN_PROVIDER_DESCRIPTORS;
-    assert_eq!(descriptors.len(), 2);
+    assert_eq!(descriptors.len(), 3);
     for descriptor in descriptors {
         let capabilities = descriptor.capabilities;
         assert_eq!(descriptor.presentation.id, descriptor.id);
@@ -327,6 +330,11 @@ fn registered_provider_capabilities_match_presentations_and_streams() {
         assert_eq!(
             capabilities.always_open,
             descriptor.id == HYPERLIQUID_DESCRIPTOR.id
+                || descriptor.id == RECORDING_REPLAY_DESCRIPTOR.id
+        );
+        assert_eq!(
+            capabilities.recovers_silence,
+            descriptor.id != RECORDING_REPLAY_DESCRIPTOR.id
         );
     }
     assert_eq!(

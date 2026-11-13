@@ -2177,6 +2177,13 @@ impl Coordinator<'_> {
             .wall_nanos()
             .map(|nanos| nanos.div_euclid(1_000_000));
         for (series, generation, last_progress, candle) in candidates {
+            if self
+                .providers
+                .descriptor(&series.provider_id)
+                .is_some_and(|descriptor| !descriptor.capabilities.recovers_silence)
+            {
+                continue;
+            }
             let provider_health = self
                 .engine
                 .provider_status(&series.provider_id)
