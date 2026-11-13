@@ -274,6 +274,20 @@ one_click_note = Le trading en un clic est activé : les raccourcis envoient imm
 confirm_note = Chaque raccourci demande une confirmation avant l'envoi.
 or = ou
 shortcuts_footer = Esc fermer
+shortcut_change = Modifier
+shortcut_clear = Retirer
+shortcut_reset = Réinitialiser
+shortcut_reset_all = Réinitialiser tous les raccourcis
+shortcut_not_set = Non défini
+shortcut_recording = Appuyez sur le nouveau raccourci, ou Esc pour annuler
+shortcut_taken = Déjà utilisé par {command}
+shortcut_system = Le système utilise ce raccourci
+shortcut_chart_key = Le graphique utilise cette touche
+shortcut_needs_modifier = Maintenez Ctrl ou Alt, ou utilisez une touche de fonction
+shortcut_unsupported = Cette touche ne peut pas servir de raccourci
+shortcut_change_aria = Modifier le raccourci de {command}
+shortcut_clear_aria = Retirer le raccourci de {command}
+shortcut_reset_aria = Rétablir le raccourci par défaut de {command}
 
 ## Écran de connexion
 sign_in_checking = Vérification de votre connexion enregistrée…

@@ -273,6 +273,20 @@ one_click_note = One-Click-Trading ist aktiv: Tastenkürzel senden sofort.
 confirm_note = Jedes Tastenkürzel fragt vor dem Senden nach einer Bestätigung.
 or = oder
 shortcuts_footer = Esc schließen
+shortcut_change = Ändern
+shortcut_clear = Entfernen
+shortcut_reset = Zurücksetzen
+shortcut_reset_all = Alle Tastenkürzel zurücksetzen
+shortcut_not_set = Nicht festgelegt
+shortcut_recording = Neues Tastenkürzel drücken oder Esc zum Abbrechen
+shortcut_taken = Bereits belegt durch {command}
+shortcut_system = Das System verwendet dieses Tastenkürzel
+shortcut_chart_key = Der Chart verwendet diese Taste
+shortcut_needs_modifier = Strg oder Alt gedrückt halten oder eine Funktionstaste verwenden
+shortcut_unsupported = Diese Taste kann kein Tastenkürzel sein
+shortcut_change_aria = Tastenkürzel für {command} ändern
+shortcut_clear_aria = Tastenkürzel für {command} entfernen
+shortcut_reset_aria = Standard-Tastenkürzel für {command} wiederherstellen
 
 ## Anmeldeseite
 sign_in_checking = Ihre gespeicherte Anmeldung wird geprüft…

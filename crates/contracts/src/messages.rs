@@ -348,6 +348,23 @@ pub struct WorkspaceChromeState {
     /// identity such as `user-2a`. Empty or any other text keeps the ticket's own bracket.
     #[prost(string, tag = "21")]
     pub order_template: String,
+    /// The user's changes to the default command shortcuts, at most one per command. A
+    /// command without an entry keeps its default keys.
+    #[prost(message, repeated, tag = "22")]
+    pub shortcut_overrides: Vec<WorkspaceShortcutOverrideState>,
+}
+
+/// One command whose shortcut the user changed.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceShortcutOverrideState {
+    /// The command's stable identifier, such as `buy_market`; unknown identifiers are skipped.
+    #[prost(string, tag = "1")]
+    pub command: String,
+    /// The chord that replaces the command's default keys, written `ctrl-alt-shift-<key>`
+    /// with GPUI key names. Empty leaves the command without a shortcut; a chord that does
+    /// not parse is skipped, so the command keeps its default.
+    #[prost(string, tag = "2")]
+    pub chord: String,
 }
 
 /// A window-relative logical position in the chrome preferences.

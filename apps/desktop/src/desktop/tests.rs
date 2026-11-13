@@ -12,7 +12,7 @@ use super::{
     SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
     TIMEFRAME_MENU_WIDTH, TimeframeMenuGroup, WatchlistDragState, WindowCommand,
     WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceMaximizeTransition,
-    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
+    bind_desktop_keys, bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
     catalog_rejection_message, chart_position_id, chart_price_fixed_point,
     chart_quantity_fixed_point, chart_status_detail, chart_surface_notice,
     chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
@@ -52,6 +52,7 @@ pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
     .expect("test trading service starts")
 }
 use aeris_design_system::ThemeColor;
+use aeris_desktop::command_registry::ShortcutOverrides;
 use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
@@ -1460,7 +1461,11 @@ mod timeframe_input {
         );
         let (view, cx) = cx.add_window_view(move |window, cx| {
             gpui_base::init(cx);
-            bind_desktop_keys(cx).expect("the registry shortcuts bind");
+            bind_desktop_keys(
+                &aeris_desktop::command_registry::ShortcutOverrides::default(),
+                cx,
+            )
+            .expect("the registry shortcuts bind");
             let terminal = terminal_root(
                 MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
                     product,
@@ -2117,6 +2122,137 @@ mod timeframe_input {
         assert!(!shortcuts_open(cx), "Escape closes the shortcuts list");
         cx.simulate_keystrokes("ctrl-shift-x");
         assert!(confirming(cx), "trading keys work again once it closes");
+    }
+
+    #[gpui::test]
+    fn a_rebound_trading_shortcut_runs_from_its_new_chord_and_text_keys_keep_working(
+        cx: &mut TestAppContext,
+    ) {
+        use aeris_desktop::command_registry::{
+            CommandId, ShortcutChord, ShortcutOverride, ShortcutOwner, ShortcutRefusal,
+        };
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        let confirming = |cx: &mut VisualTestContext| {
+            cx.read(|cx| terminal.read(cx).keyboard_trading.confirming())
+        };
+        let cancel_override = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                terminal
+                    .read(cx)
+                    .chrome
+                    .preferences()
+                    .shortcut_overrides
+                    .get(CommandId::CancelAll)
+            })
+        };
+
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.open_keyboard_shortcuts(window, cx);
+                terminal.record_shortcut(CommandId::CancelAll, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-b");
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert_eq!(
+                terminal.shortcut_editor.refusal(CommandId::CancelAll),
+                Some(ShortcutRefusal::Taken(ShortcutOwner::Command(
+                    CommandId::BuyMarket
+                ))),
+                "a chord another command holds is refused"
+            );
+            assert_eq!(
+                terminal.shortcut_editor.recording(),
+                Some(CommandId::CancelAll),
+                "a refused chord keeps recording"
+            );
+        });
+        assert!(!confirming(cx), "a recorded chord runs nothing");
+        cx.simulate_keystrokes("ctrl-alt-x");
+        let rebound = ShortcutChord::named("x").ctrl().alt();
+        assert_eq!(cancel_override(cx), Some(ShortcutOverride::Chord(rebound)));
+        assert!(!confirming(cx), "the recorded chord itself runs nothing");
+        cx.read(|cx| {
+            let terminal = terminal.read(cx);
+            assert_eq!(terminal.shortcut_editor.recording(), None);
+            assert!(
+                terminal.overlays.is_open(OverlayKind::KeyboardShortcuts),
+                "recording ends with the dialog still open"
+            );
+            assert_eq!(
+                terminal
+                    .chrome
+                    .preferences()
+                    .to_workspace_chrome()
+                    .shortcut_overrides,
+                [aeris_contracts::WorkspaceShortcutOverrideState {
+                    command: "cancel_all".to_string(),
+                    chord: "ctrl-alt-x".to_string(),
+                }],
+                "the change is saved with the workspace chrome"
+            );
+            assert_eq!(
+                terminal
+                    .active_surface()
+                    .read(cx)
+                    .chart_chrome
+                    .shortcut_overrides
+                    .get(CommandId::CancelAll),
+                Some(ShortcutOverride::Chord(rebound)),
+                "every pane's copy of the chrome carries the change"
+            );
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("ctrl-shift-x");
+        assert!(!confirming(cx), "the replaced chord no longer cancels");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("x").expect("key"),
+        });
+        cx.simulate_keystrokes("ctrl-alt-x");
+        assert!(confirming(cx), "the new chord asks to cancel every order");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("x").expect("key"),
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(!confirming(cx), "Escape cancels the confirmation");
+
+        assert_palette_opens_and_edits_text(&terminal, cx);
+    }
+
+    /// Ctrl+K opens the command palette, whose field types and deletes through the text
+    /// input's own key bindings.
+    fn assert_palette_opens_and_edits_text(
+        terminal: &Entity<TerminalApp>,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.simulate_keystrokes("ctrl-k");
+        assert!(
+            cx.read(|cx| terminal
+                .read(cx)
+                .overlays
+                .is_open(OverlayKind::CommandPalette)),
+            "an unchanged command keeps its shortcut"
+        );
+        cx.simulate_input("buyx");
+        cx.simulate_keystrokes("backspace");
+        let text = cx.read(|cx| {
+            terminal
+                .read(cx)
+                .overlays
+                .command_palette_input()
+                .read(cx)
+                .value()
+                .to_string()
+        });
+        assert_eq!(
+            text, "buy",
+            "the text field's editing keys survive the rebind"
+        );
     }
 
     #[gpui::test]
@@ -5201,7 +5337,7 @@ fn escape_exits_fullscreen_without_stealing_regular_escape() {
 #[gpui::test]
 fn ctrl_s_saves_the_layout_and_ctrl_shift_s_sells_at_market(cx: &mut gpui::TestAppContext) {
     let bindings = cx
-        .update(|cx| desktop_key_bindings(cx))
+        .update(|cx| desktop_key_bindings(&ShortcutOverrides::default(), cx))
         .expect("the registry shortcuts bind");
     let actions = |chord: &'static str| {
         let typed = [gpui::Keystroke::parse(chord).expect("chord")];
@@ -5224,7 +5360,7 @@ fn ctrl_s_saves_the_layout_and_ctrl_shift_s_sells_at_market(cx: &mut gpui::TestA
 #[gpui::test]
 fn every_registry_shortcut_binds_and_stays_off_the_chart_keys(cx: &mut gpui::TestAppContext) {
     let bindings = cx
-        .update(|cx| desktop_key_bindings(cx))
+        .update(|cx| desktop_key_bindings(&ShortcutOverrides::default(), cx))
         .expect("the registry shortcuts bind");
     let chord_count = aeris_desktop::command_registry::COMMANDS
         .iter()
@@ -5235,6 +5371,63 @@ fn every_registry_shortcut_binds_and_stays_off_the_chart_keys(cx: &mut gpui::Tes
         chord_count,
         "one binding per registry chord"
     );
+}
+
+#[test]
+fn exactly_the_commands_with_a_key_action_accept_a_shortcut() {
+    for id in aeris_desktop::command_registry::CommandId::ALL {
+        assert_eq!(
+            id.accepts_shortcut(),
+            super::command_key_action(id).is_some(),
+            "{id:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn rebinding_replaces_only_the_desktop_command_bindings(cx: &mut gpui::TestAppContext) {
+    use aeris_desktop::command_registry::{CommandId, ShortcutChord};
+    let flatten = ShortcutChord::named("f8");
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        let others = cx.key_bindings().borrow().bindings().len();
+        assert!(others > 0, "the text inputs bind their editing keys");
+        bind_desktop_keys(&ShortcutOverrides::default(), cx).expect("the defaults bind");
+        let overrides = ShortcutOverrides::default()
+            .bind(
+                CommandId::FlattenAccount,
+                flatten,
+                &aeris_chart_integration::chart_keystrokes(),
+            )
+            .expect("F8 is free")
+            .unbind(CommandId::KillSwitch);
+        bind_desktop_keys(&overrides, cx).expect("the overrides bind");
+        let commands = desktop_key_bindings(&overrides, cx)
+            .expect("the overrides bind")
+            .len();
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        assert_eq!(keymap.bindings().len(), others + commands);
+        let actions = |chord: &str| {
+            let typed =
+                [gpui::Keystroke::parse_with_os(chord, cx.platform_info().os).expect("chord")];
+            keymap
+                .bindings()
+                .filter(|binding| binding.match_keystrokes(&typed) == Some(false))
+                .map(|binding| binding.action().name())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            actions("f8"),
+            [gpui::Action::name(&super::TradingFlattenAccount)]
+        );
+        assert_eq!(actions("ctrl-shift-f"), Vec::<&str>::new());
+        assert_eq!(actions("ctrl-shift-k"), Vec::<&str>::new());
+        assert_eq!(
+            actions("ctrl-k"),
+            [gpui::Action::name(&super::OpenCommandPalette)]
+        );
+    });
 }
 
 #[test]

@@ -323,6 +323,7 @@ impl TerminalApp {
             keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
             provider_login: provider_login::ProviderLoginFlow::default(),
             chrome: AppChrome::new(init.chart_chrome),
+            shortcut_editor: keyboard_shortcuts::ShortcutEditor::default(),
         };
         terminal.post_workspace_restore_notice(&restore_outcome, cx);
         terminal

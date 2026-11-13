@@ -275,6 +275,20 @@ one_click_note = Торговля в один клик включена: соч�
 confirm_note = Каждое сочетание запрашивает подтверждение перед отправкой.
 or = или
 shortcuts_footer = Esc — закрыть
+shortcut_change = Изменить
+shortcut_clear = Убрать
+shortcut_reset = Сбросить
+shortcut_reset_all = Сбросить все сочетания
+shortcut_not_set = Не задано
+shortcut_recording = Нажмите новое сочетание или Esc для отмены
+shortcut_taken = Уже используется: {command}
+shortcut_system = Это сочетание использует система
+shortcut_chart_key = Эту клавишу использует график
+shortcut_needs_modifier = Удерживайте Ctrl или Alt либо используйте функциональную клавишу
+shortcut_unsupported = Эту клавишу нельзя назначить сочетанием
+shortcut_change_aria = Изменить сочетание для «{command}»
+shortcut_clear_aria = Убрать сочетание для «{command}»
+shortcut_reset_aria = Вернуть стандартное сочетание для «{command}»
 
 ## Окно входа
 sign_in_checking = Проверка сохранённого входа…

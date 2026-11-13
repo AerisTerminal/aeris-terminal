@@ -271,6 +271,20 @@ one_click_note = 一键交易已开启：快捷键会立即发送订单。
 confirm_note = 每个快捷键在发送前都会请求确认。
 or = 或
 shortcuts_footer = Esc 关闭
+shortcut_change = 更改
+shortcut_clear = 清除
+shortcut_reset = 重置
+shortcut_reset_all = 重置所有快捷键
+shortcut_not_set = 未设置
+shortcut_recording = 按下新的快捷键，或按 Esc 取消
+shortcut_taken = 已被 {command} 使用
+shortcut_system = 系统使用此快捷键
+shortcut_chart_key = 图表使用此按键
+shortcut_needs_modifier = 按住 Ctrl 或 Alt，或使用功能键
+shortcut_unsupported = 此按键不能用作快捷键
+shortcut_change_aria = 更改 {command} 的快捷键
+shortcut_clear_aria = 清除 {command} 的快捷键
+shortcut_reset_aria = 恢复 {command} 的默认快捷键
 
 ## 登录界面
 sign_in_checking = 正在检查已保存的登录…

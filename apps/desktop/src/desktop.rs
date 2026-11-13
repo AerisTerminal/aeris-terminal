@@ -5428,6 +5428,7 @@ struct TerminalApp {
     keyboard_trading: trading_hotkeys::KeyboardTrading,
     provider_login: provider_login::ProviderLoginFlow,
     chrome: AppChrome,
+    shortcut_editor: keyboard_shortcuts::ShortcutEditor,
 }
 
 fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {
@@ -6141,7 +6142,7 @@ fn mount_desktop(
     let chart_chrome = configured.chart_chrome;
     let workspace_notice = configured.workspace_notice;
     let restore_outcome = configured.restore_outcome;
-    if let Err(error) = bind_desktop_keys(cx) {
+    if let Err(error) = bind_desktop_keys(&chart_chrome.shortcut_overrides, cx) {
         diagnostic!("Aeris keyboard shortcuts are invalid: {error}");
         return None;
     }
@@ -6300,31 +6301,87 @@ fn command_key_action(
     })
 }
 
-/// Builds every desktop key binding from the command registry after checking it, and the
-/// workspace shortcuts, against the system shortcuts and the keys the chart consumes.
-fn desktop_key_bindings(cx: &App) -> Result<Vec<KeyBinding>, String> {
-    use aeris_desktop::command_registry::{COMMANDS, WORKSPACE_SHORTCUTS, validate_chords};
-    validate_chords(
-        COMMANDS,
-        WORKSPACE_SHORTCUTS,
-        &aeris_chart_integration::chart_keystrokes(),
-    )?;
+/// Why the desktop shortcuts could not become key bindings.
+#[derive(Debug)]
+enum DesktopKeyBindingError {
+    /// A chord cannot be bound beside the others, the system or the chart keys.
+    Conflict(aeris_desktop::command_registry::ShortcutConflict),
+    /// The registry lets a command take a shortcut that has no GPUI key action.
+    MissingAction(aeris_desktop::command_registry::CommandId),
+    Keystroke {
+        command: aeris_desktop::command_registry::CommandId,
+        error: gpui::InvalidKeystrokeError,
+    },
+}
+
+impl std::fmt::Display for DesktopKeyBindingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(conflict) => conflict.fmt(formatter),
+            Self::MissingAction(command) => {
+                write!(formatter, "{command:?} has a shortcut but no key action")
+            }
+            Self::Keystroke { command, error } => write!(formatter, "{command:?}: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DesktopKeyBindingError {}
+
+/// Builds the desktop command key bindings with `overrides` applied, after checking every
+/// command and workspace shortcut against the system shortcuts and the keys the chart consumes.
+fn desktop_key_bindings(
+    overrides: &aeris_desktop::command_registry::ShortcutOverrides,
+    cx: &App,
+) -> Result<Vec<KeyBinding>, DesktopKeyBindingError> {
+    use aeris_desktop::command_registry::CommandId;
+    overrides
+        .validate(&aeris_chart_integration::chart_keystrokes())
+        .map_err(DesktopKeyBindingError::Conflict)?;
     let mut bindings = Vec::new();
-    for spec in COMMANDS.iter().filter(|spec| !spec.chords.is_empty()) {
-        let action = command_key_action(spec.id)
-            .ok_or_else(|| format!("{} has a shortcut but no key action", spec.title))?;
-        for chord in spec.chords {
-            let binding = KeyBinding::load(chord, action.boxed_clone(), None, false, None, cx)
-                .map_err(|error| format!("{} chord {chord}: {error}", spec.title))?;
+    for command in CommandId::ALL {
+        let chords = overrides.chords(command);
+        if chords.is_empty() {
+            continue;
+        }
+        let action =
+            command_key_action(command).ok_or(DesktopKeyBindingError::MissingAction(command))?;
+        for chord in chords {
+            let binding =
+                KeyBinding::load(&chord.source(), action.boxed_clone(), None, false, None, cx)
+                    .map_err(|error| DesktopKeyBindingError::Keystroke { command, error })?;
             bindings.push(binding);
         }
     }
     Ok(bindings)
 }
 
-fn bind_desktop_keys(cx: &mut App) -> Result<(), String> {
-    let bindings = desktop_key_bindings(cx)?;
-    cx.bind_keys(bindings);
+/// Puts the desktop command bindings `overrides` gives into the GPUI keymap in place of the
+/// ones it holds. Every other binding, such as the text inputs' editing keys, is kept in its
+/// order. The keymap is unchanged when the bindings cannot be built.
+fn bind_desktop_keys(
+    overrides: &aeris_desktop::command_registry::ShortcutOverrides,
+    cx: &mut App,
+) -> Result<(), DesktopKeyBindingError> {
+    use aeris_desktop::command_registry::CommandId;
+    let bindings = desktop_key_bindings(overrides, cx)?;
+    let command_actions = CommandId::ALL
+        .into_iter()
+        .filter_map(command_key_action)
+        .collect::<Vec<_>>();
+    let kept = cx
+        .key_bindings()
+        .borrow()
+        .bindings()
+        .filter(|binding| {
+            !command_actions
+                .iter()
+                .any(|action| action.partial_eq(binding.action()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    cx.clear_key_bindings();
+    cx.bind_keys(kept.into_iter().chain(bindings));
     Ok(())
 }
 #[cfg(test)]

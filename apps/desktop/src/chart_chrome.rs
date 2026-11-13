@@ -1,3 +1,4 @@
+use crate::command_registry::ShortcutOverrides;
 use crate::language::LanguagePreference;
 use aeris_chart_integration::{
     BuiltinIndicator, ChartDrawingKind, ChartDrawingStamp, ChartIndicator, ChartIndicatorChrome,
@@ -390,6 +391,8 @@ pub struct ChartChromePreferences {
     /// The order template the order ticket attaches to its entries, by its trading owner
     /// number; `None` keeps the ticket's own bracket.
     pub order_template: Option<NonZeroU64>,
+    /// The user's changes to the default desktop command shortcuts.
+    pub shortcut_overrides: ShortcutOverrides,
 }
 
 /// The timeframes the user starred, a bitset over [`ChartInterval::ALL`] so the preferences
@@ -726,6 +729,7 @@ impl Default for ChartChromePreferences {
             timeframe_favorites: TimeframeFavorites::default(),
             indicator_favorites: IndicatorFavorites::default(),
             order_template: None,
+            shortcut_overrides: ShortcutOverrides::default(),
         }
     }
 }
@@ -770,6 +774,7 @@ impl ChartChromePreferences {
                 .order_template
                 .map(aeris_trading_runtime::order_template_id)
                 .unwrap_or_default(),
+            shortcut_overrides: self.shortcut_overrides.to_workspace(),
         }
     }
 
@@ -822,6 +827,10 @@ impl ChartChromePreferences {
         preferences.indicator_favorites = IndicatorFavorites::parse(&state.indicator_favorites);
         preferences.order_template =
             aeris_trading_runtime::order_template_key(&state.order_template);
+        preferences.shortcut_overrides = ShortcutOverrides::from_workspace(
+            &state.shortcut_overrides,
+            &aeris_chart_integration::chart_keystrokes(),
+        );
         preferences
     }
 }
@@ -944,6 +953,7 @@ mod tests {
         TradingShortcutMode, WindowFrame, chart_chrome_path, filter_indicator_specs,
         indicator_search_key, parse_chart_chrome_preferences,
     };
+    use crate::command_registry::ShortcutOverrides;
     use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
     use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
     use aeris_market_data::ChartInterval;
@@ -1185,6 +1195,7 @@ mod tests {
             timeframe_favorites: TimeframeFavorites::default(),
             indicator_favorites: IndicatorFavorites::default(),
             order_template: NonZeroU64::new(0x2a),
+            shortcut_overrides: ShortcutOverrides::default(),
         }
     }
 
@@ -1379,6 +1390,7 @@ mod tests {
                 timeframe_favorites: String::new(),
                 indicator_favorites: String::new(),
                 order_template: "user-2a".to_string(),
+                shortcut_overrides: Vec::new(),
             },
             "the document form keeps the legacy identifiers"
         );
@@ -1449,5 +1461,62 @@ mod tests {
                 "{foreign}"
             );
         }
+    }
+
+    #[test]
+    fn shortcut_overrides_round_trip_through_the_workspace_document() {
+        use crate::command_registry::{CommandId, ShortcutChord, ShortcutOverride};
+        use aeris_contracts::WorkspaceShortcutOverrideState;
+        let chart_keys = aeris_chart_integration::chart_keystrokes();
+        let defaults = ChartChromePreferences::default();
+        assert_eq!(
+            defaults.to_workspace_chrome().shortcut_overrides,
+            Vec::<WorkspaceShortcutOverrideState>::new()
+        );
+        let buy = ShortcutChord::named("f2").shift();
+        let overrides = defaults
+            .shortcut_overrides
+            .bind(CommandId::BuyMarket, buy, &chart_keys)
+            .expect("Shift+F2 is free")
+            .unbind(CommandId::KillSwitch);
+        let changed = ChartChromePreferences {
+            shortcut_overrides: overrides,
+            ..defaults
+        };
+        let state = changed.to_workspace_chrome();
+        assert_eq!(
+            state.shortcut_overrides,
+            [
+                WorkspaceShortcutOverrideState {
+                    command: "buy_market".to_string(),
+                    chord: "shift-f2".to_string(),
+                },
+                WorkspaceShortcutOverrideState {
+                    command: "kill_switch".to_string(),
+                    chord: String::new(),
+                },
+            ]
+        );
+        let decoded = <WorkspaceChromeState as prost::Message>::decode(
+            prost::Message::encode_to_vec(&state).as_slice(),
+        )
+        .expect("the chrome section decodes");
+        assert_eq!(decoded, state, "the overrides survive the saved document");
+        let restored = ChartChromePreferences::from_workspace_chrome(Some(&decoded));
+        assert_eq!(restored, changed);
+        assert_eq!(
+            restored.shortcut_overrides.get(CommandId::BuyMarket),
+            Some(ShortcutOverride::Chord(buy))
+        );
+        assert_eq!(
+            restored.shortcut_overrides.chords(CommandId::KillSwitch),
+            Vec::<ShortcutChord>::new()
+        );
+        assert_eq!(
+            ChartChromePreferences::from_workspace_chrome(Some(&WorkspaceChromeState::default()))
+                .shortcut_overrides,
+            defaults.shortcut_overrides,
+            "a document written before shortcut overrides keeps the default keys"
+        );
     }
 }

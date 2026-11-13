@@ -271,6 +271,20 @@ one_click_note = ワンクリック取引がオンです：ショートカット
 confirm_note = 各ショートカットは送信前に確認を求めます。
 or = または
 shortcuts_footer = Esc で閉じる
+shortcut_change = 変更
+shortcut_clear = 解除
+shortcut_reset = リセット
+shortcut_reset_all = すべてのショートカットをリセット
+shortcut_not_set = 未設定
+shortcut_recording = 新しいショートカットを押してください（Esc でキャンセル）
+shortcut_taken = {command} で使用中です
+shortcut_system = システムが使用するショートカットです
+shortcut_chart_key = チャートが使用するキーです
+shortcut_needs_modifier = Ctrl または Alt を押しながら押すか、ファンクションキーを使ってください
+shortcut_unsupported = このキーはショートカットにできません
+shortcut_change_aria = {command} のショートカットを変更
+shortcut_clear_aria = {command} のショートカットを解除
+shortcut_reset_aria = {command} の既定のショートカットに戻す
 
 ## サインイン画面
 sign_in_checking = 保存済みのサインインを確認しています…

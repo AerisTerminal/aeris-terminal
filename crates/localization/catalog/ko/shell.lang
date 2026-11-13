@@ -271,6 +271,20 @@ one_click_note = 원클릭 주문이 켜져 있습니다: 단축키를 누르면
 confirm_note = 각 단축키는 전송 전에 확인을 요청합니다.
 or = 또는
 shortcuts_footer = Esc 닫기
+shortcut_change = 변경
+shortcut_clear = 지우기
+shortcut_reset = 재설정
+shortcut_reset_all = 모든 단축키 재설정
+shortcut_not_set = 설정 안 됨
+shortcut_recording = 새 단축키를 누르거나 Esc로 취소하세요
+shortcut_taken = 이미 {command}에서 사용 중입니다
+shortcut_system = 시스템이 사용하는 단축키입니다
+shortcut_chart_key = 차트가 사용하는 키입니다
+shortcut_needs_modifier = Ctrl 또는 Alt를 누른 채로 누르거나 기능 키를 사용하세요
+shortcut_unsupported = 이 키는 단축키로 쓸 수 없습니다
+shortcut_change_aria = {command} 단축키 변경
+shortcut_clear_aria = {command} 단축키 지우기
+shortcut_reset_aria = {command} 기본 단축키로 되돌리기
 
 ## 로그인 화면
 sign_in_checking = 저장된 로그인 확인 중…

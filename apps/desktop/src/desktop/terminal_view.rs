@@ -431,6 +431,7 @@ impl TerminalApp {
                 self.overlays.command_palette_input(),
                 selection,
                 self.overlays.command_palette_message().map(str::to_string),
+                &self.chrome.preferences().shortcut_overrides,
                 &self.theme,
                 cx,
             )

@@ -273,6 +273,20 @@ one_click_note = El trading con un clic está activado: los atajos se envían al
 confirm_note = Cada atajo pide confirmación antes de enviarse.
 or = o
 shortcuts_footer = Esc cerrar
+shortcut_change = Cambiar
+shortcut_clear = Quitar
+shortcut_reset = Restablecer
+shortcut_reset_all = Restablecer todos los atajos
+shortcut_not_set = Sin asignar
+shortcut_recording = Pulsa el nuevo atajo o Esc para cancelar
+shortcut_taken = Ya lo usa {command}
+shortcut_system = El sistema usa este atajo
+shortcut_chart_key = El gráfico usa esta tecla
+shortcut_needs_modifier = Mantén Ctrl o Alt, o usa una tecla de función
+shortcut_unsupported = Esta tecla no puede ser un atajo
+shortcut_change_aria = Cambiar el atajo de {command}
+shortcut_clear_aria = Quitar el atajo de {command}
+shortcut_reset_aria = Restablecer el atajo predeterminado de {command}
 
 ## Pantalla de inicio de sesión
 sign_in_checking = Comprobando su sesión guardada…

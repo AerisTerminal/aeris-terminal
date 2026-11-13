@@ -273,6 +273,20 @@ one_click_note = One-click trading is on: shortcuts send at once.
 confirm_note = Each shortcut asks for confirmation before it sends.
 or = or
 shortcuts_footer = Esc close
+shortcut_change = Change
+shortcut_clear = Clear
+shortcut_reset = Reset
+shortcut_reset_all = Reset all shortcuts
+shortcut_not_set = Not set
+shortcut_recording = Press the new shortcut, or Esc to cancel
+shortcut_taken = Already used by {command}
+shortcut_system = The system uses this shortcut
+shortcut_chart_key = The chart uses this key
+shortcut_needs_modifier = Hold Ctrl or Alt, or use a function key
+shortcut_unsupported = This key cannot be a shortcut
+shortcut_change_aria = Change the shortcut for {command}
+shortcut_clear_aria = Remove the shortcut for {command}
+shortcut_reset_aria = Restore the default shortcut for {command}
 
 ## Sign-in gate
 sign_in_checking = Checking your saved sign-in…

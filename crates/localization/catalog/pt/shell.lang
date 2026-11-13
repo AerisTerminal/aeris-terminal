@@ -273,6 +273,20 @@ one_click_note = A negociação com um clique está ativa: os atalhos enviam na 
 confirm_note = Cada atalho pede confirmação antes de enviar.
 or = ou
 shortcuts_footer = Esc fechar
+shortcut_change = Alterar
+shortcut_clear = Remover
+shortcut_reset = Redefinir
+shortcut_reset_all = Redefinir todos os atalhos
+shortcut_not_set = Não definido
+shortcut_recording = Pressione o novo atalho ou Esc para cancelar
+shortcut_taken = Já usado por {command}
+shortcut_system = O sistema usa este atalho
+shortcut_chart_key = O gráfico usa esta tecla
+shortcut_needs_modifier = Segure Ctrl ou Alt, ou use uma tecla de função
+shortcut_unsupported = Esta tecla não pode ser um atalho
+shortcut_change_aria = Alterar o atalho de {command}
+shortcut_clear_aria = Remover o atalho de {command}
+shortcut_reset_aria = Restaurar o atalho padrão de {command}
 
 ## Tela de login
 sign_in_checking = Verificando seu login salvo…

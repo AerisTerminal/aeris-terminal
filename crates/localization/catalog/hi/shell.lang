@@ -273,6 +273,20 @@ one_click_note = वन-क्लिक ट्रेडिंग चालू �
 confirm_note = हर शॉर्टकट भेजने से पहले पुष्टि माँगता है।
 or = या
 shortcuts_footer = Esc बंद करें
+shortcut_change = बदलें
+shortcut_clear = हटाएँ
+shortcut_reset = रीसेट करें
+shortcut_reset_all = सभी शॉर्टकट रीसेट करें
+shortcut_not_set = सेट नहीं
+shortcut_recording = नया शॉर्टकट दबाएँ, या रद्द करने के लिए Esc
+shortcut_taken = {command} पहले से इसका उपयोग करता है
+shortcut_system = सिस्टम इस शॉर्टकट का उपयोग करता है
+shortcut_chart_key = चार्ट इस की का उपयोग करता है
+shortcut_needs_modifier = Ctrl या Alt दबाए रखें, या कोई फ़ंक्शन की उपयोग करें
+shortcut_unsupported = यह की शॉर्टकट नहीं बन सकती
+shortcut_change_aria = {command} का शॉर्टकट बदलें
+shortcut_clear_aria = {command} का शॉर्टकट हटाएँ
+shortcut_reset_aria = {command} का डिफ़ॉल्ट शॉर्टकट वापस लाएँ
 
 ## Sign-in gate
 sign_in_checking = आपका सेव किया गया साइन-इन जाँचा जा रहा है…

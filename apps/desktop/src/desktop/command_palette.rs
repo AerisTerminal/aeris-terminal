@@ -9,6 +9,7 @@ pub(super) fn command_palette_layer(
     input: &Entity<InputState>,
     selected: usize,
     message: Option<String>,
+    overrides: &command_registry::ShortcutOverrides,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
@@ -22,7 +23,10 @@ pub(super) fn command_palette_layer(
             terminal,
             spec.id,
             spec.title.get(),
-            spec.shortcut_label(),
+            overrides
+                .chords(spec.id)
+                .first()
+                .map(command_registry::ShortcutChord::label),
             index,
             index == selected,
             theme,
