@@ -1020,6 +1020,31 @@ impl Coordinator<'_> {
                 })
             })
     }
+    /// Whether an older page holds nothing before the retained first bar, as when a
+    /// provider repeats the bar at the range end. Installing it would clear the
+    /// confirmed-empty range and send the same request again, without end.
+    fn older_page_reaches_nothing_older(
+        &self,
+        series: &BarSeriesKey,
+        range: Option<HistoryRange>,
+        snapshot: &HistorySnapshot,
+    ) -> bool {
+        let Some(requested) = range else {
+            return false;
+        };
+        let Some(first_retained) = self.engine.series_segments(series).and_then(|segments| {
+            segments
+                .first()
+                .map(|first| first.exchange_timestamp_unix_nanos)
+        }) else {
+            return false;
+        };
+        requested.end_unix_nanos <= first_retained
+            && snapshot
+                .bars
+                .iter()
+                .all(|bar| bar.exchange_timestamp_unix_nanos >= first_retained)
+    }
     fn uncovered_history_range(
         &self,
         series: &BarSeriesKey,
@@ -1200,7 +1225,9 @@ impl Coordinator<'_> {
         else {
             return;
         };
-        if snapshot.bars.is_empty() {
+        if snapshot.bars.is_empty()
+            || self.older_page_reaches_nothing_older(series, range, &snapshot)
+        {
             self.handle_empty_history(ticket, generation, range, &snapshot);
             return;
         }

@@ -27,6 +27,8 @@ struct Observation {
     bars: Vec<MarketBar>,
     forming: bool,
     updates: u64,
+    snapshots: u64,
+    history_started: bool,
     closed_bars: u64,
     epoch: u64,
     sessions: u64,
@@ -47,6 +49,8 @@ impl Observation {
             bars: Vec::new(),
             forming: false,
             updates: 0,
+            snapshots: 0,
+            history_started: false,
             closed_bars: 0,
             epoch: 0,
             sessions: 0,
@@ -66,6 +70,8 @@ impl Observation {
         self.bars.clear();
         self.forming = false;
         self.updates = 0;
+        self.snapshots = 0;
+        self.history_started = false;
         self.closed_bars = 0;
     }
 
@@ -107,6 +113,14 @@ impl Observation {
                 }
                 self.bars = snapshot.bars.to_vec();
                 self.forming = snapshot.forming;
+                self.snapshots += 1;
+            }
+            MarketRuntimeEvent::DemandError(error)
+                if error.generation.0.get() == self.generation
+                    && error.scope
+                        == aeris_market_runtime::MarketDemandErrorScope::HistoryStart =>
+            {
+                self.history_started = true;
             }
             MarketRuntimeEvent::SeriesUpdate(update)
                 if update.generation.0.get() == self.generation =>
@@ -475,6 +489,63 @@ fn page_history(
             "interior_gaps":gaps}))
 }
 
+/// Scrolls a market whose whole history fits one page to before its listing. The
+/// provider has nothing older, so paging must stop at the start of history rather
+/// than ask for the same range again and spend the request budget.
+fn history_start_stops_paging(
+    service: &MarketService,
+    state: &mut Observation,
+    evidence: &mut Evidence,
+) -> ProbeResult<()> {
+    select(
+        service,
+        state,
+        "HYPE",
+        ChartInterval::Day1,
+        86_400,
+        evidence,
+    )?;
+    let first = state
+        .bars
+        .first()
+        .ok_or_else(|| ProbeError::Invariant("no history".to_string()))?
+        .exchange_timestamp_unix_nanos;
+    let last = state
+        .bars
+        .last()
+        .ok_or_else(|| ProbeError::Invariant("no history".to_string()))?
+        .exchange_timestamp_unix_nanos;
+    let day = 86_400 * 1_000_000_000_i64;
+    let viewport = Viewport::try_new(first - 2_000 * day, last)
+        .map_err(|error| ProbeError::Runtime(error.to_string()))?;
+    market(service.set_viewport(
+        CLIENT,
+        CONSUMER,
+        state.generation,
+        viewport.start_unix_nanos,
+        viewport.end_unix_nanos,
+    ))?;
+    state.until(service, Duration::from_secs(30), |current| {
+        current.history_started
+    })?;
+    let snapshots = state.snapshots;
+    let settle = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < settle {
+        state.pump(service)?;
+    }
+    let republished = state.snapshots - snapshots;
+    evidence.check(
+        "history_start_stops_paging",
+        republished == 0
+            && state
+                .bars
+                .first()
+                .is_some_and(|bar| bar.exchange_timestamp_unix_nanos == first),
+        json!({"bars":state.bars.len(),"snapshots_after_history_start":republished}),
+    )?;
+    select(service, state, "BTC", ChartInterval::Minute1, 60, evidence)
+}
+
 pub(super) fn run(
     service: &MarketService,
     options: &Options,
@@ -509,6 +580,7 @@ pub(super) fn run(
     quote_lease(service, &mut state, evidence)?;
     switch_without_reconnect(service, &mut state, evidence)?;
     page_history(service, &mut state, evidence)?;
+    history_start_stops_paging(service, &mut state, evidence)?;
 
     reconnect(service, &mut state, evidence)?;
     retry_schedule(service, &mut state, evidence)?;

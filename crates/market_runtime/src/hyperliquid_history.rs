@@ -154,8 +154,11 @@ fn history_window_for_range(
         return Err("Hyperliquid history range is empty".to_string());
     }
     let requested_start = range.start_unix_nanos.div_euclid(NANOS_PER_MILLI).max(0);
+    // The range is half-open but `candleSnapshot` includes a candle opening at
+    // `endTime`, so the last requested millisecond is the one before the end.
     let requested_end = range
         .end_unix_nanos
+        .saturating_sub(1)
         .div_euclid(NANOS_PER_MILLI)
         .min(now_millis);
     if requested_start >= requested_end {
@@ -224,6 +227,25 @@ mod tests {
         assert_eq!(confirmed.handoff_boundary_unix_nanos, None);
 
         assert!(snapshot_from_page(empty(), false).is_err());
+    }
+
+    #[test]
+    fn an_older_range_never_asks_for_the_candle_opening_at_its_end() {
+        let minute = 60_000;
+        let now = 10_000 * minute;
+        let first_retained = 9_000 * minute;
+        let (start, end) = history_window_for_range(
+            BarPeriod::time(60).expect("period"),
+            200,
+            HistoryRange {
+                start_unix_nanos: 8_900 * minute * NANOS_PER_MILLI,
+                end_unix_nanos: first_retained * NANOS_PER_MILLI,
+            },
+            now,
+        )
+        .expect("window");
+        assert_eq!(start, 8_900 * minute);
+        assert_eq!(end, first_retained - 1);
     }
 
     #[test]
