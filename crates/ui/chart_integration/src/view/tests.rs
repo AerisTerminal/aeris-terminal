@@ -2321,6 +2321,64 @@ fn last_value_cluster_uses_instrument_title_and_host_clock() {
 }
 
 #[test]
+fn the_symbol_name_label_toggle_works_on_a_footprint_chart() {
+    let mut chart = interactive_chart();
+    let last_micros = chart
+        .engine
+        .series_data(0)
+        .last()
+        .expect("replay has bars")
+        .time
+        .to_i64()
+        .expect("bar time fits i64")
+        * 1_000_000;
+    chart.set_chart_type(ChartType::Footprint);
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            OrderFlowAggregation::TimeMicros(60_000_000),
+            0.25,
+            &[order_flow_trade(1, last_micros, 2.0)],
+            OrderFlowTapeChange::ReplaceWindow,
+        )
+        .unwrap();
+    let measure =
+        |text: &str, _bold: bool| f64::from(u32::try_from(text.len()).unwrap_or(u32::MAX)) * 7.0;
+    let axis_texts = |chart: &mut AerisChartView| -> Vec<String> {
+        chart
+            .engine
+            .recompute_layout_with_measure(true, measure, measure);
+        chart
+            .engine
+            .build_axis_frame(80.0, measure, measure)
+            .labels
+            .into_iter()
+            .map(|label| label.text)
+            .collect()
+    };
+    let texts = axis_texts(&mut chart);
+    assert!(
+        texts.iter().any(|text| text == "AXF"),
+        "the footprint's price label lacks the symbol name: {texts:?}"
+    );
+
+    assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::ToggleTitle));
+    assert!(
+        !chart
+            .price_axis_menu_state(0, false)
+            .unwrap()
+            .enabled(PriceAxisMenuState::TITLE)
+    );
+    let texts = axis_texts(&mut chart);
+    assert!(!texts.iter().any(|text| text == "AXF"), "{texts:?}");
+
+    assert!(chart.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::ToggleTitle));
+    let texts = axis_texts(&mut chart);
+    assert!(texts.iter().any(|text| text == "AXF"), "{texts:?}");
+}
+
+#[test]
 fn the_symbol_legend_reports_a_load_only_when_it_turns_over() {
     let mut chart = AerisChartView::empty();
     assert!(!chart.asset_loading.is_present());
@@ -6420,13 +6478,10 @@ fn footprint_draws_only_bars_the_trade_tape_covers() {
             .len(),
         1
     );
-    let footprint = chart.footprint_series_id().expect("footprint series");
-    let footprint_entry = series_entry(&chart, footprint);
+    let price = series_entry(&chart, 0);
     assert!(
-        footprint_entry.last_value_visible
-            && footprint_entry.price_line_visible
-            && footprint_entry.countdown_visible,
-        "the footprint owns the price chrome over its whitespace price series"
+        price.last_value_visible && price.price_line_visible && price.countdown_visible,
+        "the footprint draws the price chrome of its whitespace price series"
     );
     let read_out = asset_legend_values(&chart);
     assert_eq!(

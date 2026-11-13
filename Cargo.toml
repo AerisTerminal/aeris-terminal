@@ -95,11 +95,11 @@ unicode-segmentation = "=1.13.3"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "c7bea343838f42b4c14151393e41f0bbe033c95e", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c7bea343838f42b4c14151393e41f0bbe033c95e", default-features = false, features = ["font-kit", "wayland", "x11"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3a6b8ffe32d0236e0b5b8bb7ad311774dd561f7e", version = "=0.3.0" }
-aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3a6b8ffe32d0236e0b5b8bb7ad311774dd561f7e", version = "=0.3.0" }
-aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3a6b8ffe32d0236e0b5b8bb7ad311774dd561f7e", version = "=0.3.0" }
-aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3a6b8ffe32d0236e0b5b8bb7ad311774dd561f7e", version = "=0.3.0", features = ["gpui-backend"] }
-aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3a6b8ffe32d0236e0b5b8bb7ad311774dd561f7e", version = "=0.3.0" }
+aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "754a6ce432343994d73b454cf7c9ac2c4c329f38", version = "=0.3.0" }
+aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "754a6ce432343994d73b454cf7c9ac2c4c329f38", version = "=0.3.0" }
+aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "754a6ce432343994d73b454cf7c9ac2c4c329f38", version = "=0.3.0" }
+aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "754a6ce432343994d73b454cf7c9ac2c4c329f38", version = "=0.3.0", features = ["gpui-backend"] }
+aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "754a6ce432343994d73b454cf7c9ac2c4c329f38", version = "=0.3.0" }
 
 [profile.release]
 codegen-units = 1
