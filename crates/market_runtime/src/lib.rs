@@ -461,6 +461,6 @@ pub use market_service::descriptors::{
 };
 pub use market_service::{
     BrokerVenueLink, MAXIMUM_RECENT_LADDER_TRADES, MarketService, MarketServiceStatus,
-    QuoteSubscription, RithmicLoginSummary, RithmicServer, built_in_provider_presentations,
-    published_provider_descriptors,
+    QuoteSubscription, RECENT_LADDER_TRADE_RETENTION_NANOS, RithmicLoginSummary, RithmicServer,
+    built_in_provider_presentations, published_provider_descriptors,
 };

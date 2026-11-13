@@ -675,6 +675,18 @@ the check.
   restarts the stream with a `Reset`. The desktop's `OrderFlowPresenter` applies the stream
   into a ring bounded at the runtime's `MAXIMUM_RECENT_LADDER_TRADES` and projects only the
   covering window or the appended suffix into the chart.
+- The order-book Buy, Sell, Delta and Volume columns and the imbalance highlight read only the
+  runtime's `OrderBookFrame.traded_volumes`, built from the retained ladder tape (at most
+  `RECENT_LADDER_TRADE_RETENTION_NANOS`, eight minutes, and `MAXIMUM_RECENT_LADDER_TRADES`
+  prints, restarted with each selection and provider session; prints without a known aggressor
+  are excluded). The menu labels those columns with that window ("up to 8 min", derived from the
+  constant) and the view keeps no trade state of its own. Imbalance compares buy and sell
+  aggressor volume at the same price (default 3:1); a large lot is a resting quantity at or above
+  the chosen whole-unit size. The volume profile's point of control is computed once per
+  installed frame and only while the Volume column is shown. Column bits in
+  `OrderBookColumnVisibility` are stable and never renumbered; the choices persist in
+  `WorkspacePaneState.order_book` (tag 15), and a pane without it opens with the defaults and
+  keeps its bytes.
 - Provider catalog controls and responses pass through one bounded `ProviderCatalogChannel`
   boundary; provider-specific command translation stays with each registered channel.
 - Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider

@@ -9,6 +9,12 @@ close_side_panel = 사이드 패널 닫기
 order_book_recenter = 현재 스프레드를 중심으로 호가창 정렬
 order_book_choose_columns = 호가창 열 선택
 order_book_column_not_offered = {column} · 이 제공자는 지원하지 않음
+order_book_trade_window = 최대 {minutes}분
+order_book_imbalance = 불균형
+order_book_imbalance_ratio = {ratio}:1
+order_book_large_lots = 대량 주문
+order_book_large_lot_minimum = >= {size}
+order_book_highlight_off = 끄기
 time_sales_no_prints = 체결 내역 없음
 time_sales_provider_no_trades = {provider}는 시세와 호가 깊이만 제공하며 개별 체결은 제공하지 않습니다.
 time_sales_any_size = 모든 수량

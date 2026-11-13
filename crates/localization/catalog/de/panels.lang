@@ -9,6 +9,12 @@ close_side_panel = Seitenpanel schließen
 order_book_recenter = Orderbuch auf den aktuellen Spread zentrieren
 order_book_choose_columns = Spalten des Orderbuchs wählen
 order_book_column_not_offered = {column} · von diesem Anbieter nicht angeboten
+order_book_trade_window = bis {minutes} Min.
+order_book_imbalance = Ungleichgewicht
+order_book_imbalance_ratio = {ratio}:1
+order_book_large_lots = Große Lots
+order_book_large_lot_minimum = >= {size}
+order_book_highlight_off = Aus
 time_sales_no_prints = Keine Trades
 time_sales_provider_no_trades = {provider} veröffentlicht Kurse und Markttiefe, aber keine einzelnen Trades.
 time_sales_any_size = Jede Größe

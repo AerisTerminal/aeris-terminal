@@ -9,6 +9,12 @@ close_side_panel = サイドパネルを閉じる
 order_book_recenter = 板を現在のスプレッドの中央に戻す
 order_book_choose_columns = 板の列を選択
 order_book_column_not_offered = {column} · このプロバイダーでは提供されていません
+order_book_trade_window = 最大{minutes}分
+order_book_imbalance = インバランス
+order_book_imbalance_ratio = {ratio}:1
+order_book_large_lots = 大口
+order_book_large_lot_minimum = >= {size}
+order_book_highlight_off = オフ
 time_sales_no_prints = 約定はありません
 time_sales_provider_no_trades = {provider} は気配と板情報を配信していますが、個々の約定は配信していません。
 time_sales_any_size = すべての数量

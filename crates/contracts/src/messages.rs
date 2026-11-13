@@ -494,6 +494,25 @@ pub struct WorkspacePaneState {
     /// Order-book share when both side-panel components are visible.
     #[prost(uint32, tag = "13")]
     pub side_panel_split_basis_points: u32,
+    /// The docked order book's chosen columns and highlights. Absent means the defaults:
+    /// documents written before it existed, and panes that never changed them, keep their bytes.
+    #[prost(message, optional, tag = "15")]
+    pub order_book: Option<WorkspaceOrderBookState>,
+}
+
+/// Durable presentation choices of one pane's docked order book.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceOrderBookState {
+    /// Chosen columns, shown while offered: bit 0 P/L, 1 bid, 2 sell trades, 3 price,
+    /// 4 buy trades, 5 ask, 6 orders, 7 queue, 8 delta, 9 volume.
+    #[prost(uint32, tag = "1")]
+    pub chosen_columns: u32,
+    /// Traded-volume imbalance highlight ratio N, read as N:1; 0 turns it off.
+    #[prost(uint32, tag = "2")]
+    pub imbalance_ratio: u32,
+    /// Resting size in whole instrument units from which a level is highlighted; 0 turns it off.
+    #[prost(uint32, tag = "3")]
+    pub large_lot_quantity: u32,
 }
 
 /// Durable chart state owned by one workspace pane.

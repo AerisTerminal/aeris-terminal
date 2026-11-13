@@ -6600,10 +6600,59 @@ impl WorkspaceSurface {
         column: OrderBookColumn,
         cx: &mut Context<Self>,
     ) {
-        self.order_book.update(cx, |order_book, order_book_cx| {
+        let changed = self.order_book.update(cx, |order_book, order_book_cx| {
+            let before = order_book.columns();
             order_book.toggle_column(column, order_book_cx);
+            order_book.columns() != before
+        });
+        if changed {
+            self.persistence.mark_dirty();
+        }
+        self.sync_order_book_demand(cx);
+    }
+
+    pub(super) fn cycle_order_book_imbalance_ratio(&mut self, cx: &mut Context<Self>) {
+        self.update_order_book_highlights(OrderBookHighlights::with_next_imbalance_ratio, cx);
+    }
+
+    pub(super) fn cycle_order_book_large_lots(&mut self, cx: &mut Context<Self>) {
+        self.update_order_book_highlights(OrderBookHighlights::with_next_large_lot_quantity, cx);
+    }
+
+    fn update_order_book_highlights(
+        &mut self,
+        change: impl FnOnce(OrderBookHighlights) -> OrderBookHighlights,
+        cx: &mut Context<Self>,
+    ) {
+        self.order_book.update(cx, |order_book, order_book_cx| {
+            let highlights = change(order_book.highlights());
+            order_book.set_highlights(highlights, order_book_cx);
+        });
+        self.persistence.mark_dirty();
+        cx.notify();
+    }
+
+    /// Applies the docked order book's saved columns and highlights.
+    pub(super) fn restore_order_book(
+        &mut self,
+        state: &WorkspaceOrderBookState,
+        cx: &mut Context<Self>,
+    ) {
+        let (chosen_columns, highlights) =
+            super::order_book_panel::restored_order_book_state(state);
+        self.order_book.update(cx, |order_book, order_book_cx| {
+            order_book.set_chosen_columns(chosen_columns, order_book_cx);
+            order_book.set_highlights(highlights, order_book_cx);
         });
         self.sync_order_book_demand(cx);
+    }
+
+    pub(super) fn workspace_order_book_state(&self, cx: &App) -> Option<WorkspaceOrderBookState> {
+        let order_book = self.order_book.read(cx);
+        super::order_book_panel::persisted_order_book_state(
+            order_book.columns(),
+            order_book.highlights(),
+        )
     }
 
     /// Opens, changes or releases the pane's order-book demand when its consumers changed

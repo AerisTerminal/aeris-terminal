@@ -133,6 +133,10 @@ const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 2_048;
 const LIVE_HANDOFF_HISTORY_BARS: usize = VIEWPORT_LIVE_TAIL_RESERVE + 1;
 pub const MAXIMUM_RECENT_LADDER_TRADES: usize = 65_536;
+/// The provider-clock age past which a retained print leaves the tape and its per-price
+/// aggressor volumes; together with `MAXIMUM_RECENT_LADDER_TRADES` it bounds the window
+/// every order-book traded-volume column reads.
+pub const RECENT_LADDER_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 

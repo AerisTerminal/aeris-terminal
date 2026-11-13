@@ -6919,3 +6919,62 @@ fn descriptor_labels_render_without_desktop_mapping(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn pane_harness_order_book_columns_and_highlights_survive_save_and_restore(
+    cx: &mut TestAppContext,
+) {
+    use prost::Message as _;
+
+    let (harness, cx) = PaneHarness::open(cx);
+    cx.read(|cx| {
+        assert_eq!(
+            harness.pane.read(cx).workspace_order_book_state(cx),
+            None,
+            "a pane that never changed its book persists nothing new"
+        );
+    });
+    harness.pane.update(cx, |pane, cx| {
+        pane.persistence.discard_dirty();
+        pane.toggle_order_book_column(OrderBookColumn::Delta, cx);
+        assert!(pane.persistence.is_dirty(), "a column choice is saved");
+        pane.persistence.discard_dirty();
+        pane.toggle_order_book_column(OrderBookColumn::Volume, cx);
+        pane.cycle_order_book_imbalance_ratio(cx);
+        pane.cycle_order_book_large_lots(cx);
+        assert!(pane.persistence.is_dirty(), "a highlight choice is saved");
+    });
+    let saved = cx
+        .read(|cx| harness.pane.read(cx).workspace_order_book_state(cx))
+        .expect("changed choices persist");
+    assert_eq!(
+        saved,
+        WorkspaceOrderBookState {
+            chosen_columns: 0b11_0011_1110,
+            imbalance_ratio: 4,
+            large_lot_quantity: 1,
+        }
+    );
+    let decoded = WorkspaceOrderBookState::decode(saved.encode_to_vec().as_slice())
+        .expect("order-book persistence decodes");
+    let (reopened, cx) = PaneHarness::open_with_restore(
+        WorkspaceSurfaceRestore {
+            order_book: Some(decoded),
+            ..WorkspaceSurfaceRestore::default()
+        },
+        cx,
+    );
+    cx.read(|cx| {
+        let pane = reopened.pane.read(cx);
+        let order_book = pane.order_book.read(cx);
+        assert!(order_book.columns().is_visible(OrderBookColumn::Delta));
+        assert!(order_book.columns().is_visible(OrderBookColumn::Volume));
+        assert_eq!(order_book.highlights().imbalance_ratio(), Some(4));
+        assert_eq!(order_book.highlights().large_lot_quantity(), Some(1));
+        assert_eq!(pane.workspace_order_book_state(cx), Some(saved));
+        assert!(
+            !pane.persistence.is_dirty(),
+            "applying the saved choices is not a change"
+        );
+    });
+}

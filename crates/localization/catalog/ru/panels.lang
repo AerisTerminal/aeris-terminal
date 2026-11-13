@@ -10,6 +10,12 @@ close_side_panel = Закрыть боковую панель
 order_book_recenter = Центрировать стакан на текущем спреде
 order_book_choose_columns = Выбрать столбцы стакана
 order_book_column_not_offered = {column} · не поддерживается этим провайдером
+order_book_trade_window = до {minutes} мин
+order_book_imbalance = Дисбаланс
+order_book_imbalance_ratio = {ratio}:1
+order_book_large_lots = Крупные лоты
+order_book_large_lot_minimum = >= {size}
+order_book_highlight_off = Выкл.
 time_sales_no_prints = Нет сделок
 time_sales_provider_no_trades = {provider} публикует котировки и стакан, но не отдельные сделки.
 time_sales_any_size = Любой размер

@@ -9,6 +9,12 @@ close_side_panel = 关闭侧边面板
 order_book_recenter = 将订单簿居中到当前价差
 order_book_choose_columns = 选择订单簿列
 order_book_column_not_offered = {column} · 此数据源不提供
+order_book_trade_window = 最多 {minutes} 分钟
+order_book_imbalance = 失衡
+order_book_imbalance_ratio = {ratio}:1
+order_book_large_lots = 大单
+order_book_large_lot_minimum = >= {size}
+order_book_highlight_off = 关闭
 time_sales_no_prints = 暂无成交记录
 time_sales_provider_no_trades = {provider} 仅发布报价和深度，不提供逐笔成交。
 time_sales_any_size = 任意数量

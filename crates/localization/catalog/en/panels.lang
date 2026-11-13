@@ -9,6 +9,12 @@ close_side_panel = Close side panel
 order_book_recenter = Center order book on the current spread
 order_book_choose_columns = Choose order-book columns
 order_book_column_not_offered = {column} · not offered by this provider
+order_book_trade_window = up to {minutes} min
+order_book_imbalance = Imbalance
+order_book_imbalance_ratio = {ratio}:1
+order_book_large_lots = Large lots
+order_book_large_lot_minimum = >= {size}
+order_book_highlight_off = Off
 time_sales_no_prints = No trade prints
 time_sales_provider_no_trades = {provider} publishes quotes and depth, not individual trades.
 time_sales_any_size = Any size

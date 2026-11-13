@@ -18,7 +18,7 @@ use gpui::{
 };
 #[cfg(test)]
 use std::cmp::Ordering;
-use std::{sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 const HEADER_HEIGHT: f32 = 28.0;
 /// The Level 1 note above the column labels for top-of-book-only providers.
@@ -113,6 +113,8 @@ const TRADE_WIDTH: f32 = 0.15;
 const PRICE_WIDTH: f32 = 0.20;
 const ORDERS_WIDTH: f32 = 0.15;
 const QUEUE_WIDTH: f32 = 0.30;
+const DELTA_WIDTH: f32 = 0.15;
+const VOLUME_WIDTH: f32 = 0.20;
 /// A queue cell lists at most this many leading orders; the rest show as a count.
 const MAXIMUM_QUEUE_CELL_ORDERS: usize = 12;
 
@@ -140,6 +142,12 @@ pub enum OrderBookColumn {
     Orders,
     /// The individual resting orders at each price in queue-priority order.
     Queue,
+    /// Buy-aggressor minus sell-aggressor volume traded at each price over the
+    /// runtime's retained tape (`OrderBookFrame::traded_volumes`).
+    Delta,
+    /// Total aggressor volume traded at each price over the same retained tape,
+    /// drawn as a profile with its point of control marked.
+    Volume,
 }
 
 /// Provider connectivity shown independently from the last valid book frame.
@@ -151,13 +159,15 @@ pub enum OrderBookConnectionState {
 }
 
 impl OrderBookColumn {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::ProfitLoss,
         Self::Bid,
         Self::SellTrades,
         Self::Price,
         Self::BuyTrades,
         Self::Ask,
+        Self::Delta,
+        Self::Volume,
         Self::Orders,
         Self::Queue,
     ];
@@ -173,6 +183,8 @@ impl OrderBookColumn {
             Self::Ask => tr!(chart_ui::BOOK_COLUMN_ASK),
             Self::Orders => tr!(chart_ui::BOOK_COLUMN_ORDERS),
             Self::Queue => tr!(chart_ui::BOOK_COLUMN_QUEUE),
+            Self::Delta => tr!(chart_ui::BOOK_COLUMN_DELTA),
+            Self::Volume => tr!(chart_ui::BOOK_COLUMN_VOLUME),
         }
     }
 
@@ -184,10 +196,13 @@ impl OrderBookColumn {
             Self::Price => PRICE_WIDTH,
             Self::Orders => ORDERS_WIDTH,
             Self::Queue => QUEUE_WIDTH,
+            Self::Delta => DELTA_WIDTH,
+            Self::Volume => VOLUME_WIDTH,
         }
     }
 
-    const fn bit(self) -> u8 {
+    /// The column's bit in persisted column choices; never renumber a bit.
+    const fn bit(self) -> u16 {
         match self {
             Self::ProfitLoss => 1 << 0,
             Self::Bid => 1 << 1,
@@ -197,7 +212,19 @@ impl OrderBookColumn {
             Self::Ask => 1 << 5,
             Self::Orders => 1 << 6,
             Self::Queue => 1 << 7,
+            Self::Delta => 1 << 8,
+            Self::Volume => 1 << 9,
         }
+    }
+
+    const fn all_bits() -> u16 {
+        let mut bits = 0;
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            bits |= Self::ALL[index].bit();
+            index += 1;
+        }
+        bits
     }
 }
 
@@ -206,8 +233,8 @@ impl OrderBookColumn {
 /// streams individual resting orders.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OrderBookColumnVisibility {
-    visible: u8,
-    offered: u8,
+    visible: u16,
+    offered: u16,
 }
 
 impl Default for OrderBookColumnVisibility {
@@ -232,6 +259,22 @@ impl OrderBookColumnVisibility {
     #[must_use]
     pub const fn is_offered(self, column: OrderBookColumn) -> bool {
         self.offered & column.bit() != 0
+    }
+
+    /// The trader's column choices, including a chosen column not offered right now, as
+    /// the stable bits a workspace persists.
+    #[must_use]
+    pub const fn chosen_bits(self) -> u16 {
+        self.visible
+    }
+
+    /// Restores persisted column choices; bits of no known column are dropped.
+    #[must_use]
+    pub const fn with_chosen_bits(self, bits: u16) -> Self {
+        Self {
+            visible: bits & OrderBookColumn::all_bits(),
+            offered: self.offered,
+        }
     }
 
     fn toggle(&mut self, column: OrderBookColumn) -> bool {
@@ -269,6 +312,203 @@ impl OrderBookColumnVisibility {
     }
 }
 
+/// Trader-chosen highlights on the depth ladder.
+///
+/// The imbalance highlight compares the volume bought (lifting the ask) with the
+/// volume sold (hitting the bid) at the same ladder price over the runtime's
+/// retained tape, the same `OrderBookFrame::traded_volumes` the Buy, Sell, Delta
+/// and Volume columns read: when one side traded at least `ratio` times the
+/// other, that side's trade cell is outlined. A price that traded on one side
+/// only is not an imbalance. The large-lot highlight outlines a resting bid or
+/// ask whose size is at least the threshold in whole instrument units.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrderBookHighlights {
+    imbalance_ratio: Option<u32>,
+    large_lot_quantity: Option<u32>,
+}
+
+impl Default for OrderBookHighlights {
+    fn default() -> Self {
+        Self {
+            imbalance_ratio: Some(Self::DEFAULT_IMBALANCE_RATIO),
+            large_lot_quantity: None,
+        }
+    }
+}
+
+impl OrderBookHighlights {
+    /// The offered imbalance ratios, each read as `ratio`:1.
+    pub const IMBALANCE_RATIOS: [u32; 4] = [2, 3, 4, 5];
+    pub const DEFAULT_IMBALANCE_RATIO: u32 = 3;
+    /// The offered large-lot thresholds in whole instrument units.
+    pub const LARGE_LOT_QUANTITIES: [u32; 9] = [1, 5, 10, 25, 50, 100, 250, 500, 1_000];
+
+    /// Highlights from offered choices (`None` turns one off); a value that is not
+    /// offered yields `None`.
+    #[must_use]
+    pub fn from_choices(
+        imbalance_ratio: Option<u32>,
+        large_lot_quantity: Option<u32>,
+    ) -> Option<Self> {
+        let offered = |value: Option<u32>, choices: &[u32]| {
+            value.is_none_or(|value| choices.contains(&value))
+        };
+        (offered(imbalance_ratio, &Self::IMBALANCE_RATIOS)
+            && offered(large_lot_quantity, &Self::LARGE_LOT_QUANTITIES))
+        .then_some(Self {
+            imbalance_ratio,
+            large_lot_quantity,
+        })
+    }
+
+    #[must_use]
+    pub const fn imbalance_ratio(self) -> Option<u32> {
+        self.imbalance_ratio
+    }
+
+    #[must_use]
+    pub const fn large_lot_quantity(self) -> Option<u32> {
+        self.large_lot_quantity
+    }
+
+    /// The next offered ratio, then off, then the smallest ratio again.
+    #[must_use]
+    pub fn with_next_imbalance_ratio(self) -> Self {
+        Self {
+            imbalance_ratio: next_choice(self.imbalance_ratio, &Self::IMBALANCE_RATIOS),
+            ..self
+        }
+    }
+
+    /// The next offered threshold, then off, then the smallest threshold again.
+    #[must_use]
+    pub fn with_next_large_lot_quantity(self) -> Self {
+        Self {
+            large_lot_quantity: next_choice(self.large_lot_quantity, &Self::LARGE_LOT_QUANTITIES),
+            ..self
+        }
+    }
+}
+
+fn next_choice(current: Option<u32>, choices: &[u32]) -> Option<u32> {
+    let next = current.map_or(0, |value| {
+        choices
+            .iter()
+            .position(|choice| *choice == value)
+            .map_or(0, |index| index + 1)
+    });
+    choices.get(next).copied()
+}
+
+/// The side whose aggressors dominated the volume traded at one price.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TradeImbalance {
+    Buyers,
+    Sellers,
+}
+
+fn trade_imbalance(volumes: AggressorTradeVolumes, ratio: Option<u32>) -> Option<TradeImbalance> {
+    let ratio = i128::from(ratio?);
+    if volumes.buy <= 0 || volumes.sell <= 0 {
+        return None;
+    }
+    let buy = i128::from(volumes.buy);
+    let sell = i128::from(volumes.sell);
+    if buy >= sell * ratio {
+        Some(TradeImbalance::Buyers)
+    } else if sell >= buy * ratio {
+        Some(TradeImbalance::Sellers)
+    } else {
+        None
+    }
+}
+
+fn is_large_lot(quantity: Option<i64>, quantity_scale: u8, threshold: Option<u32>) -> bool {
+    let (Some(quantity), Some(threshold)) = (quantity, threshold) else {
+        return false;
+    };
+    10_i128
+        .checked_pow(u32::from(quantity_scale))
+        .and_then(|unit| unit.checked_mul(i128::from(threshold)))
+        .is_some_and(|minimum| i128::from(quantity) >= minimum)
+}
+
+/// Buy-aggressor minus sell-aggressor volume, the Delta column's value.
+const fn price_delta(volumes: AggressorTradeVolumes) -> i64 {
+    volumes.buy.saturating_sub(volumes.sell)
+}
+
+const fn price_volume(volumes: AggressorTradeVolumes) -> i64 {
+    volumes.buy.saturating_add(volumes.sell)
+}
+
+/// The ladder row holding the most traded volume of the retained tape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VolumeProfilePeak {
+    price: i64,
+    total: i64,
+}
+
+/// The point of control on the rows the ladder shows: price-grid rows group volume
+/// exactly as `grouped_trade_volumes_at_price` does, and the real-level ladder reads
+/// each exact price.
+fn volume_profile_peak(frame: &OrderBookFrame) -> Option<VolumeProfilePeak> {
+    let tick = price_grid_layout(frame).map_or(1, |grid| grid.tick);
+    grouped_volume_peak(&frame.traded_volumes, tick)
+}
+
+/// Sells group down and buys group up to their row. Both projections stay in
+/// ascending row order, so one merge visits each row once; a tie keeps the lower price.
+fn grouped_volume_peak(
+    traded_volumes: &BTreeMap<i64, AggressorTradeVolumes>,
+    tick: i64,
+) -> Option<VolumeProfilePeak> {
+    let mut sells = traded_volumes
+        .iter()
+        .filter(|(_, volumes)| volumes.sell > 0)
+        .filter_map(|(price, volumes)| Some((floor_price_to_tick(*price, tick)?, volumes.sell)))
+        .peekable();
+    let mut buys = traded_volumes
+        .iter()
+        .filter(|(_, volumes)| volumes.buy > 0)
+        .filter_map(|(price, volumes)| Some((ceil_price_to_tick(*price, tick)?, volumes.buy)))
+        .peekable();
+    let mut peak: Option<VolumeProfilePeak> = None;
+    let mut row: Option<VolumeProfilePeak> = None;
+    loop {
+        let sell_first = match (sells.peek(), buys.peek()) {
+            (Some(sell), Some(buy)) => sell.0 <= buy.0,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        let next = if sell_first {
+            sells.next()
+        } else {
+            buys.next()
+        };
+        let Some((price, volume)) = next else {
+            break;
+        };
+        if let Some(current) = row.as_mut().filter(|current| current.price == price) {
+            current.total = current.total.saturating_add(volume);
+        } else if let Some(finished) = row.replace(VolumeProfilePeak {
+            price,
+            total: volume,
+        }) {
+            peak = Some(higher_peak(peak, finished));
+        }
+    }
+    row.map_or(peak, |finished| Some(higher_peak(peak, finished)))
+}
+
+fn higher_peak(peak: Option<VolumeProfilePeak>, row: VolumeProfilePeak) -> VolumeProfilePeak {
+    match peak {
+        Some(peak) if peak.total >= row.total => peak,
+        _ => row,
+    }
+}
+
 /// Flush, square-edged GPUI view for one immutable read-only Order Book frame.
 pub struct ReadOnlyOrderBookView {
     frame: Option<Arc<OrderBookFrame>>,
@@ -280,6 +520,9 @@ pub struct ReadOnlyOrderBookView {
     ladder_scroll: UniformListScrollHandle,
     follow_center: bool,
     columns: OrderBookColumnVisibility,
+    highlights: OrderBookHighlights,
+    /// Computed once per installed frame, and only while the Volume column shows.
+    volume_peak: Option<VolumeProfilePeak>,
     render_metrics: OrderBookRenderMetrics,
 }
 
@@ -299,6 +542,8 @@ impl ReadOnlyOrderBookView {
             ladder_scroll: UniformListScrollHandle::new(),
             follow_center: true,
             columns: OrderBookColumnVisibility::default(),
+            highlights: OrderBookHighlights::default(),
+            volume_peak: None,
             render_metrics: OrderBookRenderMetrics::default(),
         }
     }
@@ -343,8 +588,39 @@ impl ReadOnlyOrderBookView {
 
     pub fn toggle_column(&mut self, column: OrderBookColumn, cx: &mut Context<Self>) {
         if self.columns.toggle(column) {
+            self.refresh_volume_peak();
             cx.notify();
         }
+    }
+
+    /// Restores persisted column choices (`OrderBookColumnVisibility::chosen_bits`).
+    pub fn set_chosen_columns(&mut self, bits: u16, cx: &mut Context<Self>) {
+        let columns = self.columns.with_chosen_bits(bits);
+        if self.columns != columns {
+            self.columns = columns;
+            self.refresh_volume_peak();
+            cx.notify();
+        }
+    }
+
+    #[must_use]
+    pub const fn highlights(&self) -> OrderBookHighlights {
+        self.highlights
+    }
+
+    pub fn set_highlights(&mut self, highlights: OrderBookHighlights, cx: &mut Context<Self>) {
+        if self.highlights != highlights {
+            self.highlights = highlights;
+            cx.notify();
+        }
+    }
+
+    fn refresh_volume_peak(&mut self) {
+        self.volume_peak = if self.columns.is_visible(OrderBookColumn::Volume) {
+            self.frame.as_deref().and_then(volume_profile_peak)
+        } else {
+            None
+        };
     }
 
     /// Offers the queue column while the selected provider streams resting orders.
@@ -409,6 +685,7 @@ impl ReadOnlyOrderBookView {
     }
 
     fn discard_frames(&mut self) -> bool {
+        self.volume_peak = None;
         self.frame.take().is_some()
     }
 
@@ -442,6 +719,7 @@ impl ReadOnlyOrderBookView {
             .then(|| ladder_recenter_index(frame.as_ref()))
             .flatten();
         self.frame = Some(frame);
+        self.refresh_volume_peak();
         self.unavailable = false;
         if let Some(index) = recenter_index {
             self.ladder_scroll
@@ -556,6 +834,8 @@ impl Render for ReadOnlyOrderBookView {
                             order_book: &order_book,
                             working_orders: &working_orders,
                             position_marker: position_marker.as_ref(),
+                            highlights: self.highlights,
+                            volume_peak: self.volume_peak,
                         },
                     )),
             );
@@ -705,6 +985,8 @@ fn render_virtualized_ladder_list(
     let fallback_scroll_order_book = interaction.order_book.clone();
     let list_working_orders = interaction.working_orders.to_vec();
     let list_position_marker = interaction.position_marker.cloned();
+    let highlights = interaction.highlights;
+    let volume_peak = interaction.volume_peak;
     if let Some(grid) = price_grid_layout(frame.as_ref()) {
         return uniform_list(
             "read_only_order_book_ladder",
@@ -728,6 +1010,8 @@ fn render_virtualized_ladder_list(
                                 order_book: &list_order_book,
                                 working_orders: &list_working_orders,
                                 position_marker: list_position_marker.as_ref(),
+                                highlights,
+                                volume_peak,
                             },
                         )
                     })
@@ -767,6 +1051,8 @@ fn render_virtualized_ladder_list(
                             order_book: &list_order_book,
                             working_orders: &list_working_orders,
                             position_marker: list_position_marker.as_ref(),
+                            highlights,
+                            volume_peak,
                         },
                     )
                 })
@@ -1453,6 +1739,8 @@ struct LadderInteraction<'a> {
     order_book: &'a Entity<ReadOnlyOrderBookView>,
     working_orders: &'a [OrderBookWorkingOrder],
     position_marker: Option<&'a OrderBookPositionMarker>,
+    highlights: OrderBookHighlights,
+    volume_peak: Option<VolumeProfilePeak>,
 }
 
 #[derive(Clone)]
@@ -1494,14 +1782,25 @@ enum CellAlignment {
     Right,
 }
 
+/// One row's aggressor volumes with what the traded-volume columns need to draw them.
+#[derive(Clone, Copy)]
+struct TradedRow<'a> {
+    price: i64,
+    volumes: AggressorTradeVolumes,
+    quantity_scale: u8,
+    maximum_trade_quantity: i64,
+    highlights: OrderBookHighlights,
+    volume_peak: Option<VolumeProfilePeak>,
+    theme: &'a AerisTheme,
+}
+
 #[derive(Clone)]
 struct LevelCellContext<'a> {
     columns: OrderBookColumnVisibility,
     price_color: ThemeColor,
     theme: &'a AerisTheme,
     maximum_quantity: i64,
-    maximum_trade_quantity: i64,
-    trade_volumes: AggressorTradeVolumes,
+    traded: TradedRow<'a>,
     quantity_scale: u8,
     price_scale: u8,
     working_order: Option<&'a OrderBookWorkingOrder>,
@@ -1575,8 +1874,15 @@ fn render_level_row(
         price_color: appearance.text,
         theme,
         maximum_quantity: stats.maximum_quantity,
-        maximum_trade_quantity: stats.maximum_trade_quantity,
-        trade_volumes,
+        traded: TradedRow {
+            price: level.price,
+            volumes: trade_volumes,
+            quantity_scale: frame.quantity_scale,
+            maximum_trade_quantity: stats.maximum_trade_quantity,
+            highlights: interaction.highlights,
+            volume_peak: interaction.volume_peak,
+            theme,
+        },
         quantity_scale: frame.quantity_scale,
         price_scale: frame.price_scale,
         working_order,
@@ -1711,12 +2017,19 @@ fn render_empty_price_tick(
                         price_scale,
                         price_color: appearance.text,
                         quantity_scale,
-                        trade_volumes,
+                        traded: TradedRow {
+                            price,
+                            volumes: trade_volumes,
+                            quantity_scale,
+                            maximum_trade_quantity: stats.maximum_trade_quantity,
+                            highlights: interaction.highlights,
+                            volume_peak: interaction.volume_peak,
+                            theme,
+                        },
                         working_order,
                         queue: order_queue_at(frame, side, price),
                         click_side,
                         interaction,
-                        maximum_trade_quantity: stats.maximum_trade_quantity,
                     })
                 }),
         )
@@ -1757,12 +2070,11 @@ struct EmptyPriceCellContext<'a> {
     price_scale: u8,
     price_color: ThemeColor,
     quantity_scale: u8,
-    trade_volumes: AggressorTradeVolumes,
+    traded: TradedRow<'a>,
     working_order: Option<&'a OrderBookWorkingOrder>,
     queue: Option<&'a OrderQueueLevel>,
     click_side: OrderBookLevelSide,
     interaction: LadderInteraction<'a>,
-    maximum_trade_quantity: i64,
 }
 
 fn render_empty_price_cell(context: &EmptyPriceCellContext<'_>) -> AnyElement {
@@ -1774,24 +2086,10 @@ fn render_empty_price_cell(context: &EmptyPriceCellContext<'_>) -> AnyElement {
             .text_color(gpui_color(context.price_color))
             .child(grouped_fixed_point_text(context.price, context.price_scale))
             .into_any_element(),
-        OrderBookColumn::SellTrades => trade_volume_cell(
-            width,
-            context.trade_volumes.sell,
-            context.quantity_scale,
-            order_book_side_appearance(context.interaction.theme, BookColumnSide::Ask),
-            true,
-            context.maximum_trade_quantity,
-        )
-        .into_any_element(),
-        OrderBookColumn::BuyTrades => trade_volume_cell(
-            width,
-            context.trade_volumes.buy,
-            context.quantity_scale,
-            order_book_side_appearance(context.interaction.theme, BookColumnSide::Bid),
-            false,
-            context.maximum_trade_quantity,
-        )
-        .into_any_element(),
+        OrderBookColumn::SellTrades => sell_trades_cell(width, context.traded),
+        OrderBookColumn::BuyTrades => buy_trades_cell(width, context.traded),
+        OrderBookColumn::Delta => delta_cell(width, context.traded),
+        OrderBookColumn::Volume => volume_cell(width, context.traded),
         OrderBookColumn::Orders => working_order_cell(
             width,
             context.working_order,
@@ -1851,46 +2149,28 @@ fn render_level_cell(
             context.theme,
         )
         .into_any_element(),
-        OrderBookColumn::Bid => quantity_cell(
+        OrderBookColumn::Bid => resting_quantity_cell(
             width,
             (side == BookColumnSide::Bid).then_some(level),
-            order_book_side_appearance(context.theme, BookColumnSide::Bid),
-            true,
-            context.maximum_quantity,
-        )
-        .into_any_element(),
-        OrderBookColumn::SellTrades => trade_volume_cell(
-            width,
-            context.trade_volumes.sell,
-            context.quantity_scale,
-            order_book_side_appearance(context.theme, BookColumnSide::Ask),
-            true,
-            context.maximum_trade_quantity,
-        )
-        .into_any_element(),
+            BookColumnSide::Bid,
+            context,
+        ),
+        OrderBookColumn::SellTrades => sell_trades_cell(width, context.traded),
         OrderBookColumn::Price => table_cell(width)
             .px_1()
             .text_center()
             .text_color(gpui_color(context.price_color))
             .child(level.price_text.clone())
             .into_any_element(),
-        OrderBookColumn::BuyTrades => trade_volume_cell(
-            width,
-            context.trade_volumes.buy,
-            context.quantity_scale,
-            order_book_side_appearance(context.theme, BookColumnSide::Bid),
-            false,
-            context.maximum_trade_quantity,
-        )
-        .into_any_element(),
-        OrderBookColumn::Ask => quantity_cell(
+        OrderBookColumn::BuyTrades => buy_trades_cell(width, context.traded),
+        OrderBookColumn::Ask => resting_quantity_cell(
             width,
             (side == BookColumnSide::Ask).then_some(level),
-            order_book_side_appearance(context.theme, BookColumnSide::Ask),
-            false,
-            context.maximum_quantity,
-        )
-        .into_any_element(),
+            BookColumnSide::Ask,
+            context,
+        ),
+        OrderBookColumn::Delta => delta_cell(width, context.traded),
+        OrderBookColumn::Volume => volume_cell(width, context.traded),
         OrderBookColumn::Orders => working_order_cell(
             width,
             context.working_order,
@@ -2078,15 +2358,163 @@ fn header_cell(width: f32, label: String, alignment: CellAlignment) -> impl Into
 
 const fn column_alignment(column: OrderBookColumn) -> CellAlignment {
     match column {
-        OrderBookColumn::Ask | OrderBookColumn::BuyTrades | OrderBookColumn::Queue => {
-            CellAlignment::Left
-        }
+        OrderBookColumn::Ask
+        | OrderBookColumn::BuyTrades
+        | OrderBookColumn::Volume
+        | OrderBookColumn::Queue => CellAlignment::Left,
         OrderBookColumn::Price => CellAlignment::Center,
         OrderBookColumn::ProfitLoss
         | OrderBookColumn::Bid
         | OrderBookColumn::Orders
-        | OrderBookColumn::SellTrades => CellAlignment::Right,
+        | OrderBookColumn::SellTrades
+        | OrderBookColumn::Delta => CellAlignment::Right,
     }
+}
+
+/// An outline in the cell's own text token, with strong text, marks a highlighted
+/// value without changing its fill.
+fn highlight_cell(cell: Div, highlighted: bool, color: ThemeColor, theme: &AerisTheme) -> Div {
+    if highlighted {
+        cell.border(px(theme.dimensions.border_width))
+            .border_color(gpui_color(color))
+            .font_weight(platform_font_weight(TypographyRole::Strong))
+    } else {
+        cell
+    }
+}
+
+fn resting_quantity_cell(
+    width: f32,
+    level: Option<&OrderBookColumnLevel>,
+    column_side: BookColumnSide,
+    context: &LevelCellContext<'_>,
+) -> AnyElement {
+    let appearance = order_book_side_appearance(context.theme, column_side);
+    let large_lot = level.is_some_and(|level| {
+        is_large_lot(
+            level.quantity,
+            context.quantity_scale,
+            context.traded.highlights.large_lot_quantity(),
+        )
+    });
+    highlight_cell(
+        quantity_cell(
+            width,
+            level,
+            appearance,
+            column_side == BookColumnSide::Bid,
+            context.maximum_quantity,
+        ),
+        large_lot,
+        appearance.text,
+        context.theme,
+    )
+    .into_any_element()
+}
+
+fn sell_trades_cell(width: f32, row: TradedRow<'_>) -> AnyElement {
+    let appearance = order_book_side_appearance(row.theme, BookColumnSide::Ask);
+    highlight_cell(
+        trade_volume_cell(
+            width,
+            row.volumes.sell,
+            row.quantity_scale,
+            appearance,
+            true,
+            row.maximum_trade_quantity,
+        ),
+        trade_imbalance(row.volumes, row.highlights.imbalance_ratio())
+            == Some(TradeImbalance::Sellers),
+        appearance.text,
+        row.theme,
+    )
+    .into_any_element()
+}
+
+fn buy_trades_cell(width: f32, row: TradedRow<'_>) -> AnyElement {
+    let appearance = order_book_side_appearance(row.theme, BookColumnSide::Bid);
+    highlight_cell(
+        trade_volume_cell(
+            width,
+            row.volumes.buy,
+            row.quantity_scale,
+            appearance,
+            false,
+            row.maximum_trade_quantity,
+        ),
+        trade_imbalance(row.volumes, row.highlights.imbalance_ratio())
+            == Some(TradeImbalance::Buyers),
+        appearance.text,
+        row.theme,
+    )
+    .into_any_element()
+}
+
+/// Buyers' delta reads in the bid text token and sellers' in the ask text token,
+/// matching the Buy and Sell columns.
+fn delta_cell(width: f32, row: TradedRow<'_>) -> AnyElement {
+    let delta = price_delta(row.volumes);
+    let colors = row.theme.colors;
+    let (color, text) = match delta.cmp(&0) {
+        std::cmp::Ordering::Greater => (
+            colors.book_bid_text,
+            format!("+{}", compact_quantity_text(delta, row.quantity_scale)),
+        ),
+        std::cmp::Ordering::Less => (
+            colors.book_ask_text,
+            compact_quantity_text(delta, row.quantity_scale),
+        ),
+        std::cmp::Ordering::Equal if price_volume(row.volumes) > 0 => (
+            colors.text_secondary,
+            compact_quantity_text(0, row.quantity_scale),
+        ),
+        std::cmp::Ordering::Equal => (colors.text_secondary, String::new()),
+    };
+    table_cell(width)
+        .px_1()
+        .text_right()
+        .text_color(gpui_color(color))
+        .child(div().w_full().truncate().child(text))
+        .into_any_element()
+}
+
+/// The profile bar scales to the point of control, so its row is the one full bar;
+/// each fill keeps its paired text token.
+fn volume_cell(width: f32, row: TradedRow<'_>) -> AnyElement {
+    let total = price_volume(row.volumes);
+    let point_of_control = total > 0 && row.volume_peak.is_some_and(|peak| peak.price == row.price);
+    let colors = row.theme.colors;
+    let (fill, text_color) = if point_of_control {
+        (colors.warning_subtle, colors.text_warning)
+    } else {
+        (colors.primary_subtle, colors.text_default)
+    };
+    let bar_width = visible_quantity_width(total, row.volume_peak.map_or(0, |peak| peak.total));
+    let text = if total > 0 {
+        compact_quantity_text(total, row.quantity_scale)
+    } else {
+        String::new()
+    };
+    let cell = table_cell(width)
+        .relative()
+        .px_1()
+        .text_color(gpui_color(text_color))
+        .children((total > 0).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(relative(bar_width))
+                .bg(gpui_color(fill))
+        }))
+        .child(div().relative().w_full().truncate().child(text));
+    if point_of_control {
+        cell.font_weight(platform_font_weight(TypographyRole::Strong))
+    } else {
+        cell
+    }
+    .into_any_element()
 }
 
 fn trade_volume_cell(
@@ -2096,7 +2524,7 @@ fn trade_volume_cell(
     appearance: OrderBookSideAppearance,
     align_right: bool,
     maximum_trade_quantity: i64,
-) -> impl IntoElement + use<> {
+) -> Div {
     let width = visible_quantity_width(quantity, maximum_trade_quantity);
     let bar = div()
         .absolute()
@@ -2130,7 +2558,7 @@ fn quantity_cell(
     appearance: OrderBookSideAppearance,
     align_right: bool,
     maximum_quantity: i64,
-) -> impl IntoElement + use<> {
+) -> Div {
     let width = level
         .and_then(|level| level.quantity)
         .map_or(0.0, |quantity| {
@@ -3336,5 +3764,264 @@ mod tests {
             Some(PriceGridItem::Bid(25))
         );
         assert_eq!(price_grid_item(grid, grid.recenter_index() + 3), None);
+    }
+
+    #[test]
+    fn delta_and_volume_columns_start_hidden_and_persist_as_stable_bits() {
+        let mut columns = OrderBookColumnVisibility::default();
+        assert!(!columns.is_visible(OrderBookColumn::Delta));
+        assert!(!columns.is_visible(OrderBookColumn::Volume));
+        assert!(columns.is_offered(OrderBookColumn::Delta));
+        assert!(columns.is_offered(OrderBookColumn::Volume));
+        assert_eq!(columns.chosen_bits(), 0b11_1110);
+
+        assert!(columns.toggle(OrderBookColumn::Delta));
+        assert!(columns.toggle(OrderBookColumn::Volume));
+        assert_eq!(columns.chosen_bits(), 0b11_0011_1110);
+        let width = OrderBookColumn::ALL
+            .into_iter()
+            .filter(|column| columns.is_visible(*column))
+            .map(|column| columns.width(column))
+            .sum::<f32>();
+        assert!((width - 1.0).abs() < 1e-6);
+
+        let restored = OrderBookColumnVisibility::default().with_chosen_bits(columns.chosen_bits());
+        assert_eq!(restored, columns);
+        let queue_and_unknown = OrderBookColumnVisibility::default()
+            .with_chosen_bits(OrderBookColumn::Queue.bit() | 1 << 15);
+        assert_eq!(
+            queue_and_unknown.chosen_bits(),
+            OrderBookColumn::Queue.bit(),
+            "unknown bits are dropped and an unoffered choice is kept"
+        );
+        assert!(!queue_and_unknown.is_visible(OrderBookColumn::Queue));
+        assert!(matches!(
+            column_alignment(OrderBookColumn::Delta),
+            CellAlignment::Right
+        ));
+        assert!(matches!(
+            column_alignment(OrderBookColumn::Volume),
+            CellAlignment::Left
+        ));
+    }
+
+    #[test]
+    fn delta_and_volume_combine_both_aggressor_sides_of_a_price() {
+        let volumes = AggressorTradeVolumes { buy: 12, sell: 5 };
+        assert_eq!(price_delta(volumes), 7);
+        assert_eq!(price_volume(volumes), 17);
+        let sold = AggressorTradeVolumes { buy: 2, sell: 9 };
+        assert_eq!(price_delta(sold), -7);
+        assert_eq!(price_volume(sold), 11);
+        let extreme = AggressorTradeVolumes {
+            buy: i64::MAX,
+            sell: i64::MIN,
+        };
+        assert_eq!(price_delta(extreme), i64::MAX, "delta saturates");
+        assert_eq!(
+            price_volume(AggressorTradeVolumes {
+                buy: i64::MAX,
+                sell: 1
+            }),
+            i64::MAX
+        );
+
+        // A grouped grid row reads its delta and volume from the grouped aggressor sides.
+        let mut frame = price_grid_frame();
+        frame.traded_volumes = BTreeMap::from([
+            (101, AggressorTradeVolumes { buy: 4, sell: 1 }),
+            (105, AggressorTradeVolumes { buy: 0, sell: 6 }),
+            (110, AggressorTradeVolumes { buy: 2, sell: 0 }),
+            (119, AggressorTradeVolumes { buy: 0, sell: 3 }),
+        ]);
+        let row_100 = grouped_trade_volumes_at_price(&frame, 100, 10);
+        let row_110 = grouped_trade_volumes_at_price(&frame, 110, 10);
+        assert_eq!((price_delta(row_100), price_volume(row_100)), (-7, 7));
+        assert_eq!((price_delta(row_110), price_volume(row_110)), (3, 9));
+    }
+
+    #[test]
+    fn volume_profile_peak_groups_rows_like_the_ladder_and_keeps_the_lower_price_on_a_tie() {
+        let traded = BTreeMap::from([
+            (101, AggressorTradeVolumes { buy: 4, sell: 1 }),
+            (105, AggressorTradeVolumes { buy: 0, sell: 6 }),
+            (110, AggressorTradeVolumes { buy: 2, sell: 0 }),
+            (119, AggressorTradeVolumes { buy: 0, sell: 3 }),
+        ]);
+        assert_eq!(
+            grouped_volume_peak(&traded, 10),
+            Some(VolumeProfilePeak {
+                price: 110,
+                total: 9
+            })
+        );
+        assert_eq!(
+            grouped_volume_peak(&traded, 1),
+            Some(VolumeProfilePeak {
+                price: 105,
+                total: 6
+            })
+        );
+        let tie = BTreeMap::from([
+            (100, AggressorTradeVolumes { buy: 5, sell: 0 }),
+            (200, AggressorTradeVolumes { buy: 0, sell: 5 }),
+        ]);
+        assert_eq!(
+            grouped_volume_peak(&tie, 1),
+            Some(VolumeProfilePeak {
+                price: 100,
+                total: 5
+            })
+        );
+        assert_eq!(grouped_volume_peak(&BTreeMap::new(), 1), None);
+
+        let frame = price_grid_frame();
+        assert_eq!(
+            volume_profile_peak(&frame),
+            Some(VolumeProfilePeak {
+                price: 20_025,
+                total: 11
+            }),
+            "the frame's own grid tick groups the profile"
+        );
+    }
+
+    #[test]
+    fn imbalance_needs_the_ratio_on_a_price_that_traded_both_ways() {
+        let at = |buy, sell| AggressorTradeVolumes { buy, sell };
+        assert_eq!(
+            trade_imbalance(at(9, 3), Some(3)),
+            Some(TradeImbalance::Buyers)
+        );
+        assert_eq!(trade_imbalance(at(8, 3), Some(3)), None);
+        assert_eq!(
+            trade_imbalance(at(3, 9), Some(3)),
+            Some(TradeImbalance::Sellers)
+        );
+        assert_eq!(
+            trade_imbalance(at(4, 2), Some(2)),
+            Some(TradeImbalance::Buyers)
+        );
+        assert_eq!(
+            trade_imbalance(at(40, 0), Some(3)),
+            None,
+            "a price traded by one side only is not an imbalance"
+        );
+        assert_eq!(trade_imbalance(at(9, 3), None), None, "off");
+        assert_eq!(
+            trade_imbalance(at(i64::MAX, i64::MAX / 4), Some(3)),
+            Some(TradeImbalance::Buyers),
+            "the comparison cannot overflow"
+        );
+    }
+
+    #[test]
+    fn large_lot_threshold_counts_whole_units_at_the_quantity_scale() {
+        assert!(is_large_lot(Some(50), 0, Some(50)));
+        assert!(!is_large_lot(Some(49), 0, Some(50)));
+        assert!(is_large_lot(Some(1_500), 3, Some(1)), "1.500 lots");
+        assert!(!is_large_lot(Some(999), 3, Some(1)));
+        assert!(!is_large_lot(Some(1_000_000), 0, None), "off");
+        assert!(!is_large_lot(None, 0, Some(1)), "unknown size");
+        assert!(
+            !is_large_lot(Some(i64::MAX), 60, Some(1)),
+            "an unrepresentable threshold"
+        );
+    }
+
+    #[test]
+    fn highlights_default_to_three_to_one_and_cycle_through_offered_choices() {
+        let highlights = OrderBookHighlights::default();
+        assert_eq!(highlights.imbalance_ratio(), Some(3));
+        assert_eq!(highlights.large_lot_quantity(), None);
+        let ratios = std::iter::successors(Some(highlights), |current| {
+            Some(current.with_next_imbalance_ratio())
+        })
+        .take(6)
+        .map(OrderBookHighlights::imbalance_ratio)
+        .collect::<Vec<_>>();
+        assert_eq!(ratios, [Some(3), Some(4), Some(5), None, Some(2), Some(3)]);
+        let lots = std::iter::successors(Some(highlights), |current| {
+            Some(current.with_next_large_lot_quantity())
+        })
+        .take(11)
+        .map(OrderBookHighlights::large_lot_quantity)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            lots,
+            [
+                None,
+                Some(1),
+                Some(5),
+                Some(10),
+                Some(25),
+                Some(50),
+                Some(100),
+                Some(250),
+                Some(500),
+                Some(1_000),
+                None
+            ]
+        );
+        let chosen = OrderBookHighlights::from_choices(None, Some(250)).expect("offered choices");
+        assert_eq!(chosen.imbalance_ratio(), None);
+        assert_eq!(chosen.large_lot_quantity(), Some(250));
+        assert_eq!(OrderBookHighlights::from_choices(Some(7), None), None);
+        assert_eq!(OrderBookHighlights::from_choices(Some(3), Some(3)), None);
+    }
+
+    #[gpui::test]
+    fn volume_profile_follows_the_installed_selection_and_its_retained_tape(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, _| ReadOnlyOrderBookView::new(AerisTheme::dark()));
+        let first = price_grid_frame();
+        view.update(cx, |view, view_cx| {
+            view.install_frame(Arc::new(first.clone()), view_cx);
+            assert_eq!(
+                view.volume_peak, None,
+                "a hidden Volume column computes nothing"
+            );
+            view.toggle_column(OrderBookColumn::Volume, view_cx);
+            assert_eq!(
+                view.volume_peak,
+                Some(VolumeProfilePeak {
+                    price: 20_025,
+                    total: 11
+                })
+            );
+
+            let mut next_selection = first.clone();
+            next_selection.selection_generation += 1;
+            next_selection.traded_volumes =
+                BTreeMap::from([(20_050, AggressorTradeVolumes { buy: 1, sell: 0 })]);
+            assert!(view.replace_frame(next_selection.clone(), view_cx));
+            assert_eq!(
+                view.volume_peak,
+                Some(VolumeProfilePeak {
+                    price: 20_050,
+                    total: 1
+                }),
+                "nothing carries over from the previous selection"
+            );
+            let frame = view.frame().expect("installed frame");
+            assert_eq!(
+                price_delta(grouped_trade_volumes_at_price(frame, 20_025, 25)),
+                0
+            );
+            assert_eq!(
+                price_delta(grouped_trade_volumes_at_price(frame, 20_050, 25)),
+                1
+            );
+
+            let mut session_reset = next_selection;
+            session_reset.session_generation += 1;
+            session_reset.traded_volumes.clear();
+            assert!(view.replace_frame(session_reset, view_cx));
+            assert_eq!(view.volume_peak, None, "a reset tape has no profile");
+
+            view.clear(view_cx);
+            assert_eq!(view.volume_peak, None);
+        });
     }
 }

@@ -9,6 +9,12 @@ close_side_panel = साइड पैनल बंद करें
 order_book_recenter = ऑर्डर बुक को मौजूदा स्प्रेड पर केंद्रित करें
 order_book_choose_columns = ऑर्डर बुक के कॉलम चुनें
 order_book_column_not_offered = {column} · यह प्रोवाइडर उपलब्ध नहीं कराता
+order_book_trade_window = {minutes} मिनट तक
+order_book_imbalance = असंतुलन
+order_book_imbalance_ratio = {ratio}:1
+order_book_large_lots = बड़े लॉट
+order_book_large_lot_minimum = >= {size}
+order_book_highlight_off = बंद
 time_sales_no_prints = कोई ट्रेड प्रिंट नहीं
 time_sales_provider_no_trades = {provider} कोट और डेप्थ प्रकाशित करता है, अलग-अलग ट्रेड नहीं।
 time_sales_any_size = कोई भी साइज़

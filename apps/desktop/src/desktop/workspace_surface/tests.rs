@@ -1903,7 +1903,7 @@ mod instrument_drawings {
                 chart_chrome::ChartChromePreferences::default(),
                 WorkspaceSurfaceRestore {
                     chart: restored,
-                    side_panel: None,
+                    ..WorkspaceSurfaceRestore::default()
                 },
                 window,
                 cx,

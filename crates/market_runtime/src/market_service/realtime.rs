@@ -9,8 +9,8 @@ use super::{
     OrderLevelInterruption, OrderLevelState, OrderLevelSubscription, Ordering, ProviderDemand,
     ProviderDisconnect, ProviderDisplayDepthEvent, ProviderEvent, ProviderEventKind,
     ProviderGeneration, ProviderHealth, ProviderInstrumentDemand, ProviderOrderBook,
-    ProviderTradeBatch, SeriesLoadState, TopOfBookQuote, TradeModel, VecDeque, id,
-    merge_live_candle, series_state_payload, series_update_message,
+    ProviderTradeBatch, RECENT_LADDER_TRADE_RETENTION_NANOS, SeriesLoadState, TopOfBookQuote,
+    TradeModel, VecDeque, id, merge_live_candle, series_state_payload, series_update_message,
 };
 #[cfg(test)]
 use super::{BarPeriod, Duration, HyperliquidDemand, RithmicRealtimeDemand, TradeHandoffSeed};
@@ -31,7 +31,6 @@ use aeris_observability::diagnostic;
 use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
-const RECENT_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
 
 pub(in crate::market_service) fn enqueue_bar_transition(
     queue: &mut VecDeque<MarketBar>,
@@ -269,7 +268,7 @@ impl ProviderOrderBook {
             .max(observed_unix_nanos.max(0));
         let cutoff = self
             .retention_clock_unix_nanos
-            .saturating_sub(RECENT_TRADE_RETENTION_NANOS);
+            .saturating_sub(RECENT_LADDER_TRADE_RETENTION_NANOS);
         let mut changed = false;
         while self
             .recent_trades
@@ -3006,7 +3005,9 @@ mod tests {
         let trade = ladder_trade(1, 1, 1_000_000_000_000, 20_000, 4, AggressorSide::Buy);
         assert!(book.accept_recent_trade(&trade));
         assert_eq!(book.recent_trades.len(), 1);
-        assert!(book.prune_recent_trades(1_000_000_000_000 + RECENT_TRADE_RETENTION_NANOS + 1));
+        assert!(
+            book.prune_recent_trades(1_000_000_000_000 + RECENT_LADDER_TRADE_RETENTION_NANOS + 1)
+        );
         assert!(book.recent_trades.is_empty());
         assert!(book.traded_volumes.is_empty());
     }
@@ -3226,7 +3227,7 @@ mod tests {
         assert!(
             book.prune_recent_trades(
                 start
-                    .saturating_add(RECENT_TRADE_RETENTION_NANOS)
+                    .saturating_add(RECENT_LADDER_TRADE_RETENTION_NANOS)
                     .saturating_add(1)
             )
         );
@@ -3240,7 +3241,7 @@ mod tests {
                 2,
                 1,
                 start
-                    .saturating_add(RECENT_TRADE_RETENTION_NANOS)
+                    .saturating_add(RECENT_LADDER_TRADE_RETENTION_NANOS)
                     .saturating_add(2),
                 20_025,
                 7,
@@ -3263,7 +3264,7 @@ mod tests {
                 2,
                 1,
                 start
-                    .saturating_add(RECENT_TRADE_RETENTION_NANOS)
+                    .saturating_add(RECENT_LADDER_TRADE_RETENTION_NANOS)
                     .saturating_add(3),
                 20_025,
                 7,

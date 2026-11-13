@@ -369,6 +369,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         side_panel_width: 400,
         side_panel_split_basis_points: 5_000,
         interval: ChartInterval::Minute1.label().to_string(),
+        order_book: None,
     };
     let tab = WorkspaceTabState {
         workspace_id: 1,

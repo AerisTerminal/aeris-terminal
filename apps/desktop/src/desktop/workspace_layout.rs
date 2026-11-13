@@ -483,6 +483,7 @@ pub(super) fn workspace_market_area(
                 order_book: &surface.order_book,
                 column_menu_open: surface.chrome.order_book_column_menu_open(),
                 columns: surface.order_book.read(cx).columns(),
+                highlights: surface.order_book.read(cx).highlights(),
                 theme,
             },
             order_entry: TradingOrderControlsState {

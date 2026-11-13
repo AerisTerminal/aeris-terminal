@@ -2,13 +2,14 @@ use aeris_contracts::{
     InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartIndicatorState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceDrawingTemplateState, WorkspaceIndicatorTemplateState,
-    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspaceSavedLayoutState, WorkspaceScanComparison,
-    WorkspaceScanConditionState, WorkspaceScanMatchMode, WorkspaceScanOperandKind,
-    WorkspaceScanOperandState, WorkspaceScanStudyParameterState, WorkspaceScreenerScanState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderBookState,
+    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspaceSavedLayoutState, WorkspaceScanComparison, WorkspaceScanConditionState,
+    WorkspaceScanMatchMode, WorkspaceScanOperandKind, WorkspaceScanOperandState,
+    WorkspaceScanStudyParameterState, WorkspaceScreenerScanState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -82,6 +83,11 @@ fn workspace_tab() -> WorkspaceTabState {
             side_panel_width: 420,
             side_panel_split_basis_points: 5_000,
             interval: "1m".into(),
+            order_book: Some(WorkspaceOrderBookState {
+                chosen_columns: 0b11_0011_1110,
+                imbalance_ratio: 4,
+                large_lot_quantity: 50,
+            }),
             chart: Some(WorkspaceChartState {
                 studies: vec![WorkspaceChartStudyState {
                     local_id: 1,
@@ -275,6 +281,16 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
     let decoded =
         WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");
     assert_eq!(decoded, workspace);
+}
+
+#[test]
+fn panes_written_before_order_book_settings_open_with_none_and_keep_their_bytes() {
+    let mut pane = workspace_tab().panes.remove(0);
+    pane.order_book = None;
+    let bytes = pane.encode_to_vec();
+    let decoded = WorkspacePaneState::decode(bytes.as_slice()).expect("legacy pane decodes");
+    assert_eq!(decoded.order_book, None);
+    assert_eq!(decoded.encode_to_vec(), bytes);
 }
 
 #[test]

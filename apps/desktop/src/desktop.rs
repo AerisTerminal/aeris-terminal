@@ -145,8 +145,8 @@ use aeris_contracts::{
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceChromeState, WorkspaceCumulativeDeltaState, WorkspaceDeltaHistogramState,
     WorkspaceDrawingTemplateState, WorkspaceIndicatorTemplateState, WorkspaceLayoutState,
-    WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceOrderBookDepthState, WorkspaceOrderBookState, WorkspaceOrderFlowSettingsState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
     WorkspaceSavedLayoutState, WorkspaceSessionProfileState, WorkspaceSplitAxis, WorkspaceState,
     WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
@@ -179,8 +179,8 @@ use aeris_market_runtime::{
 use aeris_observability::FeedConnectionState;
 use aeris_observability::diagnostic;
 use aeris_terminal_ui::{
-    OrderBookColumn, OrderBookColumnVisibility, OrderBookLevelClick, OrderBookLevelDrop,
-    OrderBookLevelSide, ReadOnlyOrderBookView,
+    OrderBookColumn, OrderBookColumnVisibility, OrderBookHighlights, OrderBookLevelClick,
+    OrderBookLevelDrop, OrderBookLevelSide, ReadOnlyOrderBookView,
 };
 use assets::UiIcon as HugeIcon;
 use big_trades_dialog::big_trades_dialog_layer;
@@ -4791,6 +4791,7 @@ fn subscribe_time_zone_input(
 struct WorkspaceSurfaceRestore {
     chart: Option<WorkspaceChartState>,
     side_panel: Option<(u32, u32, u32)>,
+    order_book: Option<WorkspaceOrderBookState>,
 }
 
 /// Maps a ladder click to a resting order at that price.
@@ -5042,6 +5043,14 @@ fn workspace_surface_entity(
     });
     let order_book = workspace.read(cx).order_book.clone();
     subscribe_order_book_trading(&workspace, &order_book, window, cx);
+    // Column choices restore before the side panels so a restored Queue column opens its
+    // order-level demand with the docked book.
+    if let Some(state) = restored.order_book.as_ref() {
+        workspace.update(cx, |surface, surface_cx| {
+            surface.restore_order_book(state, surface_cx);
+            surface.persistence.discard_dirty();
+        });
+    }
     if let Some((visibility, width, split)) = restored.side_panel {
         workspace.update(cx, |surface, surface_cx| {
             surface.chrome.restore_side_panel_size(width, split);
@@ -5494,6 +5503,7 @@ fn workspace_tab_state(workspace: &WorkspaceTab, cx: &App) -> WorkspaceTabState 
                         .unwrap_or(400),
                     side_panel_split_basis_points: surface.chrome.side_panel_split_basis_points(),
                     interval: surface.interval.label().to_string(),
+                    order_book: surface.workspace_order_book_state(cx),
                 })
             })
             .collect(),

@@ -1779,6 +1779,7 @@ pub(super) fn restored_workspace_tab(
                         persisted.side_panel_width,
                         persisted.side_panel_split_basis_points,
                     )),
+                    order_book: persisted.order_book.clone(),
                 },
                 window,
                 cx,

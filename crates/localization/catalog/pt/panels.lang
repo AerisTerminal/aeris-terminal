@@ -9,6 +9,12 @@ close_side_panel = Fechar painel lateral
 order_book_recenter = Centralizar o livro de ofertas no spread atual
 order_book_choose_columns = Escolher colunas do livro de ofertas
 order_book_column_not_offered = {column} · não oferecido por este provedor
+order_book_trade_window = até {minutes} min
+order_book_imbalance = Desequilíbrio
+order_book_imbalance_ratio = {ratio}:1
+order_book_large_lots = Lotes grandes
+order_book_large_lot_minimum = >= {size}
+order_book_highlight_off = Desligado
 time_sales_no_prints = Nenhum negócio
 time_sales_provider_no_trades = {provider} publica cotações e profundidade, não negócios individuais.
 time_sales_any_size = Qualquer tamanho
