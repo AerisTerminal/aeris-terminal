@@ -68,8 +68,8 @@ pub use crate::plan::{
 pub use crate::risk::session::{RiskSession, RiskSessionBoundary};
 pub use crate::risk::{
     EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskOutcome,
-    EconomicEventRiskRule, EconomicEventRiskTrigger, RiskEvaluation, RiskLock, RiskLockKind,
-    RiskMeter, RiskProfile, RiskRuleState, TrailingDrawdownMode,
+    EconomicEventRiskRule, EconomicEventRiskTrigger, MaximumDrawdownRule, RiskEvaluation, RiskLock,
+    RiskLockKind, RiskMeter, RiskProfile, RiskRuleState, TrailingDrawdownMode,
 };
 pub use crate::round_trip::{TradeLeg, TradeRoundTrip};
 use crate::service::Command;
@@ -103,7 +103,7 @@ use aeris_trading::{
     FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, OrderEventId,
     OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, RejectReason,
     RiskWarning, TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
-    project_unrealized_pnl,
+    TradingValidationError, project_unrealized_pnl,
 };
 pub use groups::model::{MovePlannedLeg, PlannedLeg};
 pub use publication::{
@@ -2815,19 +2815,24 @@ pub(crate) fn remaining_limit(limit: FixedPoint, used: FixedPoint) -> Result<Fix
 }
 
 pub(crate) fn subtract_fixed(left: FixedPoint, right: FixedPoint) -> Result<FixedPoint, String> {
-    let right = right
-        .exact_rescale(left.scale())
-        .map_err(|error| error.to_string())?;
+    checked_difference(left, right).map_err(|error| error.to_string())
+}
+
+/// `left - right` at `left`'s scale, refused when `right` cannot be held exactly at that
+/// scale or the difference overflows.
+pub(crate) fn checked_difference(
+    left: FixedPoint,
+    right: FixedPoint,
+) -> Result<FixedPoint, TradingValidationError> {
+    let right = right.exact_rescale(left.scale())?;
     let negative = FixedPoint::try_new(
         right
             .units()
             .checked_neg()
-            .ok_or_else(|| "fixed-point subtraction overflowed".to_string())?,
+            .ok_or(TradingValidationError::ArithmeticOverflow)?,
         right.scale(),
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     left.checked_add(negative)
-        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn nonnegative_difference(

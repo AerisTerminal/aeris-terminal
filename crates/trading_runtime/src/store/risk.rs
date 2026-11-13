@@ -20,6 +20,51 @@ pub(super) struct StoredRiskProfile {
     event_action: Option<String>,
     event_minimum_importance: Option<i64>,
     event_lead_seconds: Option<u32>,
+    profit_target_units: Option<i64>,
+    profit_target_scale: Option<u8>,
+    max_drawdown_units: Option<i64>,
+    max_drawdown_scale: Option<u8>,
+    max_drawdown_mode: Option<String>,
+    max_drawdown_floor_stop_units: Option<i64>,
+    max_drawdown_floor_stop_scale: Option<u8>,
+}
+
+/// Whether the store carries the V34 prop-firm rule columns. A gated pre-group store stops at
+/// V23 and gains them with the rest of the chain once its group conversion finalizes.
+fn prop_firm_rule_columns_present(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('risk_profiles')
+         WHERE name = 'profit_target_units')",
+        [],
+        |row| row.get(0),
+    )
+}
+
+const PROP_FIRM_RULES_NEED_MIGRATION: &str =
+    "prop-firm risk rules need the trading store migration to finish first";
+
+/// Writes the V34 prop-firm rule columns of a profile row already upserted in `connection`.
+fn update_prop_firm_rules(connection: &Connection, profile: &RiskProfile) -> rusqlite::Result<()> {
+    let drawdown = profile.maximum_drawdown;
+    let floor_stop = drawdown.and_then(|rule| rule.floor_stops_at);
+    connection
+        .execute(
+            "UPDATE risk_profiles SET profit_target_units=?2, profit_target_scale=?3,
+                max_drawdown_units=?4, max_drawdown_scale=?5, max_drawdown_mode=?6,
+                max_drawdown_floor_stop_units=?7, max_drawdown_floor_stop_scale=?8
+             WHERE account_id=?1",
+            params![
+                profile.account_id.as_str(),
+                profile.daily_profit_target.map(FixedPoint::units),
+                profile.daily_profit_target.map(FixedPoint::scale),
+                drawdown.map(|rule| rule.amount.units()),
+                drawdown.map(|rule| rule.amount.scale()),
+                drawdown.map(|rule| rule.mode.as_str()),
+                floor_stop.map(FixedPoint::units),
+                floor_stop.map(FixedPoint::scale),
+            ],
+        )
+        .map(drop)
 }
 
 pub(super) fn decode_risk_profile(
@@ -56,6 +101,23 @@ pub(super) fn decode_risk_profile(
             },
         )
         .transpose()?;
+    let maximum_drawdown =
+        match optional_fixed(stored.max_drawdown_units, stored.max_drawdown_scale)? {
+            Some(amount) => Some(MaximumDrawdownRule {
+                amount,
+                mode: TrailingDrawdownMode::parse(
+                    stored
+                        .max_drawdown_mode
+                        .as_deref()
+                        .ok_or("stored maximum drawdown has no mode")?,
+                )?,
+                floor_stops_at: optional_fixed(
+                    stored.max_drawdown_floor_stop_units,
+                    stored.max_drawdown_floor_stop_scale,
+                )?,
+            }),
+            None => None,
+        };
     let profile = RiskProfile {
         account_id: account_id.clone(),
         profile_id: stored.profile_id,
@@ -67,6 +129,11 @@ pub(super) fn decode_risk_profile(
         consistency_max_single_trade_percent: stored.consistency_percent,
         restricted_until_unix_nanos: stored.restricted_until_unix_nanos,
         economic_event_rule,
+        daily_profit_target: optional_fixed(
+            stored.profit_target_units,
+            stored.profit_target_scale,
+        )?,
+        maximum_drawdown,
         enabled: stored.enabled != 0,
         session_start_unix_nanos: stored.session_start_unix_nanos,
         session_start_realized_pnl,
@@ -87,6 +154,13 @@ impl TradingStore {
             || state.profile_version != profile.version
         {
             return Err("risk profile state identity does not match profile".to_string());
+        }
+        let prop_firm_columns =
+            prop_firm_rule_columns_present(&self.connection).map_err(database_error)?;
+        if !prop_firm_columns
+            && (profile.daily_profit_target.is_some() || profile.maximum_drawdown.is_some())
+        {
+            return Err(PROP_FIRM_RULES_NEED_MIGRATION.to_string());
         }
         let transaction = self.connection.transaction().map_err(database_error)?;
         transaction
@@ -138,6 +212,9 @@ impl TradingStore {
                 ],
             )
             .map_err(database_error)?;
+        if prop_firm_columns {
+            update_prop_firm_rules(&transaction, profile).map_err(database_error)?;
+        }
         upsert_risk_rule_state(&transaction, state)?;
         // The profile's session fields seed the durable risk session only when the account
         // has none yet; an existing session keeps its baseline across profile revisions.
@@ -335,17 +412,24 @@ impl TradingStore {
         &self,
     ) -> Result<BTreeMap<TradingAccountId, RiskProfile>, String> {
         let mut result = BTreeMap::new();
+        let prop_firm_columns =
+            if prop_firm_rule_columns_present(&self.connection).map_err(database_error)? {
+                "profit_target_units, profit_target_scale, max_drawdown_units, max_drawdown_scale,
+                max_drawdown_mode, max_drawdown_floor_stop_units, max_drawdown_floor_stop_scale"
+            } else {
+                "NULL, NULL, NULL, NULL, NULL, NULL, NULL"
+            };
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT account_id, profile_id, version, daily_loss_units, daily_loss_scale,
                     trailing_units, trailing_scale, trailing_mode, max_contracts_units,
                     max_contracts_scale, consistency_percent, restricted_until_unix_nanos, enabled,
                     session_start_unix_nanos, session_start_realized_units,
                     session_start_realized_scale, event_action, event_minimum_importance,
-                    event_lead_seconds
-                 FROM risk_profiles ORDER BY account_id",
-            )
+                    event_lead_seconds, {prop_firm_columns}
+                 FROM risk_profiles ORDER BY account_id"
+            ))
             .map_err(database_error)?;
         let rows = statement
             .query_map([], |row| {
@@ -369,6 +453,13 @@ impl TradingStore {
                     event_action: row.get(16)?,
                     event_minimum_importance: row.get(17)?,
                     event_lead_seconds: row.get(18)?,
+                    profit_target_units: row.get(19)?,
+                    profit_target_scale: row.get(20)?,
+                    max_drawdown_units: row.get(21)?,
+                    max_drawdown_scale: row.get(22)?,
+                    max_drawdown_mode: row.get(23)?,
+                    max_drawdown_floor_stop_units: row.get(24)?,
+                    max_drawdown_floor_stop_scale: row.get(25)?,
                 })
             })
             .map_err(database_error)?;
@@ -490,14 +581,20 @@ impl TradingStore {
         &self,
     ) -> Result<BTreeMap<TradingAccountId, RiskRuleState>, String> {
         let mut result = BTreeMap::new();
+        let peak_columns =
+            if prop_firm_rule_columns_present(&self.connection).map_err(database_error)? {
+                "equity_peak_units, equity_peak_scale"
+            } else {
+                "NULL, NULL"
+            };
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT account_id, profile_id, profile_version, peak_session_units,
                     peak_session_scale, total_winning_units, total_winning_scale,
-                    largest_winner_units, largest_winner_scale
-                 FROM risk_rule_states ORDER BY account_id",
-            )
+                    largest_winner_units, largest_winner_scale, {peak_columns}
+                 FROM risk_rule_states ORDER BY account_id"
+            ))
             .map_err(database_error)?;
         let rows = statement
             .query_map([], |row| {
@@ -511,6 +608,8 @@ impl TradingStore {
                     row.get::<_, u8>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, u8>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<u8>>(10)?,
                 ))
             })
             .map_err(database_error)?;
@@ -525,6 +624,8 @@ impl TradingStore {
                 total_scale,
                 largest_units,
                 largest_scale,
+                equity_peak_units,
+                equity_peak_scale,
             ) = row.map_err(database_error)?;
             let account_id =
                 TradingAccountId::try_new(account_id).map_err(|error| error.to_string())?;
@@ -537,6 +638,7 @@ impl TradingStore {
                     peak_session_pnl: fixed(peak_units, peak_scale)?,
                     total_winning_pnl: fixed(total_units, total_scale)?,
                     largest_winning_trade_pnl: fixed(largest_units, largest_scale)?,
+                    equity_peak: optional_fixed(equity_peak_units, equity_peak_scale)?,
                 },
             );
         }
@@ -642,6 +744,21 @@ pub(super) fn upsert_risk_rule_state(
             ],
         )
         .map_err(database_error)?;
+    if prop_firm_rule_columns_present(connection).map_err(database_error)? {
+        connection
+            .execute(
+                "UPDATE risk_rule_states SET equity_peak_units=?2, equity_peak_scale=?3
+                 WHERE account_id=?1",
+                params![
+                    state.account_id.as_str(),
+                    state.equity_peak.map(FixedPoint::units),
+                    state.equity_peak.map(FixedPoint::scale),
+                ],
+            )
+            .map_err(database_error)?;
+    } else if state.equity_peak.is_some() {
+        return Err(PROP_FIRM_RULES_NEED_MIGRATION.to_string());
+    }
     Ok(())
 }
 

@@ -105,6 +105,7 @@ mod group_recovery;
 pub(crate) mod market_feed;
 mod oco;
 mod order_templates;
+mod prop_firm_rules;
 mod property;
 mod publication;
 mod workflows;
@@ -2111,6 +2112,8 @@ fn equity_watch_profile() -> RiskProfile {
         consistency_max_single_trade_percent: None,
         restricted_until_unix_nanos: None,
         economic_event_rule: None,
+        daily_profit_target: None,
+        maximum_drawdown: None,
         enabled: true,
     }
 }
@@ -4356,6 +4359,8 @@ fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: None,
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("profile registers");
@@ -4427,6 +4432,8 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: None,
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("profile registers");
@@ -4515,6 +4522,8 @@ fn bracket_is_blocked_when_its_stop_would_reach_a_loss_limit() {
         consistency_max_single_trade_percent: None,
         restricted_until_unix_nanos: None,
         economic_event_rule: None,
+        daily_profit_target: None,
+        maximum_drawdown: None,
         enabled: true,
     };
     service
@@ -4579,6 +4588,8 @@ fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
             consistency_max_single_trade_percent: Some(50),
             restricted_until_unix_nanos: None,
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("profile registers");
@@ -4964,6 +4975,8 @@ fn replace_risk_policy_mid_trade(service: &TradingService) {
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: None,
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: false,
         })
         .expect("changing risk policy mid-trade does not reset trade P&L");
@@ -5410,6 +5423,8 @@ fn v21_reversal_and_scale_out_accounting_agrees_across_views_and_restart() {
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: None,
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("risk profile");
@@ -5584,6 +5599,8 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
             consistency_max_single_trade_percent: Some(50),
             restricted_until_unix_nanos: None,
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("risk profile stores");
@@ -5682,6 +5699,8 @@ fn news_time_restriction_blocks_and_persists_a_hard_lock() {
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: Some(5_000),
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("restricted profile stores");
@@ -5787,6 +5806,8 @@ fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
                 minimum_importance: EconomicEventRiskImportance::High,
                 lead_seconds: 300,
             }),
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("profile registers");
@@ -6495,6 +6516,8 @@ fn reverse_rejected_by_risk_leaves_the_position_untouched() {
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: None,
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("risk profile registers");
@@ -6595,6 +6618,8 @@ fn risk_profile_for(account: &TradingAccountId, session_start_unix_nanos: i64) -
         consistency_max_single_trade_percent: None,
         restricted_until_unix_nanos: None,
         economic_event_rule: None,
+        daily_profit_target: None,
+        maximum_drawdown: None,
         enabled: true,
     }
 }

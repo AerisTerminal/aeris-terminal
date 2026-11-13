@@ -133,6 +133,33 @@ impl TrailingDrawdownMode {
     }
 }
 
+/// A prop-firm style maximum drawdown measured from the account's durable equity
+/// high-water mark. Unlike the session trailing drawdown it never resets at a session
+/// boundary: the peak survives rollovers and restarts while the profile keeps the rule, and
+/// a breach locks the account until an explicit unlock. Practice accounts only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaximumDrawdownRule {
+    /// How far account equity may fall below its peak before the account locks.
+    pub amount: FixedPoint,
+    /// `Intraday` raises the peak from live equity; `EndOfDay` raises it only at the session
+    /// rollover, from the boundary equity.
+    pub mode: TrailingDrawdownMode,
+    /// The equity at which the floor stops rising, typically the starting balance: once
+    /// `peak - amount` reaches it the floor stays there. `None` trails without a limit.
+    pub floor_stops_at: Option<FixedPoint>,
+}
+
+impl MaximumDrawdownRule {
+    /// The equity at or below which the account locks for a given peak.
+    pub(crate) fn floor(self, peak: FixedPoint) -> Result<FixedPoint, TradingValidationError> {
+        let trailing = crate::core::checked_difference(peak, self.amount)?;
+        Ok(match self.floor_stops_at {
+            Some(limit) if trailing.units() > limit.units() => limit,
+            _ => trailing,
+        })
+    }
+}
+
 /// Versioned deterministic account rules evaluated by the trading owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RiskProfile {
@@ -149,6 +176,9 @@ pub struct RiskProfile {
     pub consistency_max_single_trade_percent: Option<u8>,
     pub restricted_until_unix_nanos: Option<i64>,
     pub economic_event_rule: Option<EconomicEventRiskRule>,
+    /// Session P&L at which the account locks for the rest of the session.
+    pub daily_profit_target: Option<FixedPoint>,
+    pub maximum_drawdown: Option<MaximumDrawdownRule>,
     pub enabled: bool,
 }
 
@@ -194,6 +224,25 @@ impl RiskProfile {
         if let Some(rule) = self.economic_event_rule {
             rule.validate()?;
         }
+        if let Some(target) = self.daily_profit_target {
+            validate_positive(target, "daily profit target")?;
+            if target.scale() != self.daily_loss_limit.scale() {
+                return Err("risk profile currency scales do not match".to_string());
+            }
+        }
+        if let Some(rule) = self.maximum_drawdown {
+            validate_positive(rule.amount, "maximum drawdown")?;
+            if let Some(limit) = rule.floor_stops_at {
+                validate_positive(limit, "maximum drawdown floor limit")?;
+            }
+            if [Some(rule.amount), rule.floor_stops_at]
+                .into_iter()
+                .flatten()
+                .any(|value| value.scale() != self.daily_loss_limit.scale())
+            {
+                return Err("risk profile currency scales do not match".to_string());
+            }
+        }
         Ok(())
     }
 }
@@ -215,6 +264,10 @@ pub enum RiskLockKind {
     NewsRestriction,
     /// The kill switch or an economic-event lock; released only by unlock.
     KillSwitch,
+    /// The daily profit target; resets at the session boundary.
+    ProfitTarget,
+    /// The maximum drawdown from the equity high-water mark; released only by unlock.
+    MaximumDrawdown,
 }
 
 impl RiskLockKind {
@@ -226,6 +279,8 @@ impl RiskLockKind {
             Self::SessionPlan => "session_plan",
             Self::NewsRestriction => "news_restriction",
             Self::KillSwitch => "kill_switch",
+            Self::ProfitTarget => "profit_target",
+            Self::MaximumDrawdown => "max_drawdown",
         }
     }
 
@@ -237,13 +292,18 @@ impl RiskLockKind {
             "session_plan" => Ok(Self::SessionPlan),
             "news_restriction" => Ok(Self::NewsRestriction),
             "kill_switch" => Ok(Self::KillSwitch),
+            "profit_target" => Ok(Self::ProfitTarget),
+            "max_drawdown" => Ok(Self::MaximumDrawdown),
             _ => Err("risk lock kind is invalid".to_string()),
         }
     }
 
     /// Whether the session rollover releases this lock with the daily meters it measured.
     pub(crate) const fn resets_at_session_boundary(self) -> bool {
-        matches!(self, Self::DailyLossLimit | Self::TrailingDrawdown)
+        matches!(
+            self,
+            Self::DailyLossLimit | Self::TrailingDrawdown | Self::ProfitTarget
+        )
     }
 }
 
@@ -304,6 +364,14 @@ pub struct RiskMeter {
     pub consistency_current_percent: Option<u8>,
     pub consistency_additional_profit_required: Option<FixedPoint>,
     pub restricted_until_unix_nanos: Option<i64>,
+    /// Session profit still needed to reach the daily profit target, never negative.
+    pub profit_target_remaining: Option<FixedPoint>,
+    /// The durable equity high-water mark the maximum drawdown trails.
+    pub maximum_drawdown_peak: Option<FixedPoint>,
+    /// The equity at or below which the maximum drawdown locks the account.
+    pub maximum_drawdown_floor: Option<FixedPoint>,
+    /// Equity above the maximum drawdown floor, never negative.
+    pub maximum_drawdown_remaining: Option<FixedPoint>,
     pub lock_reason: Option<String>,
 }
 
@@ -316,6 +384,9 @@ pub struct RiskRuleState {
     pub peak_session_pnl: FixedPoint,
     pub total_winning_pnl: FixedPoint,
     pub largest_winning_trade_pnl: FixedPoint,
+    /// The maximum drawdown's equity high-water mark, at the account currency scale; present
+    /// exactly while the profile carries a maximum drawdown rule.
+    pub equity_peak: Option<FixedPoint>,
 }
 
 fn validate_positive(value: FixedPoint, label: &str) -> Result<(), String> {

@@ -11,7 +11,7 @@ use super::big_trades_dialog::{
     control_strip, described_setting_row, settings_group, settings_groups,
 };
 use super::*;
-use aeris_localization::{common, tr, trade_copier, trading};
+use aeris_localization::{common, risk_rules, tr, trade_copier, trading};
 
 const HEADER_HEIGHT: f32 = 44.0;
 const SIDEBAR_WIDTH: f32 = 184.0;
@@ -25,16 +25,23 @@ pub(super) enum AccountsTab {
     Connections,
     TradingAccounts,
     TradeCopier,
+    RiskRules,
 }
 
 impl AccountsTab {
-    const ALL: [Self; 3] = [Self::Connections, Self::TradingAccounts, Self::TradeCopier];
+    const ALL: [Self; 4] = [
+        Self::Connections,
+        Self::TradingAccounts,
+        Self::TradeCopier,
+        Self::RiskRules,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Connections => tr!(trading::CONNECTIONS_TAB),
             Self::TradingAccounts => tr!(trading::TRADING_ACCOUNTS_TAB),
             Self::TradeCopier => tr!(trade_copier::TAB),
+            Self::RiskRules => tr!(risk_rules::TAB),
         }
     }
 
@@ -43,6 +50,7 @@ impl AccountsTab {
             Self::Connections => HugeIcon::Chart,
             Self::TradingAccounts => HugeIcon::User,
             Self::TradeCopier => HugeIcon::Copy,
+            Self::RiskRules => HugeIcon::Lock,
         }
     }
 }
@@ -96,18 +104,28 @@ impl WorkspaceSurface {
         self.trading_pnl.account_creator = None;
         self.trading_pnl.account_delete_confirmation = None;
         window.dispatch_action(Box::new(CancelProviderLogin), cx);
-        self.sync_trade_copier_editor(window, cx);
+        self.sync_accounts_tab_editors(window, cx);
         self.chrome_focus.focus(window, cx);
         cx.notify();
     }
 
-    /// The trade copier draft exists only while its section is shown, so leaving the
-    /// section discards unsaved edits like any other unfinished form.
-    pub(super) fn sync_trade_copier_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chrome.accounts_tab() == AccountsTab::TradeCopier {
+    /// The trade copier and risk rules drafts exist only while their section is shown, so
+    /// leaving the section discards unsaved edits like any other unfinished form.
+    pub(super) fn sync_accounts_tab_editors(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.chrome.accounts_tab();
+        if tab == AccountsTab::TradeCopier {
             self.open_trade_copier_editor(window, cx);
         } else {
             self.trading_pnl.trade_copier = None;
+        }
+        if tab == AccountsTab::RiskRules {
+            self.open_risk_rules_editor(window, cx);
+        } else {
+            self.trading_pnl.risk_rules = None;
         }
     }
 
@@ -169,6 +187,9 @@ pub(super) fn accounts_panel_content(
         AccountsTab::TradingAccounts => trading_account_groups(app_state, app, working_set, theme),
         AccountsTab::TradeCopier => {
             super::trade_copier_view::trade_copier_groups(app_state, app, working_set, theme, cx)
+        }
+        AccountsTab::RiskRules => {
+            super::risk_rules_view::risk_rules_groups(app_state, app, working_set, theme, cx)
         }
     };
     div()

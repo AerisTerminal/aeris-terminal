@@ -408,7 +408,7 @@ violations and missing verification explicitly, and never describe them as satis
   second container or a direct writer, `.bak` or `read_to_string` path in the workspace
   file's owner and any container or file writer in `chart_chrome.rs`.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V33 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V34 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
@@ -490,6 +490,21 @@ violations and missing verification explicitly, and never describe them as satis
   own bracket). The order ticket, the buy and sell shortcuts and the chart trade bar read that
   choice at the click or key, and a selected template that is no longer saved refuses the order
   instead of placing it unprotected or with another bracket.
+  V34 adds the prop-firm risk rules: nullable `risk_profiles` columns for an optional daily
+  profit target and an optional maximum drawdown (amount, intraday or end-of-day mode and an
+  optional equity at which its floor stops trailing), and `risk_rule_states.equity_peak`, the
+  durable equity high-water mark. Rows written before V34 open with neither rule. Session P&L at
+  the target locks the account with kind `profit_target`, a daily-meter lock the session
+  boundary releases. Equity at or below `min(peak - amount, floor stop)` locks it with kind
+  `max_drawdown`, which no boundary releases; only an explicit unlock clears it. An intraday
+  peak follows live equity, an end-of-day peak rises only to the boundary equity at each
+  rollover, and a profile revision that keeps the rule keeps its peak. The owner refuses a
+  maximum drawdown on a broker account (practice only) and refuses either rule on a gated
+  pre-group store until its migration finishes. The desktop Accounts panel's Risk rules section
+  (`desktop/risk_rules_view.rs`) edits one practice account's profile as an inline draft
+  dropped when the section or panel closes, checks it with `RiskProfile::validate`, sends only
+  the saved profile through `register_risk_profile` and shows the owner's live risk meter and
+  lock, with an unlock through the owner's `unlock_account`.
   Store-open preflight scratch cleanup may remove only exact preflight directories containing
   solely the expected database copy and SQLite sidecars, and exact readiness directories
   containing solely that copy, its migration backups and its preflight scratch; preserve

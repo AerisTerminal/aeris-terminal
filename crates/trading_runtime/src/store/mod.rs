@@ -57,10 +57,10 @@ pub(crate) fn open_read_only(path: &Path) -> Result<Connection, String> {
 use super::{
     BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, BreakEvenRule,
     DisciplineState, EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskRule,
-    RiskLock, RiskLockKind, RiskProfile, RiskRuleState, RiskSession, RiskSessionBoundary,
-    SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel, TradeCopierConfig,
-    TradeCopierTarget, TradingInstrument, TradingRetention, TrailingDrawdownMode, TrailingStopRule,
-    UserRecord,
+    MaximumDrawdownRule, RiskLock, RiskLockKind, RiskProfile, RiskRuleState, RiskSession,
+    RiskSessionBoundary, SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel,
+    TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
+    TrailingDrawdownMode, TrailingStopRule, UserRecord,
 };
 use crate::core::ledger::{
     CostBasis, FillAccounting, LedgerCheckpoint, PositionCheckpoint, TradeCycle,
@@ -825,7 +825,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 33);
+        assert_eq!(SCHEMA_VERSION, 34);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -1535,6 +1535,86 @@ mod tests {
                 ("b".into(), "manual".into())
             ],
             "legacy lock reasons classify into durable kinds"
+        );
+        drop(store);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn v33_risk_profiles_migrate_to_v34_without_prop_firm_rules_and_then_store_them() {
+        let path = temporary_database("v33-prop-firm-rules");
+        let connection = Connection::open(&path).expect("fixture");
+        create_schema_at(&connection, 33);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                 VALUES ('a','Practice','simulated','USD',2);
+                 INSERT INTO risk_profiles(account_id,profile_id,version,session_start_unix_nanos,
+                     session_start_realized_units,session_start_realized_scale,daily_loss_units,
+                     daily_loss_scale,trailing_units,trailing_scale,trailing_mode,
+                     max_contracts_units,max_contracts_scale,consistency_percent,
+                     restricted_until_unix_nanos,enabled)
+                 VALUES ('a','daily',3,1700000000000000000,0,2,100000,2,50000,2,'end_of_day',
+                     10,0,40,NULL,1);
+                 INSERT INTO risk_rule_states(account_id,profile_id,profile_version,
+                     peak_session_units,peak_session_scale,total_winning_units,
+                     total_winning_scale,largest_winner_units,largest_winner_scale)
+                 VALUES ('a','daily',3,12500,2,30000,2,10000,2);",
+            )
+            .expect("fixture facts");
+        drop(connection);
+
+        let mut store = TradingStore::open(&path, TradingRetention::default()).expect("migration");
+        let version: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, SCHEMA_VERSION);
+        let account = TradingAccountId::try_new("a").expect("account");
+        let mut profile = store
+            .load_risk_profiles()
+            .expect("profiles")
+            .remove(&account)
+            .expect("the V33 profile survives");
+        assert_eq!(profile.version, 3);
+        assert_eq!(profile.daily_loss_limit, fixed(100_000, 2).expect("limit"));
+        assert_eq!(
+            profile.trailing_drawdown,
+            Some(fixed(50_000, 2).expect("trail"))
+        );
+        assert_eq!(profile.trailing_mode, TrailingDrawdownMode::EndOfDay);
+        assert_eq!(profile.consistency_max_single_trade_percent, Some(40));
+        assert_eq!(profile.daily_profit_target, None);
+        assert_eq!(profile.maximum_drawdown, None);
+        let mut state = store
+            .load_risk_rule_states()
+            .expect("rule states")
+            .remove(&account)
+            .expect("the V33 rule state survives");
+        assert_eq!(state.peak_session_pnl, fixed(12_500, 2).expect("peak"));
+        assert_eq!(state.equity_peak, None);
+
+        profile.version = 4;
+        profile.daily_profit_target = Some(fixed(150_000, 2).expect("target"));
+        profile.maximum_drawdown = Some(MaximumDrawdownRule {
+            amount: fixed(250_000, 2).expect("drawdown"),
+            mode: TrailingDrawdownMode::Intraday,
+            floor_stops_at: Some(fixed(5_000_000, 2).expect("floor stop")),
+        });
+        state.profile_version = 4;
+        state.equity_peak = Some(fixed(5_012_500, 2).expect("equity peak"));
+        store
+            .put_risk_profile_and_state(&profile, &state)
+            .expect("prop-firm rules store");
+        drop(store);
+        let store = TradingStore::open(&path, TradingRetention::default()).expect("reopen");
+        assert_eq!(
+            store.load_risk_profiles().expect("profiles").get(&account),
+            Some(&profile)
+        );
+        assert_eq!(
+            store.load_risk_rule_states().expect("states").get(&account),
+            Some(&state)
         );
         drop(store);
         fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");

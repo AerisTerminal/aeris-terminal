@@ -506,6 +506,8 @@ fn economic_event_flatten_rejects_broker_and_preserves_simulated_rule() {
             minimum_importance: EconomicEventRiskImportance::High,
             lead_seconds: 300,
         }),
+        daily_profit_target: None,
+        maximum_drawdown: None,
         enabled: true,
     };
     assert_eq!(

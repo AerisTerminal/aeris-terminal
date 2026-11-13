@@ -358,6 +358,8 @@ fn build_property_world(seed: u64) -> (PropertyWorld, TestDirectory, TradingServ
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: None,
             economic_event_rule: None,
+            daily_profit_target: None,
+            maximum_drawdown: None,
             enabled: true,
         })
         .expect("risk profile registration");

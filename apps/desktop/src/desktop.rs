@@ -90,6 +90,7 @@ mod symbol_entry;
 mod symbol_menu;
 mod tab_strip;
 use tab_strip::{TabClose, TabDragMove, TabStrip, WorkspaceDragState};
+mod risk_rules_view;
 mod terminal_chrome;
 mod terminal_view;
 mod time_sales_panel;
@@ -1009,6 +1010,7 @@ struct TradingPaneState {
     account_creator: Option<PracticeAccountFormState>,
     account_delete_confirmation: Option<aeris_trading::TradingAccountId>,
     trade_copier: Option<trade_copier_view::TradeCopierEditor>,
+    risk_rules: Option<risk_rules_view::RiskRulesEditor>,
 }
 
 #[cfg(test)]

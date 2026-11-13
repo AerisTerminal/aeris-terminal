@@ -17,11 +17,11 @@ use aeris_trading_runtime::{
 const RECENT_COPY_ROWS: usize = 20;
 
 /// Only practice accounts can copy or receive copies; the owner refuses broker accounts.
-fn is_practice(account: &TradingAccount) -> bool {
+pub(super) fn is_practice(account: &TradingAccount) -> bool {
     account.environment == AccountEnvironment::Simulated
 }
 
-fn practice_account<'a>(
+pub(super) fn practice_account<'a>(
     accounts: &'a [TradingAccount],
     account_id: &TradingAccountId,
 ) -> Option<&'a TradingAccount> {
@@ -31,7 +31,7 @@ fn practice_account<'a>(
         .filter(|account| is_practice(account))
 }
 
-fn account_name(accounts: &[TradingAccount], account_id: &TradingAccountId) -> String {
+pub(super) fn account_name(accounts: &[TradingAccount], account_id: &TradingAccountId) -> String {
     accounts
         .iter()
         .find(|account| &account.id == account_id)
@@ -50,9 +50,9 @@ fn saved_copier<'a>(
         .find(|config| &config.source_account_id == source)
 }
 
-/// An exact positive multiplier such as `2`, `0.5` or `1.25`; its scale is the number of
+/// An exact positive decimal such as `2`, `0.5` or `1.25`; its scale is the number of
 /// decimals typed, so no value is rounded.
-fn parse_multiplier(text: &str) -> Option<FixedPoint> {
+pub(super) fn parse_positive_decimal(text: &str) -> Option<FixedPoint> {
     let text = text.trim();
     let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
     if whole.is_empty() && fraction.is_empty() {
@@ -73,9 +73,9 @@ fn parse_multiplier(text: &str) -> Option<FixedPoint> {
     FixedPoint::try_new(units, scale).ok()
 }
 
-/// A multiplier as typed back into its field, keeping its scale: `1.50` reopens as `1.50`,
-/// so an unchanged saved copier never reads as edited.
-fn multiplier_text(value: FixedPoint) -> String {
+/// A decimal as typed back into its field, keeping its scale: `1.50` reopens as `1.50`,
+/// so an unchanged saved value never reads as edited.
+pub(super) fn decimal_text(value: FixedPoint) -> String {
     let scale = usize::from(value.scale());
     let digits = format!(
         "{:0>width$}",
@@ -90,9 +90,9 @@ fn multiplier_text(value: FixedPoint) -> String {
     }
 }
 
-/// The revision a save writes: past both the published copier and this editor's own last
-/// save, which the working set may not show yet.
-fn next_copier_revision(saved: Option<u32>, last_saved: Option<u32>) -> Option<u32> {
+/// The revision a save writes: past both the published one and the editor's own last save,
+/// which the working set may not show yet.
+pub(super) fn next_revision(saved: Option<u32>, last_saved: Option<u32>) -> Option<u32> {
     saved.max(last_saved).unwrap_or(0).checked_add(1)
 }
 
@@ -182,7 +182,7 @@ fn draft_config(
             if practice_account(accounts, &target.account_id).is_none() {
                 return Err(CopierProblem::TargetUnavailable(target.account_id.clone()));
             }
-            let quantity_multiplier = parse_multiplier(&target.multiplier)
+            let quantity_multiplier = parse_positive_decimal(&target.multiplier)
                 .ok_or_else(|| CopierProblem::Multiplier(target.account_id.clone()))?;
             Ok(TradeCopierTarget {
                 account_id: target.account_id.clone(),
@@ -397,7 +397,7 @@ impl WorkspaceSurface {
                     target_row(
                         target.account_id.clone(),
                         target.enabled,
-                        multiplier_text(target.quantity_multiplier),
+                        decimal_text(target.quantity_multiplier),
                         window,
                         cx,
                     )
@@ -543,7 +543,7 @@ impl WorkspaceSurface {
                 .and_then(|set| saved_copier(&set.trade_copiers, source))
                 .map(|config| config.revision)
         });
-        let draft = next_copier_revision(saved_revision, editor.last_saved_revision)
+        let draft = next_revision(saved_revision, editor.last_saved_revision)
             .ok_or(CopierProblem::RevisionExhausted)
             .and_then(|revision| {
                 draft_config(
@@ -1136,12 +1136,12 @@ mod tests {
 
     #[test]
     fn multipliers_are_exact_positive_decimals() {
-        assert_eq!(parse_multiplier("1"), Some(fixed(1, 0)));
-        assert_eq!(parse_multiplier(" 2 "), Some(fixed(2, 0)));
-        assert_eq!(parse_multiplier("0.5"), Some(fixed(5, 1)));
-        assert_eq!(parse_multiplier("1.50"), Some(fixed(150, 2)));
-        assert_eq!(parse_multiplier(".25"), Some(fixed(25, 2)));
-        assert_eq!(parse_multiplier("3."), Some(fixed(3, 0)));
+        assert_eq!(parse_positive_decimal("1"), Some(fixed(1, 0)));
+        assert_eq!(parse_positive_decimal(" 2 "), Some(fixed(2, 0)));
+        assert_eq!(parse_positive_decimal("0.5"), Some(fixed(5, 1)));
+        assert_eq!(parse_positive_decimal("1.50"), Some(fixed(150, 2)));
+        assert_eq!(parse_positive_decimal(".25"), Some(fixed(25, 2)));
+        assert_eq!(parse_positive_decimal("3."), Some(fixed(3, 0)));
         for refused in [
             "",
             ".",
@@ -1155,7 +1155,11 @@ mod tests {
             "0.0000000000000000001",
             "99999999999999999999",
         ] {
-            assert_eq!(parse_multiplier(refused), None, "{refused:?} is refused");
+            assert_eq!(
+                parse_positive_decimal(refused),
+                None,
+                "{refused:?} is refused"
+            );
         }
         for saved in [
             fixed(1, 0),
@@ -1165,13 +1169,13 @@ mod tests {
             fixed(12, 0),
         ] {
             assert_eq!(
-                parse_multiplier(&multiplier_text(saved)),
+                parse_positive_decimal(&decimal_text(saved)),
                 Some(saved),
                 "a saved multiplier reopens as the same value"
             );
         }
-        assert_eq!(multiplier_text(fixed(25, 3)), "0.025");
-        assert_eq!(multiplier_text(fixed(150, 2)), "1.50");
+        assert_eq!(decimal_text(fixed(25, 3)), "0.025");
+        assert_eq!(decimal_text(fixed(150, 2)), "1.50");
     }
 
     #[test]
@@ -1282,11 +1286,11 @@ mod tests {
 
     #[test]
     fn a_save_advances_past_the_published_and_the_last_saved_revision() {
-        assert_eq!(next_copier_revision(None, None), Some(1));
-        assert_eq!(next_copier_revision(Some(3), None), Some(4));
-        assert_eq!(next_copier_revision(Some(3), Some(5)), Some(6));
-        assert_eq!(next_copier_revision(Some(7), Some(5)), Some(8));
-        assert_eq!(next_copier_revision(Some(u32::MAX), None), None);
+        assert_eq!(next_revision(None, None), Some(1));
+        assert_eq!(next_revision(Some(3), None), Some(4));
+        assert_eq!(next_revision(Some(3), Some(5)), Some(6));
+        assert_eq!(next_revision(Some(7), Some(5)), Some(8));
+        assert_eq!(next_revision(Some(u32::MAX), None), None);
     }
 
     #[test]

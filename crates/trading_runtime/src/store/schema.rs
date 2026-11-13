@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 33;
+pub const SCHEMA_VERSION: u32 = 34;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -431,6 +431,18 @@ pub(super) const MIGRATION_V33: &str = "
      trailing_activation_ticks INTEGER,
      trailing_distance_ticks INTEGER
  ) STRICT;";
+/// Prop-firm risk rules: an optional daily profit target and an optional maximum drawdown
+/// from a durable equity high-water mark. Every existing profile keeps neither rule.
+pub(super) const MIGRATION_V34: &str = "
+ ALTER TABLE risk_profiles ADD COLUMN profit_target_units INTEGER;
+ ALTER TABLE risk_profiles ADD COLUMN profit_target_scale INTEGER;
+ ALTER TABLE risk_profiles ADD COLUMN max_drawdown_units INTEGER;
+ ALTER TABLE risk_profiles ADD COLUMN max_drawdown_scale INTEGER;
+ ALTER TABLE risk_profiles ADD COLUMN max_drawdown_mode TEXT;
+ ALTER TABLE risk_profiles ADD COLUMN max_drawdown_floor_stop_units INTEGER;
+ ALTER TABLE risk_profiles ADD COLUMN max_drawdown_floor_stop_scale INTEGER;
+ ALTER TABLE risk_rule_states ADD COLUMN equity_peak_units INTEGER;
+ ALTER TABLE risk_rule_states ADD COLUMN equity_peak_scale INTEGER;";
 
 pub(super) const MIGRATION_V26: &str = "
  CREATE TABLE position_checkpoints (
@@ -626,6 +638,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 32,
         to: 33,
         sql: MIGRATION_V33,
+    },
+    Migration {
+        from: 33,
+        to: 34,
+        sql: MIGRATION_V34,
     },
 ];
 

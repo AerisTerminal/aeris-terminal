@@ -1610,6 +1610,8 @@ fn risk_profile(daily_loss_limit: i64, max_contracts: i64) -> crate::RiskProfile
         consistency_max_single_trade_percent: None,
         restricted_until_unix_nanos: None,
         economic_event_rule: None,
+        daily_profit_target: None,
+        maximum_drawdown: None,
         enabled: true,
     }
 }

@@ -4290,6 +4290,196 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn the_risk_rules_tab_saves_prop_firm_rules_through_the_owner_and_drops_its_draft_when_left(
+        cx: &mut TestAppContext,
+    ) {
+        let (owner, root, account, _, _, _) =
+            trading_store::real_owner_fill_fixture_for("hyperliquid");
+        let subscription = owner.subscribe().expect("owner subscription");
+        let (terminal, cx) = terminal_harness_with_product(
+            cx,
+            DesktopLifecycle::new_for_test_with_trading(owner.clone()),
+            None,
+            aeris_desktop::test_support::fixture_public_crypto(),
+        );
+        adopt_trading_until(&terminal, &subscription, |set| set.accounts.len() == 2, cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        update_terminal(&terminal, cx, |_, _, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.select_trading_account(account.clone(), cx);
+            });
+        });
+        open_accounts_tab(
+            &terminal,
+            &surface,
+            accounts_panel::AccountsTab::RiskRules,
+            cx,
+        );
+        assert_eq!(
+            cx.read(|cx| {
+                surface
+                    .read(cx)
+                    .trading_pnl
+                    .risk_rules
+                    .as_ref()
+                    .and_then(|editor| editor.account().cloned())
+            }),
+            Some(account.clone()),
+            "the section opens on the practice account the pane trades on"
+        );
+
+        update_terminal(&terminal, cx, |_, window, cx| {
+            surface.update(cx, |surface, cx| {
+                let editor = surface.trading_pnl.risk_rules.as_ref().expect("editor");
+                let inputs = [
+                    (editor.daily_loss_input().clone(), "1000"),
+                    (editor.maximum_contracts_input().clone(), "5"),
+                    (editor.profit_target_input().clone(), "750"),
+                    (editor.maximum_drawdown_input().clone(), "zero"),
+                ];
+                for (input, value) in &inputs {
+                    input.update(cx, |input, input_cx| {
+                        input.set_value(*value, window, input_cx);
+                    });
+                }
+                surface.save_risk_rules(window, cx);
+                let editor = surface.trading_pnl.risk_rules.as_ref().expect("editor");
+                assert!(
+                    editor.has_problem() && !editor.is_saving(),
+                    "an invalid field is refused before any owner call"
+                );
+                inputs[3].0.update(cx, |input, input_cx| {
+                    input.set_value("2500", window, input_cx);
+                });
+                surface.save_risk_rules(window, cx);
+                let editor = surface.trading_pnl.risk_rules.as_ref().expect("editor");
+                assert!(
+                    editor.is_saving() && !editor.has_problem(),
+                    "the save holds the editor until its reply"
+                );
+            });
+        });
+        cx.run_until_parked();
+        adopt_trading_until(
+            &terminal,
+            &subscription,
+            |set| !set.risk_profiles.is_empty() && !set.risk_meters.is_empty(),
+            cx,
+        );
+        assert_the_owner_holds_the_saved_risk_rules(&terminal, &surface, &account, cx);
+        assert_the_risk_rules_draft_follows_its_tab(&terminal, &surface, cx);
+        drop(subscription);
+        owner
+            .shutdown(aeris_desktop::test_support::TRADING_OWNER_TEST_SHUTDOWN)
+            .expect("owner stopped");
+        std::fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    fn assert_the_owner_holds_the_saved_risk_rules(
+        terminal: &Entity<TerminalApp>,
+        surface: &Entity<WorkspaceSurface>,
+        account: &aeris_trading::TradingAccountId,
+        cx: &mut VisualTestContext,
+    ) {
+        use aeris_trading_runtime::{MaximumDrawdownRule, TrailingDrawdownMode};
+        cx.read(|cx| {
+            let set = terminal
+                .read(cx)
+                .services
+                .trading_store()
+                .read(cx)
+                .current()
+                .expect("working set");
+            let scale = set
+                .accounts
+                .iter()
+                .find(|candidate| &candidate.id == account)
+                .expect("account")
+                .currency_scale;
+            let money = |whole: i64| {
+                aeris_trading::FixedPoint::try_new(whole, 0)
+                    .and_then(|value| value.exact_rescale(scale))
+                    .expect("money")
+            };
+            let [profile] = set.risk_profiles.as_slice() else {
+                panic!("exactly one saved profile: {:?}", set.risk_profiles);
+            };
+            assert_eq!(&profile.account_id, account);
+            assert_eq!(profile.version, 1);
+            assert!(profile.enabled);
+            assert_eq!(profile.daily_loss_limit, money(1000));
+            assert_eq!(
+                profile.max_contracts,
+                aeris_trading::FixedPoint::try_new(5, 0).expect("contracts")
+            );
+            assert_eq!(profile.trailing_drawdown, None);
+            assert_eq!(profile.daily_profit_target, Some(money(750)));
+            assert_eq!(
+                profile.maximum_drawdown,
+                Some(MaximumDrawdownRule {
+                    amount: money(2500),
+                    mode: TrailingDrawdownMode::Intraday,
+                    floor_stops_at: None,
+                }),
+                "the owner holds exactly the rules the editor described"
+            );
+            let meter = set
+                .risk_meters
+                .iter()
+                .find(|meter| &meter.account_id == account)
+                .expect("the account's live meter");
+            assert!(meter.profit_target_remaining.is_some());
+            assert!(meter.maximum_drawdown_peak.is_some());
+            let editor = surface.read(cx).trading_pnl.risk_rules.as_ref();
+            let editor = editor.expect("the section stays open");
+            assert!(!editor.is_saving());
+            assert!(!editor.has_problem());
+        });
+    }
+
+    /// Leaving the risk rules section drops its draft, returning reloads the saved rules, and
+    /// closing the panel drops the draft too.
+    fn assert_the_risk_rules_draft_follows_its_tab(
+        terminal: &Entity<TerminalApp>,
+        surface: &Entity<WorkspaceSurface>,
+        cx: &mut VisualTestContext,
+    ) {
+        open_accounts_tab(
+            terminal,
+            surface,
+            accounts_panel::AccountsTab::TradingAccounts,
+            cx,
+        );
+        assert!(
+            cx.read(|cx| surface.read(cx).trading_pnl.risk_rules.is_none()),
+            "leaving the section drops its draft"
+        );
+        open_accounts_tab(
+            terminal,
+            surface,
+            accounts_panel::AccountsTab::RiskRules,
+            cx,
+        );
+        cx.read(|cx| {
+            let editor = surface.read(cx).trading_pnl.risk_rules.as_ref();
+            let editor = editor.expect("the section reopens");
+            let profit_target = editor.profit_target_input().read(cx).value().to_string();
+            assert!(
+                profit_target.starts_with("750"),
+                "returning reloads the saved rules: {profit_target}"
+            );
+        });
+        update_terminal(terminal, cx, |_, window, cx| {
+            surface.update(cx, |surface, cx| surface.close_chrome_overlay(window, cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.read(|cx| surface.read(cx).trading_pnl.risk_rules.is_none()),
+            "closing the panel drops the draft"
+        );
+    }
+
+    #[gpui::test]
     fn saved_layouts_open_from_the_start_page_even_when_a_tab_shows_them(cx: &mut TestAppContext) {
         let (terminal, _additions, cx) = tabbed_terminal_harness(cx);
         let (first_layout, first_name) = tab_layouts(&terminal, cx)[0].clone();

@@ -1,10 +1,19 @@
 use super::{
     BROKER_PNL_UNAVAILABLE, BTreeMap, EconomicEventRiskAction, FAST_STOP_REENTRY_NANOS, FixedPoint,
-    InstrumentId, OrderSide, PlaceOrder, RiskEvaluation, RiskLock, RiskLockKind, RiskProfile,
-    RiskRuleState, RiskSession, RiskSessionBoundary, SessionPlan, TradingAccountId, TradingCore,
-    TrailingDrawdownMode, VenueRoute, consistency_projection, subtract_fixed,
+    InstrumentId, MaximumDrawdownRule, OrderSide, PlaceOrder, RiskEvaluation, RiskLock,
+    RiskLockKind, RiskProfile, RiskRuleState, RiskSession, RiskSessionBoundary, SessionPlan,
+    TradingAccountId, TradingCore, TrailingDrawdownMode, VenueRoute, checked_difference,
+    consistency_projection, subtract_fixed,
 };
-use aeris_trading::RiskWarning;
+use aeris_trading::{RiskWarning, TradingValidationError};
+
+/// Where the maximum drawdown stands for one account.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MaximumDrawdownStanding {
+    pub(super) equity: FixedPoint,
+    pub(super) peak: FixedPoint,
+    pub(super) floor: FixedPoint,
+}
 
 impl TradingCore {
     pub(super) fn register_risk_profile(&mut self, profile: RiskProfile) -> Result<(), String> {
@@ -16,8 +25,19 @@ impl TradingCore {
             return Err("economic-event flatten is unavailable for broker accounts".into());
         }
         profile.validate()?;
-        if !self.state.accounts.contains_key(&profile.account_id) {
+        let Some(account) = self.state.accounts.get(&profile.account_id) else {
             return Err("risk profile account is not registered".to_string());
+        };
+        if profile.maximum_drawdown.is_some() {
+            if self.route(&profile.account_id)? != VenueRoute::Simulated {
+                return Err("a maximum drawdown is available only for practice accounts".into());
+            }
+            if profile.daily_loss_limit.scale() != account.currency_scale {
+                return Err(
+                    "a maximum drawdown needs the risk profile in the account currency scale"
+                        .into(),
+                );
+            }
         }
         if self
             .state
@@ -41,6 +61,13 @@ impl TradingCore {
             .map_err(|error| error.to_string())?;
         // An unreachable broker account starts its peak at zero; the live check raises it.
         let current = self.session_pnl(&profile)?.unwrap_or(zero);
+        let equity_peak = profile
+            .maximum_drawdown
+            .map(|_| {
+                self.registered_equity_peak(&profile)
+                    .ok_or("account equity is unavailable for the maximum drawdown")
+            })
+            .transpose()?;
         let rule_state = RiskRuleState {
             account_id: profile.account_id.clone(),
             profile_id: profile.profile_id.clone(),
@@ -48,6 +75,7 @@ impl TradingCore {
             peak_session_pnl: if current.units() > 0 { current } else { zero },
             total_winning_pnl: zero,
             largest_winning_trade_pnl: zero,
+            equity_peak,
         };
         self.store
             .put_risk_profile_and_state(&profile, &rule_state)?;
@@ -75,6 +103,43 @@ impl TradingCore {
             .risk_profiles
             .insert(profile.account_id.clone(), profile);
         self.bump_revision()
+    }
+
+    /// The equity high-water mark a registration with a maximum drawdown keeps, or `None`
+    /// while the account equity is unknown: a revision that keeps the rule keeps its peak, so
+    /// editing other rules never resets it; a profile that adds the rule starts the peak at
+    /// the account's current equity.
+    fn registered_equity_peak(&self, profile: &RiskProfile) -> Option<FixedPoint> {
+        self.state
+            .risk_profiles
+            .get(&profile.account_id)
+            .filter(|current| current.maximum_drawdown.is_some())
+            .and_then(|_| self.state.risk_rule_states.get(&profile.account_id))
+            .and_then(|state| state.equity_peak)
+            .or_else(|| self.account_equity(&profile.account_id))
+    }
+
+    /// The account's equity against its maximum-drawdown floor, or `None` while equity is
+    /// unknown. A missing peak reads as the current equity.
+    pub(super) fn maximum_drawdown_standing(
+        &self,
+        account_id: &TradingAccountId,
+        rule: MaximumDrawdownRule,
+    ) -> Result<Option<MaximumDrawdownStanding>, TradingValidationError> {
+        let Some(equity) = self.account_equity(account_id) else {
+            return Ok(None);
+        };
+        let peak = self
+            .state
+            .risk_rule_states
+            .get(account_id)
+            .and_then(|state| state.equity_peak)
+            .unwrap_or(equity);
+        Ok(Some(MaximumDrawdownStanding {
+            equity,
+            peak,
+            floor: rule.floor(peak)?,
+        }))
     }
 
     pub(super) fn register_session_plan(&mut self, plan: SessionPlan) -> Result<(), String> {
@@ -335,6 +400,31 @@ impl TradingCore {
                 )?;
                 return Err("account is risk-locked: trailing drawdown reached".to_string());
             }
+        }
+        if let Some(target) = profile.daily_profit_target
+            && current_session_pnl.units() >= target.units()
+        {
+            self.lock_account(
+                command.account_id.clone(),
+                RiskLockKind::ProfitTarget,
+                "daily profit target reached".to_string(),
+                command.submitted_unix_nanos,
+            )?;
+            return Err("account is risk-locked: daily profit target reached".to_string());
+        }
+        if let Some(rule) = profile.maximum_drawdown
+            && let Some(standing) = self
+                .maximum_drawdown_standing(&profile.account_id, rule)
+                .map_err(|error| error.to_string())?
+            && standing.equity.units() <= standing.floor.units()
+        {
+            self.lock_account(
+                command.account_id.clone(),
+                RiskLockKind::MaximumDrawdown,
+                "maximum drawdown reached".to_string(),
+                command.submitted_unix_nanos,
+            )?;
+            return Err("account is risk-locked: maximum drawdown reached".to_string());
         }
         Ok(())
     }
@@ -615,48 +705,32 @@ impl TradingCore {
             let Some(current) = self.session_pnl(&profile)? else {
                 continue;
             };
-            if current.units() < 0
-                && current.units().unsigned_abs() >= profile.daily_loss_limit.units().unsigned_abs()
+            let mut breach = session_pnl_breach(&profile, current);
+            if breach.is_none()
+                && (profile.trailing_drawdown.is_some() || profile.maximum_drawdown.is_some())
             {
-                self.lock_account(
-                    profile.account_id.clone(),
-                    RiskLockKind::DailyLossLimit,
-                    "daily loss limit reached".to_string(),
-                    observed_unix_nanos,
-                )?;
-                continue;
-            }
-            let Some(drawdown) = profile.trailing_drawdown else {
-                continue;
-            };
-            let mut state = self
-                .state
-                .risk_rule_states
-                .get(&profile.account_id)
-                .cloned()
-                .ok_or_else(|| "risk rule state is unavailable".to_string())?;
-            if profile.trailing_mode == TrailingDrawdownMode::Intraday
-                && current.units() > state.peak_session_pnl.units()
-            {
-                state.peak_session_pnl = current;
-                if !self.quote_planning {
-                    self.store.put_risk_rule_state(&state)?;
-                }
-                self.state
+                let mut state = self
+                    .state
                     .risk_rule_states
-                    .insert(profile.account_id.clone(), state.clone());
+                    .get(&profile.account_id)
+                    .cloned()
+                    .ok_or_else(|| "risk rule state is unavailable".to_string())?;
+                let equity = self.account_equity(&profile.account_id);
+                breach = trailing_rule_breach(&profile, current, equity, &mut state)
+                    .map_err(|error| error.to_string())?;
+                if self.state.risk_rule_states.get(&profile.account_id) != Some(&state) {
+                    // A speculative quote plan persists the raised peaks with the rest of its
+                    // committed facts instead.
+                    if !self.quote_planning {
+                        self.store.put_risk_rule_state(&state)?;
+                    }
+                    self.state
+                        .risk_rule_states
+                        .insert(profile.account_id.clone(), state);
+                }
             }
-            let floor = subtract_fixed(state.peak_session_pnl, drawdown)?;
-            if current.units() <= floor.units() {
-                self.lock_account(
-                    profile.account_id,
-                    RiskLockKind::TrailingDrawdown,
-                    format!(
-                        "{} trailing drawdown reached",
-                        profile.trailing_mode.as_str()
-                    ),
-                    observed_unix_nanos,
-                )?;
+            if let Some((kind, reason)) = breach {
+                self.lock_account(profile.account_id, kind, reason, observed_unix_nanos)?;
             }
         }
         let plans = self
@@ -702,7 +776,8 @@ impl TradingCore {
     }
 
     /// Rolls every due risk session at its boundary: re-baselines the daily meters, resets
-    /// the trailing peak, releases the daily-meter locks, and records the boundary equity
+    /// the session trailing peak, raises the maximum-drawdown peak to the boundary equity,
+    /// releases the daily-meter and profit-target locks, and records the boundary equity
     /// sample, each account in one durable transaction. Called from the owner timer, so a
     /// process closed across a boundary rolls at the first tick after restart.
     pub(super) fn roll_risk_sessions(&mut self, now: i64) -> Result<(), String> {
@@ -741,6 +816,17 @@ impl TradingCore {
                             reset.peak_session_pnl = FixedPoint::try_new(0, current.scale())
                                 .map_err(|error| error.to_string())?;
                         }
+                    }
+                    // The maximum drawdown's peak never resets: the boundary equity only
+                    // raises it, which is the only move an end-of-day peak makes.
+                    if profile.enabled
+                        && profile.maximum_drawdown.is_some()
+                        && let Some(equity) = self.account_equity(&session.account_id)
+                        && reset
+                            .equity_peak
+                            .is_none_or(|peak| equity.units() > peak.units())
+                    {
+                        reset.equity_peak = Some(equity);
                     }
                     Some(reset)
                 }
@@ -812,4 +898,76 @@ impl TradingCore {
                 total.checked_add(value).map_err(|error| error.to_string())
             })
     }
+}
+
+/// The daily rule the live session P&L breaches: the loss limit or the profit target.
+fn session_pnl_breach(
+    profile: &RiskProfile,
+    current: FixedPoint,
+) -> Option<(RiskLockKind, String)> {
+    if current.units() < 0
+        && current.units().unsigned_abs() >= profile.daily_loss_limit.units().unsigned_abs()
+    {
+        return Some((
+            RiskLockKind::DailyLossLimit,
+            "daily loss limit reached".to_string(),
+        ));
+    }
+    profile
+        .daily_profit_target
+        .is_some_and(|target| current.units() >= target.units())
+        .then(|| {
+            (
+                RiskLockKind::ProfitTarget,
+                "daily profit target reached".to_string(),
+            )
+        })
+}
+
+/// The trailing rule the live session P&L or equity breaches, raising in `state` the
+/// intraday peaks those rules follow on the way. Without a known equity the maximum
+/// drawdown is not evaluated.
+fn trailing_rule_breach(
+    profile: &RiskProfile,
+    current: FixedPoint,
+    equity: Option<FixedPoint>,
+    state: &mut RiskRuleState,
+) -> Result<Option<(RiskLockKind, String)>, TradingValidationError> {
+    if let Some(drawdown) = profile.trailing_drawdown {
+        if profile.trailing_mode == TrailingDrawdownMode::Intraday
+            && current.units() > state.peak_session_pnl.units()
+        {
+            state.peak_session_pnl = current;
+        }
+        let floor = checked_difference(state.peak_session_pnl, drawdown)?;
+        if current.units() <= floor.units() {
+            return Ok(Some((
+                RiskLockKind::TrailingDrawdown,
+                format!(
+                    "{} trailing drawdown reached",
+                    profile.trailing_mode.as_str()
+                ),
+            )));
+        }
+    }
+    let (Some(rule), Some(equity)) = (profile.maximum_drawdown, equity) else {
+        return Ok(None);
+    };
+    // An end-of-day peak moves only at the session rollover; an intraday peak follows
+    // every new equity high.
+    let peak = match state.equity_peak {
+        Some(peak)
+            if rule.mode == TrailingDrawdownMode::EndOfDay || equity.units() <= peak.units() =>
+        {
+            peak
+        }
+        _ => equity,
+    };
+    state.equity_peak = Some(peak);
+    Ok((equity.units() <= rule.floor(peak)?.units()).then(|| {
+        (
+            RiskLockKind::MaximumDrawdown,
+            "maximum drawdown reached".to_string(),
+        )
+    }))
 }

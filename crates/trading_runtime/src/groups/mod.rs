@@ -293,6 +293,16 @@ impl TradingCore {
                 return Err("bracket loss at stop would reach the trailing drawdown".to_string());
             }
         }
+        if let Some(rule) = profile.maximum_drawdown
+            && let Some(standing) = self
+                .maximum_drawdown_standing(account_id, rule)
+                .map_err(|error| error.to_string())?
+        {
+            let remaining = nonnegative_difference(standing.equity, standing.floor)?;
+            if potential_loss.units() >= remaining.units() {
+                return Err("bracket loss at stop would reach the maximum drawdown".to_string());
+            }
+        }
         Ok(())
     }
 }

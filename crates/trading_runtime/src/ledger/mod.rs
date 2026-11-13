@@ -494,6 +494,19 @@ impl TradingCore {
                     })
                     .transpose()?
                     .unwrap_or((None, None));
+                let profit_target_remaining = profile
+                    .daily_profit_target
+                    .map(|target| nonnegative_difference(target, current_session_pnl))
+                    .transpose()?;
+                let maximum_drawdown = profile
+                    .maximum_drawdown
+                    .map(|rule| self.maximum_drawdown_standing(&profile.account_id, rule))
+                    .transpose()
+                    .map_err(|error| error.to_string())?
+                    .flatten();
+                let maximum_drawdown_remaining = maximum_drawdown
+                    .map(|standing| nonnegative_difference(standing.equity, standing.floor))
+                    .transpose()?;
                 Ok(Some(RiskMeter {
                     account_id: profile.account_id.clone(),
                     profile_id: profile.profile_id.clone(),
@@ -508,6 +521,10 @@ impl TradingCore {
                     consistency_current_percent,
                     consistency_additional_profit_required,
                     restricted_until_unix_nanos: profile.restricted_until_unix_nanos,
+                    profit_target_remaining,
+                    maximum_drawdown_peak: maximum_drawdown.map(|standing| standing.peak),
+                    maximum_drawdown_floor: maximum_drawdown.map(|standing| standing.floor),
+                    maximum_drawdown_remaining,
                     lock_reason: self
                         .state
                         .risk_locks

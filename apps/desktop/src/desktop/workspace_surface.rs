@@ -2827,7 +2827,7 @@ impl WorkspaceSurface {
                 self.chrome_focus.focus(window, cx);
             }
             ChromeOverlay::Accounts => {
-                self.sync_trade_copier_editor(window, cx);
+                self.sync_accounts_tab_editors(window, cx);
                 self.chrome_focus.focus(window, cx);
             }
         }
@@ -2870,6 +2870,7 @@ impl WorkspaceSurface {
                 self.trading_pnl.account_creator = None;
                 self.trading_pnl.account_delete_confirmation = None;
                 self.trading_pnl.trade_copier = None;
+                self.trading_pnl.risk_rules = None;
                 window.dispatch_action(Box::new(CancelProviderLogin), cx);
             }
             ChromeOverlay::Instrument | ChromeOverlay::Timeframe | ChromeOverlay::ChartType => {}
