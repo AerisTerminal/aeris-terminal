@@ -66,6 +66,7 @@ mod order_entry_panel;
 mod order_flow_dialog;
 mod order_flow_presenter;
 mod order_quantity;
+mod order_templates_view;
 mod order_ticket;
 mod overlay_stack;
 use overlay_stack::{OverlayKind, OverlayStack};

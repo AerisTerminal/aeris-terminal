@@ -492,6 +492,7 @@ pub(super) fn workspace_market_area(
                 trading: &surface.trading_pnl,
                 quantity: &surface.order_quantity,
                 controls: &surface.order_ticket,
+                order_template: surface.chart_chrome.order_template,
                 replay: replay_ticket.as_ref(),
                 theme,
             },

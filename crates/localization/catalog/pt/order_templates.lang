@@ -1,0 +1,64 @@
+# Modelos de ordem (estratégias ATM): a escolha de modelo do boleto de ordens, o editor de
+# modelos e as respostas dos comandos de modelo.
+
+# Boleto de ordens
+ticket_label = Modelo
+none = Nenhum
+none_detail = O bracket do próprio boleto
+new_template = Novo modelo…
+edit_aria = Editar {name}
+duplicate_aria = Duplicar {name}
+delete_aria = Excluir {name}
+missing_value = Não salvo
+overrides_bracket = O modelo coloca seu stop e seus alvos; a estratégia OCO não é usada.
+selected_missing = O modelo de ordem selecionado não está mais salvo. Escolha outro modelo ou Nenhum no boleto de ordens.
+replay_unsupported = O replay de barras opera um stop e um alvo. Escolha um modelo com um alvo e sem stop móvel, ou Nenhum.
+template_detail = Qtd. {quantity} · Stop {stop}
+
+# Editor
+new_title = Novo modelo de ordem
+edit_title = Editar modelo de ordem
+name_label = Nome
+name_placeholder = Scalp, dois alvos
+quantity_label = Quantidade
+stop_label = Stop (ticks)
+targets_heading = Alvos
+target_ticks_label = Alvo {number} (ticks)
+target_quantity_label = Quantidade
+add_target = Adicionar alvo
+remove_target_aria = Remover o alvo {number}
+trailing_label = Stop móvel
+trailing_description = Move o stop atrás do melhor preço quando a operação está no lucro.
+trailing_activation_label = Ativar após (ticks)
+trailing_distance_label = Distância (ticks)
+save = Salvar
+copy_name = {name} cópia
+
+# Excluir
+delete_title = Excluir modelo de ordem
+delete_message = Excluir "{name}"? Os brackets já colocados com ele mantêm suas ordens.
+delete_confirm = Excluir
+
+# Problemas
+whole_number_required = Digite um número inteiro no campo destacado.
+invalid_identity = Este modelo não pode ser salvo com sua identidade. Feche o editor e tente novamente.
+invalid_revision = Este modelo não pode ser salvo em sua revisão. Feche o editor e tente novamente.
+invalid_name = Digite um nome de no máximo {maximum} caracteres, sem espaços no início ou no fim.
+invalid_quantity = A quantidade deve ser de 1 a {maximum}.
+invalid_stop = O stop deve ser de 1 a {maximum} ticks.
+invalid_target_count = Um modelo precisa de pelo menos um alvo e comporta no máximo {maximum}.
+invalid_target_offset = Cada alvo deve ser de 1 a {maximum} ticks.
+invalid_target_order = Cada alvo deve estar mais longe da entrada do que o anterior.
+invalid_target_quantity = Cada alvo deve ter uma quantidade de pelo menos 1.
+invalid_target_total = As quantidades dos alvos devem somar a quantidade do modelo.
+invalid_target_split = Essas quantidades de alvos não podem ser divididas com exatidão. Altere as quantidades dos alvos mais próximos.
+invalid_trailing = A ativação e a distância do stop móvel devem ser de 1 a {maximum} ticks cada.
+too_many = No máximo {maximum} modelos de ordem podem ser salvos. Exclua um primeiro.
+unknown_template = Este modelo não está mais salvo.
+revision_must_advance = Este modelo foi alterado em outro lugar. Feche o editor e abra-o novamente.
+save_failed = Não foi possível salvar o modelo: {error}
+delete_failed = Não foi possível excluir o modelo: {error}
+
+# Respostas
+saved = Modelo de ordem {name} salvo.
+deleted = Modelo de ordem {name} excluído.

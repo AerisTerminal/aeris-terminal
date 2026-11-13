@@ -1,0 +1,63 @@
+# 订单模板（ATM 策略）：订单票据的模板选择、模板编辑器以及模板命令的反馈。
+
+# 订单票据
+ticket_label = 模板
+none = 无
+none_detail = 票据自身的括号单
+new_template = 新建模板…
+edit_aria = 编辑 {name}
+duplicate_aria = 复制 {name}
+delete_aria = 删除 {name}
+missing_value = 未保存
+overrides_bracket = 模板会下达自己的止损和目标；不使用 OCO 策略。
+selected_missing = 所选订单模板已不再保存。请在订单票据中选择其他模板或“无”。
+replay_unsupported = K 线回放只交易一个止损和一个目标。请选择只有一个目标且没有追踪止损的模板，或选择“无”。
+template_detail = 数量 {quantity} · 止损 {stop}
+
+# 编辑器
+new_title = 新建订单模板
+edit_title = 编辑订单模板
+name_label = 名称
+name_placeholder = 剥头皮，两个目标
+quantity_label = 数量
+stop_label = 止损（跳动点）
+targets_heading = 目标
+target_ticks_label = 目标 {number}（跳动点）
+target_quantity_label = 数量
+add_target = 添加目标
+remove_target_aria = 移除目标 {number}
+trailing_label = 追踪止损
+trailing_description = 交易盈利后，将止损移到最优价格之后。
+trailing_activation_label = 激活距离（跳动点）
+trailing_distance_label = 追踪距离（跳动点）
+save = 保存
+copy_name = {name} 副本
+
+# 删除
+delete_title = 删除订单模板
+delete_message = 删除“{name}”？已用它下达的括号单会保留其订单。
+delete_confirm = 删除
+
+# 问题
+whole_number_required = 请在突出显示的字段中输入整数。
+invalid_identity = 此模板无法以其标识保存。请关闭编辑器后重试。
+invalid_revision = 此模板无法以其修订版本保存。请关闭编辑器后重试。
+invalid_name = 请输入不超过 {maximum} 个字符的名称，开头和结尾不能有空格。
+invalid_quantity = 数量必须在 1 到 {maximum} 之间。
+invalid_stop = 止损必须在 1 到 {maximum} 个跳动点之间。
+invalid_target_count = 模板至少需要一个目标，最多 {maximum} 个。
+invalid_target_offset = 每个目标必须在 1 到 {maximum} 个跳动点之间。
+invalid_target_order = 每个目标距入场价都必须比前一个更远。
+invalid_target_quantity = 每个目标的数量必须至少为 1。
+invalid_target_total = 各目标数量之和必须等于模板数量。
+invalid_target_split = 这些目标数量无法精确拆分。请修改较近目标的数量。
+invalid_trailing = 追踪止损的激活距离和追踪距离都必须在 1 到 {maximum} 个跳动点之间。
+too_many = 最多可保存 {maximum} 个订单模板。请先删除一个。
+unknown_template = 此模板已不再保存。
+revision_must_advance = 此模板已在别处更改。请关闭编辑器后重新打开。
+save_failed = 无法保存模板：{error}
+delete_failed = 无法删除模板：{error}
+
+# 反馈
+saved = 已保存订单模板 {name}。
+deleted = 已删除订单模板 {name}。

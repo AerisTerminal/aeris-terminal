@@ -81,6 +81,9 @@ pub struct WorkingSet {
     pub venue_notices: Vec<VenueNotice>,
     /// Every accepted workflow, by identity.
     pub workflows: Vec<WorkflowView>,
+    /// Every user-managed order template, by identity; at most
+    /// [`crate::MAXIMUM_ORDER_TEMPLATES`].
+    pub order_templates: Vec<crate::OrderTemplate>,
 }
 
 struct WorkingGroupViews {
@@ -531,6 +534,7 @@ impl crate::TradingCore {
             recovery_notices: self.recovery_notices.clone(),
             venue_notices: self.broker_sync.notices(),
             workflows: self.workflow_views(),
+            order_templates: self.state.order_templates.values().cloned().collect(),
         })
     }
 

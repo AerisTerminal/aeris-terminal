@@ -1,0 +1,64 @@
+# Auftragsvorlagen (ATM-Strategien): die Vorlagenauswahl im Orderticket, der Vorlageneditor
+# und die Rückmeldungen der Vorlagenbefehle.
+
+# Orderticket
+ticket_label = Vorlage
+none = Keine
+none_detail = Die eigene Bracket-Order des Tickets
+new_template = Neue Vorlage…
+edit_aria = {name} bearbeiten
+duplicate_aria = {name} duplizieren
+delete_aria = {name} löschen
+missing_value = Nicht gespeichert
+overrides_bracket = Die Vorlage setzt ihren Stop und ihre Ziele; die OCO-Strategie wird nicht verwendet.
+selected_missing = Die ausgewählte Auftragsvorlage ist nicht mehr gespeichert. Wählen Sie im Orderticket eine andere Vorlage oder Keine.
+replay_unsupported = Das Bar-Replay handelt einen Stop und ein Ziel. Wählen Sie eine Vorlage mit einem Ziel und ohne Trailing-Stop oder Keine.
+template_detail = Menge {quantity} · Stop {stop}
+
+# Editor
+new_title = Neue Auftragsvorlage
+edit_title = Auftragsvorlage bearbeiten
+name_label = Name
+name_placeholder = Scalp, zwei Ziele
+quantity_label = Menge
+stop_label = Stop (Ticks)
+targets_heading = Ziele
+target_ticks_label = Ziel {number} (Ticks)
+target_quantity_label = Menge
+add_target = Ziel hinzufügen
+remove_target_aria = Ziel {number} entfernen
+trailing_label = Trailing-Stop
+trailing_description = Zieht den Stop hinter dem besten Kurs nach, sobald der Trade im Gewinn ist.
+trailing_activation_label = Aktivieren nach (Ticks)
+trailing_distance_label = Abstand (Ticks)
+save = Speichern
+copy_name = {name} Kopie
+
+# Löschen
+delete_title = Auftragsvorlage löschen
+delete_message = „{name}“ löschen? Bereits damit platzierte Bracket-Orders behalten ihre Aufträge.
+delete_confirm = Löschen
+
+# Probleme
+whole_number_required = Geben Sie im markierten Feld eine ganze Zahl ein.
+invalid_identity = Diese Vorlage kann unter ihrer Kennung nicht gespeichert werden. Schließen Sie den Editor und versuchen Sie es erneut.
+invalid_revision = Diese Vorlage kann in ihrer Revision nicht gespeichert werden. Schließen Sie den Editor und versuchen Sie es erneut.
+invalid_name = Geben Sie einen Namen mit höchstens {maximum} Zeichen ohne führende oder nachgestellte Leerzeichen ein.
+invalid_quantity = Die Menge muss zwischen 1 und {maximum} liegen.
+invalid_stop = Der Stop muss zwischen 1 und {maximum} Ticks liegen.
+invalid_target_count = Eine Vorlage braucht mindestens ein Ziel und hat höchstens {maximum}.
+invalid_target_offset = Jedes Ziel muss zwischen 1 und {maximum} Ticks liegen.
+invalid_target_order = Jedes Ziel muss weiter vom Einstieg entfernt sein als das vorherige.
+invalid_target_quantity = Jedes Ziel braucht eine Menge von mindestens 1.
+invalid_target_total = Die Zielmengen müssen zusammen die Vorlagenmenge ergeben.
+invalid_target_split = Diese Zielmengen lassen sich nicht exakt aufteilen. Ändern Sie die Mengen der näheren Ziele.
+invalid_trailing = Aktivierung und Abstand des Trailing-Stops müssen jeweils zwischen 1 und {maximum} Ticks liegen.
+too_many = Es können höchstens {maximum} Auftragsvorlagen gespeichert werden. Löschen Sie zuerst eine.
+unknown_template = Diese Vorlage ist nicht mehr gespeichert.
+revision_must_advance = Diese Vorlage wurde an anderer Stelle geändert. Schließen Sie den Editor und öffnen Sie sie erneut.
+save_failed = Die Vorlage konnte nicht gespeichert werden: {error}
+delete_failed = Die Vorlage konnte nicht gelöscht werden: {error}
+
+# Rückmeldung
+saved = Auftragsvorlage {name} gespeichert.
+deleted = Auftragsvorlage {name} gelöscht.

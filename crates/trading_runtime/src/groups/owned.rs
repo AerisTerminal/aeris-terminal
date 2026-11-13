@@ -1324,10 +1324,18 @@ impl TradingCore {
             .template
             .clone()
             .unwrap_or_else(|| ("managed-bracket".to_string(), 1));
-        let name = self.state.strategy_templates.get(&template_id).map_or_else(
-            || "Managed bracket".to_string(),
-            |template| template.name.clone(),
-        );
+        let name = self
+            .state
+            .order_templates
+            .get(&template_id)
+            .map(|template| template.name.clone())
+            .or_else(|| {
+                self.state
+                    .strategy_templates
+                    .get(&template_id)
+                    .map(|template| template.name.clone())
+            })
+            .unwrap_or_else(|| "Managed bracket".to_string());
         let stop_offset_ticks = group
             .legs
             .iter()

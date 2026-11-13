@@ -4,6 +4,7 @@ mod copier;
 mod core;
 mod discipline;
 mod history;
+mod order_templates;
 mod plan;
 mod risk;
 mod round_trip;

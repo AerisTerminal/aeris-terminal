@@ -4,6 +4,7 @@ mod groups;
 mod ledger;
 mod migrate_groups;
 mod migrate_ledger;
+mod order_templates;
 mod orders;
 mod quotes;
 mod readiness_copy;
@@ -255,6 +256,8 @@ pub(super) struct StoredState {
     pub discipline_states: BTreeMap<TradingAccountId, DisciplineState>,
     pub trade_copiers: BTreeMap<TradingAccountId, TradeCopierConfig>,
     pub strategy_templates: BTreeMap<String, BracketStrategyTemplate>,
+    /// User-managed order templates, apart from the internal bracket templates.
+    pub order_templates: BTreeMap<String, crate::OrderTemplate>,
     /// Owned order groups: brackets, OCO pairs and standalone protections.
     pub order_groups: BTreeMap<String, OrderGroup>,
     /// A live-only index, updated with every group transition so publications never scan
@@ -482,22 +485,16 @@ impl TradingStore {
         } else {
             BTreeMap::new()
         };
-        let checkpoint_tables = self.checkpoint_tables_present()?;
-        let position_checkpoints = if checkpoint_tables {
-            ledger::load_position_checkpoints(&self.connection)?
-        } else {
-            BTreeMap::new()
-        };
-        let ledger_checkpoints = if checkpoint_tables {
-            ledger::load_ledger_checkpoints(&self.connection)?
-        } else {
-            BTreeMap::new()
-        };
-        let equity_rings = if checkpoint_tables {
-            ledger::load_equity_rings(&self.connection)?
-        } else {
-            BTreeMap::new()
-        };
+        let (position_checkpoints, ledger_checkpoints, equity_rings) =
+            if self.checkpoint_tables_present()? {
+                (
+                    ledger::load_position_checkpoints(&self.connection)?,
+                    ledger::load_ledger_checkpoints(&self.connection)?,
+                    ledger::load_equity_rings(&self.connection)?,
+                )
+            } else {
+                (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
+            };
         let broker_order_ids = self.load_broker_order_ids()?;
         let broker_brackets = self.load_broker_brackets()?;
         let venue_generation = self.metadata("venue_generation")?;
@@ -517,6 +514,9 @@ impl TradingStore {
         let discipline_states = self.load_discipline_states()?;
         let trade_copiers = self.load_trade_copiers()?;
         let strategy_templates = self.load_strategy_templates()?;
+        let order_templates = self
+            .load_order_templates()
+            .map_err(|error| error.to_string())?;
         let order_groups = self.load_order_groups()?;
         let active_group_ids = order_groups
             .iter()
@@ -553,6 +553,7 @@ impl TradingStore {
             discipline_states,
             trade_copiers,
             strategy_templates,
+            order_templates,
             order_groups,
             active_group_ids,
         })
@@ -824,7 +825,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 32);
+        assert_eq!(SCHEMA_VERSION, 33);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

@@ -1,0 +1,64 @@
+# Plantillas de órdenes (estrategias ATM): la elección de plantilla del ticket de órdenes, el
+# editor de plantillas y las respuestas de los comandos de plantilla.
+
+# Ticket de órdenes
+ticket_label = Plantilla
+none = Ninguna
+none_detail = El bracket propio del ticket
+new_template = Nueva plantilla…
+edit_aria = Editar {name}
+duplicate_aria = Duplicar {name}
+delete_aria = Eliminar {name}
+missing_value = No guardada
+overrides_bracket = La plantilla coloca su stop y sus objetivos; la estrategia OCO no se usa.
+selected_missing = La plantilla de órdenes seleccionada ya no está guardada. Elija otra plantilla o Ninguna en el ticket de órdenes.
+replay_unsupported = La reproducción de barras opera un stop y un objetivo. Elija una plantilla con un objetivo y sin stop dinámico, o Ninguna.
+template_detail = Cant. {quantity} · Stop {stop}
+
+# Editor
+new_title = Nueva plantilla de órdenes
+edit_title = Editar plantilla de órdenes
+name_label = Nombre
+name_placeholder = Scalp, dos objetivos
+quantity_label = Cantidad
+stop_label = Stop (ticks)
+targets_heading = Objetivos
+target_ticks_label = Objetivo {number} (ticks)
+target_quantity_label = Cantidad
+add_target = Añadir objetivo
+remove_target_aria = Quitar el objetivo {number}
+trailing_label = Stop dinámico
+trailing_description = Mueve el stop detrás del mejor precio cuando la operación está en ganancia.
+trailing_activation_label = Activar tras (ticks)
+trailing_distance_label = Distancia (ticks)
+save = Guardar
+copy_name = {name} copia
+
+# Eliminar
+delete_title = Eliminar plantilla de órdenes
+delete_message = ¿Eliminar «{name}»? Los brackets ya colocados con ella conservan sus órdenes.
+delete_confirm = Eliminar
+
+# Problemas
+whole_number_required = Introduzca un número entero en el campo resaltado.
+invalid_identity = Esta plantilla no se puede guardar con su identidad. Cierre el editor y vuelva a intentarlo.
+invalid_revision = Esta plantilla no se puede guardar en su revisión. Cierre el editor y vuelva a intentarlo.
+invalid_name = Introduzca un nombre de como máximo {maximum} caracteres, sin espacios al principio ni al final.
+invalid_quantity = La cantidad debe estar entre 1 y {maximum}.
+invalid_stop = El stop debe estar entre 1 y {maximum} ticks.
+invalid_target_count = Una plantilla necesita al menos un objetivo y admite como máximo {maximum}.
+invalid_target_offset = Cada objetivo debe estar entre 1 y {maximum} ticks.
+invalid_target_order = Cada objetivo debe estar más lejos de la entrada que el anterior.
+invalid_target_quantity = Cada objetivo debe tomar una cantidad de al menos 1.
+invalid_target_total = Las cantidades de los objetivos deben sumar la cantidad de la plantilla.
+invalid_target_split = Estas cantidades de objetivos no se pueden repartir con exactitud. Cambie las cantidades de los objetivos más cercanos.
+invalid_trailing = La activación y la distancia del stop dinámico deben estar cada una entre 1 y {maximum} ticks.
+too_many = Se pueden guardar como máximo {maximum} plantillas de órdenes. Elimine una primero.
+unknown_template = Esta plantilla ya no está guardada.
+revision_must_advance = Esta plantilla se modificó en otro lugar. Cierre el editor y vuelva a abrirla.
+save_failed = No se pudo guardar la plantilla: {error}
+delete_failed = No se pudo eliminar la plantilla: {error}
+
+# Respuestas
+saved = Plantilla de órdenes {name} guardada.
+deleted = Plantilla de órdenes {name} eliminada.

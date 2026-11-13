@@ -938,51 +938,7 @@ fn venue_operation_subject(operation: &VenueOperation) -> String {
     }
 }
 
-/// Dispatches the selected simulated order-entry instruction off the UI thread.
-pub fn dispatch_simulated_order(
-    service: &TradingService,
-    feedback: &TradingFeedback,
-    pane: &TradingPaneToken,
-    product: &aeris_contracts::InstallProviderInstrument,
-    side: aeris_trading::OrderSide,
-    selection: SimulatedOrderSelection,
-    cx: &mut gpui::App,
-) {
-    if order_type_requires_price(selection.order_type) {
-        feedback.record_for_pane(pane, Err(tr!(trading::STOP_PRICE_REQUIRED).to_string()));
-        return;
-    }
-    let service = service.clone();
-    let feedback = feedback.clone();
-    let command = match prepare_product_order(
-        feedback.now(),
-        product,
-        side,
-        selection.account_key,
-        selection.quantity,
-        selection.order_type,
-        selection.time_in_force,
-    ) {
-        Ok(command) => command,
-        Err(refusal) => {
-            feedback.record_for_pane(pane, Err(refusal.message()));
-            return;
-        }
-    };
-    let Some(request_id) = feedback.begin_request(pane) else {
-        return;
-    };
-    cx.background_executor()
-        .spawn(async move {
-            let result = service
-                .place_order(command, true)
-                .map(|order| order_outcome(&order, OrderOutcome::Placed));
-            feedback.finish_request(request_id, result);
-        })
-        .detach();
-}
-
-/// User-selected order instruction with an optional runtime-owned bracket template.
+/// User-selected order instruction with an optional order template.
 pub struct SimulatedOrderSelection {
     pub account_key: Option<String>,
     pub quantity: OrderQuantity,
@@ -991,7 +947,7 @@ pub struct SimulatedOrderSelection {
     pub template_id: Option<String>,
 }
 
-/// Dispatches a plain or bracketed entry selected by the order-entry panel off the UI thread.
+/// Dispatches a plain entry, or one bracketed by its order template, off the UI thread.
 pub fn dispatch_simulated_selected_order(
     service: &TradingService,
     feedback: &TradingFeedback,
@@ -1225,6 +1181,16 @@ impl TicketBracket {
     }
 }
 
+/// The exits an order-ticket entry carries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TicketProtection {
+    None,
+    /// The ticket's own stop and target.
+    Bracket(TicketBracket),
+    /// The bracket of the order template with this identity, which the trading owner holds.
+    Template(String),
+}
+
 /// One order-ticket instruction. A market order carries no price; a resting order carries
 /// its exact price on the instrument's grid.
 pub struct TicketOrder {
@@ -1233,7 +1199,7 @@ pub struct TicketOrder {
     pub account_key: Option<String>,
     pub quantity: OrderQuantity,
     pub price_units: Option<i64>,
-    pub bracket: Option<TicketBracket>,
+    pub protection: TicketProtection,
 }
 
 /// Dispatches an order-ticket entry, with its bracket when one is set, off the UI thread.
@@ -1298,8 +1264,8 @@ pub fn dispatch_ticket_order(
     };
     cx.background_executor()
         .spawn(async move {
-            let result = match order.bracket {
-                Some(bracket) => {
+            let result = match order.protection {
+                TicketProtection::Bracket(bracket) => {
                     let template = bracket.template(&entry);
                     service
                         .place_inline_bracket(aeris_trading_runtime::PlaceInlineBracket {
@@ -1308,7 +1274,10 @@ pub fn dispatch_ticket_order(
                         })
                         .map(|placement| bracket_outcome(&placement))
                 }
-                None => service
+                TicketProtection::Template(template_id) => service
+                    .place_bracket(PlaceBracket { entry, template_id })
+                    .map(|placement| bracket_outcome(&placement)),
+                TicketProtection::None => service
                     .place_order(entry, at_touch)
                     .map(|order| order_outcome(&order, OrderOutcome::Placed)),
             };

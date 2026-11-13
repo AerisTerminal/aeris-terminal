@@ -381,6 +381,14 @@ fn trade_bar_order_button(
                     let service = surface.read(cx).lifecycle.trading().clone();
                     let feedback = surface.read(cx).lifecycle.trading_feedback().clone();
                     let pane = surface.read(cx).trading_pane_token.clone();
+                    let template_id = match surface.read(cx).order_template_choice(cx).template_id()
+                    {
+                        Ok(template_id) => template_id,
+                        Err(reason) => {
+                            feedback.record_for_pane(&pane, Err(reason.to_string()));
+                            return;
+                        }
+                    };
                     aeris_desktop::trading::dispatch_simulated_selected_order(
                         &service,
                         &feedback,
@@ -391,7 +399,7 @@ fn trade_bar_order_button(
                             quantity,
                             order_type: aeris_trading::OrderType::Market,
                             time_in_force: aeris_trading::TimeInForce::Day,
-                            template_id: None,
+                            template_id,
                         },
                         &pane,
                         cx,

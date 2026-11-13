@@ -344,6 +344,10 @@ pub struct WorkspaceChromeState {
     /// unknown identifiers are skipped.
     #[prost(string, tag = "20")]
     pub indicator_favorites: String,
+    /// The order template the order ticket attaches to its entries, by the trading owner's
+    /// identity such as `user-2a`. Empty or any other text keeps the ticket's own bracket.
+    #[prost(string, tag = "21")]
+    pub order_template: String,
 }
 
 /// A window-relative logical position in the chrome preferences.

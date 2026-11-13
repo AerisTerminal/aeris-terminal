@@ -23,6 +23,8 @@ pub use groups::model::{
 pub(crate) mod ledger;
 #[path = "../market/mod.rs"]
 pub(crate) mod market;
+#[path = "../order_templates/owner.rs"]
+mod order_templates_owner;
 #[path = "../publication.rs"]
 pub mod publication;
 #[path = "../risk/owner.rs"]
@@ -52,6 +54,12 @@ pub use crate::copier::{
     MAXIMUM_COPIER_TARGETS, TradeCopierConfig, TradeCopierTarget, TradeCopyDispatch,
 };
 pub use crate::discipline::{DisciplineState, FAST_STOP_REENTRY_NANOS};
+pub use crate::order_templates::{
+    MAXIMUM_ORDER_TEMPLATE_NAME_CHARS, MAXIMUM_ORDER_TEMPLATE_QUANTITY,
+    MAXIMUM_ORDER_TEMPLATE_TICKS, MAXIMUM_ORDER_TEMPLATES, ORDER_TEMPLATE_ID_PREFIX, OrderTemplate,
+    OrderTemplateError, OrderTemplateInvalid, OrderTemplateTarget, order_template_id,
+    order_template_key,
+};
 pub use crate::plan::{
     MAXIMUM_ALLOWED_SETUPS, MAXIMUM_CHECKLIST_ITEMS, MAXIMUM_PLAN_LEVELS, SessionAdherenceReview,
     SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel,
@@ -1052,7 +1060,9 @@ impl TradingService {
         self.request(|reply| Command::CallerModify(order, reply))
     }
 
-    /// Submits a template entry using the owner's quote.
+    /// Submits a template entry using the owner's quote. An order template's entry keeps its
+    /// own type and explicit prices, and an unpriced one is priced at the touch; an internal
+    /// template's entry is always priced at the touch.
     ///
     /// # Errors
     /// Returns an error for an unavailable quote or rejected bracket.
@@ -1791,6 +1801,7 @@ impl TradingCore {
                 respond(&reply, self.put_user_record(&record));
             }
             Command::Workflow(command) => self.handle_workflow_command(command),
+            Command::OrderTemplate(command) => self.handle_order_template_command(command),
             #[cfg(any(test, feature = "test-support"))]
             Command::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
@@ -2009,14 +2020,16 @@ impl TradingCore {
                 respond(&reply, result);
             }
             Command::PlaceBracket(bracket, reply) => {
+                let at_touch = self.bracket_entry_at_touch(&bracket.template_id, &bracket.entry);
                 respond(
                     &reply,
-                    self.market_order(bracket.entry, true).and_then(|entry| {
-                        self.place_bracket(&PlaceBracket {
-                            entry,
-                            template_id: bracket.template_id,
-                        })
-                    }),
+                    self.market_order(bracket.entry, at_touch)
+                        .and_then(|entry| {
+                            self.place_bracket(&PlaceBracket {
+                                entry,
+                                template_id: bracket.template_id,
+                            })
+                        }),
                 );
             }
             Command::PlaceInlineBracket(bracket, reply) => {

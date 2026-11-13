@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 32;
+pub const SCHEMA_VERSION: u32 = 33;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -419,6 +419,18 @@ pub(super) const MIGRATION_V31: &str = "
 /// opened before this version keep no open time.
 pub(super) const MIGRATION_V32: &str = "
  ALTER TABLE trade_cycles ADD COLUMN opened_unix_nanos INTEGER;";
+/// User-managed order templates (ATM strategies), apart from the internal bracket templates.
+pub(super) const MIGRATION_V33: &str = "
+ CREATE TABLE order_templates (
+     template_id TEXT PRIMARY KEY,
+     revision INTEGER NOT NULL CHECK (revision > 0),
+     name TEXT NOT NULL,
+     quantity INTEGER NOT NULL CHECK (quantity > 0),
+     stop_offset_ticks INTEGER NOT NULL CHECK (stop_offset_ticks > 0),
+     targets_json TEXT NOT NULL,
+     trailing_activation_ticks INTEGER,
+     trailing_distance_ticks INTEGER
+ ) STRICT;";
 
 pub(super) const MIGRATION_V26: &str = "
  CREATE TABLE position_checkpoints (
@@ -609,6 +621,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 31,
         to: 32,
         sql: MIGRATION_V32,
+    },
+    Migration {
+        from: 32,
+        to: 33,
+        sql: MIGRATION_V33,
     },
 ];
 

@@ -7,11 +7,12 @@ use super::TradingSnapshot;
 use super::{
     BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount, EconomicEventRiskOutcome,
     EconomicEventRiskTrigger, EmergencyOutcome, FeeSchedule, FlattenOutcome, FlattenScope,
-    ModifyOrder, MoveBracketLevel, MovePlannedLeg, Order, PathBuf, PlaceBracket, PlaceChartBracket,
-    PlaceInlineBracket, PlaceOco, PlaceOrder, PlaceProtection, PlacementOutcome, PlannedLeg, Reply,
-    RevisionedCancelOrder, RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan,
-    TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus,
-    UserRecord, WorkflowDefinition, WorkflowError, WorkflowLayout, WorkflowView,
+    ModifyOrder, MoveBracketLevel, MovePlannedLeg, Order, OrderTemplate, OrderTemplateError,
+    PathBuf, PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOco, PlaceOrder,
+    PlaceProtection, PlacementOutcome, PlannedLeg, Reply, RevisionedCancelOrder,
+    RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan, TradeCopierConfig,
+    TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus, UserRecord,
+    WorkflowDefinition, WorkflowError, WorkflowLayout, WorkflowView,
 };
 #[cfg(test)]
 use crate::SimulatedMarketObservation;
@@ -83,6 +84,7 @@ pub(crate) enum Command {
     DrainMarketFeed,
     PutUserRecord(UserRecord, Reply<()>),
     Workflow(WorkflowCommand),
+    OrderTemplate(OrderTemplateCommand),
     #[cfg(any(test, feature = "test-support"))]
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
@@ -113,4 +115,13 @@ pub(crate) enum WorkflowCommand {
     Arm(String, u32, Reply<Result<WorkflowView, WorkflowError>>),
     Pause(String, u32, Reply<Result<WorkflowView, WorkflowError>>),
     Delete(String, Reply<Result<(), WorkflowError>>),
+}
+
+/// An order template command; its own error rides inside the owner reply.
+pub(crate) enum OrderTemplateCommand {
+    Save(
+        OrderTemplate,
+        Reply<Result<OrderTemplate, OrderTemplateError>>,
+    ),
+    Remove(String, Reply<Result<(), OrderTemplateError>>),
 }

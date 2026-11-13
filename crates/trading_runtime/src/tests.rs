@@ -104,6 +104,7 @@ mod group_migration;
 mod group_recovery;
 pub(crate) mod market_feed;
 mod oco;
+mod order_templates;
 mod property;
 mod publication;
 mod workflows;

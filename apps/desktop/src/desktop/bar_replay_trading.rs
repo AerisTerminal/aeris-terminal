@@ -87,7 +87,8 @@ pub(super) struct ReplayTouch {
 pub(super) struct ReplayTicketOrder {
     pub(super) side: aeris_trading::OrderSide,
     pub(super) quantity: aeris_desktop::trading::OrderQuantity,
-    /// A stop and target in ticks from the entry, or from the close for a market order.
+    /// The ticket's own stop and target in ticks from the entry, or from the close for a
+    /// market order; a selected order template replaces it.
     pub(super) bracket: Option<aeris_desktop::trading::TicketBracket>,
 }
 
@@ -307,7 +308,8 @@ impl WorkspaceSurface {
     }
 
     /// A Buy or Sell at the market on a replaying chart (the chart trade bar or a trading
-    /// shortcut): it fills at the newest revealed close.
+    /// shortcut): it fills at the newest revealed close, protected by the selected order
+    /// template's bracket.
     pub(super) fn place_bar_replay_market_order(
         &mut self,
         side: aeris_trading::OrderSide,
@@ -340,6 +342,10 @@ impl WorkspaceSurface {
         price: impl FnOnce(ReplayTouch) -> Result<Option<i64>, &'static str>,
         cx: &App,
     ) -> Result<&'static str, ReplayTradingRefusal> {
+        let bracket = self
+            .order_template_choice(cx)
+            .replay_bracket(order.bracket)
+            .map_err(ReplayTradingRefusal::Ticket)?;
         let session = self.bar_replay_trading_session(cx)?;
         let price_scale = session.instrument().price_scale;
         let tick_units = tick_units(session.instrument());
@@ -362,7 +368,7 @@ impl WorkspaceSurface {
                 .and_then(|units| aeris_trading::FixedPoint::try_new(units, price_scale).ok())
                 .ok_or(BarReplayTradingError::InvalidPrice)
         };
-        let (stop_loss, take_profit) = match order.bracket {
+        let (stop_loss, take_profit) = match bracket {
             None => (None, None),
             Some(bracket) => {
                 let tick = tick_units.ok_or(ReplayTradingRefusal::Ticket(tr!(

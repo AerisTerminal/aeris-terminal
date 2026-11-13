@@ -1,0 +1,64 @@
+# Modèles d'ordres (stratégies ATM) : le choix de modèle du ticket d'ordre, l'éditeur de
+# modèles et les retours des commandes de modèle.
+
+# Ticket d'ordre
+ticket_label = Modèle
+none = Aucun
+none_detail = Le bracket propre au ticket
+new_template = Nouveau modèle…
+edit_aria = Modifier {name}
+duplicate_aria = Dupliquer {name}
+delete_aria = Supprimer {name}
+missing_value = Non enregistré
+overrides_bracket = Le modèle place son stop et ses objectifs ; la stratégie OCO n'est pas utilisée.
+selected_missing = Le modèle d'ordre sélectionné n'est plus enregistré. Choisissez un autre modèle ou Aucun dans le ticket d'ordre.
+replay_unsupported = La relecture de barres négocie un stop et un objectif. Choisissez un modèle avec un objectif et sans stop suiveur, ou Aucun.
+template_detail = Qté {quantity} · Stop {stop}
+
+# Éditeur
+new_title = Nouveau modèle d'ordre
+edit_title = Modifier le modèle d'ordre
+name_label = Nom
+name_placeholder = Scalp, deux objectifs
+quantity_label = Quantité
+stop_label = Stop (ticks)
+targets_heading = Objectifs
+target_ticks_label = Objectif {number} (ticks)
+target_quantity_label = Quantité
+add_target = Ajouter un objectif
+remove_target_aria = Retirer l'objectif {number}
+trailing_label = Stop suiveur
+trailing_description = Déplace le stop derrière le meilleur prix dès que la position est en gain.
+trailing_activation_label = Activer après (ticks)
+trailing_distance_label = Suivre à (ticks)
+save = Enregistrer
+copy_name = {name} copie
+
+# Suppression
+delete_title = Supprimer le modèle d'ordre
+delete_message = Supprimer « {name} » ? Les brackets déjà placés avec lui conservent leurs ordres.
+delete_confirm = Supprimer
+
+# Problèmes
+whole_number_required = Saisissez un nombre entier dans le champ mis en évidence.
+invalid_identity = Ce modèle ne peut pas être enregistré sous son identifiant. Fermez l'éditeur et réessayez.
+invalid_revision = Ce modèle ne peut pas être enregistré à sa révision. Fermez l'éditeur et réessayez.
+invalid_name = Saisissez un nom d'au plus {maximum} caractères, sans espace au début ni à la fin.
+invalid_quantity = La quantité doit être comprise entre 1 et {maximum}.
+invalid_stop = Le stop doit être compris entre 1 et {maximum} ticks.
+invalid_target_count = Un modèle a besoin d'au moins un objectif et en compte au plus {maximum}.
+invalid_target_offset = Chaque objectif doit être compris entre 1 et {maximum} ticks.
+invalid_target_order = Chaque objectif doit être plus éloigné de l'entrée que le précédent.
+invalid_target_quantity = Chaque objectif doit prendre une quantité d'au moins 1.
+invalid_target_total = Les quantités des objectifs doivent totaliser la quantité du modèle.
+invalid_target_split = Ces quantités d'objectifs ne peuvent pas être réparties exactement. Modifiez les quantités des objectifs les plus proches.
+invalid_trailing = L'activation et la distance du stop suiveur doivent chacune être comprises entre 1 et {maximum} ticks.
+too_many = Au plus {maximum} modèles d'ordre peuvent être enregistrés. Supprimez-en un d'abord.
+unknown_template = Ce modèle n'est plus enregistré.
+revision_must_advance = Ce modèle a été modifié ailleurs. Fermez l'éditeur et rouvrez-le.
+save_failed = Le modèle n'a pas pu être enregistré : {error}
+delete_failed = Le modèle n'a pas pu être supprimé : {error}
+
+# Retours
+saved = Modèle d'ordre {name} enregistré.
+deleted = Modèle d'ordre {name} supprimé.

@@ -453,12 +453,22 @@ impl TerminalApp {
                 ) else {
                     return;
                 };
+                // The order ticket's template brackets the order; a template that is no longer
+                // saved refuses it rather than sending it unprotected.
+                let template_id = match surface.read(cx).order_template_choice(cx).template_id() {
+                    Ok(template_id) => template_id,
+                    Err(reason) => {
+                        self.lifecycle
+                            .trading_feedback()
+                            .record_for_pane(&pane, Err(reason.to_string()));
+                        return;
+                    }
+                };
                 let (account_id, quantity, order_type, time_in_force) =
                     self.trading_order_entry(cx);
-                aeris_desktop::trading::dispatch_simulated_order(
+                aeris_desktop::trading::dispatch_simulated_selected_order(
                     self.lifecycle.trading(),
                     self.lifecycle.trading_feedback(),
-                    &pane,
                     &product,
                     side,
                     aeris_desktop::trading::SimulatedOrderSelection {
@@ -466,8 +476,9 @@ impl TerminalApp {
                         quantity,
                         order_type,
                         time_in_force,
-                        template_id: None,
+                        template_id,
                     },
+                    &pane,
                     cx,
                 );
             }

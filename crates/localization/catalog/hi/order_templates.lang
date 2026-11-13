@@ -1,0 +1,64 @@
+# ऑर्डर टेम्पलेट (ATM रणनीतियाँ): ऑर्डर टिकट का टेम्पलेट चयन, टेम्पलेट संपादक और टेम्पलेट
+# आदेशों की प्रतिक्रियाएँ।
+
+# ऑर्डर टिकट
+ticket_label = टेम्पलेट
+none = कोई नहीं
+none_detail = टिकट का अपना ब्रैकेट
+new_template = नया टेम्पलेट…
+edit_aria = {name} संपादित करें
+duplicate_aria = {name} की प्रति बनाएँ
+delete_aria = {name} हटाएँ
+missing_value = सहेजा नहीं गया
+overrides_bracket = टेम्पलेट अपना स्टॉप और लक्ष्य लगाता है; OCO रणनीति का उपयोग नहीं होता।
+selected_missing = चुना गया ऑर्डर टेम्पलेट अब सहेजा हुआ नहीं है। ऑर्डर टिकट में कोई दूसरा टेम्पलेट या कोई नहीं चुनें।
+replay_unsupported = बार रीप्ले एक स्टॉप और एक लक्ष्य से ट्रेड करता है। एक लक्ष्य और बिना ट्रेलिंग स्टॉप वाला टेम्पलेट या कोई नहीं चुनें।
+template_detail = मात्रा {quantity} · स्टॉप {stop}
+
+# संपादक
+new_title = नया ऑर्डर टेम्पलेट
+edit_title = ऑर्डर टेम्पलेट संपादित करें
+name_label = नाम
+name_placeholder = स्कैल्प, दो लक्ष्य
+quantity_label = मात्रा
+stop_label = स्टॉप (टिक)
+targets_heading = लक्ष्य
+target_ticks_label = लक्ष्य {number} (टिक)
+target_quantity_label = मात्रा
+add_target = लक्ष्य जोड़ें
+remove_target_aria = लक्ष्य {number} हटाएँ
+trailing_label = ट्रेलिंग स्टॉप
+trailing_description = ट्रेड मुनाफ़े में आते ही स्टॉप को सबसे अच्छे भाव के पीछे खिसकाता है।
+trailing_activation_label = इतने टिक बाद सक्रिय करें
+trailing_distance_label = इतने टिक पीछे रखें
+save = सहेजें
+copy_name = {name} प्रति
+
+# हटाना
+delete_title = ऑर्डर टेम्पलेट हटाएँ
+delete_message = "{name}" हटाएँ? इससे पहले से लगाए गए ब्रैकेट अपने ऑर्डर बनाए रखते हैं।
+delete_confirm = हटाएँ
+
+# समस्याएँ
+whole_number_required = चिह्नित फ़ील्ड में पूर्ण संख्या दर्ज करें।
+invalid_identity = यह टेम्पलेट अपनी पहचान के साथ सहेजा नहीं जा सकता। संपादक बंद करें और फिर से प्रयास करें।
+invalid_revision = यह टेम्पलेट अपने संशोधन पर सहेजा नहीं जा सकता। संपादक बंद करें और फिर से प्रयास करें।
+invalid_name = अधिकतम {maximum} वर्णों का नाम दर्ज करें, शुरुआत या अंत में खाली जगह के बिना।
+invalid_quantity = मात्रा 1 से {maximum} तक होनी चाहिए।
+invalid_stop = स्टॉप 1 से {maximum} टिक तक होना चाहिए।
+invalid_target_count = टेम्पलेट में कम से कम एक लक्ष्य चाहिए और अधिकतम {maximum} हो सकते हैं।
+invalid_target_offset = हर लक्ष्य 1 से {maximum} टिक तक होना चाहिए।
+invalid_target_order = हर लक्ष्य प्रवेश से पिछले लक्ष्य की तुलना में अधिक दूर होना चाहिए।
+invalid_target_quantity = हर लक्ष्य की मात्रा कम से कम 1 होनी चाहिए।
+invalid_target_total = लक्ष्यों की मात्राओं का योग टेम्पलेट की मात्रा के बराबर होना चाहिए।
+invalid_target_split = लक्ष्यों की ये मात्राएँ ठीक-ठीक बाँटी नहीं जा सकतीं। पास वाले लक्ष्यों की मात्राएँ बदलें।
+invalid_trailing = ट्रेलिंग स्टॉप की सक्रियता और दूरी, दोनों 1 से {maximum} टिक तक होनी चाहिए।
+too_many = अधिकतम {maximum} ऑर्डर टेम्पलेट सहेजे जा सकते हैं। पहले एक हटाएँ।
+unknown_template = यह टेम्पलेट अब सहेजा हुआ नहीं है।
+revision_must_advance = यह टेम्पलेट कहीं और बदला गया। संपादक बंद करें और इसे फिर से खोलें।
+save_failed = टेम्पलेट सहेजा नहीं जा सका: {error}
+delete_failed = टेम्पलेट हटाया नहीं जा सका: {error}
+
+# प्रतिक्रिया
+saved = ऑर्डर टेम्पलेट {name} सहेजा गया।
+deleted = ऑर्डर टेम्पलेट {name} हटाया गया।

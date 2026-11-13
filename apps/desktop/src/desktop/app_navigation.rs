@@ -10,8 +10,8 @@ const APP_NAVIGATION_MENU_GAP: f32 = 4.0;
 const APP_NAVIGATION_ICON_SIZE: f32 = 16.0;
 
 /// The page shown under the title bar, the pages besides the terminal, the terminal page's
-/// bottom panel, the start page with its layout menu and dialogs, and the header's indicator
-/// template menu and dialogs.
+/// bottom panel, the start page with its layout menu and dialogs, the header's indicator
+/// template menu and dialogs, and the order template dialogs.
 #[derive(Default)]
 pub(super) struct AppPages {
     pub(super) view: AppView,
@@ -20,6 +20,7 @@ pub(super) struct AppPages {
     pub(super) bottom_panel: bottom_panel::BottomPanelState,
     pub(super) layouts: layouts_view::LayoutsUi,
     pub(super) indicator_templates: indicator_templates_view::IndicatorTemplatesUi,
+    pub(super) order_templates: order_templates_view::OrderTemplatesUi,
 }
 
 pub(super) fn app_navigation_button(

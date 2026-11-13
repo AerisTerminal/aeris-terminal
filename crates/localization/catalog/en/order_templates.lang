@@ -1,0 +1,64 @@
+# Order templates (ATM strategies): the order ticket's template choice, the template editor
+# and the feedback of template commands.
+
+# Order ticket
+ticket_label = Template
+none = None
+none_detail = The ticket's own bracket
+new_template = New template…
+edit_aria = Edit {name}
+duplicate_aria = Duplicate {name}
+delete_aria = Delete {name}
+missing_value = Not saved
+overrides_bracket = The template places its stop and targets; the OCO strategy is not used.
+selected_missing = The selected order template is no longer saved. Choose another template or None in the order ticket.
+replay_unsupported = Bar replay trades one stop and one target. Choose a template with one target and no trailing stop, or None.
+template_detail = Qty {quantity} · Stop {stop}
+
+# Editor
+new_title = New order template
+edit_title = Edit order template
+name_label = Name
+name_placeholder = Scalp, two targets
+quantity_label = Quantity
+stop_label = Stop (ticks)
+targets_heading = Targets
+target_ticks_label = Target {number} (ticks)
+target_quantity_label = Quantity
+add_target = Add target
+remove_target_aria = Remove target {number}
+trailing_label = Trailing stop
+trailing_description = Moves the stop behind the best price once the trade is in profit.
+trailing_activation_label = Activate after (ticks)
+trailing_distance_label = Trail by (ticks)
+save = Save
+copy_name = {name} copy
+
+# Delete
+delete_title = Delete order template
+delete_message = Delete "{name}"? Brackets already placed with it keep their orders.
+delete_confirm = Delete
+
+# Problems
+whole_number_required = Enter a whole number in the highlighted field.
+invalid_identity = This template cannot be saved under its identity. Close the editor and try again.
+invalid_revision = This template cannot be saved at its revision. Close the editor and try again.
+invalid_name = Enter a name of at most {maximum} characters, without leading or trailing spaces.
+invalid_quantity = The quantity must be from 1 to {maximum}.
+invalid_stop = The stop must be from 1 to {maximum} ticks.
+invalid_target_count = A template needs at least one target and holds at most {maximum}.
+invalid_target_offset = Each target must be from 1 to {maximum} ticks.
+invalid_target_order = Each target must be further from the entry than the one before it.
+invalid_target_quantity = Each target must take a quantity of at least 1.
+invalid_target_total = The target quantities must add up to the template quantity.
+invalid_target_split = These target quantities cannot be split exactly. Change the quantities of the nearer targets.
+invalid_trailing = The trailing activation and distance must each be from 1 to {maximum} ticks.
+too_many = At most {maximum} order templates can be saved. Delete one first.
+unknown_template = This template is no longer saved.
+revision_must_advance = This template was changed elsewhere. Close the editor and open it again.
+save_failed = The template could not be saved: {error}
+delete_failed = The template could not be deleted: {error}
+
+# Feedback
+saved = Saved order template {name}.
+deleted = Deleted order template {name}.

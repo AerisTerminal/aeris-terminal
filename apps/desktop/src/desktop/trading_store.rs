@@ -743,6 +743,7 @@ mod tests {
                     recovery_notices: vec![],
                     venue_notices: vec![],
                     workflows: vec![],
+                    order_templates: vec![],
                 }),
             },
         }

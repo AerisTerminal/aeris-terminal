@@ -1,0 +1,64 @@
+# 注文テンプレート（ATM 戦略）：注文チケットのテンプレート選択、テンプレートエディター、
+# テンプレート操作の結果表示。
+
+# 注文チケット
+ticket_label = テンプレート
+none = なし
+none_detail = チケット独自のブラケット
+new_template = 新しいテンプレート…
+edit_aria = {name} を編集
+duplicate_aria = {name} を複製
+delete_aria = {name} を削除
+missing_value = 未保存
+overrides_bracket = テンプレートが独自のストップとターゲットを発注します。OCO 戦略は使用されません。
+selected_missing = 選択した注文テンプレートは保存されていません。注文チケットで別のテンプレートか「なし」を選択してください。
+replay_unsupported = バーリプレイでは 1 つのストップと 1 つのターゲットで取引します。ターゲットが 1 つでトレーリングストップのないテンプレートか「なし」を選択してください。
+template_detail = 数量 {quantity} · ストップ {stop}
+
+# エディター
+new_title = 新しい注文テンプレート
+edit_title = 注文テンプレートを編集
+name_label = 名前
+name_placeholder = スキャルプ、ターゲット 2 つ
+quantity_label = 数量
+stop_label = ストップ（ティック）
+targets_heading = ターゲット
+target_ticks_label = ターゲット {number}（ティック）
+target_quantity_label = 数量
+add_target = ターゲットを追加
+remove_target_aria = ターゲット {number} を削除
+trailing_label = トレーリングストップ
+trailing_description = 取引が利益になると、ストップを最良価格の後ろに移動します。
+trailing_activation_label = 有効化まで（ティック）
+trailing_distance_label = 追従幅（ティック）
+save = 保存
+copy_name = {name} のコピー
+
+# 削除
+delete_title = 注文テンプレートを削除
+delete_message = 「{name}」を削除しますか？このテンプレートで発注済みのブラケットは注文を保持します。
+delete_confirm = 削除
+
+# 問題
+whole_number_required = 強調表示されたフィールドに整数を入力してください。
+invalid_identity = このテンプレートはその識別子では保存できません。エディターを閉じてもう一度お試しください。
+invalid_revision = このテンプレートはそのリビジョンでは保存できません。エディターを閉じてもう一度お試しください。
+invalid_name = 先頭と末尾に空白を含まない、{maximum} 文字以内の名前を入力してください。
+invalid_quantity = 数量は 1 から {maximum} の範囲で指定してください。
+invalid_stop = ストップは 1 から {maximum} ティックの範囲で指定してください。
+invalid_target_count = テンプレートには 1 つ以上、最大 {maximum} 個のターゲットが必要です。
+invalid_target_offset = 各ターゲットは 1 から {maximum} ティックの範囲で指定してください。
+invalid_target_order = 各ターゲットは前のターゲットよりもエントリーから離れている必要があります。
+invalid_target_quantity = 各ターゲットの数量は 1 以上にしてください。
+invalid_target_total = ターゲットの数量の合計をテンプレートの数量と一致させてください。
+invalid_target_split = これらのターゲット数量は正確に分割できません。近いターゲットの数量を変更してください。
+invalid_trailing = トレーリングストップの有効化と追従幅は、それぞれ 1 から {maximum} ティックの範囲で指定してください。
+too_many = 保存できる注文テンプレートは最大 {maximum} 個です。先に 1 つ削除してください。
+unknown_template = このテンプレートは保存されていません。
+revision_must_advance = このテンプレートは別の場所で変更されました。エディターを閉じて開き直してください。
+save_failed = テンプレートを保存できませんでした：{error}
+delete_failed = テンプレートを削除できませんでした：{error}
+
+# 結果
+saved = 注文テンプレート {name} を保存しました。
+deleted = 注文テンプレート {name} を削除しました。

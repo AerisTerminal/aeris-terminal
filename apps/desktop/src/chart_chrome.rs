@@ -6,6 +6,7 @@ use aeris_chart_integration::{
 use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
 use aeris_market_data::ChartInterval;
 use aeris_market_runtime::InstrumentSearchCategories;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 pub const CHART_CHROME_HEIGHT: f32 = 44.0;
@@ -386,6 +387,9 @@ pub struct ChartChromePreferences {
     pub timeframe_favorites: TimeframeFavorites,
     /// The indicators starred in the indicator menu, listed first there.
     pub indicator_favorites: IndicatorFavorites,
+    /// The order template the order ticket attaches to its entries, by its trading owner
+    /// number; `None` keeps the ticket's own bracket.
+    pub order_template: Option<NonZeroU64>,
 }
 
 /// The timeframes the user starred, a bitset over [`ChartInterval::ALL`] so the preferences
@@ -721,6 +725,7 @@ impl Default for ChartChromePreferences {
             drawings: ChromeVisibility::Shown,
             timeframe_favorites: TimeframeFavorites::default(),
             indicator_favorites: IndicatorFavorites::default(),
+            order_template: None,
         }
     }
 }
@@ -761,6 +766,10 @@ impl ChartChromePreferences {
             drawings_hidden: !self.drawings.shown(),
             timeframe_favorites: self.timeframe_favorites.encode(),
             indicator_favorites: self.indicator_favorites.encode(),
+            order_template: self
+                .order_template
+                .map(aeris_trading_runtime::order_template_id)
+                .unwrap_or_default(),
         }
     }
 
@@ -811,6 +820,8 @@ impl ChartChromePreferences {
         preferences.drawings = ChromeVisibility::from_shown(!state.drawings_hidden);
         preferences.timeframe_favorites = TimeframeFavorites::parse(&state.timeframe_favorites);
         preferences.indicator_favorites = IndicatorFavorites::parse(&state.indicator_favorites);
+        preferences.order_template =
+            aeris_trading_runtime::order_template_key(&state.order_template);
         preferences
     }
 }
@@ -936,6 +947,7 @@ mod tests {
     use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
     use aeris_contracts::{WorkspaceChromePoint, WorkspaceChromeState};
     use aeris_market_data::ChartInterval;
+    use std::num::NonZeroU64;
     use std::path::PathBuf;
 
     #[test]
@@ -1172,6 +1184,7 @@ mod tests {
             drawings: ChromeVisibility::Shown,
             timeframe_favorites: TimeframeFavorites::default(),
             indicator_favorites: IndicatorFavorites::default(),
+            order_template: NonZeroU64::new(0x2a),
         }
     }
 
@@ -1197,7 +1210,11 @@ mod tests {
         assert!(!mixed.indicator_value_labels_visible);
         assert!(!mixed.indicator_price_lines_visible);
         assert_eq!(mixed.chart_type, ChartType::Line);
-        let hidden = hidden_chrome_preferences();
+        // The legacy file predates order templates, so it never names one.
+        let hidden = ChartChromePreferences {
+            order_template: None,
+            ..hidden_chrome_preferences()
+        };
         assert_eq!(
             parse_chart_chrome_preferences(
                 "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nsymbol_search_scope=exchange:rithmic:CBOT\nwindow_frame=frameless\ndrawing_toolbar=0\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\nchart_trade_buttons=0\ndrawing_favorites_origin=120.5,80\ndrawing_context_toolbar_origin=640,96.5\n"
@@ -1361,6 +1378,7 @@ mod tests {
                 drawings_hidden: false,
                 timeframe_favorites: String::new(),
                 indicator_favorites: String::new(),
+                order_template: "user-2a".to_string(),
             },
             "the document form keeps the legacy identifiers"
         );
@@ -1404,6 +1422,31 @@ mod tests {
             assert_eq!(
                 ChartChromePreferences::from_workspace_chrome(Some(&state)).language,
                 LanguagePreference::System
+            );
+        }
+    }
+
+    #[test]
+    fn the_selected_order_template_round_trips_and_anything_else_selects_none() {
+        let restored =
+            ChartChromePreferences::from_workspace_chrome(Some(&WorkspaceChromeState::default()));
+        assert_eq!(restored.order_template, None);
+        let selected = ChartChromePreferences {
+            order_template: NonZeroU64::new(0x2a),
+            ..ChartChromePreferences::default()
+        };
+        assert_eq!(
+            ChartChromePreferences::from_workspace_chrome(Some(&selected.to_workspace_chrome()))
+                .order_template,
+            NonZeroU64::new(0x2a)
+        );
+        for foreign in ["managed-bracket", "user-", "user-0", "user-2A"] {
+            let mut state = ChartChromePreferences::default().to_workspace_chrome();
+            state.order_template = foreign.to_string();
+            assert_eq!(
+                ChartChromePreferences::from_workspace_chrome(Some(&state)).order_template,
+                None,
+                "{foreign}"
             );
         }
     }

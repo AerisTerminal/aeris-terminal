@@ -167,7 +167,8 @@ violations and missing verification explicitly, and never describe them as satis
   policies and the owner's position and P&L math, and never reaches the trading owner, an account,
   a venue or the store. While a chart replays, every order entry on it trades that session, decided
   at the click or key rather than at render: chart orders and drawings, the trade bar, the order
-  ticket (resting prices measured from the newest revealed close, its bracket, Cancel and Flat) and
+  ticket (resting prices measured from the newest revealed close, its bracket or a selected
+  single-target order template without trailing stop, any other template refused, Cancel and Flat) and
   the buy, sell, cancel-all and flatten shortcuts (a confirmation answered after replay started or
   ended is refused); only the kill switch still locks the accounts, and the live order-book ladder
   refuses clicks. The chart and ticket show the session in place of the account; the session ends
@@ -407,7 +408,7 @@ violations and missing verification explicitly, and never describe them as satis
   second container or a direct writer, `.bak` or `read_to_string` path in the workspace
   file's owner and any container or file writer in `chart_chrome.rs`.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V32 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V33 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
@@ -477,6 +478,18 @@ violations and missing verification explicitly, and never describe them as satis
   opened, so position opened and closed triggers and the time-in-trade, open-profit and pullback
   checks read the owner's own trade cycle; a pre-group store awaiting conversion reads it as
   unknown, and a check that cannot read its position blocks instead of guessing.
+  V33 adds `order_templates`: user-managed order templates (ATM strategies, at most 64, a save
+  past the bound is refused and none is evicted) owned by `trading_runtime::order_templates`.
+  Each holds a name, a default quantity, one stop, one to `MAXIMUM_BRACKET_TARGETS` targets
+  whose quantities split that quantity exactly, and an optional trailing stop; the owner
+  validates every revision, and their `user-<hex>` identities are reserved apart from the
+  internal bracket templates. `place_bracket` with a template's identity places its bracket
+  (an unpriced entry is priced at the touch, a resting one keeps its price), and removing a
+  template keeps the groups already placed with it. The desktop chart chrome keeps only the
+  selected template (`WorkspaceChromeState.order_template`, tag 21; none places the ticket's
+  own bracket). The order ticket, the buy and sell shortcuts and the chart trade bar read that
+  choice at the click or key, and a selected template that is no longer saved refuses the order
+  instead of placing it unprotected or with another bracket.
   Store-open preflight scratch cleanup may remove only exact preflight directories containing
   solely the expected database copy and SQLite sidecars, and exact readiness directories
   containing solely that copy, its migration backups and its preflight scratch; preserve

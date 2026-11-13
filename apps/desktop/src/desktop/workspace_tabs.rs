@@ -812,7 +812,10 @@ impl TerminalApp {
     /// tab, or the active pane's chrome or chart) rather than on a text field, so workspace
     /// shortcuts may act.
     pub(super) fn workspace_keyboard_focused(&self, window: &Window, cx: &App) -> bool {
-        if self.pages.layouts.covers_workspace() || self.pages.indicator_templates.modal_open() {
+        if self.pages.layouts.covers_workspace()
+            || self.pages.indicator_templates.modal_open()
+            || self.pages.order_templates.modal_open()
+        {
             return false;
         }
         self.window.chrome_focus().is_focused(window)
@@ -3681,6 +3684,32 @@ impl TerminalApp {
         true
     }
 
+    /// While a layout or template dialog is open it takes every key, and Escape cancels it.
+    /// Returns whether one was open.
+    fn modal_dialog_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let cancel: fn(&mut Self, &mut Window, &mut Context<Self>) =
+            if self.pages.layouts.modal_open() {
+                Self::cancel_layout_modal
+            } else if self.pages.indicator_templates.modal_open() {
+                Self::cancel_indicator_template_dialog
+            } else if self.pages.order_templates.modal_open() {
+                Self::cancel_order_template_dialog
+            } else {
+                return false;
+            };
+        if event.keystroke.key.eq_ignore_ascii_case("escape") {
+            cancel(self, window, cx);
+            window.prevent_default();
+            cx.stop_propagation();
+        }
+        true
+    }
+
     pub(super) fn on_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -3702,20 +3731,7 @@ impl TerminalApp {
             }
             return;
         }
-        if self.pages.layouts.modal_open() {
-            if event.keystroke.key.eq_ignore_ascii_case("escape") {
-                self.cancel_layout_modal(window, cx);
-                window.prevent_default();
-                cx.stop_propagation();
-            }
-            return;
-        }
-        if self.pages.indicator_templates.modal_open() {
-            if event.keystroke.key.eq_ignore_ascii_case("escape") {
-                self.cancel_indicator_template_dialog(window, cx);
-                window.prevent_default();
-                cx.stop_propagation();
-            }
+        if self.modal_dialog_key_down(event, window, cx) {
             return;
         }
         if self.keyboard_trading.confirming() {

@@ -5,8 +5,10 @@
 
 mod ticket_workflows;
 
+use super::order_templates_view::{OrderTemplateChoice, OrderTemplateDraft};
 use super::*;
-use aeris_localization::{Text, common, panels, tr, tr_count};
+use aeris_localization::{Text, common, order_templates, panels, tr, tr_count};
+use aeris_trading_runtime::{OrderTemplate, order_template_key};
 use gpui::ClickEvent;
 
 const FIELD_HEIGHT: f32 = 28.0;
@@ -119,6 +121,7 @@ pub(super) enum TicketMenu {
     Broker,
     Account,
     BracketMode,
+    OrderTemplate,
     Workflow,
 }
 
@@ -300,6 +303,8 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) trading: &'a super::TradingPaneState,
     pub(super) quantity: &'a super::order_quantity::OrderQuantityControls,
     pub(super) controls: &'a OrderTicketControls,
+    /// The order template the surface's chart chrome names.
+    pub(super) order_template: Option<std::num::NonZeroU64>,
     /// Set while the pane's chart replays: orders then trade the replay, not the account.
     pub(super) replay: Option<&'a super::bar_replay_trading::ReplayTicket>,
     pub(super) theme: &'a AerisTheme,
@@ -425,6 +430,7 @@ pub(super) fn trading_order_controls(
         .child(offset_field(state))
         .child(order_grid(state, &view))
         .child(div().my_1().h_px().bg(gpui_color(colors.border)))
+        .child(order_template_field(state))
         .child(bracket_header(state))
         .child(bracket_fields(state, &view))
         .child(div().my_1().h_px().bg(gpui_color(colors.border)))
@@ -1181,6 +1187,17 @@ fn order_button(
                 },
                 _ => return,
             };
+            let protection = match app
+                .read(cx)
+                .order_template_choice(cx)
+                .ticket_protection(settings.bracket())
+            {
+                Ok(protection) => protection,
+                Err(reason) => {
+                    feedback.record_for_pane(&pane, Err(reason.to_string()));
+                    return;
+                }
+            };
             aeris_desktop::trading::dispatch_ticket_order(
                 &service,
                 &feedback,
@@ -1193,7 +1210,7 @@ fn order_button(
                     account_key: account.clone(),
                     quantity,
                     price_units,
-                    bracket: settings.bracket(),
+                    protection,
                 },
                 cx,
             );
@@ -1261,6 +1278,212 @@ fn flat_button(state: &TradingOrderControlsState<'_>, view: &TicketView<'_>) -> 
                 account.clone(),
                 cx,
             );
+        })
+}
+
+/// The order template the ticket, the trading shortcuts and the chart trade bar place their
+/// brackets with; None keeps the ticket's own bracket.
+fn order_template_field(state: &TradingOrderControlsState<'_>) -> Div {
+    let theme = state.theme;
+    let colors = theme.colors;
+    let saved = state
+        .store
+        .current()
+        .map(|set| set.order_templates.as_slice());
+    let choice = OrderTemplateChoice::resolve(saved, state.order_template);
+    let open = state.controls.open_menu == Some(TicketMenu::OrderTemplate);
+    let menu = open.then(|| {
+        let terminal = state.terminal.clone();
+        let app = state.app.clone();
+        let none = MenuRow::compact(
+            "ticket_order_template_none",
+            tr!(order_templates::NONE),
+            theme,
+        )
+        .detail(tr!(order_templates::NONE_DETAIL))
+        .checked(choice == OrderTemplateChoice::None)
+        .on_click(move |_, _, cx| {
+            terminal.update(cx, |terminal, terminal_cx| {
+                terminal.select_order_template(None, terminal_cx);
+            });
+            app.update(cx, WorkspaceSurface::close_ticket_menu);
+        });
+        let templates = saved
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .map(|(index, template)| {
+                let chosen = matches!(&choice, OrderTemplateChoice::Template(chosen)
+                    if chosen.template_id == template.template_id);
+                order_template_row(state, index, template, chosen)
+            });
+        let terminal = state.terminal.clone();
+        let app = state.app.clone();
+        let new = MenuRow::compact(
+            "ticket_order_template_new",
+            tr!(order_templates::NEW_TEMPLATE),
+            theme,
+        )
+        .leading_icon(header_icon(HugeIcon::Add))
+        .on_click(move |_, window, cx| {
+            app.update(cx, WorkspaceSurface::close_ticket_menu);
+            terminal.update(cx, |terminal, terminal_cx| {
+                terminal.open_order_template_editor(OrderTemplateDraft::New, window, terminal_cx);
+            });
+        });
+        select_menu("ticket_order_template_menu", theme).children(
+            std::iter::once(none)
+                .chain(templates)
+                .chain(std::iter::once(new)),
+        )
+    });
+    let value = match &choice {
+        OrderTemplateChoice::None => tr!(order_templates::NONE).to_string(),
+        OrderTemplateChoice::Template(template) => template.name.clone(),
+        OrderTemplateChoice::Missing => tr!(order_templates::MISSING_VALUE).to_string(),
+    };
+    let note = match choice {
+        OrderTemplateChoice::None => None,
+        OrderTemplateChoice::Template(_) => Some((
+            tr!(order_templates::OVERRIDES_BRACKET),
+            colors.text_secondary,
+        )),
+        OrderTemplateChoice::Missing => {
+            Some((tr!(order_templates::SELECTED_MISSING), colors.text_danger))
+        }
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(GAP))
+        .child(ticket_select(
+            state.app,
+            "ticket_order_template_field",
+            select_trigger(
+                "ticket_order_template",
+                Some(tr!(order_templates::TICKET_LABEL)),
+                value,
+                theme,
+                menu_toggle(state.app, TicketMenu::OrderTemplate),
+            ),
+            menu,
+        ))
+        .children(note.map(|(text, color)| {
+            div()
+                .debug_selector(|| "ticket_order_template_note".into())
+                .mx(px(2.0))
+                .text_size(px(11.0))
+                .text_color(gpui_color(color))
+                .child(text)
+        }))
+}
+
+/// A saved template: choosing it also sets this ticket's quantity to the template's default
+/// quantity, and its buttons edit, duplicate or delete it.
+fn order_template_row(
+    state: &TradingOrderControlsState<'_>,
+    index: usize,
+    template: &OrderTemplate,
+    chosen: bool,
+) -> MenuRow {
+    let theme = state.theme;
+    let name = template.name.as_str();
+    let edit = template.clone();
+    let duplicate = template.clone();
+    let delete = template.clone();
+    let actions = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(order_template_action(
+            state,
+            ("ticket_order_template_edit", index),
+            HugeIcon::Settings,
+            tr!(order_templates::EDIT_ARIA, name = name),
+            move |terminal, window, cx| {
+                terminal.open_order_template_editor(
+                    OrderTemplateDraft::Edit(edit.clone()),
+                    window,
+                    cx,
+                );
+            },
+        ))
+        .child(order_template_action(
+            state,
+            ("ticket_order_template_duplicate", index),
+            HugeIcon::Copy,
+            tr!(order_templates::DUPLICATE_ARIA, name = name),
+            move |terminal, window, cx| {
+                terminal.open_order_template_editor(
+                    OrderTemplateDraft::Duplicate(duplicate.clone()),
+                    window,
+                    cx,
+                );
+            },
+        ))
+        .child(
+            order_template_action(
+                state,
+                ("ticket_order_template_delete", index),
+                HugeIcon::Trash,
+                tr!(order_templates::DELETE_ARIA, name = name),
+                move |terminal, _, cx| {
+                    terminal.request_order_template_delete(delete.clone(), cx);
+                },
+            )
+            .danger_on_hover(),
+        );
+    let terminal = state.terminal.clone();
+    let app = state.app.clone();
+    let key = order_template_key(&template.template_id);
+    let quantity = aeris_desktop::trading::OrderQuantity::whole(u64::from(template.quantity));
+    MenuRow::compact(
+        ("ticket_order_template_option", index),
+        template.name.clone(),
+        theme,
+    )
+    .detail(tr!(
+        order_templates::TEMPLATE_DETAIL,
+        quantity = template.quantity,
+        stop = template.stop_offset_ticks
+    ))
+    .checked(chosen)
+    .trailing(actions)
+    .on_click(move |_, window, cx| {
+        terminal.update(cx, |terminal, terminal_cx| {
+            terminal.select_order_template(key, terminal_cx);
+        });
+        app.update(cx, |surface, surface_cx| {
+            if let Some(quantity) = quantity {
+                surface.set_order_quantity(quantity, window, surface_cx);
+            }
+            surface.close_ticket_menu(surface_cx);
+        });
+    })
+}
+
+/// A template row's button; it closes the menu and does not choose the row.
+fn order_template_action(
+    state: &TradingOrderControlsState<'_>,
+    id: (&'static str, usize),
+    icon: HugeIcon,
+    aria: String,
+    run: impl Fn(&mut TerminalApp, &mut Window, &mut Context<TerminalApp>) + 'static,
+) -> Button {
+    let terminal = state.terminal.clone();
+    let app = state.app.clone();
+    Button::new(id, state.theme)
+        .variant(ButtonVariant::Ghost)
+        .button_size(ButtonSize::Sm)
+        .icon(header_icon(icon))
+        .aria_label(aria)
+        .tab_stop(false)
+        .on_click(move |_, window, cx| {
+            app.update(cx, WorkspaceSurface::close_ticket_menu);
+            terminal.update(cx, |terminal, terminal_cx| {
+                run(terminal, window, terminal_cx);
+            });
+            cx.stop_propagation();
         })
 }
 

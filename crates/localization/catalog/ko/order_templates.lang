@@ -1,0 +1,63 @@
+# 주문 템플릿(ATM 전략): 주문 티켓의 템플릿 선택, 템플릿 편집기, 템플릿 명령의 결과 안내.
+
+# 주문 티켓
+ticket_label = 템플릿
+none = 없음
+none_detail = 티켓 자체 브래킷
+new_template = 새 템플릿…
+edit_aria = {name} 편집
+duplicate_aria = {name} 복제
+delete_aria = {name} 삭제
+missing_value = 저장되지 않음
+overrides_bracket = 템플릿이 자체 손절과 목표를 주문합니다. OCO 전략은 사용되지 않습니다.
+selected_missing = 선택한 주문 템플릿이 더 이상 저장되어 있지 않습니다. 주문 티켓에서 다른 템플릿이나 없음을 선택하세요.
+replay_unsupported = 바 리플레이는 손절 하나와 목표 하나로 거래합니다. 목표가 하나이고 추적 손절이 없는 템플릿이나 없음을 선택하세요.
+template_detail = 수량 {quantity} · 손절 {stop}
+
+# 편집기
+new_title = 새 주문 템플릿
+edit_title = 주문 템플릿 편집
+name_label = 이름
+name_placeholder = 스캘핑, 목표 두 개
+quantity_label = 수량
+stop_label = 손절(틱)
+targets_heading = 목표
+target_ticks_label = 목표 {number}(틱)
+target_quantity_label = 수량
+add_target = 목표 추가
+remove_target_aria = 목표 {number} 제거
+trailing_label = 추적 손절
+trailing_description = 거래가 수익 구간에 들어서면 손절을 최우선 가격 뒤로 옮깁니다.
+trailing_activation_label = 활성화 기준(틱)
+trailing_distance_label = 추적 간격(틱)
+save = 저장
+copy_name = {name} 사본
+
+# 삭제
+delete_title = 주문 템플릿 삭제
+delete_message = "{name}"을(를) 삭제할까요? 이 템플릿으로 이미 낸 브래킷은 주문을 유지합니다.
+delete_confirm = 삭제
+
+# 문제
+whole_number_required = 강조 표시된 필드에 정수를 입력하세요.
+invalid_identity = 이 템플릿은 해당 식별자로 저장할 수 없습니다. 편집기를 닫고 다시 시도하세요.
+invalid_revision = 이 템플릿은 해당 리비전으로 저장할 수 없습니다. 편집기를 닫고 다시 시도하세요.
+invalid_name = 앞뒤 공백 없이 최대 {maximum}자의 이름을 입력하세요.
+invalid_quantity = 수량은 1에서 {maximum} 사이여야 합니다.
+invalid_stop = 손절은 1에서 {maximum}틱 사이여야 합니다.
+invalid_target_count = 템플릿에는 목표가 하나 이상 필요하며 최대 {maximum}개까지 가능합니다.
+invalid_target_offset = 각 목표는 1에서 {maximum}틱 사이여야 합니다.
+invalid_target_order = 각 목표는 이전 목표보다 진입가에서 더 멀어야 합니다.
+invalid_target_quantity = 각 목표의 수량은 1 이상이어야 합니다.
+invalid_target_total = 목표 수량의 합이 템플릿 수량과 같아야 합니다.
+invalid_target_split = 이 목표 수량은 정확히 나눌 수 없습니다. 가까운 목표의 수량을 바꾸세요.
+invalid_trailing = 추적 손절의 활성화 기준과 간격은 각각 1에서 {maximum}틱 사이여야 합니다.
+too_many = 주문 템플릿은 최대 {maximum}개까지 저장할 수 있습니다. 먼저 하나를 삭제하세요.
+unknown_template = 이 템플릿은 더 이상 저장되어 있지 않습니다.
+revision_must_advance = 이 템플릿이 다른 곳에서 변경되었습니다. 편집기를 닫고 다시 여세요.
+save_failed = 템플릿을 저장할 수 없습니다: {error}
+delete_failed = 템플릿을 삭제할 수 없습니다: {error}
+
+# 결과
+saved = 주문 템플릿 {name}을(를) 저장했습니다.
+deleted = 주문 템플릿 {name}을(를) 삭제했습니다.

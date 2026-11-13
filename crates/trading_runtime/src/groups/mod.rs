@@ -125,6 +125,12 @@ impl TradingCore {
         template: BracketStrategyTemplate,
     ) -> Result<(), String> {
         template.validate()?;
+        if template
+            .template_id
+            .starts_with(crate::ORDER_TEMPLATE_ID_PREFIX)
+        {
+            return Err("strategy template identity is reserved for order templates".to_string());
+        }
         if !self
             .state
             .strategy_templates
@@ -152,14 +158,28 @@ impl TradingCore {
         &mut self,
         command: &PlaceBracket,
     ) -> Result<PlacementOutcome, String> {
-        let template = self
-            .state
-            .strategy_templates
-            .get(&command.template_id)
-            .filter(|template| template.enabled)
-            .cloned()
-            .ok_or_else(|| "enabled bracket strategy template is not registered".to_string())?;
+        // An order template's bracket, or an enabled internal bracket template.
+        let template = match self.state.order_templates.get(&command.template_id) {
+            Some(template) => template
+                .bracket_template()
+                .map_err(|invalid| crate::OrderTemplateError::Invalid(invalid).to_string())?,
+            None => self
+                .state
+                .strategy_templates
+                .get(&command.template_id)
+                .filter(|template| template.enabled)
+                .cloned()
+                .ok_or_else(|| "enabled bracket strategy template is not registered".to_string())?,
+        };
         self.place_bracket_with_template(&command.entry, &template)
+    }
+
+    /// An order template's entry keeps its own type and explicit prices, as an inline
+    /// bracket's does, and only an unpriced one is priced at the touch; an internal
+    /// template's entry is always priced at the touch.
+    pub(super) fn bracket_entry_at_touch(&self, template_id: &str, entry: &PlaceOrder) -> bool {
+        !self.state.order_templates.contains_key(template_id)
+            || (entry.limit_price.is_none() && entry.stop_price.is_none())
     }
 
     pub(super) fn place_bracket_with_template(

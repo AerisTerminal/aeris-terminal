@@ -926,6 +926,7 @@ impl TerminalApp {
             workspace_price_alert_dialog(self.tabs.active(), &self.theme, cx),
             self.layouts_dialog_layer(terminal, cx),
             self.indicator_templates_dialog_layer(terminal),
+            self.order_templates_dialog_layer(terminal),
             self.trading_report_layer(terminal, cx),
         ]
         .into_iter()
