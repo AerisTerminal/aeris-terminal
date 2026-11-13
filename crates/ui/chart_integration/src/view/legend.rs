@@ -1,7 +1,8 @@
 //! The chart legend: one row per series or study, with its visibility, settings and remove controls.
 
 use super::{
-    AerisChartView, ChartHostEvent, ChartSettingsRequest, OrderFlowStudy, gpui_theme_color,
+    AerisChartView, ChartHostEvent, ChartSettingsRequest, OrderFlowStudy, SessionProfileKind,
+    gpui_theme_color,
 };
 use aeris_charts_render::color::Color;
 use aeris_design_system::{AerisTheme, platform_numeric_font_family, platform_typography};
@@ -28,6 +29,7 @@ pub(super) enum LegendItem {
     BigTrades,
     OrderBookDepth,
     DepthHeatmap,
+    SessionProfile(SessionProfileKind),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -55,6 +57,7 @@ impl LegendItem {
             Self::BigTrades => 1_u64 << 60,
             Self::OrderBookDepth => 1_u64 << 59,
             Self::DepthHeatmap => 1_u64 << 58,
+            Self::SessionProfile(kind) => (1_u64 << 57) | kind as u64,
         }
     }
 }
@@ -408,6 +411,7 @@ fn legend_row_controls(
                 | LegendItem::Volume
                 | LegendItem::OrderFlow(_)
                 | LegendItem::OrderBookDepth
+                | LegendItem::SessionProfile(_)
         )
     {
         controls = controls.child(
@@ -520,6 +524,9 @@ fn legend_control(
                             Some(ChartSettingsRequest::DeltaHistogram)
                         }
                         LegendItem::OrderBookDepth => Some(ChartSettingsRequest::OrderBookDepth),
+                        LegendItem::SessionProfile(kind) => {
+                            Some(ChartSettingsRequest::SessionProfile(kind))
+                        }
                         _ => None,
                     };
                     if let Some(request) = request {

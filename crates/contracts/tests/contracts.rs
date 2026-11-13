@@ -257,6 +257,7 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
                 kind: "volume".into(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             }],
             studies: vec![WorkspaceChartStudyState {
                 local_id: 1,

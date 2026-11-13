@@ -1687,7 +1687,8 @@ fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
         ChartType::Candles
         | ChartType::HollowCandles
         | ChartType::HollowCandlesBullish
-        | ChartType::HollowCandlesBearish => vec![candle_group(ui, title, appearance, defaults)],
+        | ChartType::HollowCandlesBearish
+        | ChartType::HeikinAshi => vec![candle_group(ui, title, appearance, defaults)],
         ChartType::Footprint => vec![footprint_group(ui, title, snapshot.order_flow)],
         ChartType::Bars => vec![bar_group(ui, title, appearance, defaults)],
         ChartType::Line | ChartType::LineWithMarkers | ChartType::BrushableArea => {

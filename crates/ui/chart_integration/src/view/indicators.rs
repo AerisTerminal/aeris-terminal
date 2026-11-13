@@ -21,6 +21,11 @@ impl AerisChartView {
         if !self.has_market_data() {
             return Err(ChartIndicatorError::MarketDataUnavailable);
         }
+        if let Some(kind) = SessionProfileKind::of(indicator) {
+            // A profile owns price rows per session, not a time series, so it has no output.
+            self.add_session_profile(SessionProfileSettings::default_for(kind), true)?;
+            return Ok(Vec::new());
+        }
         let ids = if indicator == ChartIndicator::Volume {
             let settings = self.volume_settings().unwrap_or_default();
             self.install_volume(settings, true)
@@ -74,6 +79,7 @@ impl AerisChartView {
                 indicator: ChartIndicator::Volume,
                 visible: self.volume_visible(),
                 volume: Some(volume.settings.clone()),
+                session_profile: None,
             });
         }
         if let Some(visible) = self.volume_profile_visible() {
@@ -81,8 +87,10 @@ impl AerisChartView {
                 indicator: ChartIndicator::VolumeProfile,
                 visible,
                 volume: None,
+                session_profile: None,
             });
         }
+        states.extend(self.session_profile_states());
         for binding in self.engine.indicator_bindings() {
             let Some(indicator) = ChartIndicator::from_engine_kind(&binding.kind) else {
                 continue;
@@ -92,6 +100,7 @@ impl AerisChartView {
                 indicator,
                 visible,
                 volume: None,
+                session_profile: None,
             });
         }
         states
@@ -136,6 +145,17 @@ impl AerisChartView {
                 self.restore_volume(state)?;
                 continue;
             }
+            if let Some(kind) = SessionProfileKind::of(state.indicator) {
+                if !self.has_market_data() {
+                    return Err(ChartIndicatorError::MarketDataUnavailable);
+                }
+                let settings = state
+                    .session_profile
+                    .filter(|settings| settings.kind() == kind && settings.is_valid())
+                    .unwrap_or_else(|| SessionProfileSettings::default_for(kind));
+                self.add_session_profile(settings, state.visible)?;
+                continue;
+            }
             let ids = self.add_indicator(state.indicator)?;
             if state.visible {
                 continue;
@@ -165,6 +185,7 @@ impl AerisChartView {
             || self.order_flow_settings.big_trades.is_some()
             || self.order_flow_settings.order_book_depth.is_some()
             || self.order_flow_settings.depth_heatmap.is_some()
+            || self.has_session_profiles()
     }
     /// Removes every indicator as one undo step. The product-owned price and volume series stay
     /// in place.
@@ -197,6 +218,7 @@ impl AerisChartView {
         cleared |= self.remove_big_trades();
         cleared |= self.remove_order_book_depth();
         cleared |= self.remove_depth_heatmap();
+        cleared |= self.remove_every_session_profile();
         cleared
     }
 
@@ -300,6 +322,10 @@ impl AerisChartView {
             let title = tr!(chart_ui::LEGEND_DEPTH_HEATMAP);
             insert_price_pane_legend_row(&mut rows, item, title, heatmap.visible, false);
         }
+        let session_profiles = self.session_profile_legend_rows().collect::<Vec<_>>();
+        for (item, title, visible) in session_profiles {
+            insert_price_pane_legend_row(&mut rows, item, title, visible, true);
+        }
         let indicator_toggle = apply_legend_options(&mut rows, self.legend_options);
         LegendPresentation {
             rows,
@@ -336,6 +362,9 @@ impl AerisChartView {
         }
         if item == LegendItem::DepthHeatmap {
             return self.set_depth_heatmap_visible(visible);
+        }
+        if let LegendItem::SessionProfile(kind) = item {
+            return self.set_session_profile_visible(kind, visible);
         }
         let ids: Vec<u32> = match item {
             // The footprint presents the same product price series, so they toggle together.
@@ -384,8 +413,9 @@ impl AerisChartView {
             | LegendItem::OrderFlow(_)
             | LegendItem::BigTrades
             | LegendItem::OrderBookDepth
-            | LegendItem::DepthHeatmap => {
-                unreachable!("study and order-flow visibility handled above")
+            | LegendItem::DepthHeatmap
+            | LegendItem::SessionProfile(_) => {
+                unreachable!("study, order-flow and session profile visibility handled above")
             }
         };
         if ids.is_empty() {
@@ -412,6 +442,7 @@ impl AerisChartView {
             LegendItem::BigTrades => return self.remove_big_trades(),
             LegendItem::OrderBookDepth => return self.remove_order_book_depth(),
             LegendItem::DepthHeatmap => return self.remove_depth_heatmap(),
+            LegendItem::SessionProfile(kind) => return self.remove_session_profile(kind),
             LegendItem::VolumeProfile => self.remove_volume_profile(),
             LegendItem::Asset | LegendItem::Study { .. } => false,
             LegendItem::Indicator(binding) => self.engine.remove_indicator_binding(binding),
@@ -751,7 +782,8 @@ fn apply_legend_options(
     toggle
 }
 
-/// The volume profile and big trades are engine-owned price-pane primitives, not series, so the
+/// The volume and session profiles and big trades are engine-owned price-pane primitives, not
+/// series, so the
 /// financial legend has no row for them; the host adds one so they can be hidden or removed.
 fn insert_price_pane_legend_row(
     rows: &mut Vec<LegendRow>,

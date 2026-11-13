@@ -506,6 +506,7 @@ mod tests {
                 kind: ChartIndicator::Ema.identifier().to_string(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             }],
             ..WorkspaceChartState::default()
         });
@@ -674,6 +675,7 @@ mod tests {
                     average_length: 20,
                     ..aeris_contracts::WorkspaceVolumeSettingsState::default()
                 }),
+                session_profile: None,
             }],
             order_flow: Some(aeris_contracts::WorkspaceOrderFlowSettingsState {
                 cumulative_delta: Some(aeris_contracts::WorkspaceCumulativeDeltaState {
@@ -866,16 +868,19 @@ mod tests {
                     kind: ChartIndicator::Sma.identifier().to_string(),
                     visible: false,
                     volume: None,
+                    session_profile: None,
                 },
                 aeris_contracts::WorkspaceChartIndicatorState {
                     kind: ChartIndicator::Ema.identifier().to_string(),
                     visible: true,
                     volume: None,
+                    session_profile: None,
                 },
                 aeris_contracts::WorkspaceChartIndicatorState {
                     kind: ChartIndicator::Volume.identifier().to_string(),
                     visible: true,
                     volume: None,
+                    session_profile: None,
                 },
             ],
             ..WorkspaceChartState::default()

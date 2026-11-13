@@ -1651,6 +1651,60 @@ fn line_with_markers_survives_replay_and_appearance_reset_without_leaking_to_oth
     assert_eq!(chart.engine.series_data(0).len(), bars);
 }
 
+fn heikin_ashi_projection(chart: &AerisChartView) -> bool {
+    chart
+        .engine
+        .series
+        .iter()
+        .find(|series| series.id == 0 && !series.removed)
+        .expect("product price series")
+        .heikin_ashi
+}
+
+#[test]
+fn heikin_ashi_is_the_engine_projection_of_the_unchanged_product_bars() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    assert_eq!(
+        ChartType::from_identifier("heikin_ashi"),
+        Some(ChartType::HeikinAshi)
+    );
+    assert_eq!(ChartType::HeikinAshi.label(), "Heikin Ashi");
+    let mut chart = AerisChartView::empty();
+    chart.set_chart_type(ChartType::HeikinAshi);
+    assert_eq!(
+        series_entry(&chart, 0).kind,
+        aeris_charts_engine::SeriesKind::Candlestick
+    );
+    assert!(heikin_ashi_projection(&chart));
+
+    chart.load_replay(&replay).expect("snapshot installs");
+    assert_eq!(chart.chart_type(), ChartType::HeikinAshi);
+    assert!(heikin_ashi_projection(&chart));
+    let raw = replay
+        .bars()
+        .iter()
+        .map(|item| crate::engine_bridge::fixed_price(item.value().close, chart.price_divisor))
+        .collect::<Vec<_>>();
+    let closes = chart
+        .engine
+        .series_data(0)
+        .into_iter()
+        .map(|point| point.close)
+        .collect::<Vec<_>>();
+    assert_eq!(closes, raw, "the price series keeps the product's own OHLC");
+
+    chart.reset_appearance_settings();
+    assert!(heikin_ashi_projection(&chart));
+    for other in [ChartType::Candles, ChartType::Bars, ChartType::Line] {
+        chart.set_chart_type(other);
+        assert!(!heikin_ashi_projection(&chart), "{other:?}");
+    }
+    chart.set_chart_type(ChartType::HeikinAshi);
+    assert!(heikin_ashi_projection(&chart));
+}
+
 #[test]
 fn hollow_candles_are_engine_owned_and_never_leak_into_the_user_appearance() {
     let replay = EmbeddedReplaySource
@@ -2720,6 +2774,7 @@ fn volume_profile_indicator_round_trips_through_state_legend_and_removal() {
         indicator: ChartIndicator::VolumeProfile,
         visible: true,
         volume: None,
+        session_profile: None,
     }));
     assert!(
         chart
@@ -2734,6 +2789,7 @@ fn volume_profile_indicator_round_trips_through_state_legend_and_removal() {
         indicator: ChartIndicator::VolumeProfile,
         visible: false,
         volume: None,
+        session_profile: None,
     }));
 
     let mut restored = interactive_chart();
@@ -4144,6 +4200,7 @@ fn volume_settings_restore_with_the_chart_and_release_their_own_pane() {
             indicator: ChartIndicator::Volume,
             visible: true,
             volume: Some(settings.clone()),
+            session_profile: None,
         }]
     );
     let mut restored = interactive_chart();
@@ -5076,7 +5133,7 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
 
 #[test]
 fn indicator_metadata_matches_the_legacy_picker_copy() {
-    assert_eq!(ChartIndicator::ALL.len(), 11);
+    assert_eq!(ChartIndicator::ALL.len(), 13);
     assert_eq!(ChartIndicator::Volume.label(), "Volume");
     assert_eq!(
         ChartIndicator::VolumeProfile.label(),
@@ -5096,6 +5153,11 @@ fn indicator_metadata_matches_the_legacy_picker_copy() {
     );
     assert_eq!(ChartIndicator::Stochastic.parameters(), "%K 14 · %D 3");
     assert_eq!(ChartIndicator::Atr.parameters(), "Period 14");
+    assert_eq!(ChartIndicator::Tpo.label(), "TPO Profile (Market Profile)");
+    assert_eq!(
+        ChartIndicator::SessionVolumeProfile.label(),
+        "Volume Profile (Session)"
+    );
 }
 
 #[test]
@@ -5185,6 +5247,13 @@ fn every_aeris_charts_drawing_tool_arms_from_the_host_toolbar() {
 #[test]
 fn data_bound_profile_tools_read_the_product_price_and_volume_series() {
     let mut chart = interactive_chart();
+    assert_eq!(
+        chart
+            .engine
+            .series_volume_source(chart.product_series.price_bars),
+        Some(chart.product_series.volume),
+        "the product bars register their volume with Aeris Charts"
+    );
     for (kind, anchors) in [
         (DrawingKind::FixedRangeVolumeProfile, 2),
         (DrawingKind::AnchoredVolumeProfile, 1),
@@ -5197,19 +5266,25 @@ fn data_bound_profile_tools_read_the_product_price_and_volume_series() {
         let id = chart
             .selected_drawing_id()
             .expect("profile drawing commits");
-        let profile = chart
-            .engine
-            .drawing(id)
-            .and_then(|drawing| drawing.profile.clone())
-            .expect("profile drawings bind a data source");
-        assert_eq!(
-            profile.source,
-            aeris_charts_engine::ProfileSource::Candles {
-                price_series: 0,
-                volume_series: chart.product_series.volume,
-            }
+        assert!(
+            chart
+                .engine
+                .drawing(id)
+                .is_some_and(|drawing| drawing.profile.is_none()),
+            "{kind:?} carries no host binding; Aeris Charts resolves its source"
         );
-        assert!(profile.tick_size > 0.0 && profile.tick_size.is_finite());
+        match chart.engine.profile_drawing_snapshot(id) {
+            Ok(aeris_charts_engine::ProfileDrawingSnapshot::Volume(profile)) => {
+                assert_ne!(kind, DrawingKind::AnchoredVwap);
+                assert!(profile.candle_approximation, "{kind:?} reads candle volume");
+                assert!(!profile.rows.is_empty(), "{kind:?} has volume rows");
+            }
+            Ok(aeris_charts_engine::ProfileDrawingSnapshot::Vwap(points)) => {
+                assert_eq!(kind, DrawingKind::AnchoredVwap);
+                assert!(!points.is_empty(), "anchored VWAP has points");
+            }
+            Err(error) => panic!("{kind:?} has no profile data: {error:?}"),
+        }
     }
 }
 

@@ -308,6 +308,9 @@ fn pane_settings_dialog(
         IndicatorSettingsDialog::OrderFlow(dialog) => {
             Some(order_flow_dialog_layer(entity, dialog, theme))
         }
+        IndicatorSettingsDialog::SessionProfile(dialog) => {
+            Some(session_profile_dialog_layer(entity, dialog, theme))
+        }
         IndicatorSettingsDialog::Drawing(dialog) => {
             drawing_settings_dialog_layer(entity, dialog, theme, cx)
         }

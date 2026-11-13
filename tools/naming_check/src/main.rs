@@ -4761,6 +4761,11 @@ mod tests {
             "bounded quote interest published without depending on market_runtime",
         ),
         (
+            "crates/ui/chart_integration/src/view/session_profiles.rs",
+            1,
+            "chart trading days supplied by the desktop from market_runtime's calendar, which the presentation layer may not depend on",
+        ),
+        (
             "crates/market_runtime/src/market_service/clock.rs",
             1,
             "one injectable time boundary for the market owner and provider workers",

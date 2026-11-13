@@ -938,6 +938,37 @@ pub struct WorkspaceChartIndicatorState {
     /// Present only for the volume indicator; absent restores its defaults.
     #[prost(message, optional, tag = "3")]
     pub volume: Option<WorkspaceVolumeSettingsState>,
+    /// Present only for the TPO and session volume profile indicators; absent restores
+    /// their defaults.
+    #[prost(message, optional, tag = "4")]
+    pub session_profile: Option<WorkspaceSessionProfileState>,
+}
+
+/// Durable session profile settings. The indicator kind decides which fields apply: the TPO
+/// reads the `tpo_*` fields and the session volume profile the profile fields; both read the
+/// value area. A value outside its accepted range restores that profile's defaults.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceSessionProfileState {
+    /// 0 letters, 1 blocks.
+    #[prost(uint32, tag = "1")]
+    pub tpo_cells: u32,
+    /// Minutes each TPO letter covers.
+    #[prost(uint32, tag = "2")]
+    pub tpo_period_minutes: u32,
+    /// TPO periods from the session open that form the initial balance.
+    #[prost(uint32, tag = "3")]
+    pub tpo_initial_balance_periods: u32,
+    #[prost(uint32, tag = "4")]
+    pub value_area_percent: u32,
+    /// Trading days merged into one volume profile; 1 draws one profile per session.
+    #[prost(uint32, tag = "5")]
+    pub sessions_per_profile: u32,
+    #[prost(uint32, tag = "6")]
+    pub row_count: u32,
+    #[prost(bool, tag = "7")]
+    pub show_developing: bool,
+    #[prost(bool, tag = "8")]
+    pub extend_naked_levels: bool,
 }
 
 /// Durable volume indicator presentation. Empty colors follow the Aeris Charts defaults.

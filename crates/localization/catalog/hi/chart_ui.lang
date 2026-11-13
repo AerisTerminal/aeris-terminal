@@ -13,6 +13,8 @@ indicator_macd = MACD
 indicator_stochastic = स्टोकेस्टिक
 indicator_atr = एवरेज ट्रू रेंज
 indicator_volume_profile = वॉल्यूम प्रोफ़ाइल (दिखाई देने वाली रेंज)
+indicator_tpo = TPO प्रोफ़ाइल (मार्केट प्रोफ़ाइल)
+indicator_session_volume_profile = वॉल्यूम प्रोफ़ाइल (सेशन)
 
 # Aeris Charts built-in indicator names.
 indicator_dema = डबल एक्सपोनेंशियल मूविंग एवरेज
@@ -86,6 +88,8 @@ params_period_14 = पीरियड 14
 params_macd = फ़ास्ट 12 · स्लो 26 · सिग्नल 9
 params_stochastic = %K 14 · %D 3
 params_volume_profile = रो 48 · वैल्यू एरिया 70%
+params_tpo = अक्षर · 30 मिनट · वैल्यू एरिया 70%
+params_session_volume_profile = प्रति सेशन · रो 48 · वैल्यू एरिया 70%
 params_alma = पीरियड 14 · ऑफ़सेट 0.85 · सिग्मा 6
 params_kama = पीरियड 10 · फ़ास्ट 2 · स्लो 30
 params_envelopes = पीरियड 14 · 2%
@@ -123,6 +127,7 @@ chart_type_line_with_markers = मार्कर वाली लाइन
 chart_type_area = एरिया
 chart_type_baseline = बेसलाइन
 chart_type_brushable_area = ब्रश करने योग्य एरिया
+chart_type_heikin_ashi = हेकिन आशी
 
 # Icon-stamp drawing tool glyphs.
 stamp_check = चेक मार्क
@@ -137,6 +142,8 @@ stamp_target = टारगेट
 # Chart legend rows and row controls.
 legend_waiting_for_order_flow = ऑर्डर फ़्लो की प्रतीक्षा है
 legend_volume_profile = वॉल्यूम प्रोफ़ाइल
+legend_tpo = TPO
+legend_session_volume_profile = सेशन वॉल्यूम प्रोफ़ाइल
 legend_big_trades = बड़े ट्रेड
 legend_order_book = ऑर्डर बुक
 legend_depth_heatmap = डेप्थ हीटमैप

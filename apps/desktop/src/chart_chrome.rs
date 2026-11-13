@@ -28,6 +28,8 @@ pub enum IndicatorKind {
     Stochastic,
     Atr,
     VolumeProfile,
+    Tpo,
+    SessionVolumeProfile,
 }
 
 impl IndicatorKind {
@@ -45,6 +47,8 @@ impl IndicatorKind {
             Self::Stochastic => "stochastic",
             Self::Atr => "atr",
             Self::VolumeProfile => "volume_profile",
+            Self::Tpo => "tpo",
+            Self::SessionVolumeProfile => "session_volume_profile",
         }
     }
 }
@@ -115,7 +119,7 @@ impl IndicatorSpec {
     }
 }
 
-pub const INDICATOR_SPECS: [IndicatorSpec; 11] = [
+pub const INDICATOR_SPECS: [IndicatorSpec; 13] = [
     IndicatorSpec {
         kind: IndicatorKind::Sma,
         label: "Simple Moving Average",
@@ -159,6 +163,20 @@ pub const INDICATOR_SPECS: [IndicatorSpec; 11] = [
         label: "Volume Profile (Visible Range)",
         parameters: IndicatorParameters::None,
         parameter_description: "Rows 48 - Value area 70% - POC",
+        location: IndicatorLocation::MainChartOverlay,
+    },
+    IndicatorSpec {
+        kind: IndicatorKind::Tpo,
+        label: "TPO (Market Profile)",
+        parameters: IndicatorParameters::None,
+        parameter_description: "Letters 30 min - Value area 70% - POC - Initial balance",
+        location: IndicatorLocation::MainChartOverlay,
+    },
+    IndicatorSpec {
+        kind: IndicatorKind::SessionVolumeProfile,
+        label: "Volume Profile (Session)",
+        parameters: IndicatorParameters::None,
+        parameter_description: "Per session or composite - Rows 48 - Value area 70%",
         location: IndicatorLocation::MainChartOverlay,
     },
     IndicatorSpec {
@@ -1035,6 +1053,8 @@ mod tests {
                 IndicatorKind::BollingerBands,
                 IndicatorKind::Vwap,
                 IndicatorKind::VolumeProfile,
+                IndicatorKind::Tpo,
+                IndicatorKind::SessionVolumeProfile,
                 IndicatorKind::Volume,
                 IndicatorKind::Rsi,
                 IndicatorKind::Macd,
@@ -1059,6 +1079,8 @@ mod tests {
                 IndicatorParameters::None,
                 IndicatorParameters::None,
                 IndicatorParameters::None,
+                IndicatorParameters::None,
+                IndicatorParameters::None,
                 IndicatorParameters::Period { period: 14 },
                 IndicatorParameters::Macd {
                     fast_period: 12,
@@ -1073,12 +1095,12 @@ mod tests {
             ]
         );
         assert!(
-            INDICATOR_SPECS[..6]
+            INDICATOR_SPECS[..8]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::MainChartOverlay)
         );
         assert!(
-            INDICATOR_SPECS[7..]
+            INDICATOR_SPECS[9..]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::OscillatorPane)
         );

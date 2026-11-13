@@ -240,5 +240,7 @@ pub(super) const fn native_indicator(kind: chart_chrome::IndicatorKind) -> Chart
         chart_chrome::IndicatorKind::Stochastic => ChartIndicator::Stochastic,
         chart_chrome::IndicatorKind::Atr => ChartIndicator::Atr,
         chart_chrome::IndicatorKind::VolumeProfile => ChartIndicator::VolumeProfile,
+        chart_chrome::IndicatorKind::Tpo => ChartIndicator::Tpo,
+        chart_chrome::IndicatorKind::SessionVolumeProfile => ChartIndicator::SessionVolumeProfile,
     }
 }

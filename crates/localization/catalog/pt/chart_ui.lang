@@ -13,6 +13,8 @@ indicator_macd = MACD
 indicator_stochastic = Estocástico
 indicator_atr = Amplitude média verdadeira
 indicator_volume_profile = Perfil de volume (intervalo visível)
+indicator_tpo = Perfil TPO (Market Profile)
+indicator_session_volume_profile = Perfil de volume (sessão)
 
 # Nomes dos indicadores integrados do Aeris Charts.
 indicator_dema = Média móvel exponencial dupla
@@ -86,6 +88,8 @@ params_period_14 = Período 14
 params_macd = Rápida 12 · Lenta 26 · Sinal 9
 params_stochastic = %K 14 · %D 3
 params_volume_profile = Linhas 48 · Área de valor 70%
+params_tpo = Letras · 30 minutos · Área de valor 70%
+params_session_volume_profile = Por sessão · Linhas 48 · Área de valor 70%
 params_alma = Período 14 · Deslocamento 0.85 · Sigma 6
 params_kama = Período 10 · Rápida 2 · Lenta 30
 params_envelopes = Período 14 · 2%
@@ -123,6 +127,7 @@ chart_type_line_with_markers = Linha com marcadores
 chart_type_area = Área
 chart_type_baseline = Linha de base
 chart_type_brushable_area = Área com seleção
+chart_type_heikin_ashi = Heikin Ashi
 
 # Glifos da ferramenta de desenho de carimbos.
 stamp_check = Visto
@@ -137,6 +142,8 @@ stamp_target = Alvo
 # Linhas da legenda do gráfico e seus controles.
 legend_waiting_for_order_flow = Aguardando fluxo de ordens
 legend_volume_profile = Perfil de volume
+legend_tpo = TPO
+legend_session_volume_profile = Perfil de volume da sessão
 legend_big_trades = Grandes negócios
 legend_order_book = Livro de ofertas
 legend_depth_heatmap = Mapa de calor de profundidade

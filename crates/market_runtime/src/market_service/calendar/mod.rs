@@ -370,6 +370,141 @@ impl MarketCalendarService {
             CalendarSource::Unknown => unknown(),
         }
     }
+
+    /// Trading days of the instrument's recurring calendar overlapping
+    /// `[from_utc_ms, to_utc_ms)`, oldest first and at most the newest `limit`.
+    ///
+    /// Back-to-back phases (an equity's pre-market, regular and post-market
+    /// hours) join one trading day, contract hours that run through the week
+    /// split at the contract's daily open, and a continuous market's day runs
+    /// from 00:00 UTC. A market without a known calendar has no sessions.
+    #[must_use]
+    pub fn trading_sessions(
+        &self,
+        instrument_id: &str,
+        from_utc_ms: i64,
+        to_utc_ms: i64,
+        limit: usize,
+    ) -> Vec<SessionWindow> {
+        let mut sessions = std::collections::VecDeque::new();
+        let Some(source) = self.sources.get(instrument_id) else {
+            return Vec::new();
+        };
+        if limit == 0 || from_utc_ms >= to_utc_ms {
+            return Vec::new();
+        }
+        // No calendar here closes for more than four days in a row, so twice the requested
+        // days plus a long weekend reaches the oldest session that can be kept.
+        let reach = i64::try_from(limit)
+            .unwrap_or(i64::MAX)
+            .saturating_add(4)
+            .saturating_mul(2 * DAY_MS);
+        let start = from_utc_ms.max(to_utc_ms.saturating_sub(reach));
+        let mut keep = |window: SessionWindow| {
+            if window.close_utc_ms <= from_utc_ms || window.open_utc_ms >= to_utc_ms {
+                return;
+            }
+            if sessions.len() == limit {
+                sessions.pop_front();
+            }
+            sessions.push_back(window);
+        };
+        match source {
+            CalendarSource::Unknown => {}
+            CalendarSource::AlwaysOpen => {
+                let mut day = start.div_euclid(DAY_MS);
+                while day.saturating_mul(DAY_MS) < to_utc_ms {
+                    keep(SessionWindow {
+                        open_utc_ms: day * DAY_MS,
+                        close_utc_ms: (day + 1) * DAY_MS,
+                    });
+                    day += 1;
+                }
+            }
+            CalendarSource::ContractHours(hours)
+                if self.phase(instrument_id, start) == SessionPhase::AlwaysOpen =>
+            {
+                if let Some(open) = weekly_hours::daily_open(hours, start.saturating_mul(1_000_000))
+                {
+                    let open = open.div_euclid(1_000_000);
+                    split_at_daily_opens(hours, open, i64::MAX, to_utc_ms, &mut keep);
+                }
+            }
+            _ => {
+                let hours = match source {
+                    CalendarSource::ContractHours(hours) => Some(hours.as_slice()),
+                    _ => None,
+                };
+                let mut emit = |window: SessionWindow| match hours {
+                    Some(hours) => split_at_daily_opens(
+                        hours,
+                        window.open_utc_ms,
+                        window.close_utc_ms,
+                        to_utc_ms,
+                        &mut keep,
+                    ),
+                    None => keep(window),
+                };
+                let mut at = start;
+                let mut current: Option<SessionWindow> = None;
+                // Each step moves to a session close; equities report three phases a day.
+                for _ in 0..limit.saturating_mul(8).saturating_add(64) {
+                    let Some(window) = self.session_window(instrument_id, at) else {
+                        break;
+                    };
+                    if window.close_utc_ms <= at || window.open_utc_ms >= to_utc_ms {
+                        break;
+                    }
+                    at = window.close_utc_ms;
+                    current = match current {
+                        Some(day) if day.close_utc_ms == window.open_utc_ms => {
+                            Some(SessionWindow {
+                                open_utc_ms: day.open_utc_ms,
+                                close_utc_ms: window.close_utc_ms,
+                            })
+                        }
+                        Some(day) => {
+                            emit(day);
+                            Some(window)
+                        }
+                        None => Some(window),
+                    };
+                    if at >= to_utc_ms {
+                        break;
+                    }
+                }
+                if let Some(day) = current {
+                    emit(day);
+                }
+            }
+        }
+        sessions.into()
+    }
+}
+
+/// Splits one open stretch of contract hours at the contract's daily open, so a week that
+/// trades without a break still yields one session per trading day.
+fn split_at_daily_opens(
+    hours: &[ProviderSessionHours],
+    open_utc_ms: i64,
+    close_utc_ms: i64,
+    to_utc_ms: i64,
+    keep: &mut impl FnMut(SessionWindow),
+) {
+    let mut open = open_utc_ms;
+    while open < close_utc_ms && open < to_utc_ms {
+        // Two hours past a day reaches the next open across a 23 or 25 hour DST day.
+        let probe = open.saturating_add(DAY_MS + 2 * 3_600_000);
+        let next = weekly_hours::daily_open(hours, probe.saturating_mul(1_000_000))
+            .map(|next| next.div_euclid(1_000_000))
+            .filter(|&next| next > open && next < close_utc_ms)
+            .unwrap_or(close_utc_ms);
+        keep(SessionWindow {
+            open_utc_ms: open,
+            close_utc_ms: next,
+        });
+        open = next;
+    }
 }
 
 /// Bar identity of a trading date (Unix days). Weeks start on Monday.
@@ -765,6 +900,160 @@ mod tests {
         assert_ne!(
             calendar.bar_bucket("fx", before, CalendarBarPeriod::Session(1)),
             calendar.bar_bucket("fx", after, CalendarBarPeriod::Session(1))
+        );
+    }
+
+    fn windows(spans: &[(&str, &str)]) -> Vec<SessionWindow> {
+        spans
+            .iter()
+            .map(|(open, close)| SessionWindow {
+                open_utc_ms: ms(open),
+                close_utc_ms: ms(close),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn trading_sessions_follow_cme_trading_days_across_both_dst_changes() {
+        let mut calendar = MarketCalendarService::default();
+        calendar.insert(
+            "future".into(),
+            CalendarSource::ExchangeRule(ExchangeRule::CmeGlobex),
+        );
+        let spring = calendar.trading_sessions(
+            "future",
+            ms("2026-03-06T00:00:00Z"),
+            ms("2026-03-11T00:00:00Z"),
+            10,
+        );
+        assert_eq!(
+            spring,
+            windows(&[
+                ("2026-03-05T23:00:00Z", "2026-03-06T22:00:00Z"),
+                ("2026-03-08T22:00:00Z", "2026-03-09T21:00:00Z"),
+                ("2026-03-09T22:00:00Z", "2026-03-10T21:00:00Z"),
+                ("2026-03-10T22:00:00Z", "2026-03-11T21:00:00Z"),
+            ])
+        );
+        let fall = calendar.trading_sessions(
+            "future",
+            ms("2026-10-30T00:00:00Z"),
+            ms("2026-11-04T00:00:00Z"),
+            10,
+        );
+        assert_eq!(
+            fall,
+            windows(&[
+                ("2026-10-29T22:00:00Z", "2026-10-30T21:00:00Z"),
+                ("2026-11-01T23:00:00Z", "2026-11-02T22:00:00Z"),
+                ("2026-11-02T23:00:00Z", "2026-11-03T22:00:00Z"),
+                ("2026-11-03T23:00:00Z", "2026-11-04T22:00:00Z"),
+            ])
+        );
+        let newest = calendar.trading_sessions(
+            "future",
+            ms("2026-10-30T00:00:00Z"),
+            ms("2026-11-04T00:00:00Z"),
+            2,
+        );
+        assert_eq!(
+            newest,
+            fall[2..].to_vec(),
+            "the limit keeps the newest days"
+        );
+    }
+
+    #[test]
+    fn trading_sessions_of_a_continuous_market_are_utc_days() {
+        let mut calendar = MarketCalendarService::default();
+        calendar.insert("crypto".into(), CalendarSource::AlwaysOpen);
+        assert_eq!(
+            calendar.trading_sessions(
+                "crypto",
+                ms("2026-03-07T12:00:00Z"),
+                ms("2026-03-09T01:00:00Z"),
+                10,
+            ),
+            windows(&[
+                ("2026-03-07T00:00:00Z", "2026-03-08T00:00:00Z"),
+                ("2026-03-08T00:00:00Z", "2026-03-09T00:00:00Z"),
+                ("2026-03-09T00:00:00Z", "2026-03-10T00:00:00Z"),
+            ])
+        );
+        assert!(
+            calendar
+                .trading_sessions(
+                    "unlisted",
+                    ms("2026-03-07T12:00:00Z"),
+                    ms("2026-03-09T01:00:00Z"),
+                    10,
+                )
+                .is_empty(),
+            "an unknown calendar invents no sessions"
+        );
+    }
+
+    #[test]
+    fn trading_sessions_join_equity_phases_into_one_trading_day() {
+        let mut calendar = MarketCalendarService::default();
+        calendar.insert(
+            "equity".into(),
+            CalendarSource::ExchangeRule(ExchangeRule::UsEquity),
+        );
+        assert_eq!(
+            calendar.trading_sessions(
+                "equity",
+                ms("2026-08-17T09:00:00Z"),
+                ms("2026-08-17T23:00:00Z"),
+                10,
+            ),
+            windows(&[("2026-08-17T08:00:00Z", "2026-08-18T00:00:00Z")])
+        );
+        assert_eq!(
+            calendar.trading_sessions(
+                "equity",
+                ms("2026-08-14T00:00:00Z"),
+                ms("2026-08-18T00:00:00Z"),
+                10,
+            ),
+            windows(&[
+                ("2026-08-14T08:00:00Z", "2026-08-15T00:00:00Z"),
+                ("2026-08-17T08:00:00Z", "2026-08-18T00:00:00Z"),
+            ]),
+            "the weekend has no session"
+        );
+    }
+
+    #[test]
+    fn trading_sessions_split_a_weekly_contract_session_at_its_daily_open() {
+        let mut calendar = MarketCalendarService::default();
+        let hours = [7, 1, 2, 3, 4, 5]
+            .into_iter()
+            .map(|weekday| ProviderSessionHours {
+                weekday,
+                open_seconds: if weekday == 7 { 17 * 3_600 } else { 0 },
+                close_seconds: if weekday == 5 { 17 * 3_600 } else { 86_400 },
+                timezone: "America/New_York".into(),
+            })
+            .collect();
+        calendar.insert("fx".into(), CalendarSource::ContractHours(hours));
+        assert_eq!(
+            calendar.trading_sessions(
+                "fx",
+                ms("2026-10-26T00:00:00Z"),
+                ms("2026-11-03T00:00:00Z"),
+                20,
+            ),
+            windows(&[
+                ("2026-10-25T21:00:00Z", "2026-10-26T21:00:00Z"),
+                ("2026-10-26T21:00:00Z", "2026-10-27T21:00:00Z"),
+                ("2026-10-27T21:00:00Z", "2026-10-28T21:00:00Z"),
+                ("2026-10-28T21:00:00Z", "2026-10-29T21:00:00Z"),
+                ("2026-10-29T21:00:00Z", "2026-10-30T21:00:00Z"),
+                ("2026-11-01T22:00:00Z", "2026-11-02T22:00:00Z"),
+                ("2026-11-02T22:00:00Z", "2026-11-03T22:00:00Z"),
+            ]),
+            "the daily open follows New York time across the fall-back weekend"
         );
     }
 }

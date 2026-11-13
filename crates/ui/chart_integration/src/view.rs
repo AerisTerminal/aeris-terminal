@@ -2,7 +2,7 @@
 
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
 use crate::engine_bridge::{
-    ProductPriceBars, ProductSeries, apply_merged_chart_data, apply_product_series_markers,
+    ProductPriceBars, ProductSeries, apply_merged_chart_data, apply_product_series_style,
     chart_data_queue_capacity, install_product_price_series, install_product_series,
     install_replay, price_display_precision, replay_display_precision, replay_legend_title,
     replay_price_divisor, replay_quantity_divisor, sync_chart_language,
@@ -232,6 +232,10 @@ pub enum ChartIndicator {
     Stochastic,
     Atr,
     VolumeProfile,
+    /// Time price opportunity letters or blocks per trading session.
+    Tpo,
+    /// A volume profile per trading session, or per composite of sessions.
+    SessionVolumeProfile,
     /// An Aeris Charts built-in study beyond the legacy native catalog.
     Builtin(BuiltinIndicator),
 }
@@ -244,11 +248,14 @@ pub struct ChartIndicatorState {
     /// The volume indicator's settings; `None` for every other indicator, and restores the
     /// volume defaults.
     pub volume: Option<VolumeSettings>,
+    /// A session profile's settings; `None` for every other indicator, and restores the
+    /// profile's defaults.
+    pub session_profile: Option<SessionProfileSettings>,
 }
 
 impl ChartIndicator {
     /// All indicators that can be calculated truthfully from the installed OHLC columns.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Volume,
         Self::Vwap,
         Self::Sma,
@@ -260,6 +267,8 @@ impl ChartIndicator {
         Self::Stochastic,
         Self::Atr,
         Self::VolumeProfile,
+        Self::Tpo,
+        Self::SessionVolumeProfile,
     ];
 
     /// Distinct indicator kinds a chart can hold: the legacy catalog plus every built-in.
@@ -280,6 +289,8 @@ impl ChartIndicator {
             Self::Stochastic => "stochastic",
             Self::Atr => "atr",
             Self::VolumeProfile => "volume_profile",
+            Self::Tpo => "tpo",
+            Self::SessionVolumeProfile => "session_volume_profile",
             Self::Builtin(indicator) => indicator.identifier(),
         }
     }
@@ -299,6 +310,8 @@ impl ChartIndicator {
             "stochastic" => Self::Stochastic,
             "atr" => Self::Atr,
             "volume_profile" => Self::VolumeProfile,
+            "tpo" => Self::Tpo,
+            "session_volume_profile" => Self::SessionVolumeProfile,
             _ => return BuiltinIndicator::from_identifier(value).map(Self::Builtin),
         })
     }
@@ -318,6 +331,8 @@ impl ChartIndicator {
             Self::Stochastic => tr!(chart_ui::INDICATOR_STOCHASTIC),
             Self::Atr => tr!(chart_ui::INDICATOR_ATR),
             Self::VolumeProfile => tr!(chart_ui::INDICATOR_VOLUME_PROFILE),
+            Self::Tpo => tr!(chart_ui::INDICATOR_TPO),
+            Self::SessionVolumeProfile => tr!(chart_ui::INDICATOR_SESSION_VOLUME_PROFILE),
             Self::Builtin(indicator) => indicator.label(),
         }
     }
@@ -334,6 +349,8 @@ impl ChartIndicator {
             Self::Macd => tr!(chart_ui::PARAMS_MACD),
             Self::Stochastic => tr!(chart_ui::PARAMS_STOCHASTIC),
             Self::VolumeProfile => tr!(chart_ui::PARAMS_VOLUME_PROFILE),
+            Self::Tpo => tr!(chart_ui::PARAMS_TPO),
+            Self::SessionVolumeProfile => tr!(chart_ui::PARAMS_SESSION_VOLUME_PROFILE),
             Self::Builtin(indicator) => indicator.parameters(),
         }
     }
@@ -355,7 +372,9 @@ impl ChartIndicator {
 
     fn engine_kind(self) -> Option<IndicatorKind> {
         Some(match self {
-            Self::Volume | Self::VolumeProfile => return None,
+            Self::Volume | Self::VolumeProfile | Self::Tpo | Self::SessionVolumeProfile => {
+                return None;
+            }
             Self::Vwap => IndicatorKind::Vwap,
             Self::Sma => IndicatorKind::Sma { period: 20 },
             Self::Ema => IndicatorKind::Ema { period: 20 },
@@ -417,6 +436,9 @@ pub enum ChartType {
     HollowCandlesBullish,
     /// Candles with hollow bearish bodies and solid bullish ones.
     HollowCandlesBearish,
+    /// Candles drawn from Aeris Charts' Heikin Ashi projection of the raw bars; prices,
+    /// legend values and trading still read the raw bars.
+    HeikinAshi,
     Footprint,
     Bars,
     Line,
@@ -710,6 +732,7 @@ pub enum ChartSettingsRequest {
     CumulativeDelta,
     DeltaHistogram,
     OrderBookDepth,
+    SessionProfile(SessionProfileKind),
     /// One drawing, by its Aeris Charts identity.
     Drawing(DrawingId),
 }
@@ -852,7 +875,27 @@ impl ChartType {
                 | Self::HollowCandles
                 | Self::HollowCandlesBullish
                 | Self::HollowCandlesBearish
+                | Self::HeikinAshi
                 | Self::Footprint
+                | Self::Bars
+        )
+    }
+
+    /// Whether Aeris Charts draws the price series through its Heikin Ashi projection.
+    pub(crate) const fn heikin_ashi(self) -> bool {
+        matches!(self, Self::HeikinAshi)
+    }
+
+    /// Whether the price series holds the product's OHLC bars as candles or bars, which session
+    /// profiles read. A footprint leaves the price series as whitespace.
+    pub(crate) const fn draws_ohlc_bars(self) -> bool {
+        matches!(
+            self,
+            Self::Candles
+                | Self::HollowCandles
+                | Self::HollowCandlesBullish
+                | Self::HollowCandlesBearish
+                | Self::HeikinAshi
                 | Self::Bars
         )
     }
@@ -869,11 +912,12 @@ impl ChartType {
     }
 
     /// Built-in OHLC chart types Aeris Charts can render from the product price series.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Candles,
         Self::HollowCandles,
         Self::HollowCandlesBullish,
         Self::HollowCandlesBearish,
+        Self::HeikinAshi,
         Self::Footprint,
         Self::Bars,
         Self::Line,
@@ -891,6 +935,7 @@ impl ChartType {
             Self::HollowCandles => tr!(chart_ui::CHART_TYPE_HOLLOW_CANDLES),
             Self::HollowCandlesBullish => tr!(chart_ui::CHART_TYPE_HOLLOW_CANDLES_BULLISH),
             Self::HollowCandlesBearish => tr!(chart_ui::CHART_TYPE_HOLLOW_CANDLES_BEARISH),
+            Self::HeikinAshi => tr!(chart_ui::CHART_TYPE_HEIKIN_ASHI),
             Self::Footprint => tr!(chart_ui::CHART_TYPE_FOOTPRINT),
             Self::Bars => tr!(chart_ui::CHART_TYPE_BARS),
             Self::Line => tr!(chart_ui::CHART_TYPE_LINE),
@@ -909,6 +954,7 @@ impl ChartType {
             Self::HollowCandles => "hollow_candles",
             Self::HollowCandlesBullish => "hollow_candles_bullish",
             Self::HollowCandlesBearish => "hollow_candles_bearish",
+            Self::HeikinAshi => "heikin_ashi",
             Self::Footprint => "footprint",
             Self::Bars => "bars",
             Self::Line => "line",
@@ -943,6 +989,7 @@ impl ChartType {
             | Self::HollowCandles
             | Self::HollowCandlesBullish
             | Self::HollowCandlesBearish
+            | Self::HeikinAshi
             | Self::Footprint => aeris_charts_engine::SeriesKind::Candlestick,
             Self::Bars => aeris_charts_engine::SeriesKind::Bar,
             Self::Line | Self::LineWithMarkers => aeris_charts_engine::SeriesKind::Line,
@@ -1018,6 +1065,7 @@ pub struct AerisChartView {
     retired_volumes: std::collections::VecDeque<(u32, VolumeSettings)>,
     /// Engine handle of the visible-range volume profile drawn on the price series.
     volume_profile: Option<aeris_charts_engine::NativePrimitiveId>,
+    session_profiles: session_profiles::SessionProfiles,
     asset_legend_title: String,
     provider_display_name: Option<String>,
     /// Instrument symbol of the loaded series, naming exported chart images.
@@ -1157,6 +1205,7 @@ impl AerisChartView {
             study_default_colors: std::collections::BTreeMap::new(),
             pane_heights: pane_heights::PaneHeights::default(),
             volume_profile: None,
+            session_profiles: session_profiles::SessionProfiles::default(),
             viewport_bounds: Bounds::default(),
             input: GpuiChartInput::default(),
             input_wake: None,
@@ -1271,6 +1320,7 @@ impl AerisChartView {
             study_default_colors: std::collections::BTreeMap::new(),
             pane_heights: pane_heights::PaneHeights::default(),
             volume_profile: None,
+            session_profiles: session_profiles::SessionProfiles::default(),
             viewport_bounds: Bounds::default(),
             input: GpuiChartInput::default(),
             input_wake: None,
@@ -1406,6 +1456,7 @@ impl AerisChartView {
         self.sync_painted_appearance();
         apply_platform_chrome_contract(&mut self.engine, time_labels);
         self.sync_big_trades_options();
+        self.redraw_session_profiles();
         self.invalidate_series_layout();
     }
 
@@ -1751,6 +1802,8 @@ impl AerisChartView {
                 if mutation == SeriesMutation::Snapshot {
                     self.sync_brushable_interaction();
                     self.apply_price_series_kind();
+                } else if mutation == SeriesMutation::Append {
+                    self.refresh_session_profiles_after_append();
                 }
                 if mutation == SeriesMutation::Snapshot
                     || previous_precision != self.instrument_price_precision
@@ -2024,7 +2077,7 @@ impl AerisChartView {
         self.sync_painted_appearance();
         self.engine
             .set_candle_body(0, self.chart_type.candle_body());
-        apply_product_series_markers(&mut self.engine, self.chart_type);
+        apply_product_series_style(&mut self.engine, self.chart_type);
         self.reapply_study_styles();
         // Volume colors are indicator settings, not chart appearance.
         self.apply_volume_style(volume_visible);
@@ -2396,6 +2449,7 @@ impl AerisChartView {
         self.sync_painted_appearance();
         self.install_session_plan_price_lines();
         self.sync_brushable_interaction();
+        self.redraw_session_profiles();
         self.invalidate_series_layout();
     }
 
@@ -2788,5 +2842,10 @@ use palette::{PresetPalette, chart_theme, effective_color};
 pub use pane_heights::{ChartPaneContent, ChartPaneHeight};
 use price_axis_menu::price_format_min_move;
 pub use price_axis_menu::{PriceAxisMenuAction, PriceAxisMenuState};
+mod session_profiles;
+pub use session_profiles::{
+    ChartTradingSession, SessionProfileKind, SessionProfileSettings, SessionVolumeProfileSettings,
+    TpoCells, TpoSettings, TradingSessionCalendar,
+};
 mod studies;
 pub use studies::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};

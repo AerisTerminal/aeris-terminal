@@ -190,6 +190,7 @@ impl TerminalApp {
             | CommandId::ChartLine
             | CommandId::ChartArea
             | CommandId::ChartBaseline
+            | CommandId::ChartHeikinAshi
             | CommandId::ChartFootprint => {
                 let chart_type = match command {
                     CommandId::ChartCandles => ChartType::Candles,
@@ -197,6 +198,7 @@ impl TerminalApp {
                     CommandId::ChartLine => ChartType::Line,
                     CommandId::ChartArea => ChartType::Area,
                     CommandId::ChartBaseline => ChartType::Baseline,
+                    CommandId::ChartHeikinAshi => ChartType::HeikinAshi,
                     CommandId::ChartFootprint => ChartType::Footprint,
                     _ => unreachable!(),
                 };

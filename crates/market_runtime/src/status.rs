@@ -105,6 +105,15 @@ pub struct MarketSessionStatus {
     pub next_open_unix_nanos: Option<i64>,
 }
 
+/// One trading day of an instrument's recurring calendar: the span a session profile covers.
+/// Extended phases belong to the trading day they open, and a continuous market's day runs
+/// from 00:00 UTC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MarketTradingSession {
+    pub open_unix_nanos: i64,
+    pub close_unix_nanos: i64,
+}
+
 /// Runtime-owned provider health publication.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderState {

@@ -66,6 +66,21 @@ impl ProductPriceBars {
         self.times.last().copied()
     }
 
+    /// Lowest low and highest high of the bars opening in `[start, end)` UTC seconds.
+    pub(crate) fn price_range(&self, start: f64, end: f64) -> Option<(f64, f64)> {
+        let first = self.times.partition_point(|&time| time < start);
+        let last = self.times.partition_point(|&time| time < end);
+        self.low[first..last]
+            .iter()
+            .zip(&self.high[first..last])
+            .filter(|(low, high)| low.is_finite() && high.is_finite())
+            .fold(None, |range, (&low, &high)| {
+                Some(range.map_or((low, high), |(lowest, highest): (f64, f64)| {
+                    (lowest.min(low), highest.max(high))
+                }))
+            })
+    }
+
     fn replace(
         &mut self,
         times: Vec<f64>,
@@ -246,6 +261,12 @@ pub(crate) fn install_product_series(engine: &mut ChartEngine) -> ProductSeries 
         debug_assert!(false, "new Aeris Charts series identity must resolve");
     }
     engine.set_series_price_scale(price_bars, PriceScaleTarget::Overlay);
+    // Profile drawings without an order-flow tape read the product bars and their volume.
+    let registered = engine.set_series_volume_source(price_bars, Some(volume));
+    debug_assert!(
+        registered,
+        "the product bars and volume are a valid volume source"
+    );
     ProductSeries { volume, price_bars }
 }
 
@@ -388,16 +409,21 @@ pub(crate) fn install_product_price_series(
 fn apply_product_series_kind(engine: &mut ChartEngine, chart_type: ChartType) {
     engine.convert_series_kind(0, chart_type.series_kind());
     engine.set_candle_body(0, chart_type.candle_body());
-    apply_product_series_markers(engine, chart_type);
+    apply_product_series_style(engine, chart_type);
 }
 
-pub(crate) fn apply_product_series_markers(engine: &mut ChartEngine, chart_type: ChartType) {
+/// The per-series presentation flags a chart type selects on the price series: point markers
+/// and the engine's Heikin Ashi projection. A style reset clears both, so it reapplies them.
+pub(crate) fn apply_product_series_style(engine: &mut ChartEngine, chart_type: ChartType) {
     let primary = engine
         .series
         .iter_mut()
         .find(|series| series.id == 0 && !series.removed);
     match primary {
-        Some(series) => series.point_markers = chart_type == ChartType::LineWithMarkers,
+        Some(series) => {
+            series.point_markers = chart_type == ChartType::LineWithMarkers;
+            series.heikin_ashi = chart_type.heikin_ashi();
+        }
         None => panic!("the product price series must exist when applying its chart type"),
     }
 }

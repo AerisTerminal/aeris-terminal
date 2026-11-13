@@ -74,5 +74,9 @@ pub use view::{
     PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings, VolumeDefaultColors,
     VolumePlacement, VolumeSettings, chart_color_hex, drawing_color_hex,
 };
+pub use view::{
+    ChartTradingSession, SessionProfileKind, SessionProfileSettings, SessionVolumeProfileSettings,
+    TpoCells, TpoSettings, TradingSessionCalendar,
+};
 pub use view::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};
 pub use workspace::{AerisChartWorkspace, ChartSplitDirection, ChartWorkspaceLayout};

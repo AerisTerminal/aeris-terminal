@@ -13,6 +13,8 @@ indicator_macd = MACD
 indicator_stochastic = Стохастик
 indicator_atr = Средний истинный диапазон
 indicator_volume_profile = Профиль объёма (видимый диапазон)
+indicator_tpo = Профиль TPO (Market Profile)
+indicator_session_volume_profile = Профиль объёма (сессия)
 
 # Названия встроенных индикаторов Aeris Charts.
 indicator_dema = Двойная экспоненциальная скользящая средняя
@@ -86,6 +88,8 @@ params_period_14 = Период 14
 params_macd = Быстрый 12 · Медленный 26 · Сигнал 9
 params_stochastic = %K 14 · %D 3
 params_volume_profile = Строки 48 · Зона стоимости 70%
+params_tpo = Буквы · 30 минут · Зона стоимости 70%
+params_session_volume_profile = По сессиям · Строки 48 · Зона стоимости 70%
 params_alma = Период 14 · Смещение 0.85 · Сигма 6
 params_kama = Период 10 · Быстрый 2 · Медленный 30
 params_envelopes = Период 14 · 2%
@@ -123,6 +127,7 @@ chart_type_line_with_markers = Линия с маркерами
 chart_type_area = Область
 chart_type_baseline = Базовая линия
 chart_type_brushable_area = Область с выделением
+chart_type_heikin_ashi = Хейкин-Аши
 
 # Значки инструмента рисования «Метка».
 stamp_check = Галочка
@@ -137,6 +142,8 @@ stamp_target = Цель
 # Строки легенды графика и их кнопки.
 legend_waiting_for_order_flow = Ожидание потока ордеров
 legend_volume_profile = Профиль объёма
+legend_tpo = TPO
+legend_session_volume_profile = Профиль объёма сессии
 legend_big_trades = Крупные сделки
 legend_order_book = Стакан
 legend_depth_heatmap = Тепловая карта глубины

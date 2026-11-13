@@ -1077,6 +1077,7 @@ pub(super) fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
         ChartType::HollowCandles
         | ChartType::HollowCandlesBullish
         | ChartType::HollowCandlesBearish => assets::SeriesIcon::HollowCandles,
+        ChartType::HeikinAshi => assets::SeriesIcon::HeikinAshi,
         ChartType::Bars => assets::SeriesIcon::OhlcBar,
         ChartType::Line | ChartType::Baseline => assets::SeriesIcon::Line,
         ChartType::LineWithMarkers => assets::SeriesIcon::LineWithMarkers,

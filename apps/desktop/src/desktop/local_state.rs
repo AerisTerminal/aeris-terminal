@@ -1116,6 +1116,7 @@ mod tests {
                     kind: "rsi".to_string(),
                     visible: true,
                     volume: None,
+                    session_profile: None,
                 },
                 WorkspaceChartIndicatorState {
                     kind: "volume".to_string(),
@@ -1129,6 +1130,7 @@ mod tests {
                         average_color: "#FF9800".to_string(),
                         placement: 1,
                     }),
+                    session_profile: None,
                 },
             ],
             price_axis: Some(WorkspacePriceAxisState {

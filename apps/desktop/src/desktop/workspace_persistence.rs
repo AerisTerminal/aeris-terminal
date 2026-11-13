@@ -712,6 +712,7 @@ mod tests {
                 kind: "volume".to_string(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             }],
             favorite: true,
             ..aeris_contracts::WorkspaceIndicatorTemplateState::default()

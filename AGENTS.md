@@ -94,7 +94,8 @@ violations and missing verification explicitly, and never describe them as satis
 - Practice-account admission has its own 10,000-account bound; keep this value so stores
   written by released versions continue opening.
 - Recurring contract-hour session projection lives in `aeris_instruments::calendar::weekly_hours`;
-  market status and trading DAY recovery use that one IANA-zone/DST calculation. A historical
+  market status, trading DAY recovery and the chart's session-profile trading days
+  (`MarketService::trading_sessions`) use that one IANA-zone/DST calculation. A historical
   DAY deadline is derived only from a verified route and the acceptance-time open session;
   unresolved legacy rows stay non-executable rather than receiving a guessed deadline.
 - The trading service has one named owner thread whose loop is in `service/owner.rs`; it waits for bounded commands
@@ -802,6 +803,21 @@ Chart behavior is owned by Aeris Charts, never re-implemented here:
   leaves its body unfilled while the frame and wick carry the direction color.
   `chart_integration_candle_bodies_are_engine_owned` rejects the retired host transform names
   `hollow_appearance` and `hollow_base` in chart integration and desktop production source.
+- Heikin Ashi is the engine's per-series `heikin_ashi` projection of the product bars, selected
+  with the chart type; raw OHLC stays the bar data. Renko, Kagi, Point & Figure and Line Break
+  are not offered: Aeris Charts' synthetic transforms produce a sequence domain the time-based
+  product series cannot carry, and Terminal must not rebuild bars to compensate.
+- The TPO and the session volume profile are Aeris Charts' TPO and periodic profile presentations
+  over the product bars (`view/session_profiles.rs`); they draw only for chart types with OHLC
+  bars. The host supplies only the trading days through `TradingSessionCalendar`, which the
+  desktop implements over the market runtime's recurring calendar
+  (`MarketService::trading_sessions`; a continuous market's day starts at 00:00 UTC, an unknown
+  calendar draws nothing), a row size on the price grid and theme colors. Their settings persist in
+  `WorkspaceChartIndicatorState.session_profile` (tag 4); a document without it keeps its bytes
+  and a damaged value restores the defaults. Neither enters the undo history, and a settings,
+  theme, chart-type or session change replaces the drawn presentation because Aeris Charts has
+  no update operation for them. Profile drawings read their source from Aeris Charts: the product
+  bars register their volume with `set_series_volume_source`.
 - Order-flow sweep classification and tape continuity are runtime-owned: chart integration's
   `apply_order_flow_trades` takes the runtime's `Reset`/`Append` decision as a
   `OrderFlowTapeChange` and never reclassifies the tape or diffs ordinals.

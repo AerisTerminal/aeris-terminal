@@ -8,8 +8,10 @@ use super::pane_persistence::PanePersistence;
 use super::studies_controller::{StudiesController, StudySettingsRequest};
 use super::symbol_entry::SymbolEntry;
 use super::*;
+use aeris_chart_integration::{ChartTradingSession, TradingSessionCalendar};
 use aeris_localization::{tr, tr_count, workspace};
 use aeris_observability::diagnostic;
+use std::rc::Rc;
 
 #[cfg(feature = "diagnostics")]
 #[derive(serde::Serialize)]
@@ -220,6 +222,46 @@ fn chart_market_trading(
     !status.is_some_and(|status| {
         status.phase == aeris_market_runtime::MarketSessionPhase::Closed
             && product.is_some_and(|product| product.instrument_id == status.instrument_id)
+    })
+}
+
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+
+/// The chart instrument's trading days for its session profiles, projected by the market
+/// runtime's provider-neutral calendar from the instrument's contract hours or venue.
+struct InstrumentTradingCalendar {
+    instrument: InstallProviderInstrument,
+}
+
+impl TradingSessionCalendar for InstrumentTradingCalendar {
+    fn sessions(
+        &self,
+        from_unix_seconds: i64,
+        to_unix_seconds: i64,
+        limit: usize,
+    ) -> Vec<ChartTradingSession> {
+        aeris_market_runtime::MarketService::trading_sessions(
+            &self.instrument,
+            from_unix_seconds.saturating_mul(NANOS_PER_SECOND),
+            to_unix_seconds.saturating_mul(NANOS_PER_SECOND),
+            limit,
+        )
+        .into_iter()
+        .map(|session| ChartTradingSession {
+            open_unix_seconds: session.open_unix_nanos.div_euclid(NANOS_PER_SECOND),
+            close_unix_seconds: session.close_unix_nanos.div_euclid(NANOS_PER_SECOND),
+        })
+        .collect()
+    }
+}
+
+fn chart_trading_calendar(
+    product: Option<&InstallProviderInstrument>,
+) -> Option<Rc<dyn TradingSessionCalendar>> {
+    product.map(|instrument| {
+        Rc::new(InstrumentTradingCalendar {
+            instrument: instrument.clone(),
+        }) as Rc<dyn TradingSessionCalendar>
     })
 }
 
@@ -994,6 +1036,9 @@ fn persisted_legacy_indicator_states(
             kind: state.indicator.identifier().to_string(),
             visible: state.visible,
             volume: state.volume.as_ref().map(persisted_volume_settings),
+            session_profile: state
+                .session_profile
+                .map(persisted_session_profile_settings),
         })
         .collect()
 }
@@ -1014,6 +1059,11 @@ fn restored_legacy_indicator_states(
                     .as_ref()
                     .filter(|_| indicator == ChartIndicator::Volume)
                     .and_then(restored_volume_settings),
+                session_profile: SessionProfileKind::of(indicator).and_then(|kind| {
+                    item.session_profile
+                        .as_ref()
+                        .and_then(|state| restored_session_profile_settings(kind, state))
+                }),
             })
         })
         .filter(|state| !runtime_managed_indicator(state.indicator))
@@ -1067,6 +1117,62 @@ fn restored_volume_settings(state: &WorkspaceVolumeSettingsState) -> Option<Volu
         },
         placement,
     })
+}
+
+fn persisted_session_profile_settings(
+    settings: SessionProfileSettings,
+) -> WorkspaceSessionProfileState {
+    match settings {
+        SessionProfileSettings::Tpo(tpo) => WorkspaceSessionProfileState {
+            tpo_cells: match tpo.cells {
+                TpoCells::Letters => 0,
+                TpoCells::Blocks => 1,
+            },
+            tpo_period_minutes: u32::from(tpo.period_minutes),
+            tpo_initial_balance_periods: u32::from(tpo.initial_balance_periods),
+            value_area_percent: u32::from(tpo.value_area_percent),
+            ..WorkspaceSessionProfileState::default()
+        },
+        SessionProfileSettings::Volume(volume) => WorkspaceSessionProfileState {
+            value_area_percent: u32::from(volume.value_area_percent),
+            sessions_per_profile: u32::from(volume.sessions_per_profile),
+            row_count: u32::from(volume.row_count),
+            show_developing: volume.show_developing,
+            extend_naked_levels: volume.extend_naked_levels,
+            ..WorkspaceSessionProfileState::default()
+        },
+    }
+}
+
+/// The saved settings of one session profile kind. A value outside its accepted range is
+/// rejected so a damaged layout restores that profile's defaults instead of a partial guess.
+fn restored_session_profile_settings(
+    kind: SessionProfileKind,
+    state: &WorkspaceSessionProfileState,
+) -> Option<SessionProfileSettings> {
+    let value_area_percent = u8::try_from(state.value_area_percent).ok()?;
+    let settings = match kind {
+        SessionProfileKind::Tpo => SessionProfileSettings::Tpo(TpoSettings {
+            cells: match state.tpo_cells {
+                0 => TpoCells::Letters,
+                1 => TpoCells::Blocks,
+                _ => return None,
+            },
+            period_minutes: u16::try_from(state.tpo_period_minutes).ok()?,
+            value_area_percent,
+            initial_balance_periods: u8::try_from(state.tpo_initial_balance_periods).ok()?,
+        }),
+        SessionProfileKind::Volume => {
+            SessionProfileSettings::Volume(SessionVolumeProfileSettings {
+                sessions_per_profile: u8::try_from(state.sessions_per_profile).ok()?,
+                row_count: u16::try_from(state.row_count).ok()?,
+                value_area_percent,
+                show_developing: state.show_developing,
+                extend_naked_levels: state.extend_naked_levels,
+            })
+        }
+    };
+    settings.is_valid().then_some(settings)
 }
 
 fn runtime_study_registration(
@@ -1510,7 +1616,11 @@ fn default_runtime_study_contract(
             )],
             vec![aeris_study_sdk::BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string()],
         ),
-        ChartIndicator::Volume | ChartIndicator::VolumeProfile | ChartIndicator::Builtin(_) => {
+        ChartIndicator::Volume
+        | ChartIndicator::VolumeProfile
+        | ChartIndicator::Tpo
+        | ChartIndicator::SessionVolumeProfile
+        | ChartIndicator::Builtin(_) => {
             return None;
         }
     };
@@ -3254,6 +3364,7 @@ impl WorkspaceSurface {
             Self::clear_indicator_failure("chart_restore", cx);
         }
         self.apply_market_session_to_chart(&chart, cx);
+        self.install_trading_session_calendar(&chart, cx);
         self.apply_provider_trade_prints(&chart, cx);
         replace_chart_price_alert_lines(
             Some(&chart),
@@ -4066,6 +4177,20 @@ impl WorkspaceSurface {
             chart_market_trading(self.market_session_status.as_ref(), self.product.as_ref());
         chart.update(cx, |chart, chart_cx| {
             chart.set_market_trading(trading);
+            chart_cx.notify();
+        });
+    }
+
+    /// Session profiles follow the trading days of the chart's instrument; its verified terms
+    /// can bring the contract hours the calendar is projected from.
+    fn install_trading_session_calendar(
+        &self,
+        chart: &Entity<AerisChartView>,
+        cx: &mut Context<Self>,
+    ) {
+        let calendar = chart_trading_calendar(self.product.as_ref());
+        chart.update(cx, |chart, chart_cx| {
+            chart.set_trading_session_calendar(calendar);
             chart_cx.notify();
         });
     }
@@ -6308,6 +6433,9 @@ impl WorkspaceSurface {
         if increment_changed && self.order_flow.tape().is_some() {
             self.apply_trade_tape_to_chart(TapeApply::Reset, cx);
         }
+        if let Some(chart) = self.chart.clone() {
+            self.install_trading_session_calendar(&chart, cx);
+        }
     }
 
     fn apply_search_completed(
@@ -6947,6 +7075,9 @@ impl WorkspaceSurface {
             Some(IndicatorSettingsDialog::BigTrades(_)) => self.close_big_trades_dialog(cx),
             Some(IndicatorSettingsDialog::Volume(_)) => self.close_volume_dialog(cx),
             Some(IndicatorSettingsDialog::OrderFlow(_)) => self.close_order_flow_dialog(cx),
+            Some(IndicatorSettingsDialog::SessionProfile(_)) => {
+                self.close_session_profile_dialog(cx);
+            }
             Some(IndicatorSettingsDialog::Drawing(_)) => {
                 self.close_drawing_settings_dialog(false, cx);
             }
@@ -6966,6 +7097,7 @@ impl WorkspaceSurface {
             IndicatorSettingsDialog::Volume(_) => "volume_settings",
             IndicatorSettingsDialog::BigTrades(_) => "big_trades_settings",
             IndicatorSettingsDialog::OrderFlow(_) => "order_flow_settings",
+            IndicatorSettingsDialog::SessionProfile(_) => "session_profile_settings",
             IndicatorSettingsDialog::Drawing(_) => "drawing",
         };
         self.indicator_settings_dialog = Some(dialog);
@@ -7024,6 +7156,7 @@ impl WorkspaceSurface {
             Some(IndicatorSettingsDialog::BigTrades(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::Volume(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::OrderFlow(dialog)) => Some(&mut dialog.menu),
+            Some(IndicatorSettingsDialog::SessionProfile(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::Drawing(_)) | None => None,
         }
     }

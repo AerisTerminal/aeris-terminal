@@ -1158,46 +1158,55 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
                 kind: "sma".to_string(),
                 visible: false,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "ema".to_string(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "wma".to_string(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "bollinger".to_string(),
                 visible: false,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "vwap".to_string(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "atr".to_string(),
                 visible: false,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "rsi".to_string(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "macd".to_string(),
                 visible: false,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "stochastic".to_string(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             },
         ],
         ..WorkspaceChartState::default()
@@ -1257,6 +1266,7 @@ fn retired_legacy_indicator_kinds_are_dropped_without_affecting_other_indicators
             kind: kind.to_string(),
             visible: true,
             volume: None,
+            session_profile: None,
         })
         .collect(),
         ..WorkspaceChartState::default()
@@ -1299,21 +1309,25 @@ fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicat
                 kind: "wma".to_string(),
                 visible: false,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "rsi".to_string(),
                 visible: true,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "rsi".to_string(),
                 visible: false,
                 volume: None,
+                session_profile: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "bollinger".to_string(),
                 visible: false,
                 volume: None,
+                session_profile: None,
             },
         ],
         ..WorkspaceChartState::default()
@@ -1362,57 +1376,208 @@ fn migrated_picker_indicators_are_runtime_managed() {
 }
 
 #[test]
+fn session_profile_settings_round_trip_and_damaged_values_restore_defaults() {
+    let tpo = SessionProfileSettings::Tpo(TpoSettings {
+        cells: TpoCells::Blocks,
+        period_minutes: 60,
+        value_area_percent: 80,
+        initial_balance_periods: 1,
+    });
+    let volume = SessionProfileSettings::Volume(SessionVolumeProfileSettings {
+        sessions_per_profile: 5,
+        row_count: 120,
+        value_area_percent: 65,
+        show_developing: true,
+        extend_naked_levels: false,
+    });
+    let saved = persisted_legacy_indicator_states([
+        ChartIndicatorState {
+            indicator: ChartIndicator::Tpo,
+            visible: false,
+            volume: None,
+            session_profile: Some(tpo),
+        },
+        ChartIndicatorState {
+            indicator: ChartIndicator::SessionVolumeProfile,
+            visible: true,
+            volume: None,
+            session_profile: Some(volume),
+        },
+    ]);
+    assert_eq!(
+        saved
+            .iter()
+            .map(|state| state.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["tpo", "session_volume_profile"]
+    );
+    let restored = restored_legacy_indicator_states(&saved);
+    assert_eq!(restored[0].session_profile, Some(tpo));
+    assert!(!restored[0].visible);
+    assert_eq!(restored[1].session_profile, Some(volume));
+
+    let tpo_state = saved[0]
+        .session_profile
+        .clone()
+        .expect("saved TPO settings");
+    let volume_state = saved[1]
+        .session_profile
+        .clone()
+        .expect("saved profile settings");
+    let damaged = [
+        (
+            SessionProfileKind::Tpo,
+            WorkspaceSessionProfileState {
+                tpo_cells: 2,
+                ..tpo_state.clone()
+            },
+        ),
+        (
+            SessionProfileKind::Tpo,
+            WorkspaceSessionProfileState {
+                tpo_period_minutes: 1,
+                ..tpo_state.clone()
+            },
+        ),
+        (
+            SessionProfileKind::Tpo,
+            WorkspaceSessionProfileState {
+                value_area_percent: 300,
+                ..tpo_state
+            },
+        ),
+        (
+            SessionProfileKind::Volume,
+            WorkspaceSessionProfileState {
+                row_count: 100_000,
+                ..volume_state.clone()
+            },
+        ),
+        (
+            SessionProfileKind::Volume,
+            WorkspaceSessionProfileState {
+                sessions_per_profile: 0,
+                ..volume_state
+            },
+        ),
+    ];
+    for (kind, state) in damaged {
+        assert_eq!(
+            restored_session_profile_settings(kind, &state),
+            None,
+            "{state:?}"
+        );
+    }
+}
+
+#[test]
+fn session_profiles_saved_without_settings_restore_defaults() {
+    // A profile saved without settings, or settings on another indicator, restore defaults.
+    let restored = restored_legacy_indicator_states(&[
+        WorkspaceChartIndicatorState {
+            kind: "tpo".to_string(),
+            visible: true,
+            volume: None,
+            session_profile: None,
+        },
+        WorkspaceChartIndicatorState {
+            kind: "volume".to_string(),
+            visible: true,
+            volume: None,
+            session_profile: Some(WorkspaceSessionProfileState::default()),
+        },
+    ]);
+    assert_eq!(restored[0].indicator, ChartIndicator::Tpo);
+    assert_eq!(restored[0].session_profile, None);
+    assert_eq!(restored[1].session_profile, None);
+}
+
+#[test]
+fn documents_written_before_session_profiles_keep_their_bytes() {
+    use prost::Message as _;
+
+    let legacy = WorkspaceChartState {
+        chart_type: ChartType::Candles.identifier().into(),
+        indicators: vec![WorkspaceChartIndicatorState {
+            kind: "volume".to_string(),
+            visible: true,
+            volume: Some(persisted_volume_settings(&VolumeSettings::default())),
+            session_profile: None,
+        }],
+        ..WorkspaceChartState::default()
+    };
+    let bytes = legacy.encode_to_vec();
+    let decoded = WorkspaceChartState::decode(bytes.as_slice()).expect("legacy pane decodes");
+    assert_eq!(decoded.indicators[0].session_profile, None);
+    assert_eq!(decoded.encode_to_vec(), bytes);
+    assert_eq!(
+        restored_legacy_indicator_states(&decoded.indicators)[0].session_profile,
+        None
+    );
+}
+
+#[test]
 fn runtime_managed_indicators_are_not_written_to_the_legacy_indicator_field() {
     let persisted = persisted_legacy_indicator_states([
         ChartIndicatorState {
             indicator: ChartIndicator::Sma,
             visible: true,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Ema,
             visible: true,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Wma,
             visible: false,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Bollinger,
             visible: true,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Vwap,
             visible: true,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Atr,
             visible: true,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Rsi,
             visible: false,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Macd,
             visible: true,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Stochastic,
             visible: false,
             volume: None,
+            session_profile: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Volume,
             visible: true,
             volume: None,
+            session_profile: None,
         },
     ]);
 
@@ -1422,6 +1587,7 @@ fn runtime_managed_indicators_are_not_written_to_the_legacy_indicator_field() {
             kind: "volume".to_string(),
             visible: true,
             volume: None,
+            session_profile: None,
         }]
     );
 }
@@ -1892,12 +2058,42 @@ mod instrument_drawings {
         let (source, _requests, cx) = open_surface(cx, instrument("A"), None);
         show(&source, "A", cx);
         let mut original = saved(&source, cx);
-        original.chart_type = ChartType::HollowCandles.identifier().into();
-        original.indicators = vec![WorkspaceChartIndicatorState {
-            kind: ChartIndicator::Volume.identifier().into(),
-            visible: false,
-            volume: Some(persisted_volume_settings(&VolumeSettings::default())),
-        }];
+        original.chart_type = ChartType::HeikinAshi.identifier().into();
+        original.indicators = vec![
+            WorkspaceChartIndicatorState {
+                kind: ChartIndicator::Volume.identifier().into(),
+                visible: false,
+                volume: Some(persisted_volume_settings(&VolumeSettings::default())),
+                session_profile: None,
+            },
+            WorkspaceChartIndicatorState {
+                kind: ChartIndicator::Tpo.identifier().into(),
+                visible: true,
+                volume: None,
+                session_profile: Some(persisted_session_profile_settings(
+                    SessionProfileSettings::Tpo(TpoSettings {
+                        cells: TpoCells::Blocks,
+                        period_minutes: 15,
+                        value_area_percent: 68,
+                        initial_balance_periods: 4,
+                    }),
+                )),
+            },
+            WorkspaceChartIndicatorState {
+                kind: ChartIndicator::SessionVolumeProfile.identifier().into(),
+                visible: false,
+                volume: None,
+                session_profile: Some(persisted_session_profile_settings(
+                    SessionProfileSettings::Volume(SessionVolumeProfileSettings {
+                        sessions_per_profile: 3,
+                        row_count: 96,
+                        value_area_percent: 75,
+                        show_developing: true,
+                        extend_naked_levels: true,
+                    }),
+                )),
+            },
+        ];
         original.price_axis = Some(WorkspacePriceAxisState {
             mode: 1,
             ..WorkspacePriceAxisState::default()
@@ -1953,6 +2149,99 @@ mod instrument_drawings {
         assert!(loaded.context_panel_visible);
         assert_eq!(loaded.context_panel_tab, original.context_panel_tab);
         assert_eq!(loaded.context_panel_height, original.context_panel_height);
+    }
+
+    #[gpui::test]
+    fn a_restored_tpo_is_drawn_from_the_instruments_trading_calendar(cx: &mut TestAppContext) {
+        let settings = TpoSettings {
+            cells: TpoCells::Blocks,
+            period_minutes: 15,
+            value_area_percent: 68,
+            initial_balance_periods: 4,
+        };
+        let restored = WorkspaceChartState {
+            chart_type: ChartType::Candles.identifier().into(),
+            indicators: vec![WorkspaceChartIndicatorState {
+                kind: ChartIndicator::Tpo.identifier().into(),
+                visible: true,
+                volume: None,
+                session_profile: Some(persisted_session_profile_settings(
+                    SessionProfileSettings::Tpo(settings),
+                )),
+            }],
+            ..WorkspaceChartState::default()
+        };
+        let (surface, _requests, cx) = open_surface(cx, instrument("A"), Some(restored));
+        let snapshot = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 64 })
+            .expect("embedded replay validates");
+        let profile = |surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext| {
+            cx.read(|cx| {
+                let chart = surface.read(cx).chart.as_ref().expect("chart").read(cx);
+                (
+                    chart.session_profile_settings(SessionProfileKind::Tpo),
+                    chart.session_profile_drawn(SessionProfileKind::Tpo),
+                    chart.session_profile_settings(SessionProfileKind::Volume),
+                )
+            })
+        };
+
+        // The fixture market trades around the clock, so its calendar has a UTC trading day
+        // under every bar.
+        show(&surface, "A", cx);
+        assert_eq!(
+            profile(&surface, cx),
+            (Some(SessionProfileSettings::Tpo(settings)), true, None),
+            "the saved TPO reaches Aeris Charts with its settings and is drawn"
+        );
+
+        // An instrument whose venue and contract hours are unknown has no trading days: the
+        // TPO stays on the chart and in the saved state, but nothing is drawn.
+        let unlisted = InstallProviderInstrument {
+            provider: String::new(),
+            venue_id: String::new(),
+            provider_symbol: String::new(),
+            contract_metadata: None,
+            ..instrument("A")
+        };
+        surface.update(cx, |surface, cx| {
+            surface.product = Some(unlisted.clone());
+            surface.install_snapshot_chart(&snapshot, cx);
+        });
+        assert_eq!(
+            profile(&surface, cx),
+            (Some(SessionProfileSettings::Tpo(settings)), false, None)
+        );
+        assert_eq!(
+            saved(&surface, cx)
+                .indicators
+                .iter()
+                .map(|indicator| indicator.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![ChartIndicator::Tpo.identifier()]
+        );
+
+        // Contract hours from the provider make the calendar known again.
+        let mut scheduled = unlisted;
+        scheduled.contract_metadata = Some(Box::new(aeris_contracts::ProviderContractMetadata {
+            session_hours: (1..=7)
+                .map(|weekday| aeris_contracts::ProviderSessionHours {
+                    weekday,
+                    open_seconds: 0,
+                    close_seconds: 86_400,
+                    timezone: "Etc/UTC".into(),
+                })
+                .collect(),
+            ..aeris_contracts::ProviderContractMetadata::default()
+        }));
+        surface.update(cx, |surface, cx| {
+            surface.product = Some(scheduled);
+            surface.install_snapshot_chart(&snapshot, cx);
+        });
+        assert!(
+            profile(&surface, cx).1,
+            "contract hours supply the trading days"
+        );
     }
 
     #[gpui::test]

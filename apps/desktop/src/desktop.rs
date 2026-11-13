@@ -81,6 +81,7 @@ mod readiness_conformance;
 mod saved_scans;
 mod saved_workspace;
 use saved_workspace::{SavedWorkspace, UnsavedEdit, WorkspaceSave, WorkspaceSnapshot};
+mod session_profile_dialog;
 mod side_panel_dock;
 mod sign_in_gate;
 mod study_packages;
@@ -132,7 +133,8 @@ use aeris_chart_integration::{
     DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, DepthHeatmapSettings, FootprintDisplayMode,
     MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowApplyError,
     OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade,
-    PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings,
+    PriceAxisMenuAction, PriceAxisMenuState, SessionProfileKind, SessionProfileSettings,
+    SessionVolumeProfileSettings, TpoCells, TpoSettings, VolumeAverageKind, VolumeAverageSettings,
     VolumeDefaultColors, VolumePlacement, VolumeSettings, chart_color_hex,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource};
@@ -145,10 +147,10 @@ use aeris_contracts::{
     WorkspaceDrawingTemplateState, WorkspaceIndicatorTemplateState, WorkspaceLayoutState,
     WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind,
     WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSavedLayoutState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
-    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceVolumeSettingsState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceSavedLayoutState, WorkspaceSessionProfileState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_FACES, RadiusToken, ThemeColor, TypographyRole,
@@ -274,6 +276,7 @@ use price_alert_dialog::{
     price_alert_dialog_layer, price_alert_trigger_text, replace_chart_price_alert_lines,
     runtime_price_alerts,
 };
+use session_profile_dialog::{SessionProfileDialogState, session_profile_dialog_layer};
 use side_panel_dock::{WorkspaceSidePanelState, workspace_side_panel};
 use std::{
     borrow::Cow,
@@ -1141,6 +1144,7 @@ enum LegendSettingsRequest {
     BigTrades,
     Volume,
     OrderFlow(OrderFlowIndicator),
+    SessionProfile(SessionProfileKind),
     Drawing(ChartDrawingId),
 }
 
@@ -1150,6 +1154,7 @@ enum IndicatorSettingsDialog {
     BigTrades(BigTradesDialogState),
     Volume(VolumeDialogState),
     OrderFlow(OrderFlowDialogState),
+    SessionProfile(SessionProfileDialogState),
     Drawing(Box<DrawingSettingsDialogState>),
 }
 
@@ -2798,6 +2803,9 @@ fn legend_settings_request(request: ChartSettingsRequest) -> Option<LegendSettin
         ChartSettingsRequest::CumulativeDelta => order_flow(OrderFlowIndicator::CumulativeDelta),
         ChartSettingsRequest::DeltaHistogram => order_flow(OrderFlowIndicator::DeltaHistogram),
         ChartSettingsRequest::OrderBookDepth => order_flow(OrderFlowIndicator::OrderBook),
+        ChartSettingsRequest::SessionProfile(kind) => {
+            Some(LegendSettingsRequest::SessionProfile(kind))
+        }
         ChartSettingsRequest::Drawing(id) => Some(LegendSettingsRequest::Drawing(id)),
     }
 }
@@ -6289,6 +6297,7 @@ fn command_key_action(
         | CommandId::ChartLine
         | CommandId::ChartArea
         | CommandId::ChartBaseline
+        | CommandId::ChartHeikinAshi
         | CommandId::ChartFootprint
         | CommandId::Interval1Minute
         | CommandId::Interval5Minutes

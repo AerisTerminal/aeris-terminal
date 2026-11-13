@@ -28,6 +28,7 @@ pub enum CommandId {
     ChartLine,
     ChartArea,
     ChartBaseline,
+    ChartHeikinAshi,
     ChartFootprint,
     Interval1Minute,
     Interval5Minutes,
@@ -56,7 +57,7 @@ pub enum CommandId {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 41] = [
         Self::OpenPalette,
         Self::ToggleFullscreen,
         Self::MinimizeWindow,
@@ -72,6 +73,7 @@ impl CommandId {
         Self::ChartLine,
         Self::ChartArea,
         Self::ChartBaseline,
+        Self::ChartHeikinAshi,
         Self::ChartFootprint,
         Self::Interval1Minute,
         Self::Interval5Minutes,
@@ -157,6 +159,7 @@ impl CommandId {
             Self::ChartLine => "chart_line",
             Self::ChartArea => "chart_area",
             Self::ChartBaseline => "chart_baseline",
+            Self::ChartHeikinAshi => "chart_heikin_ashi",
             Self::ChartFootprint => "chart_footprint",
             Self::Interval1Minute => "interval_1m",
             Self::Interval5Minutes => "interval_5m",
@@ -209,6 +212,7 @@ impl CommandId {
             | Self::ChartLine
             | Self::ChartArea
             | Self::ChartBaseline
+            | Self::ChartHeikinAshi
             | Self::ChartFootprint
             | Self::Interval1Minute
             | Self::Interval5Minutes
@@ -1178,6 +1182,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         &[],
     ),
     prefixed_spec(
+        CommandId::ChartHeikinAshi,
+        shell::CMD_CHART_HEIKIN_ASHI,
+        shell::CMD_CHART_HEIKIN_ASHI_SHORT,
+        shell::CMD_CHART_HEIKIN_ASHI_KEYWORDS,
+        &[],
+    ),
+    prefixed_spec(
         CommandId::ChartFootprint,
         shell::CMD_CHART_FOOTPRINT,
         shell::CMD_CHART_FOOTPRINT_SHORT,
@@ -1480,6 +1491,7 @@ pub fn parse_mnemonic(value: &str) -> Option<Mnemonic> {
             "line" => Some(CommandId::ChartLine),
             "area" => Some(CommandId::ChartArea),
             "baseline" => Some(CommandId::ChartBaseline),
+            "ha" | "heikin" | "heikinashi" => Some(CommandId::ChartHeikinAshi),
             "footprint" | "fp" => Some(CommandId::ChartFootprint),
             "1m" => Some(CommandId::Interval1Minute),
             "5m" => Some(CommandId::Interval5Minutes),
@@ -1495,6 +1507,7 @@ pub fn parse_mnemonic(value: &str) -> Option<Mnemonic> {
                 | CommandId::ChartLine
                 | CommandId::ChartArea
                 | CommandId::ChartBaseline
+                | CommandId::ChartHeikinAshi
                 | CommandId::ChartFootprint),
             ) => parsed.chart = Some(id),
             Some(id) => parsed.interval = Some(id),
@@ -1993,6 +2006,14 @@ mod tests {
                 symbol: Some("ES".to_string()),
                 chart: Some(CommandId::ChartFootprint),
                 interval: Some(CommandId::Interval5Minutes)
+            })
+        );
+        assert_eq!(
+            parse_mnemonic("NQ ha 1m"),
+            Some(Mnemonic {
+                symbol: Some("NQ".to_string()),
+                chart: Some(CommandId::ChartHeikinAshi),
+                interval: Some(CommandId::Interval1Minute)
             })
         );
         assert_eq!(parse_mnemonic("ES unknown 5m"), None);

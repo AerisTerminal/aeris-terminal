@@ -20,8 +20,9 @@ pub use messages::{
     WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSavedLayoutState,
     WorkspaceScanComparison, WorkspaceScanConditionState, WorkspaceScanMatchMode,
     WorkspaceScanOperandKind, WorkspaceScanOperandState, WorkspaceScanStudyParameterState,
-    WorkspaceScreenerScanState, WorkspaceShortcutOverrideState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceScreenerScanState, WorkspaceSessionProfileState, WorkspaceShortcutOverrideState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
+    workspace_study_setting_state,
 };

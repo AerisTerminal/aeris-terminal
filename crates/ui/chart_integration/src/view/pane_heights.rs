@@ -203,7 +203,8 @@ impl AerisChartView {
                 | LegendItem::VolumeProfile
                 | LegendItem::BigTrades
                 | LegendItem::OrderBookDepth
-                | LegendItem::DepthHeatmap => None,
+                | LegendItem::DepthHeatmap
+                | LegendItem::SessionProfile(_) => None,
             };
         }
         contents

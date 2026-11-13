@@ -50,7 +50,8 @@ pub use scan::{
 };
 pub use status::{
     EngineFaultCode, FailureStage, Fault, MarketSessionPhase, MarketSessionSource,
-    MarketSessionStatus, ProviderConnectionState, ProviderState, SeriesLoadState,
+    MarketSessionStatus, MarketTradingSession, ProviderConnectionState, ProviderState,
+    SeriesLoadState,
 };
 
 /// Maximum durable alerts owned by one market consumer.

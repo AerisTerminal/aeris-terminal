@@ -7,7 +7,7 @@ use super::{
 };
 use aeris_charts_engine::{
     ChartEngine, ChartTimeZone, DrawingIntervalVisibility, DrawingLabelOptions, DrawingLevel,
-    DrawingPropertySchema, ProfileDrawingOptions, ProfileSource, drawing_property_schema,
+    DrawingPropertySchema, drawing_property_schema,
 };
 use aeris_charts_render::color::Color;
 use aeris_localization::{chart_ui, tr};
@@ -185,6 +185,17 @@ fn format_local_date_time(zone: ChartTimeZone, utc_seconds: f64) -> Option<Strin
     ))
 }
 
+/// The host data a tool's template needs beyond the engine defaults: the stamp an icon stamp
+/// places. Data-bound profile drawings resolve their source in Aeris Charts, from the pane's
+/// order-flow tape or the product bars' registered volume.
+fn drawing_tool_template(kind: ChartDrawingKind, stamp: ChartDrawingStamp) -> Option<String> {
+    let patch = match kind {
+        ChartDrawingKind::IconStamp => serde_json::json!({ "icon_name": stamp.icon_name() }),
+        _ => return None,
+    };
+    Some(patch.to_string())
+}
+
 impl AerisChartView {
     /// Returns the drawing tool currently armed on the chart surface, `None` for the cursor.
     #[must_use]
@@ -195,15 +206,14 @@ impl AerisChartView {
     /// Arms a drawing tool (or the cursor with `None`), replacing any unfinished gesture. The
     /// icon-stamp tool arms with the first built-in stamp.
     pub fn set_drawing_tool(&mut self, tool: Option<ChartDrawingKind>) {
-        let template =
-            tool.and_then(|kind| self.drawing_tool_template(kind, ChartDrawingStamp::ALL[0]));
+        let template = tool.and_then(|kind| drawing_tool_template(kind, ChartDrawingStamp::ALL[0]));
         self.arm_drawing_tool(tool, template.as_deref());
     }
 
     /// Arms the icon-stamp tool with one built-in stamp.
     pub fn set_drawing_stamp(&mut self, stamp: ChartDrawingStamp) {
         let kind = ChartDrawingKind::IconStamp;
-        let template = self.drawing_tool_template(kind, stamp);
+        let template = drawing_tool_template(kind, stamp);
         self.arm_drawing_tool(Some(kind), template.as_deref());
     }
 
@@ -213,33 +223,6 @@ impl AerisChartView {
         let armed = self.engine.set_drawing_tool(tool, template, None);
         debug_assert!(armed, "every built-in drawing tool has a valid template");
         self.invalidate_series_frame();
-    }
-
-    /// The host data a tool's template needs beyond the engine defaults: the series a
-    /// data-bound profile reads and its price bin, or the stamp an icon stamp places.
-    fn drawing_tool_template(
-        &self,
-        kind: ChartDrawingKind,
-        stamp: ChartDrawingStamp,
-    ) -> Option<String> {
-        let patch = match kind {
-            ChartDrawingKind::FixedRangeVolumeProfile
-            | ChartDrawingKind::AnchoredVolumeProfile
-            | ChartDrawingKind::AnchoredVwap => {
-                let profile = ProfileDrawingOptions {
-                    source: ProfileSource::Candles {
-                        price_series: 0,
-                        volume_series: self.product_series.volume,
-                    },
-                    tick_size: self.price_tick_size(),
-                    ..ProfileDrawingOptions::default()
-                };
-                serde_json::json!({ "profile": profile })
-            }
-            ChartDrawingKind::IconStamp => serde_json::json!({ "icon_name": stamp.icon_name() }),
-            _ => return None,
-        };
-        Some(patch.to_string())
     }
 
     /// The instrument's minimum price increment in chart price units, or the smallest displayed

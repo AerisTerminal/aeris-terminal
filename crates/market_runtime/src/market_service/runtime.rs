@@ -899,6 +899,32 @@ impl MarketService {
         )
     }
 
+    /// Trading days of one installed instrument's recurring calendar overlapping
+    /// `[from_unix_nanos, to_unix_nanos)`, oldest first and at most the newest `limit`.
+    /// A pure projection: dated provider calendar updates the coordinator holds are not
+    /// part of it, and an instrument without a known calendar has no sessions.
+    #[must_use]
+    pub fn trading_sessions(
+        instrument: &aeris_contracts::InstallProviderInstrument,
+        from_unix_nanos: i64,
+        to_unix_nanos: i64,
+        limit: usize,
+    ) -> Vec<crate::MarketTradingSession> {
+        Self::calendar_for(instrument)
+            .trading_sessions(
+                &instrument.instrument_id,
+                from_unix_nanos.div_euclid(1_000_000),
+                to_unix_nanos.div_euclid(1_000_000),
+                limit,
+            )
+            .into_iter()
+            .map(|window| crate::MarketTradingSession {
+                open_unix_nanos: window.open_utc_ms.saturating_mul(1_000_000),
+                close_unix_nanos: window.close_utc_ms.saturating_mul(1_000_000),
+            })
+            .collect()
+    }
+
     fn calendar_for(
         instrument: &aeris_contracts::InstallProviderInstrument,
     ) -> super::calendar::MarketCalendarService {

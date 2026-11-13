@@ -1174,6 +1174,9 @@ impl TerminalApp {
                     LegendSettingsRequest::OrderFlow(indicator) => {
                         surface.open_order_flow_dialog(indicator, window, surface_cx);
                     }
+                    LegendSettingsRequest::SessionProfile(kind) => {
+                        surface.open_session_profile_dialog(kind, surface_cx);
+                    }
                     LegendSettingsRequest::Drawing(drawing) => {
                         surface.open_drawing_settings_dialog(drawing, window, surface_cx);
                     }
