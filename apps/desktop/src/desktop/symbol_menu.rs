@@ -21,12 +21,10 @@ pub(super) fn provider_exchange_mark(
     }
 }
 
-/// A generic glyph in the logo tile, inset like the logos' own artwork so every mark reads
-/// at one size: for a provider without a square logo, and for a search of every provider.
+/// The colored all-providers mark in the logo tile: for a provider without a square logo, and
+/// for a search of every provider.
 fn generic_mark(size: Pixels, well: bool, colors: &aeris_design_system::ThemeColors) -> AnyElement {
-    mark_tile(size, well, colors)
-        .child(header_icon(HugeIcon::Chart).with_size(size * 0.6))
-        .into_any_element()
+    exchange_mark(assets::ExchangeLogo::AllProviders, size, well, colors).into_any_element()
 }
 
 fn scope_mark(

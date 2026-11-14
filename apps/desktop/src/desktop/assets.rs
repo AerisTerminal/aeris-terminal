@@ -353,23 +353,31 @@ fn stamp_asset(path: &str) -> Option<&'static [u8]> {
 pub enum SeriesIcon {
     Candlestick,
     HollowCandles,
+    HollowCandlesBullish,
+    HollowCandlesBearish,
+    Footprint,
     OhlcBar,
     Line,
     LineWithMarkers,
     Area,
+    Baseline,
     HeikinAshi,
     BrushableArea,
     Tpo,
 }
 
 impl SeriesIcon {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 13] = [
         Self::Candlestick,
         Self::HollowCandles,
+        Self::HollowCandlesBullish,
+        Self::HollowCandlesBearish,
+        Self::Footprint,
         Self::OhlcBar,
         Self::Line,
         Self::LineWithMarkers,
         Self::Area,
+        Self::Baseline,
         Self::HeikinAshi,
         Self::BrushableArea,
         Self::Tpo,
@@ -380,10 +388,14 @@ impl SeriesIcon {
         let name = match self {
             Self::Candlestick => "candlestick-chart.svg",
             Self::HollowCandles => "hollow-candles-chart.svg",
+            Self::HollowCandlesBullish => "hollow-candles-bullish-chart.svg",
+            Self::HollowCandlesBearish => "hollow-candles-bearish-chart.svg",
+            Self::Footprint => "footprint-chart.svg",
             Self::OhlcBar => "ohlc-bar-chart.svg",
             Self::Line => "line-chart-type.svg",
             Self::LineWithMarkers => "line-with-markers-chart.svg",
             Self::Area => "area-chart-type.svg",
+            Self::Baseline => "baseline-chart.svg",
             Self::HeikinAshi => "heikin-ashi-chart.svg",
             Self::BrushableArea => "brushable-area-chart.svg",
             Self::Tpo => "tpo-chart.svg",
@@ -432,10 +444,17 @@ pub enum ExchangeLogo {
     #[default]
     Rithmic,
     Hyperliquid,
+    /// The Aeris mark for a search across every provider and for a provider without its own logo.
+    AllProviders,
 }
 
 impl ExchangeLogo {
-    pub const ALL: [Self; 3] = [Self::Rithmic, Self::Hyperliquid, Self::Binance];
+    pub const ALL: [Self; 4] = [
+        Self::Rithmic,
+        Self::Hyperliquid,
+        Self::Binance,
+        Self::AllProviders,
+    ];
 
     /// The logo a provider presentation descriptor names through its `logo_key`.
     #[must_use]
@@ -453,6 +472,7 @@ impl ExchangeLogo {
             Self::Binance => "binance.svg",
             Self::Rithmic => "rithmic.svg",
             Self::Hyperliquid => "hyperliquid.svg",
+            Self::AllProviders => "all-providers.svg",
         };
         format!("{EXCHANGE_ASSET_PREFIX}{name}").into()
     }
@@ -669,6 +689,14 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
         "hollow-candles-chart.svg" => {
             include_bytes!("../../assets/icons/series/hollow-candles-chart.svg")
         }
+        "hollow-candles-bullish-chart.svg" => {
+            include_bytes!("../../assets/icons/series/hollow-candles-bullish-chart.svg")
+        }
+        "hollow-candles-bearish-chart.svg" => {
+            include_bytes!("../../assets/icons/series/hollow-candles-bearish-chart.svg")
+        }
+        "footprint-chart.svg" => include_bytes!("../../assets/icons/series/footprint-chart.svg"),
+        "baseline-chart.svg" => include_bytes!("../../assets/icons/series/baseline-chart.svg"),
         "ohlc-bar-chart.svg" => include_bytes!("../../assets/icons/series/ohlc-bar-chart.svg"),
         "line-chart-type.svg" => include_bytes!("../../assets/icons/series/line-chart-type.svg"),
         "line-with-markers-chart.svg" => {
@@ -700,6 +728,9 @@ fn exchange_asset(path: &str) -> Option<&'static [u8]> {
         "rithmic.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/rithmic.svg"),
         "hyperliquid.svg" => {
             include_bytes!("../../assets/exchange_assets/exchange_logo/hyperliquid.svg")
+        }
+        "all-providers.svg" => {
+            include_bytes!("../../assets/exchange_assets/exchange_logo/all-providers.svg")
         }
         _ => return None,
     })

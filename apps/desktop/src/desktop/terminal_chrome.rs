@@ -1073,14 +1073,16 @@ pub(super) fn header_icon(name: HugeIcon) -> Icon {
 
 pub(super) fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
     match chart_type {
-        ChartType::Candles | ChartType::Footprint => assets::SeriesIcon::Candlestick,
-        ChartType::HollowCandles
-        | ChartType::HollowCandlesBullish
-        | ChartType::HollowCandlesBearish => assets::SeriesIcon::HollowCandles,
+        ChartType::Candles => assets::SeriesIcon::Candlestick,
+        ChartType::Footprint => assets::SeriesIcon::Footprint,
+        ChartType::HollowCandles => assets::SeriesIcon::HollowCandles,
+        ChartType::HollowCandlesBullish => assets::SeriesIcon::HollowCandlesBullish,
+        ChartType::HollowCandlesBearish => assets::SeriesIcon::HollowCandlesBearish,
         ChartType::HeikinAshi => assets::SeriesIcon::HeikinAshi,
         ChartType::Tpo => assets::SeriesIcon::Tpo,
         ChartType::Bars => assets::SeriesIcon::OhlcBar,
-        ChartType::Line | ChartType::Baseline => assets::SeriesIcon::Line,
+        ChartType::Line => assets::SeriesIcon::Line,
+        ChartType::Baseline => assets::SeriesIcon::Baseline,
         ChartType::LineWithMarkers => assets::SeriesIcon::LineWithMarkers,
         ChartType::Area => assets::SeriesIcon::Area,
         ChartType::BrushableArea => assets::SeriesIcon::BrushableArea,
@@ -1262,13 +1264,9 @@ pub(super) fn exchange_mark(
     })
 }
 
-/// Round tile shared by every provider and exchange mark, so a provider drawn with a generic
-/// icon occupies exactly the same footprint as one drawn with its logo.
-pub(super) fn mark_tile(
-    size: Pixels,
-    bordered: bool,
-    colors: &aeris_design_system::ThemeColors,
-) -> Div {
+/// Round tile shared by every provider and exchange mark, so the all-providers mark occupies
+/// exactly the same footprint as a provider's own logo.
+fn mark_tile(size: Pixels, bordered: bool, colors: &aeris_design_system::ThemeColors) -> Div {
     div()
         .size(size)
         .flex_none()

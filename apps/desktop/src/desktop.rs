@@ -313,8 +313,7 @@ use terminal_chrome::{
 use terminal_chrome::{
     HEADER_CHEVRON_ICON, HEADER_CHEVRON_WIDTH, HeaderMenus, WindowCommand, WindowMoveGestureEvent,
     WorkspaceTabBarState, chrome_tooltip, exchange_mark, fullscreen_escape_command, header_icon,
-    mark_tile, series_glyph, terminal_header, watchlist_arrow_step, watchlist_step,
-    workspace_title_bar,
+    series_glyph, terminal_header, watchlist_arrow_step, watchlist_step, workspace_title_bar,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, WorkspaceTabsRestore, restored_workspace_tab,
