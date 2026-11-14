@@ -359,10 +359,11 @@ pub enum SeriesIcon {
     Area,
     HeikinAshi,
     BrushableArea,
+    Tpo,
 }
 
 impl SeriesIcon {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Candlestick,
         Self::HollowCandles,
         Self::OhlcBar,
@@ -371,6 +372,7 @@ impl SeriesIcon {
         Self::Area,
         Self::HeikinAshi,
         Self::BrushableArea,
+        Self::Tpo,
     ];
 
     #[must_use]
@@ -384,6 +386,7 @@ impl SeriesIcon {
             Self::Area => "area-chart-type.svg",
             Self::HeikinAshi => "heikin-ashi-chart.svg",
             Self::BrushableArea => "brushable-area-chart.svg",
+            Self::Tpo => "tpo-chart.svg",
         };
         format!("{SERIES_ASSET_PREFIX}{name}").into()
     }
@@ -678,6 +681,7 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
         "brushable-area-chart.svg" => {
             include_bytes!("../../assets/icons/series/brushable-area-chart.svg")
         }
+        "tpo-chart.svg" => include_bytes!("../../assets/icons/series/tpo-chart.svg"),
         _ => return None,
     })
 }

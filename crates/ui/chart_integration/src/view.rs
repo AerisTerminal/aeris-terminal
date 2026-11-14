@@ -232,8 +232,6 @@ pub enum ChartIndicator {
     Stochastic,
     Atr,
     VolumeProfile,
-    /// Time price opportunity letters or blocks per trading session.
-    Tpo,
     /// A volume profile per trading session, or per composite of sessions.
     SessionVolumeProfile,
     /// An Aeris Charts built-in study beyond the legacy native catalog.
@@ -255,7 +253,7 @@ pub struct ChartIndicatorState {
 
 impl ChartIndicator {
     /// All indicators that can be calculated truthfully from the installed OHLC columns.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 12] = [
         Self::Volume,
         Self::Vwap,
         Self::Sma,
@@ -267,7 +265,6 @@ impl ChartIndicator {
         Self::Stochastic,
         Self::Atr,
         Self::VolumeProfile,
-        Self::Tpo,
         Self::SessionVolumeProfile,
     ];
 
@@ -289,7 +286,6 @@ impl ChartIndicator {
             Self::Stochastic => "stochastic",
             Self::Atr => "atr",
             Self::VolumeProfile => "volume_profile",
-            Self::Tpo => "tpo",
             Self::SessionVolumeProfile => "session_volume_profile",
             Self::Builtin(indicator) => indicator.identifier(),
         }
@@ -310,7 +306,6 @@ impl ChartIndicator {
             "stochastic" => Self::Stochastic,
             "atr" => Self::Atr,
             "volume_profile" => Self::VolumeProfile,
-            "tpo" => Self::Tpo,
             "session_volume_profile" => Self::SessionVolumeProfile,
             _ => return BuiltinIndicator::from_identifier(value).map(Self::Builtin),
         })
@@ -331,7 +326,6 @@ impl ChartIndicator {
             Self::Stochastic => tr!(chart_ui::INDICATOR_STOCHASTIC),
             Self::Atr => tr!(chart_ui::INDICATOR_ATR),
             Self::VolumeProfile => tr!(chart_ui::INDICATOR_VOLUME_PROFILE),
-            Self::Tpo => tr!(chart_ui::INDICATOR_TPO),
             Self::SessionVolumeProfile => tr!(chart_ui::INDICATOR_SESSION_VOLUME_PROFILE),
             Self::Builtin(indicator) => indicator.label(),
         }
@@ -349,7 +343,6 @@ impl ChartIndicator {
             Self::Macd => tr!(chart_ui::PARAMS_MACD),
             Self::Stochastic => tr!(chart_ui::PARAMS_STOCHASTIC),
             Self::VolumeProfile => tr!(chart_ui::PARAMS_VOLUME_PROFILE),
-            Self::Tpo => tr!(chart_ui::PARAMS_TPO),
             Self::SessionVolumeProfile => tr!(chart_ui::PARAMS_SESSION_VOLUME_PROFILE),
             Self::Builtin(indicator) => indicator.parameters(),
         }
@@ -372,7 +365,7 @@ impl ChartIndicator {
 
     fn engine_kind(self) -> Option<IndicatorKind> {
         Some(match self {
-            Self::Volume | Self::VolumeProfile | Self::Tpo | Self::SessionVolumeProfile => {
+            Self::Volume | Self::VolumeProfile | Self::SessionVolumeProfile => {
                 return None;
             }
             Self::Vwap => IndicatorKind::Vwap,
@@ -440,6 +433,9 @@ pub enum ChartType {
     /// legend values and trading still read the raw bars.
     HeikinAshi,
     Footprint,
+    /// Aeris Charts' market profile series: the product bars drawn as one TPO profile per
+    /// trading session of the instrument's calendar, in place of candles.
+    Tpo,
     Bars,
     Line,
     LineWithMarkers,
@@ -886,8 +882,8 @@ impl ChartType {
         matches!(self, Self::HeikinAshi)
     }
 
-    /// Whether the price series holds the product's OHLC bars as candles or bars, which session
-    /// profiles read. A footprint leaves the price series as whitespace.
+    /// Whether the price series holds the product's OHLC bars (as candles, bars or a TPO), which
+    /// session volume profiles read. A footprint leaves the price series as whitespace.
     pub(crate) const fn draws_ohlc_bars(self) -> bool {
         matches!(
             self,
@@ -896,6 +892,7 @@ impl ChartType {
                 | Self::HollowCandlesBullish
                 | Self::HollowCandlesBearish
                 | Self::HeikinAshi
+                | Self::Tpo
                 | Self::Bars
         )
     }
@@ -912,13 +909,14 @@ impl ChartType {
     }
 
     /// Built-in OHLC chart types Aeris Charts can render from the product price series.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Candles,
         Self::HollowCandles,
         Self::HollowCandlesBullish,
         Self::HollowCandlesBearish,
         Self::HeikinAshi,
         Self::Footprint,
+        Self::Tpo,
         Self::Bars,
         Self::Line,
         Self::LineWithMarkers,
@@ -937,6 +935,7 @@ impl ChartType {
             Self::HollowCandlesBearish => tr!(chart_ui::CHART_TYPE_HOLLOW_CANDLES_BEARISH),
             Self::HeikinAshi => tr!(chart_ui::CHART_TYPE_HEIKIN_ASHI),
             Self::Footprint => tr!(chart_ui::CHART_TYPE_FOOTPRINT),
+            Self::Tpo => tr!(chart_ui::CHART_TYPE_TPO),
             Self::Bars => tr!(chart_ui::CHART_TYPE_BARS),
             Self::Line => tr!(chart_ui::CHART_TYPE_LINE),
             Self::LineWithMarkers => tr!(chart_ui::CHART_TYPE_LINE_WITH_MARKERS),
@@ -956,6 +955,7 @@ impl ChartType {
             Self::HollowCandlesBearish => "hollow_candles_bearish",
             Self::HeikinAshi => "heikin_ashi",
             Self::Footprint => "footprint",
+            Self::Tpo => "tpo",
             Self::Bars => "bars",
             Self::Line => "line",
             Self::LineWithMarkers => "line_with_markers",
@@ -991,6 +991,7 @@ impl ChartType {
             | Self::HollowCandlesBearish
             | Self::HeikinAshi
             | Self::Footprint => aeris_charts_engine::SeriesKind::Candlestick,
+            Self::Tpo => aeris_charts_engine::SeriesKind::Tpo,
             Self::Bars => aeris_charts_engine::SeriesKind::Bar,
             Self::Line | Self::LineWithMarkers => aeris_charts_engine::SeriesKind::Line,
             Self::Area | Self::BrushableArea => aeris_charts_engine::SeriesKind::Area,

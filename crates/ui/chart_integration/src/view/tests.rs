@@ -5133,7 +5133,7 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
 
 #[test]
 fn indicator_metadata_matches_the_legacy_picker_copy() {
-    assert_eq!(ChartIndicator::ALL.len(), 13);
+    assert_eq!(ChartIndicator::ALL.len(), 12);
     assert_eq!(ChartIndicator::Volume.label(), "Volume");
     assert_eq!(
         ChartIndicator::VolumeProfile.label(),
@@ -5153,7 +5153,7 @@ fn indicator_metadata_matches_the_legacy_picker_copy() {
     );
     assert_eq!(ChartIndicator::Stochastic.parameters(), "%K 14 · %D 3");
     assert_eq!(ChartIndicator::Atr.parameters(), "Period 14");
-    assert_eq!(ChartIndicator::Tpo.label(), "TPO Profile (Market Profile)");
+    assert_eq!(ChartType::Tpo.label(), "TPO (market profile)");
     assert_eq!(
         ChartIndicator::SessionVolumeProfile.label(),
         "Volume Profile (Session)"

@@ -5401,6 +5401,11 @@ enum ChartSettingsAction {
     FootprintMode(FootprintDisplayMode),
     /// Instrument ticks per footprint row; zero is automatic.
     FootprintTicksPerRow(u32),
+    TpoCells(TpoCells),
+    /// Minutes each TPO letter covers.
+    TpoPeriod(u16),
+    TpoValueArea(u8),
+    TpoInitialBalance(u8),
     ToggleOrderManagementLines,
     ToggleExecutionMarks,
     ToggleExtendOrderLinesLeft,
@@ -5442,6 +5447,7 @@ struct ChartSettingsSnapshot {
     series_colors: ChartSeriesColors,
     crosshair_mode: u8,
     order_flow: OrderFlowSettings,
+    tpo: TpoSettings,
     time_zone: String,
     trading_visibility: ChartTradingVisibilitySettings,
     chart_trade_buttons_visible: bool,

@@ -118,8 +118,20 @@ fn boundary_spans(boundaries: &[ResampleBoundary]) -> Vec<(i64, i64, u64)> {
         .collect()
 }
 
-fn refresh_at(chart: &AerisChartView, kind: SessionProfileKind) -> Option<f64> {
-    chart.session_profiles.get(kind)?.refresh_at
+/// The `(open, close, session id)` of every profile the TPO series draws.
+fn tpo_spans(chart: &AerisChartView) -> Vec<(i64, i64, u64)> {
+    chart
+        .drawn_tpo_profiles()
+        .expect("the chart has a TPO series")
+        .iter()
+        .map(|profile| {
+            (
+                profile.start_timestamp_micros / 1_000_000,
+                profile.end_timestamp_micros / 1_000_000,
+                profile.session_id,
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -127,18 +139,14 @@ fn tpo_sessions_follow_the_calendar_across_a_daylight_saving_change() {
     // Half-hour bars from Wednesday 22:00 UTC through Tuesday 17:30 UTC, weekend included.
     let mut chart = chart_with_bars(MARCH_6_2024 + 22 * HOUR, HALF_HOUR, 280);
     install_calendar(&mut chart, futures_sessions());
-    chart
-        .add_indicator(ChartIndicator::Tpo)
-        .expect("TPO is added");
-    assert!(chart.session_profile_drawn(SessionProfileKind::Tpo));
+    chart.set_chart_type(ChartType::Tpo);
+    assert!(chart.tpo_drawn());
 
     let sessions = futures_sessions();
-    let boundaries = chart
-        .drawn_session_boundaries(SessionProfileKind::Tpo)
-        .expect("TPO boundaries");
+    let spans = tpo_spans(&chart);
     // The session that opens after the newest bar is not drawn; the newest drawn session is 0.
     assert_eq!(
-        boundary_spans(&boundaries),
+        spans,
         sessions[..4]
             .iter()
             .zip([3, 2, 1, 0])
@@ -146,13 +154,10 @@ fn tpo_sessions_follow_the_calendar_across_a_daylight_saving_change() {
             .collect::<Vec<_>>()
     );
     // Across the change the open moves from 23:00 to 22:00 UTC: a weekend minus one hour.
+    assert_eq!(spans[2].0 - spans[1].0, 3 * DAY - HOUR);
+    assert_eq!(spans[2].1 - spans[2].0, 23 * HOUR);
     assert_eq!(
-        boundaries[2].start_time - boundaries[1].start_time,
-        3 * DAY - HOUR
-    );
-    assert_eq!(boundaries[2].end_time - boundaries[2].start_time, 23 * HOUR);
-    assert_eq!(
-        refresh_at(&chart, SessionProfileKind::Tpo),
+        chart.tpo_refresh_at(),
         Some(utc(MARCH_6_2024 + 6 * DAY + 22 * HOUR)),
         "a bar from the next open redraws the TPO"
     );
@@ -161,12 +166,8 @@ fn tpo_sessions_follow_the_calendar_across_a_daylight_saving_change() {
         .drawn_tpo_profiles()
         .expect("Aeris Charts draws the TPO");
     assert_eq!(profiles.len(), 4);
-    for (profile, boundary) in profiles.iter().zip(&boundaries) {
-        assert_eq!(
-            profile.start_timestamp_micros,
-            boundary.start_time * 1_000_000
-        );
-        let periods_per_session = (boundary.end_time - boundary.start_time) / HALF_HOUR;
+    for (profile, (open, close, _)) in profiles.iter().zip(&spans) {
+        let periods_per_session = (close - open) / HALF_HOUR;
         assert!(
             profile
                 .rows
@@ -199,21 +200,14 @@ fn around_the_clock_sessions_split_at_every_utc_midnight_including_weekends() {
     let friday = MARCH_6_2024 + 2 * DAY;
     let mut chart = chart_with_bars(friday, HOUR, 84);
     install_calendar(&mut chart, utc_day_sessions(friday, 6));
-    chart
-        .add_indicator(ChartIndicator::Tpo)
-        .expect("TPO is added");
-    assert!(
-        chart.set_session_profile_settings(SessionProfileSettings::Tpo(TpoSettings {
-            period_minutes: 60,
-            ..TpoSettings::default()
-        }))
-    );
+    chart.set_chart_type(ChartType::Tpo);
+    assert!(chart.set_tpo_settings(TpoSettings {
+        period_minutes: 60,
+        ..TpoSettings::default()
+    }));
 
-    let boundaries = chart
-        .drawn_session_boundaries(SessionProfileKind::Tpo)
-        .expect("TPO boundaries");
     assert_eq!(
-        boundary_spans(&boundaries),
+        tpo_spans(&chart),
         (0..4)
             .map(|day| (
                 friday + day * DAY,
@@ -222,10 +216,7 @@ fn around_the_clock_sessions_split_at_every_utc_midnight_including_weekends() {
             ))
             .collect::<Vec<_>>()
     );
-    assert_eq!(
-        refresh_at(&chart, SessionProfileKind::Tpo),
-        Some(utc(friday + 4 * DAY))
-    );
+    assert_eq!(chart.tpo_refresh_at(), Some(utc(friday + 4 * DAY)));
     let profiles = chart
         .drawn_tpo_profiles()
         .expect("Aeris Charts draws the TPO");
@@ -284,58 +275,68 @@ fn composite_volume_profiles_end_with_the_newest_session() {
         assert!(profile.poc.is_some() && profile.value_area_low.is_some());
         assert!(profile.rows.len() <= 24);
     }
+    assert_eq!(
+        boundary_spans(&boundaries)[0],
+        (monday, monday + DAY, 2),
+        "the oldest composite starts with the first trading day"
+    );
 }
 
 #[test]
-fn session_profiles_follow_chart_type_visibility_calendar_and_settings() {
+fn the_tpo_chart_type_follows_the_calendar_and_its_settings() {
     let mut chart = chart_with_bars(MARCH_6_2024 + 22 * HOUR, HALF_HOUR, 286);
-    chart
-        .add_indicator(ChartIndicator::Tpo)
-        .expect("TPO is added");
-    assert!(
-        chart.add_indicator(ChartIndicator::Tpo).is_err(),
-        "one TPO per chart"
-    );
-    assert!(
-        !chart.session_profile_drawn(SessionProfileKind::Tpo),
-        "nothing is drawn before the calendar is known"
-    );
-    assert!(chart.legend_rows().iter().any(|row| row.item
-        == LegendItem::SessionProfile(SessionProfileKind::Tpo)
-        && row.settings_available));
-    install_calendar(&mut chart, futures_sessions());
-    assert!(chart.session_profile_drawn(SessionProfileKind::Tpo));
-
-    chart.set_chart_type(ChartType::Line);
-    assert!(!chart.session_profile_drawn(SessionProfileKind::Tpo));
-    chart.set_chart_type(ChartType::HeikinAshi);
-    assert!(chart.session_profile_drawn(SessionProfileKind::Tpo));
-
-    let item = LegendItem::SessionProfile(SessionProfileKind::Tpo);
-    assert!(chart.set_legend_item_visible(item, false));
-    assert!(!chart.session_profile_drawn(SessionProfileKind::Tpo));
-    assert!(chart.set_legend_item_visible(item, true));
-    assert!(chart.session_profile_drawn(SessionProfileKind::Tpo));
-
-    let invalid = TpoSettings {
-        period_minutes: 3,
-        ..TpoSettings::default()
-    };
-    assert!(!chart.set_session_profile_settings(SessionProfileSettings::Tpo(invalid)));
-    assert!(
-        !chart.set_session_profile_settings(SessionProfileSettings::default_for(
-            SessionProfileKind::Volume
-        )),
-        "a profile that is not on the chart is not configured"
-    );
+    // Settings chosen on another chart type are kept until the TPO shows.
     let blocks = TpoSettings {
         cells: TpoCells::Blocks,
+        period_minutes: 15,
         value_area_percent: 80,
         initial_balance_periods: 4,
-        ..TpoSettings::default()
     };
-    assert!(chart.set_session_profile_settings(SessionProfileSettings::Tpo(blocks)));
-    assert!(!chart.set_session_profile_settings(SessionProfileSettings::Tpo(blocks)));
+    assert!(chart.set_tpo_settings(blocks));
+    assert!(
+        !chart.set_tpo_settings(blocks),
+        "unchanged settings change nothing"
+    );
+    assert!(
+        !chart.set_tpo_settings(TpoSettings {
+            period_minutes: 3,
+            ..TpoSettings::default()
+        }),
+        "out-of-range settings are refused"
+    );
+    assert_eq!(chart.tpo_settings(), blocks);
+    assert!(!chart.tpo_drawn());
+    assert!(
+        chart.drawn_tpo_profiles().is_none(),
+        "candles have no TPO series"
+    );
+
+    chart.set_chart_type(ChartType::Tpo);
+    assert!(
+        !chart.tpo_drawn(),
+        "nothing is drawn before the calendar is known"
+    );
+    install_calendar(&mut chart, futures_sessions());
+    assert!(chart.tpo_drawn());
+    let profiles = chart.drawn_tpo_profiles().expect("TPO profiles");
+    let newest = profiles.last().expect("newest profile");
+    // The newest bar opens Tuesday 20:30 UTC, 22.5 hours after the Monday 22:00 UTC open: the
+    // 91st quarter hour (a 30-minute period would end at 45).
+    assert_eq!(
+        newest
+            .rows
+            .iter()
+            .flat_map(|row| row.periods.iter().copied())
+            .max(),
+        Some(90),
+        "the TPO series uses the 15-minute period chosen before it showed"
+    );
+
+    chart.set_chart_type(ChartType::Line);
+    assert!(!chart.tpo_drawn());
+    assert!(chart.drawn_tpo_profiles().is_none());
+    chart.set_chart_type(ChartType::Tpo);
+    assert!(chart.tpo_drawn());
 
     install_calendar(
         &mut chart,
@@ -344,33 +345,41 @@ fn session_profiles_follow_chart_type_visibility_calendar_and_settings() {
             session(MARCH_6_2024 + DAY, MARCH_6_2024 + 3 * DAY),
         ],
     );
-    assert!(
-        !chart.session_profile_drawn(SessionProfileKind::Tpo),
-        "overlapping trading days are refused"
-    );
+    assert!(!chart.tpo_drawn(), "overlapping trading days are refused");
     install_calendar(&mut chart, futures_sessions());
-    assert!(chart.session_profile_drawn(SessionProfileKind::Tpo));
+    assert!(chart.tpo_drawn());
 
-    assert!(chart.remove_legend_indicator(item));
-    assert!(!chart.has_session_profiles());
+    // The TPO is a chart type, not an indicator: the legend and indicator states omit it.
     assert_eq!(chart.indicator_states(), Vec::new());
+    assert!(!chart.has_session_profiles());
 }
 
 #[test]
-fn session_profile_settings_round_trip_through_indicator_states() {
+fn a_session_volume_profile_still_draws_on_a_tpo_chart() {
     let mut chart = chart_with_bars(MARCH_6_2024 + 22 * HOUR, HALF_HOUR, 286);
-    chart
-        .add_indicator(ChartIndicator::Tpo)
-        .expect("TPO is added");
+    install_calendar(&mut chart, futures_sessions());
     chart
         .add_indicator(ChartIndicator::SessionVolumeProfile)
         .expect("session volume profile is added");
-    let tpo = SessionProfileSettings::Tpo(TpoSettings {
-        cells: TpoCells::Blocks,
-        period_minutes: 15,
-        value_area_percent: 68,
-        initial_balance_periods: 4,
-    });
+    chart.set_chart_type(ChartType::Tpo);
+    assert!(chart.tpo_drawn());
+    assert!(chart.session_profile_drawn(SessionProfileKind::Volume));
+    chart.set_chart_type(ChartType::Line);
+    assert!(!chart.session_profile_drawn(SessionProfileKind::Volume));
+}
+
+#[test]
+fn session_volume_profile_settings_round_trip_through_indicator_states() {
+    let mut chart = chart_with_bars(MARCH_6_2024 + 22 * HOUR, HALF_HOUR, 286);
+    chart
+        .add_indicator(ChartIndicator::SessionVolumeProfile)
+        .expect("session volume profile is added");
+    assert!(
+        chart
+            .add_indicator(ChartIndicator::SessionVolumeProfile)
+            .is_err(),
+        "one session volume profile per chart"
+    );
     let volume = SessionProfileSettings::Volume(SessionVolumeProfileSettings {
         sessions_per_profile: 5,
         row_count: 96,
@@ -378,52 +387,48 @@ fn session_profile_settings_round_trip_through_indicator_states() {
         show_developing: true,
         extend_naked_levels: true,
     });
-    assert!(chart.set_session_profile_settings(tpo));
     assert!(chart.set_session_profile_settings(volume));
-    assert!(chart.set_legend_item_visible(
-        LegendItem::SessionProfile(SessionProfileKind::Volume),
-        false
-    ));
+    let item = LegendItem::SessionProfile(SessionProfileKind::Volume);
+    assert!(chart.set_legend_item_visible(item, false));
     let states = chart.indicator_states();
     assert_eq!(
         states,
-        vec![
-            ChartIndicatorState {
-                indicator: ChartIndicator::Tpo,
-                visible: true,
-                volume: None,
-                session_profile: Some(tpo),
-            },
-            ChartIndicatorState {
-                indicator: ChartIndicator::SessionVolumeProfile,
-                visible: false,
-                volume: None,
-                session_profile: Some(volume),
-            },
-        ]
+        vec![ChartIndicatorState {
+            indicator: ChartIndicator::SessionVolumeProfile,
+            visible: false,
+            volume: None,
+            session_profile: Some(volume),
+        }]
     );
 
     let mut restored = chart_with_bars(MARCH_6_2024 + 22 * HOUR, HALF_HOUR, 286);
     install_calendar(&mut restored, futures_sessions());
     restored
         .restore_indicator_states(&states)
-        .expect("session profiles restore");
+        .expect("session profile restores");
     assert_eq!(restored.indicator_states(), states);
-    assert!(restored.session_profile_drawn(SessionProfileKind::Tpo));
     assert!(!restored.session_profile_drawn(SessionProfileKind::Volume));
+    assert!(restored.set_legend_item_visible(item, true));
+    assert!(restored.session_profile_drawn(SessionProfileKind::Volume));
 
-    // A state written without settings, or with settings of another kind, opens on defaults.
+    // A state written without settings opens on the defaults.
     let mut defaulted = chart_with_bars(MARCH_6_2024 + 22 * HOUR, HALF_HOUR, 286);
     defaulted
         .restore_indicator_states(&[ChartIndicatorState {
-            indicator: ChartIndicator::Tpo,
+            indicator: ChartIndicator::SessionVolumeProfile,
             visible: true,
             volume: None,
-            session_profile: Some(volume),
+            session_profile: None,
         }])
-        .expect("TPO restores");
+        .expect("session volume profile restores");
     assert_eq!(
-        defaulted.session_profile_settings(SessionProfileKind::Tpo),
-        Some(SessionProfileSettings::default_for(SessionProfileKind::Tpo))
+        defaulted.session_profile_settings(SessionProfileKind::Volume),
+        Some(SessionProfileSettings::default_for(
+            SessionProfileKind::Volume
+        ))
     );
+
+    assert!(restored.remove_legend_indicator(item));
+    assert!(!restored.has_session_profiles());
+    assert_eq!(restored.indicator_states(), Vec::new());
 }

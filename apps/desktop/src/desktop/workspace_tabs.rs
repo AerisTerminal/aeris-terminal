@@ -1295,6 +1295,7 @@ impl TerminalApp {
             series_colors: surface.chart_series_colors(cx)?,
             crosshair_mode: surface.chart_crosshair_mode(cx)?,
             order_flow: surface.chart_order_flow_settings(cx)?,
+            tpo: surface.chart_tpo_settings(cx)?,
             time_zone: surface.chart_time_zone_id().to_string(),
             trading_visibility: surface.chart_trading_visibility(),
             chart_trade_buttons_visible: self.chrome.preferences().chart_trade_buttons.shown(),
@@ -1588,6 +1589,37 @@ impl TerminalApp {
         true
     }
 
+    /// Applies TPO chart type actions through the chart's TPO settings owner. Returns whether
+    /// `action` was a TPO action.
+    fn apply_tpo_settings_action(
+        surface: &Entity<WorkspaceSurface>,
+        action: ChartSettingsAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(mut settings) = surface.read(cx).chart_tpo_settings(cx) else {
+            return matches!(
+                action,
+                ChartSettingsAction::TpoCells(_)
+                    | ChartSettingsAction::TpoPeriod(_)
+                    | ChartSettingsAction::TpoValueArea(_)
+                    | ChartSettingsAction::TpoInitialBalance(_)
+            );
+        };
+        match action {
+            ChartSettingsAction::TpoCells(cells) => settings.cells = cells,
+            ChartSettingsAction::TpoPeriod(minutes) => settings.period_minutes = minutes,
+            ChartSettingsAction::TpoValueArea(percent) => settings.value_area_percent = percent,
+            ChartSettingsAction::TpoInitialBalance(periods) => {
+                settings.initial_balance_periods = periods;
+            }
+            _ => return false,
+        }
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_tpo_settings(settings, surface_cx);
+        });
+        true
+    }
+
     pub(super) fn apply_chart_settings_action(
         &mut self,
         menu: &ChartContextMenu,
@@ -1618,10 +1650,21 @@ impl TerminalApp {
             || Self::apply_axis_settings_action(&surface, action, cx)
             || Self::apply_legend_settings_action(&surface, action, cx)
             || Self::apply_order_flow_settings_action(&surface, action, cx)
+            || Self::apply_tpo_settings_action(&surface, action, cx)
         {
             cx.notify();
             return;
         }
+        Self::apply_appearance_settings_action(&surface, action, cx);
+        cx.notify();
+    }
+
+    /// Applies grid, crosshair and series appearance actions through the chart's appearance.
+    fn apply_appearance_settings_action(
+        surface: &Entity<WorkspaceSurface>,
+        action: ChartSettingsAction,
+        cx: &mut Context<Self>,
+    ) {
         let Some(mut appearance) = surface.read(cx).chart_appearance(cx) else {
             return;
         };
@@ -1631,6 +1674,10 @@ impl TerminalApp {
             ChartSettingsAction::CrosshairMode(_)
             | ChartSettingsAction::FootprintMode(_)
             | ChartSettingsAction::FootprintTicksPerRow(_)
+            | ChartSettingsAction::TpoCells(_)
+            | ChartSettingsAction::TpoPeriod(_)
+            | ChartSettingsAction::TpoValueArea(_)
+            | ChartSettingsAction::TpoInitialBalance(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks
             | ChartSettingsAction::ToggleExtendOrderLinesLeft
@@ -1675,6 +1722,10 @@ impl TerminalApp {
             ChartSettingsAction::CrosshairMode(_)
             | ChartSettingsAction::FootprintMode(_)
             | ChartSettingsAction::FootprintTicksPerRow(_)
+            | ChartSettingsAction::TpoCells(_)
+            | ChartSettingsAction::TpoPeriod(_)
+            | ChartSettingsAction::TpoValueArea(_)
+            | ChartSettingsAction::TpoInitialBalance(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks
             | ChartSettingsAction::ToggleExtendOrderLinesLeft
@@ -1687,7 +1738,6 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleFillGlow
             | ChartSettingsAction::ToggleAxisBorders => unreachable!(),
         });
-        cx.notify();
     }
 
     pub(super) fn reset_chart_settings(&mut self, menu: &ChartContextMenu, cx: &mut Context<Self>) {

@@ -1,23 +1,24 @@
-//! Session-anchored market profiles: the TPO (market profile) and the session or composite
-//! volume profile.
+//! Session-anchored market profiles: the TPO (market profile) chart type and the session or
+//! composite volume profile.
 //!
-//! Aeris Charts computes, bounds and draws both from the product price bars. The host supplies
-//! only the trading days of the instrument's calendar, a row size on the instrument's price
-//! grid and the theme colors. Neither presentation enters the chart's undo history, and Aeris
-//! Charts has no update operation for them, so a settings, theme, chart type or session change
-//! replaces the drawn presentation.
+//! Aeris Charts computes, bounds and draws both from the product price bars. The TPO is Aeris
+//! Charts' TPO series, which replaces the candles while the chart type is TPO; the session volume
+//! profile is a periodic profile presentation over the bars. The host supplies only the trading
+//! days of the instrument's calendar, a row size on the instrument's price grid and the theme
+//! colors. Neither enters the chart's undo history; a settings, theme, chart type or session
+//! change replaces what is drawn.
 
 use super::*;
 use crate::engine_bridge::ProductPriceBars;
 use aeris_charts_engine::{
     MAX_PROFILE_PERIODS, NativePrimitiveId, PeriodicProfilePresentationOptions,
     PeriodicProfilePresentationRequest, ProfileDisplayMode, ProfileError, ProfileSource,
-    ResampleBoundary, TpoCellMode, TpoPresentationOptions, TpoRequest,
+    ResampleBoundary, TpoCellMode, TpoRequest, TpoSeriesOptions,
 };
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
-/// Trading days a TPO covers at most, newest first.
+/// Trading days a TPO chart covers at most, newest first.
 const MAXIMUM_TPO_SESSIONS: usize = 120;
 /// Session or composite volume profiles drawn at most, newest first.
 const MAXIMUM_SESSION_VOLUME_PROFILES: usize = 200;
@@ -30,6 +31,8 @@ const LOOKAHEAD_SESSIONS: usize = 16;
 /// Rows Aeris Charts reserves across every periodic profile on a chart (its crate-private
 /// `MAX_PERIODIC_PRESENTATION_ROWS`); a refused request falls back to fewer sessions.
 const PERIODIC_PROFILE_ROW_BUDGET: usize = 32_768;
+/// The product price series, which the TPO chart type turns into Aeris Charts' TPO series.
+const PRICE_SERIES: u32 = 0;
 
 /// One trading day of the chart instrument, `[open, close)` in UTC seconds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,11 +54,9 @@ pub trait TradingSessionCalendar {
     ) -> Vec<ChartTradingSession>;
 }
 
-/// Which session profile an item names.
+/// Which session profile indicator an item names.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionProfileKind {
-    /// Time price opportunity (market profile) letters or blocks per session.
-    Tpo,
     /// Volume at price per session, or per composite of several sessions.
     Volume,
 }
@@ -65,7 +66,6 @@ impl SessionProfileKind {
     #[must_use]
     pub const fn indicator(self) -> ChartIndicator {
         match self {
-            Self::Tpo => ChartIndicator::Tpo,
             Self::Volume => ChartIndicator::SessionVolumeProfile,
         }
     }
@@ -74,7 +74,6 @@ impl SessionProfileKind {
     #[must_use]
     pub const fn of(indicator: ChartIndicator) -> Option<Self> {
         match indicator {
-            ChartIndicator::Tpo => Some(Self::Tpo),
             ChartIndicator::SessionVolumeProfile => Some(Self::Volume),
             _ => None,
         }
@@ -82,14 +81,12 @@ impl SessionProfileKind {
 
     const fn slot(self) -> usize {
         match self {
-            Self::Tpo => 0,
-            Self::Volume => 1,
+            Self::Volume => 0,
         }
     }
 
     fn legend_title(self) -> &'static str {
         match self {
-            Self::Tpo => tr!(chart_ui::LEGEND_TPO),
             Self::Volume => tr!(chart_ui::LEGEND_SESSION_VOLUME_PROFILE),
         }
     }
@@ -105,8 +102,8 @@ pub enum TpoCells {
     Blocks,
 }
 
-/// Durable TPO settings. Rows follow the instrument's price grid, widened only as far as a
-/// session's range needs.
+/// Durable TPO chart settings. Rows follow the instrument's price grid, widened only as far as
+/// a session's range needs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TpoSettings {
     pub cells: TpoCells,
@@ -199,7 +196,6 @@ impl Default for SessionVolumeProfileSettings {
 /// The settings of one session profile indicator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionProfileSettings {
-    Tpo(TpoSettings),
     Volume(SessionVolumeProfileSettings),
 }
 
@@ -208,7 +204,6 @@ impl SessionProfileSettings {
     #[must_use]
     pub fn default_for(kind: SessionProfileKind) -> Self {
         match kind {
-            SessionProfileKind::Tpo => Self::Tpo(TpoSettings::default()),
             SessionProfileKind::Volume => Self::Volume(SessionVolumeProfileSettings::default()),
         }
     }
@@ -216,7 +211,6 @@ impl SessionProfileSettings {
     #[must_use]
     pub const fn kind(&self) -> SessionProfileKind {
         match self {
-            Self::Tpo(_) => SessionProfileKind::Tpo,
             Self::Volume(_) => SessionProfileKind::Volume,
         }
     }
@@ -224,33 +218,24 @@ impl SessionProfileSettings {
     #[must_use]
     pub fn is_valid(&self) -> bool {
         match self {
-            Self::Tpo(settings) => settings.is_valid(),
             Self::Volume(settings) => settings.is_valid(),
         }
     }
 
     fn session_limit(self) -> usize {
         match self {
-            Self::Tpo(_) => MAXIMUM_TPO_SESSIONS,
             Self::Volume(settings) => settings.session_limit(),
         }
     }
 }
 
-/// The request Aeris Charts drew a profile from. Aeris Charts has no getter for a drawn
-/// primitive's state, so tests read the presentation back by querying the same request.
-#[cfg(test)]
-#[derive(Clone, Debug)]
-enum DrawnRequest {
-    Tpo(TpoRequest),
-    Volume(PeriodicProfilePresentationRequest),
-}
-
 #[derive(Clone, Debug)]
 struct DrawnProfile {
     primitive: NativePrimitiveId,
+    /// Aeris Charts has no getter for a drawn primitive's state, so tests read the presentation
+    /// back by querying the request it was drawn from.
     #[cfg(test)]
-    request: DrawnRequest,
+    request: PeriodicProfilePresentationRequest,
 }
 
 #[derive(Clone, Debug)]
@@ -262,11 +247,22 @@ struct SessionProfile {
     refresh_at: Option<f64>,
 }
 
-/// The chart's session profiles and the calendar they are drawn from.
+/// The TPO chart type's settings and what Aeris Charts' TPO series was last given.
+#[derive(Clone, Debug, Default)]
+struct TpoChart {
+    settings: TpoSettings,
+    /// Whether the TPO series has at least one session to draw.
+    drawn: bool,
+    /// A bar at or after this time (UTC seconds) opens a session the TPO series lacks.
+    refresh_at: Option<f64>,
+}
+
+/// The chart's session profiles, its TPO chart settings and the calendar they are drawn from.
 #[derive(Default)]
 pub(super) struct SessionProfiles {
     calendar: Option<Rc<dyn TradingSessionCalendar>>,
-    profiles: [Option<SessionProfile>; 2],
+    profiles: [Option<SessionProfile>; 1],
+    tpo: TpoChart,
 }
 
 impl SessionProfiles {
@@ -279,18 +275,42 @@ impl SessionProfiles {
     }
 }
 
-const SESSION_PROFILE_KINDS: [SessionProfileKind; 2] =
-    [SessionProfileKind::Tpo, SessionProfileKind::Volume];
+const SESSION_PROFILE_KINDS: [SessionProfileKind; 1] = [SessionProfileKind::Volume];
 
 impl AerisChartView {
     /// Installs the chart instrument's trading-day calendar, or removes it, and redraws the
-    /// session profiles from it.
+    /// session profiles and the TPO from it.
     pub fn set_trading_session_calendar(
         &mut self,
         calendar: Option<Rc<dyn TradingSessionCalendar>>,
     ) {
         self.session_profiles.calendar = calendar;
         self.redraw_session_profiles();
+    }
+
+    /// The TPO chart type's settings. They are kept while another chart type shows.
+    #[must_use]
+    pub const fn tpo_settings(&self) -> TpoSettings {
+        self.session_profiles.tpo.settings
+    }
+
+    /// Replaces the TPO chart type's settings. Returns whether the chart changed: `false` when
+    /// the settings are unchanged or out of range.
+    pub fn set_tpo_settings(&mut self, settings: TpoSettings) -> bool {
+        if !settings.is_valid() || self.session_profiles.tpo.settings == settings {
+            return false;
+        }
+        self.session_profiles.tpo.settings = settings;
+        self.draw_tpo_series();
+        self.mark_user_state_changed();
+        true
+    }
+
+    /// Whether Aeris Charts draws a TPO now: the chart type is TPO and the calendar has a
+    /// trading day under the bars.
+    #[must_use]
+    pub const fn tpo_drawn(&self) -> bool {
+        self.session_profiles.tpo.drawn
     }
 
     /// The settings of a session profile on the chart.
@@ -424,28 +444,99 @@ impl AerisChartView {
         removed
     }
 
-    /// Redraws every session profile from the current bars, chart type, calendar and theme.
+    /// Redraws the TPO and every session profile from the current bars, chart type, calendar
+    /// and theme.
     pub(super) fn redraw_session_profiles(&mut self) {
+        self.draw_tpo_series();
         for kind in SESSION_PROFILE_KINDS {
             self.draw_session_profile(kind);
         }
     }
 
-    /// Redraws the profiles whose newest drawn session the appended bars have left.
+    /// Redraws what the appended bars have carried into a session it does not have yet.
     pub(super) fn refresh_session_profiles_after_append(&mut self) {
         let Some(newest) = self.product_bars.last_time() else {
             return;
         };
+        let opened = |refresh_at: Option<f64>| refresh_at.is_some_and(|at| newest >= at);
+        if opened(self.session_profiles.tpo.refresh_at) {
+            self.draw_tpo_series();
+        }
         for kind in SESSION_PROFILE_KINDS {
-            if self
-                .session_profiles
-                .get(kind)
-                .and_then(|profile| profile.refresh_at)
-                .is_some_and(|refresh_at| newest >= refresh_at)
-            {
+            if opened(
+                self.session_profiles
+                    .get(kind)
+                    .and_then(|profile| profile.refresh_at),
+            ) {
                 self.draw_session_profile(kind);
             }
         }
+    }
+
+    /// Gives Aeris Charts' TPO series its rules, colors and the instrument's trading days.
+    /// Only the TPO chart type has that series; another type draws nothing here.
+    fn draw_tpo_series(&mut self) {
+        let tpo = &mut self.session_profiles.tpo;
+        tpo.drawn = false;
+        tpo.refresh_at = None;
+        let settings = tpo.settings;
+        if self.chart_type != ChartType::Tpo {
+            return;
+        }
+        let projected = self.session_profiles.calendar.clone().and_then(|calendar| {
+            project_sessions(calendar.as_ref(), &self.product_bars, MAXIMUM_TPO_SESSIONS)
+        });
+        let sessions = projected
+            .as_ref()
+            .map_or(&[][..], |projected| &projected.sessions[..]);
+        let boundaries = tpo_row_size(self.price_tick_size(), sessions, &self.product_bars)
+            .map_or_else(Vec::new, |row_size| {
+                self.configure_tpo_series(settings, row_size, sessions)
+            });
+        let drawn = !boundaries.is_empty();
+        if let Err(error) = self.engine.set_tpo_sessions(PRICE_SERIES, boundaries) {
+            diagnostic!("Aeris Charts refused the TPO sessions: {error}");
+        }
+        let tpo = &mut self.session_profiles.tpo;
+        tpo.drawn = drawn;
+        tpo.refresh_at = projected.and_then(|projected| projected.next_open);
+        self.invalidate_series_frame();
+    }
+
+    /// Configures the TPO series and returns the boundaries of the newest sessions that fit
+    /// Aeris Charts' profile bounds; dense history keeps the newest half until they fit.
+    fn configure_tpo_series(
+        &mut self,
+        settings: TpoSettings,
+        row_size: f64,
+        sessions: &[ChartTradingSession],
+    ) -> Vec<ResampleBoundary> {
+        let options = tpo_series_options(settings, row_size, &self.platform);
+        if let Err(error) = self.engine.configure_tpo_series(PRICE_SERIES, options) {
+            diagnostic!("Aeris Charts refused the TPO settings: {error}");
+            return Vec::new();
+        }
+        let mut count = sessions.len();
+        while count > 0 {
+            let boundaries = session_boundaries(&sessions[sessions.len() - count..], 1);
+            let request = TpoRequest {
+                price_series: PRICE_SERIES,
+                boundaries,
+                period_seconds: u32::from(settings.period_minutes) * 60,
+                tick_size: row_size,
+                value_area_percent: f64::from(settings.value_area_percent),
+                initial_balance_periods: u16::from(settings.initial_balance_periods),
+            };
+            match self.engine.tpo_profiles(&request) {
+                Ok(_) => return request.boundaries,
+                Err(ProfileError::LimitExceeded) => count /= 2,
+                Err(error) => {
+                    diagnostic!("Aeris Charts refused the TPO sessions: {error}");
+                    return Vec::new();
+                }
+            }
+        }
+        Vec::new()
     }
 
     fn remove_drawn_session_profile(&mut self, drawn: &DrawnProfile) {
@@ -486,9 +577,6 @@ impl AerisChartView {
             None
         } else {
             match settings {
-                SessionProfileSettings::Tpo(settings) => {
-                    self.install_tpo(settings, &projected.sessions)
-                }
                 SessionProfileSettings::Volume(settings) => {
                     self.install_session_volume_profile(settings, &projected.sessions)
                 }
@@ -499,44 +587,6 @@ impl AerisChartView {
             profile.refresh_at = projected.next_open;
         }
         self.invalidate_series_frame();
-    }
-
-    fn install_tpo(
-        &mut self,
-        settings: TpoSettings,
-        sessions: &[ChartTradingSession],
-    ) -> Option<DrawnProfile> {
-        let row_size = tpo_row_size(self.price_tick_size(), sessions, &self.product_bars)?;
-        let options = tpo_options(settings, &self.platform);
-        let mut count = sessions.len();
-        while count > 0 {
-            let request = TpoRequest {
-                price_series: 0,
-                boundaries: session_boundaries(&sessions[sessions.len() - count..], 1),
-                period_seconds: u32::from(settings.period_minutes) * 60,
-                tick_size: row_size,
-                value_area_percent: f64::from(settings.value_area_percent),
-                initial_balance_periods: u16::from(settings.initial_balance_periods),
-            };
-            #[cfg(test)]
-            let drawn_request = DrawnRequest::Tpo(request.clone());
-            match self.engine.add_tpo_presentation(request, options.clone()) {
-                Ok(primitive) => {
-                    return Some(DrawnProfile {
-                        primitive,
-                        #[cfg(test)]
-                        request: drawn_request,
-                    });
-                }
-                // Dense history passes Aeris Charts' row or print bounds; keep the newest half.
-                Err(ProfileError::LimitExceeded) => count /= 2,
-                Err(error) => {
-                    diagnostic!("Aeris Charts refused the TPO profile: {error}");
-                    return None;
-                }
-            }
-        }
-        None
     }
 
     fn install_session_volume_profile(
@@ -550,7 +600,7 @@ impl AerisChartView {
         while count > 0 {
             let request = PeriodicProfilePresentationRequest {
                 source: ProfileSource::Candles {
-                    price_series: 0,
+                    price_series: PRICE_SERIES,
                     volume_series: self.product_series.volume,
                 },
                 boundaries: session_boundaries(&sessions[sessions.len() - count..], per_profile),
@@ -559,11 +609,12 @@ impl AerisChartView {
                 value_area_percent: f64::from(settings.value_area_percent),
             };
             #[cfg(test)]
-            let drawn_request = DrawnRequest::Volume(request.clone());
-            match self
-                .engine
-                .add_periodic_profile_presentation(0, request, options.clone())
-            {
+            let drawn_request = request.clone();
+            match self.engine.add_periodic_profile_presentation(
+                PRICE_SERIES,
+                request,
+                options.clone(),
+            ) {
                 Ok(primitive) => {
                     return Some(DrawnProfile {
                         primitive,
@@ -581,29 +632,20 @@ impl AerisChartView {
         None
     }
 
-    /// The TPO Aeris Charts draws, read back through the request it was drawn from.
+    /// The profiles Aeris Charts' TPO series draws.
     #[cfg(test)]
     pub(super) fn drawn_tpo_profiles(&self) -> Option<Vec<aeris_charts_engine::TpoSnapshot>> {
-        match &self.session_profiles.get(SessionProfileKind::Tpo)?.drawn {
-            Some(DrawnProfile {
-                request: DrawnRequest::Tpo(request),
-                ..
-            }) => self.engine.tpo_profiles(request).ok(),
-            _ => None,
-        }
+        self.engine.tpo_series_profiles(PRICE_SERIES)
     }
 
-    /// The session boundaries a drawn profile was installed with.
+    /// The session boundaries the drawn session volume profile was installed with.
     #[cfg(test)]
     pub(super) fn drawn_session_boundaries(
         &self,
         kind: SessionProfileKind,
     ) -> Option<Vec<ResampleBoundary>> {
         let drawn = self.session_profiles.get(kind)?.drawn.as_ref()?;
-        Some(match &drawn.request {
-            DrawnRequest::Tpo(request) => request.boundaries.clone(),
-            DrawnRequest::Volume(request) => request.boundaries.clone(),
-        })
+        Some(drawn.request.boundaries.clone())
     }
 
     /// The session volume profiles Aeris Charts draws, read back through their request.
@@ -611,22 +653,26 @@ impl AerisChartView {
     pub(super) fn drawn_session_volume_profiles(
         &self,
     ) -> Option<Vec<aeris_charts_engine::ProfileSnapshot>> {
-        match &self.session_profiles.get(SessionProfileKind::Volume)?.drawn {
-            Some(DrawnProfile {
-                request: DrawnRequest::Volume(request),
-                ..
-            }) => self
-                .engine
-                .periodic_volume_profiles(
-                    request.source,
-                    &request.boundaries,
-                    request.tick_size,
-                    request.row_count,
-                    request.value_area_percent,
-                )
-                .ok(),
-            _ => None,
-        }
+        let request = &self
+            .session_profiles
+            .get(SessionProfileKind::Volume)?
+            .drawn
+            .as_ref()?
+            .request;
+        self.engine
+            .periodic_volume_profiles(
+                request.source,
+                &request.boundaries,
+                request.tick_size,
+                request.row_count,
+                request.value_area_percent,
+            )
+            .ok()
+    }
+
+    #[cfg(test)]
+    pub(super) fn tpo_refresh_at(&self) -> Option<f64> {
+        self.session_profiles.tpo.refresh_at
     }
 }
 
@@ -690,13 +736,13 @@ fn session_boundaries(
 }
 
 /// A TPO row on the instrument's price grid, as many ticks wide as keeps the widest session
-/// near [`TPO_TARGET_ROWS`] rows.
+/// near [`TPO_TARGET_ROWS`] rows. `None` without a session or a valid grid.
 fn tpo_row_size(
     tick: f64,
     sessions: &[ChartTradingSession],
     bars: &ProductPriceBars,
 ) -> Option<f64> {
-    if !tick.is_finite() || tick <= 0.0 {
+    if sessions.is_empty() || !tick.is_finite() || tick <= 0.0 {
         return None;
     }
     let widest = sessions
@@ -713,9 +759,17 @@ fn tpo_row_size(
     (row_size.is_finite() && row_size > 0.0).then_some(row_size)
 }
 
-fn tpo_options(settings: TpoSettings, theme: &AerisTheme) -> TpoPresentationOptions {
+fn tpo_series_options(
+    settings: TpoSettings,
+    row_size: f64,
+    theme: &AerisTheme,
+) -> TpoSeriesOptions {
     let colors = theme.colors;
-    TpoPresentationOptions {
+    TpoSeriesOptions {
+        period_seconds: u32::from(settings.period_minutes) * 60,
+        tick_size: row_size,
+        value_area_percent: f64::from(settings.value_area_percent),
+        initial_balance_periods: u16::from(settings.initial_balance_periods),
         mode: match settings.cells {
             TpoCells::Letters => TpoCellMode::Letters,
             TpoCells::Blocks => TpoCellMode::Blocks,

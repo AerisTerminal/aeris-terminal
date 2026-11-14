@@ -1124,16 +1124,6 @@ fn persisted_session_profile_settings(
     settings: SessionProfileSettings,
 ) -> WorkspaceSessionProfileState {
     match settings {
-        SessionProfileSettings::Tpo(tpo) => WorkspaceSessionProfileState {
-            tpo_cells: match tpo.cells {
-                TpoCells::Letters => 0,
-                TpoCells::Blocks => 1,
-            },
-            tpo_period_minutes: u32::from(tpo.period_minutes),
-            tpo_initial_balance_periods: u32::from(tpo.initial_balance_periods),
-            value_area_percent: u32::from(tpo.value_area_percent),
-            ..WorkspaceSessionProfileState::default()
-        },
         SessionProfileSettings::Volume(volume) => WorkspaceSessionProfileState {
             value_area_percent: u32::from(volume.value_area_percent),
             sessions_per_profile: u32::from(volume.sessions_per_profile),
@@ -1151,27 +1141,85 @@ fn restored_session_profile_settings(
     kind: SessionProfileKind,
     state: &WorkspaceSessionProfileState,
 ) -> Option<SessionProfileSettings> {
-    let value_area_percent = u8::try_from(state.value_area_percent).ok()?;
     let settings = match kind {
-        SessionProfileKind::Tpo => SessionProfileSettings::Tpo(TpoSettings {
-            cells: match state.tpo_cells {
-                0 => TpoCells::Letters,
-                1 => TpoCells::Blocks,
-                _ => return None,
-            },
-            period_minutes: u16::try_from(state.tpo_period_minutes).ok()?,
-            value_area_percent,
-            initial_balance_periods: u8::try_from(state.tpo_initial_balance_periods).ok()?,
-        }),
         SessionProfileKind::Volume => {
             SessionProfileSettings::Volume(SessionVolumeProfileSettings {
                 sessions_per_profile: u8::try_from(state.sessions_per_profile).ok()?,
                 row_count: u16::try_from(state.row_count).ok()?,
-                value_area_percent,
+                value_area_percent: u8::try_from(state.value_area_percent).ok()?,
                 show_developing: state.show_developing,
                 extend_naked_levels: state.extend_naked_levels,
             })
         }
+    };
+    settings.is_valid().then_some(settings)
+}
+
+/// The timeframes a TPO chart loads, one per TPO period, in minutes.
+const TPO_PERIOD_INTERVALS: [(u16, ChartInterval); 6] = [
+    (5, ChartInterval::Minute5),
+    (15, ChartInterval::Minute15),
+    (30, ChartInterval::Minute30),
+    (60, ChartInterval::Hour1),
+    (120, ChartInterval::Hour2),
+    (240, ChartInterval::Hour4),
+];
+
+/// The timeframe a TPO of `period_minutes` loads among those the provider offers (all of them
+/// when it publishes no list): the longest that is not longer than the period, so every bar
+/// falls inside one letter, else the shortest. `None` when it offers none.
+fn tpo_period_interval(period_minutes: u16, offered: &[ChartInterval]) -> Option<ChartInterval> {
+    let offered = || {
+        TPO_PERIOD_INTERVALS
+            .into_iter()
+            .filter(|(_, interval)| offered.is_empty() || offered.contains(interval))
+    };
+    offered()
+        .filter(|(minutes, _)| *minutes <= period_minutes)
+        .max_by_key(|(minutes, _)| *minutes)
+        .or_else(|| offered().min_by_key(|(minutes, _)| *minutes))
+        .map(|(_, interval)| interval)
+}
+
+/// The TPO period, in minutes, a timeframe choice on a TPO chart stands for: its length,
+/// clamped to the TPO periods. Tick and calendar-month bars stand for none.
+fn tpo_period_minutes(interval: ChartInterval) -> Option<u16> {
+    let aeris_market_data::ChartAggregation::FixedSeconds(seconds) = interval.aggregation() else {
+        return None;
+    };
+    let minutes = u16::try_from(seconds.get() / 60).unwrap_or(u16::MAX);
+    TPO_PERIOD_INTERVALS
+        .into_iter()
+        .min_by_key(|(period, _)| period.abs_diff(minutes))
+        .map(|(period, _)| period)
+}
+
+/// The TPO chart type's settings in the `tpo_*` and value-area fields they have always used.
+pub(super) fn persisted_tpo_settings(settings: TpoSettings) -> WorkspaceSessionProfileState {
+    WorkspaceSessionProfileState {
+        tpo_cells: match settings.cells {
+            TpoCells::Letters => 0,
+            TpoCells::Blocks => 1,
+        },
+        tpo_period_minutes: u32::from(settings.period_minutes),
+        tpo_initial_balance_periods: u32::from(settings.initial_balance_periods),
+        value_area_percent: u32::from(settings.value_area_percent),
+        ..WorkspaceSessionProfileState::default()
+    }
+}
+
+/// Saved TPO settings; a value outside its accepted range is rejected so a damaged layout
+/// opens the TPO on its defaults instead of a partial guess.
+pub(super) fn restored_tpo_settings(state: &WorkspaceSessionProfileState) -> Option<TpoSettings> {
+    let settings = TpoSettings {
+        cells: match state.tpo_cells {
+            0 => TpoCells::Letters,
+            1 => TpoCells::Blocks,
+            _ => return None,
+        },
+        period_minutes: u16::try_from(state.tpo_period_minutes).ok()?,
+        value_area_percent: u8::try_from(state.value_area_percent).ok()?,
+        initial_balance_periods: u8::try_from(state.tpo_initial_balance_periods).ok()?,
     };
     settings.is_valid().then_some(settings)
 }
@@ -1619,7 +1667,6 @@ fn default_runtime_study_contract(
         ),
         ChartIndicator::Volume
         | ChartIndicator::VolumeProfile
-        | ChartIndicator::Tpo
         | ChartIndicator::SessionVolumeProfile
         | ChartIndicator::Builtin(_) => {
             return None;
@@ -1915,6 +1962,11 @@ impl PanePresentation {
             .and_then(restored_order_flow_settings);
         let legend = restored_chart_legend(state.legend);
         let pane_heights = restored_pane_heights(&state.pane_heights);
+        let tpo = state
+            .tpo
+            .as_ref()
+            .and_then(restored_tpo_settings)
+            .unwrap_or_default();
         chart.update(cx, |chart, _| {
             let mut failed = chart.set_time_zone(&state.time_zone).is_err();
             failed |= chart
@@ -1927,6 +1979,8 @@ impl PanePresentation {
             if let Some(order_flow) = order_flow {
                 failed |= chart.set_order_flow_settings(order_flow).is_err();
             }
+            // Before the chart type, so a restored TPO chart is drawn once with its settings.
+            chart.set_tpo_settings(tpo);
             if let Some(chart_type) = chart_type {
                 chart.set_chart_type(chart_type);
             }
@@ -2007,6 +2061,7 @@ impl WorkspaceSurface {
             order_flow: Some(persisted_order_flow_settings(chart.order_flow_settings())),
             legend: Some(persisted_chart_legend(chart.legend_options())),
             pane_heights: persisted_pane_heights(&chart.pane_heights()),
+            tpo: Some(persisted_tpo_settings(chart.tpo_settings())),
             ..WorkspaceChartState::default()
         };
         self.persist_pane_fields(&mut state);
@@ -2512,6 +2567,7 @@ impl WorkspaceSurface {
         interval: ChartInterval,
         cx: &mut Context<Self>,
     ) -> bool {
+        let interval = self.tpo_interval_for_selection(interval, cx);
         if !Self::plan_offers_interval(interval) {
             self.series_message = tr!(workspace::TIMEFRAME_REQUIRES_PLAN).to_string();
             Self::post_indicator_failure(
@@ -3472,6 +3528,8 @@ impl WorkspaceSurface {
                 if existing.is_none() || swapping =>
             {
                 self.install_snapshot_chart(&snapshot, cx);
+                // A restored or carried TPO chart saved on another timeframe loads its period.
+                self.sync_tpo_interval(cx);
                 ChartState::Ready
             }
             (Some(_), _) if swapping => {
@@ -5653,6 +5711,94 @@ impl WorkspaceSurface {
             .map(|chart| chart.read(cx).order_flow_settings())
     }
 
+    pub(super) fn chart_tpo_settings(&self, cx: &App) -> Option<TpoSettings> {
+        self.chart
+            .as_ref()
+            .map(|chart| chart.read(cx).tpo_settings())
+    }
+
+    /// Hands the TPO chart type's settings to the chart; every choice the settings panel offers
+    /// is inside the range the chart accepts. A TPO chart then loads bars of the new period.
+    pub(super) fn set_chart_tpo_settings(&mut self, settings: TpoSettings, cx: &mut Context<Self>) {
+        if self.store_chart_tpo_settings(settings, cx) {
+            self.sync_tpo_interval(cx);
+        }
+    }
+
+    fn store_chart_tpo_settings(&mut self, settings: TpoSettings, cx: &mut Context<Self>) -> bool {
+        let Some(chart) = &self.chart else {
+            return false;
+        };
+        let changed = chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_tpo_settings(settings);
+            if changed {
+                chart_cx.notify();
+            }
+            changed
+        });
+        if changed {
+            self.persistence.mark_dirty();
+        }
+        changed
+    }
+
+    /// A TPO chart's bars are its letter period: one bar is one TPO period, so a single history
+    /// load covers weeks of sessions instead of the one day a one-minute chart holds. Selects
+    /// the period's timeframe (or the provider's nearest) when the chart shows another.
+    fn sync_tpo_interval(&mut self, cx: &mut Context<Self>) {
+        if self.chart_type(cx) != ChartType::Tpo || self.product.is_none() {
+            return;
+        }
+        let Some(settings) = self.chart_tpo_settings(cx) else {
+            return;
+        };
+        let Some(interval) = tpo_period_interval(
+            settings.period_minutes,
+            super::provider_intervals(self.provider),
+        ) else {
+            return;
+        };
+        let pending = self.chart_pane_controller.pending_interval();
+        if pending.unwrap_or(self.interval) != interval {
+            self.select_interval(interval, cx);
+        }
+    }
+
+    /// On a TPO chart a timeframe choice is a TPO period choice: the period follows the
+    /// timeframe, snapped to the periods a TPO offers, and the chart loads that period's bars.
+    fn tpo_interval_for_selection(
+        &mut self,
+        interval: ChartInterval,
+        cx: &mut Context<Self>,
+    ) -> ChartInterval {
+        if self.chart_type(cx) != ChartType::Tpo {
+            return interval;
+        }
+        let (Some(settings), Some(minutes)) =
+            (self.chart_tpo_settings(cx), tpo_period_minutes(interval))
+        else {
+            return interval;
+        };
+        let offered = super::provider_intervals(self.provider);
+        let Some(target) = tpo_period_interval(minutes, offered) else {
+            return interval;
+        };
+        // The chart already loads this period's bars: keep a saved period such as 10 minutes.
+        if tpo_period_interval(settings.period_minutes, offered) == Some(target) {
+            return target;
+        }
+        if let Some(period_minutes) = tpo_period_minutes(target) {
+            self.store_chart_tpo_settings(
+                TpoSettings {
+                    period_minutes,
+                    ..settings
+                },
+                cx,
+            );
+        }
+        target
+    }
+
     pub(super) const fn chart_trading_visibility(&self) -> ChartTradingVisibilitySettings {
         self.chart_trading_visibility
     }
@@ -6108,6 +6254,7 @@ impl WorkspaceSurface {
         if self.order_flow.tape().is_some() {
             self.apply_trade_tape_to_chart(TapeApply::Reset, cx);
         }
+        self.sync_tpo_interval(cx);
         Self::emit_chart_chrome_changed(cx);
         cx.notify();
     }

@@ -854,16 +854,21 @@ Chart behavior is owned by Aeris Charts, never re-implemented here:
   with the chart type; raw OHLC stays the bar data. Renko, Kagi, Point & Figure and Line Break
   are not offered: Aeris Charts' synthetic transforms produce a sequence domain the time-based
   product series cannot carry, and Terminal must not rebuild bars to compensate.
-- The TPO and the session volume profile are Aeris Charts' TPO and periodic profile presentations
-  over the product bars (`view/session_profiles.rs`); they draw only for chart types with OHLC
-  bars. The host supplies only the trading days through `TradingSessionCalendar`, which the
-  desktop implements over the market runtime's recurring calendar
-  (`MarketService::trading_sessions`; a continuous market's day starts at 00:00 UTC, an unknown
-  calendar draws nothing), a row size on the price grid and theme colors. Their settings persist in
-  `WorkspaceChartIndicatorState.session_profile` (tag 4); a document without it keeps its bytes
-  and a damaged value restores the defaults. Neither enters the undo history, and a settings,
-  theme, chart-type or session change replaces the drawn presentation because Aeris Charts has
-  no update operation for them. Profile drawings read their source from Aeris Charts: the product
+- The TPO is a chart type (`ChartType::Tpo`), not an indicator: it turns the product price
+  series into Aeris Charts' TPO series (`SeriesKind::Tpo`), which draws one profile per trading
+  session in place of candles. The session volume profile is Aeris Charts' periodic profile
+  presentation over the product bars and draws for chart types with OHLC bars, the TPO
+  included. Both live in `view/session_profiles.rs`. The host supplies only the trading days
+  through `TradingSessionCalendar`, which the desktop implements over the market runtime's
+  recurring calendar (`MarketService::trading_sessions`; a continuous market's day starts at
+  00:00 UTC, an unknown calendar draws nothing), a row size on the price grid and theme colors.
+  The TPO settings persist in `WorkspaceChartState.tpo` (tag 23) and are edited in the chart
+  settings panel; the session volume profile's persist in
+  `WorkspaceChartIndicatorState.session_profile` (tag 4). A document without either keeps its
+  bytes and a damaged value restores the defaults. Workspace schema 7 moves each pre-7 `tpo`
+  indicator entry's settings to `WorkspaceChartState.tpo` and, when it was shown on a candle,
+  Heikin Ashi or bar chart, makes that chart a TPO chart; indicator templates drop the entry.
+  Neither enters the undo history. Profile drawings read their source from Aeris Charts: the product
   bars register their volume with `set_series_volume_source`.
 - Order-flow sweep classification and tape continuity are runtime-owned: chart integration's
   `apply_order_flow_trades` takes the runtime's `Reset`/`Append` decision as a

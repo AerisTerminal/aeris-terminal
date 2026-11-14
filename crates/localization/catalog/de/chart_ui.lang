@@ -13,7 +13,6 @@ indicator_macd = MACD
 indicator_stochastic = Stochastik
 indicator_atr = Average True Range
 indicator_volume_profile = Volumenprofil (sichtbarer Bereich)
-indicator_tpo = TPO-Profil (Market Profile)
 indicator_session_volume_profile = Volumenprofil (Sitzung)
 
 # Namen der integrierten Indikatoren von Aeris Charts.
@@ -88,7 +87,6 @@ params_period_14 = Periode 14
 params_macd = Schnell 12 · Langsam 26 · Signal 9
 params_stochastic = %K 14 · %D 3
 params_volume_profile = Zeilen 48 · Value Area 70%
-params_tpo = Buchstaben · 30 Minuten · Value Area 70%
 params_session_volume_profile = Je Sitzung · Zeilen 48 · Value Area 70%
 params_alma = Periode 14 · Offset 0.85 · Sigma 6
 params_kama = Periode 10 · Schnell 2 · Langsam 30
@@ -121,6 +119,7 @@ chart_type_hollow_candles = Hohle Kerzen
 chart_type_hollow_candles_bullish = Hohle Kerzen: nur steigend
 chart_type_hollow_candles_bearish = Hohle Kerzen: nur fallend
 chart_type_footprint = Footprint
+chart_type_tpo = TPO (Market Profile)
 chart_type_bars = Balken
 chart_type_line = Linie
 chart_type_line_with_markers = Linie mit Markierungen
@@ -142,7 +141,6 @@ stamp_target = Ziel
 # Legendenzeilen des Charts und ihre Steuerelemente.
 legend_waiting_for_order_flow = Warte auf Order-Flow
 legend_volume_profile = Volumenprofil
-legend_tpo = TPO
 legend_session_volume_profile = Sitzungs-Volumenprofil
 legend_big_trades = Große Trades
 legend_order_book = Orderbuch

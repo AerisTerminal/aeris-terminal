@@ -13,7 +13,6 @@ indicator_macd = MACD
 indicator_stochastic = 随机指标
 indicator_atr = 平均真实波幅
 indicator_volume_profile = 成交量分布（可见范围）
-indicator_tpo = TPO 分布（市场轮廓）
 indicator_session_volume_profile = 成交量分布（交易时段）
 
 # Aeris Charts 内置指标名称。
@@ -88,7 +87,6 @@ params_period_14 = 周期 14
 params_macd = 快线 12 · 慢线 26 · 信号 9
 params_stochastic = %K 14 · %D 3
 params_volume_profile = 行数 48 · 价值区域 70%
-params_tpo = 字母 · 30 分钟 · 价值区域 70%
 params_session_volume_profile = 每个时段 · 行数 48 · 价值区域 70%
 params_alma = 周期 14 · 偏移 0.85 · Sigma 6
 params_kama = 周期 10 · 快线 2 · 慢线 30
@@ -121,6 +119,7 @@ chart_type_hollow_candles = 空心 K 线图
 chart_type_hollow_candles_bullish = 空心 K 线图：仅阳线
 chart_type_hollow_candles_bearish = 空心 K 线图：仅阴线
 chart_type_footprint = 足迹图
+chart_type_tpo = TPO（市场轮廓）
 chart_type_bars = 美国线
 chart_type_line = 折线图
 chart_type_line_with_markers = 带标记的折线图
@@ -142,7 +141,6 @@ stamp_target = 靶心
 # 图表图例行及行控件。
 legend_waiting_for_order_flow = 正在等待订单流
 legend_volume_profile = 成交量分布
-legend_tpo = TPO
 legend_session_volume_profile = 时段成交量分布
 legend_big_trades = 大单成交
 legend_order_book = 订单簿

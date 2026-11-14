@@ -9,7 +9,9 @@
 //! payload as input and `local_state` reads it at the chain boundary. `local_state`'s
 //! sanitize pass stays the last step after the chain.
 
-use aeris_chart_integration::{AerisChartTheme, ChartColor, ChartIndicator, ChartThemeColors};
+use aeris_chart_integration::{
+    AerisChartTheme, ChartColor, ChartIndicator, ChartThemeColors, ChartType,
+};
 use aeris_contracts::{
     WorkspaceChartAppearanceState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspacePaneState, WorkspaceState,
@@ -37,7 +39,22 @@ use super::workspace_surface::{
 ///   theme's current up and down colors.
 /// - 6: execution marks and left-extended order lines start off; every chart and template
 ///   turns both off once, and a later choice to show them persists.
-pub(super) const CURRENT_WORKSPACE_SCHEMA: u32 = 6;
+/// - 7: the TPO is a chart type, not an indicator. A chart's TPO indicator entry moves its
+///   settings to `WorkspaceChartState.tpo`, and a shown one on a candle or bar chart makes the
+///   chart a TPO chart; indicator templates drop the entry.
+pub(super) const CURRENT_WORKSPACE_SCHEMA: u32 = 7;
+
+/// The identifier the TPO indicator was saved under before schema 7.
+const LEGACY_TPO_INDICATOR: &str = "tpo";
+/// Chart types a pre-7 TPO indicator drew on (it needed OHLC bars on the price series).
+const LEGACY_TPO_CHART_TYPES: [&str; 6] = [
+    "candles",
+    "hollow_candles",
+    "hollow_candles_bullish",
+    "hollow_candles_bearish",
+    "heikin_ashi",
+    "bars",
+];
 
 /// The schema whose step folds the legacy chart-chrome file into the document.
 const CHART_CHROME_FOLD_SCHEMA: u32 = 4;
@@ -147,6 +164,9 @@ pub(super) fn migrate_workspace(
     }
     if from < 6 {
         start_trading_overlays_off(&mut workspace);
+    }
+    if from < 7 {
+        move_tpo_indicators_to_the_chart_type(&mut workspace);
     }
     workspace.schema_revision = CURRENT_WORKSPACE_SCHEMA;
     workspace
@@ -424,6 +444,36 @@ fn start_trading_overlays_off(workspace: &mut WorkspaceState) {
     for template in &mut workspace.chart_settings_templates {
         template.show_execution_marks = Some(false);
         template.extend_order_lines_left = Some(false);
+    }
+}
+
+/// Schema 7: the first TPO indicator entry of each chart becomes the chart's TPO settings; if
+/// it was shown on a chart type it drew on, the chart opens as a TPO chart. A chart that
+/// already holds TPO settings keeps them. Templates carry no chart type, so their entries go.
+fn move_tpo_indicators_to_the_chart_type(workspace: &mut WorkspaceState) {
+    for chart in workspace_panes(workspace).filter_map(|pane| pane.chart.as_mut()) {
+        let Some(index) = chart
+            .indicators
+            .iter()
+            .position(|item| item.kind == LEGACY_TPO_INDICATOR)
+        else {
+            continue;
+        };
+        let item = chart.indicators.remove(index);
+        chart
+            .indicators
+            .retain(|item| item.kind != LEGACY_TPO_INDICATOR);
+        if chart.tpo.is_none() {
+            chart.tpo = item.session_profile;
+        }
+        if item.visible && LEGACY_TPO_CHART_TYPES.contains(&chart.chart_type.as_str()) {
+            chart.chart_type = ChartType::Tpo.identifier().to_string();
+        }
+    }
+    for template in &mut workspace.indicator_templates {
+        template
+            .indicators
+            .retain(|item| item.kind != LEGACY_TPO_INDICATOR);
     }
 }
 
@@ -856,6 +906,134 @@ mod tests {
         }
         let again = migrate_workspace(migrated.clone(), CURRENT_WORKSPACE_SCHEMA, None);
         assert_eq!(again, migrated, "a current document is never re-migrated");
+    }
+
+    fn legacy_tpo(
+        visible: bool,
+        period_minutes: u32,
+    ) -> aeris_contracts::WorkspaceChartIndicatorState {
+        aeris_contracts::WorkspaceChartIndicatorState {
+            kind: LEGACY_TPO_INDICATOR.to_string(),
+            visible,
+            volume: None,
+            session_profile: Some(aeris_contracts::WorkspaceSessionProfileState {
+                tpo_cells: 1,
+                tpo_period_minutes: period_minutes,
+                tpo_initial_balance_periods: 3,
+                value_area_percent: 68,
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn session_volume_profile() -> aeris_contracts::WorkspaceChartIndicatorState {
+        aeris_contracts::WorkspaceChartIndicatorState {
+            kind: ChartIndicator::SessionVolumeProfile
+                .identifier()
+                .to_string(),
+            visible: true,
+            volume: None,
+            session_profile: None,
+        }
+    }
+
+    #[test]
+    fn schema_7_tpo_indicators_become_the_tpo_chart_type_with_their_settings() {
+        let charts = [
+            // A shown TPO on candles opens as a TPO chart with its settings.
+            (
+                "candles",
+                vec![legacy_tpo(true, 15), session_volume_profile()],
+                "tpo",
+                Some(15),
+            ),
+            // A hidden one keeps the chart type but moves its settings.
+            ("bars", vec![legacy_tpo(false, 60)], "bars", Some(60)),
+            // On a type it never drew on (line), the chart type stays.
+            ("line", vec![legacy_tpo(true, 5)], "line", Some(5)),
+            // A duplicate entry is dropped; the first one's settings win.
+            (
+                "heikin_ashi",
+                vec![legacy_tpo(true, 10), legacy_tpo(true, 120)],
+                "tpo",
+                Some(10),
+            ),
+            // No TPO: nothing changes.
+            ("candles", vec![session_volume_profile()], "candles", None),
+        ];
+        for (chart_type, indicators, expected_type, expected_period) in charts {
+            let mut workspace = workspace_with_chart(WorkspaceChartState {
+                chart_type: chart_type.to_string(),
+                indicators,
+                ..WorkspaceChartState::default()
+            });
+            workspace.saved_layouts[0].tab = Some(workspace.workspace_tabs[0].clone());
+            workspace.indicator_templates =
+                vec![aeris_contracts::WorkspaceIndicatorTemplateState {
+                    name: "template".to_string(),
+                    indicators: vec![legacy_tpo(true, 30), session_volume_profile()],
+                    ..Default::default()
+                }];
+            workspace.schema_revision = 6;
+
+            let migrated = migrate_workspace(workspace, 6, None);
+            let saved_chart = migrated.saved_layouts[0]
+                .tab
+                .as_ref()
+                .and_then(|tab| tab.panes[0].chart.clone())
+                .expect("saved layout chart");
+            for chart in [
+                migrated.workspace_tabs[0].panes[0]
+                    .chart
+                    .clone()
+                    .expect("migrated chart"),
+                saved_chart,
+            ] {
+                assert_eq!(chart.chart_type, expected_type, "{chart_type}");
+                assert_eq!(
+                    chart.tpo.as_ref().map(|tpo| tpo.tpo_period_minutes),
+                    expected_period,
+                    "{chart_type}"
+                );
+                assert!(
+                    chart
+                        .indicators
+                        .iter()
+                        .all(|item| item.kind != LEGACY_TPO_INDICATOR),
+                    "{chart_type}"
+                );
+            }
+            assert_eq!(
+                migrated.indicator_templates[0]
+                    .indicators
+                    .iter()
+                    .map(|item| item.kind.as_str())
+                    .collect::<Vec<_>>(),
+                vec![ChartIndicator::SessionVolumeProfile.identifier()],
+                "templates drop the TPO and keep the rest"
+            );
+            let again = migrate_workspace(migrated.clone(), CURRENT_WORKSPACE_SCHEMA, None);
+            assert_eq!(again, migrated, "a current document is never re-migrated");
+        }
+    }
+
+    #[test]
+    fn schema_7_keeps_tpo_settings_a_chart_already_holds() {
+        let mut workspace = workspace_with_chart(WorkspaceChartState {
+            chart_type: "candles".to_string(),
+            indicators: vec![legacy_tpo(true, 15)],
+            tpo: legacy_tpo(true, 120).session_profile,
+            ..WorkspaceChartState::default()
+        });
+        workspace.schema_revision = 6;
+        let migrated = migrate_workspace(workspace, 6, None);
+        let chart = migrated.workspace_tabs[0].panes[0]
+            .chart
+            .clone()
+            .expect("migrated chart");
+        assert_eq!(chart.tpo.map(|tpo| tpo.tpo_period_minutes), Some(120));
+        assert_eq!(chart.chart_type, "tpo");
+        assert_eq!(chart.indicators, Vec::new());
     }
 
     #[test]

@@ -1211,6 +1211,17 @@ mod tests {
                 content: "volume".to_string(),
                 share_basis_points: 1_200,
             }],
+            tpo: Some(round_trip_tpo()),
+        }
+    }
+
+    fn round_trip_tpo() -> aeris_contracts::WorkspaceSessionProfileState {
+        aeris_contracts::WorkspaceSessionProfileState {
+            tpo_cells: 1,
+            tpo_period_minutes: 15,
+            tpo_initial_balance_periods: 3,
+            value_area_percent: 68,
+            ..aeris_contracts::WorkspaceSessionProfileState::default()
         }
     }
 

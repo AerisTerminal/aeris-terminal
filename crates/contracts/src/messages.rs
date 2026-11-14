@@ -620,6 +620,10 @@ pub struct WorkspaceChartState {
     /// workspaces) keeps the chart's default pane heights.
     #[prost(message, repeated, tag = "22")]
     pub pane_heights: Vec<WorkspaceChartPaneHeightState>,
+    /// The TPO chart type's settings, in the `tpo_*` and value-area fields. Absent (and in
+    /// documents written before the TPO became a chart type) restores the TPO defaults.
+    #[prost(message, optional, tag = "23")]
+    pub tpo: Option<WorkspaceSessionProfileState>,
 }
 
 /// The height of one separate chart pane, kept by what the pane shows so a rebuilt chart
@@ -984,8 +988,8 @@ pub struct WorkspaceChartIndicatorState {
     /// Present only for the volume indicator; absent restores its defaults.
     #[prost(message, optional, tag = "3")]
     pub volume: Option<WorkspaceVolumeSettingsState>,
-    /// Present only for the TPO and session volume profile indicators; absent restores
-    /// their defaults.
+    /// Present only for the session volume profile indicator (and the TPO indicator of
+    /// documents before schema 7); absent restores its defaults.
     #[prost(message, optional, tag = "4")]
     pub session_profile: Option<WorkspaceSessionProfileState>,
 }

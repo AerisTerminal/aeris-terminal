@@ -1,34 +1,26 @@
-//! Settings dialog of the session profiles: the TPO (market profile) and the session or
-//! composite volume profile. Every choice is inside the bounds the chart accepts, so each edit
-//! previews at once through the chart's session profile owner; Apply keeps what the chart shows
-//! and Cancel restores the settings the dialog opened with.
+//! Settings dialog of the session volume profile, per session or composite. Every choice is
+//! inside the bounds the chart accepts, so each edit previews at once through the chart's
+//! session profile owner; Apply keeps what the chart shows and Cancel restores the settings the
+//! dialog opened with. The TPO is a chart type whose settings live in the chart settings panel.
 
 use super::big_trades_dialog::{
-    DropdownChoice, SettingDropdown, dropdown_choices, setting_row, settings_group, settings_groups,
+    DropdownChoice, SettingDropdown, setting_row, settings_group, settings_groups,
 };
 use super::*;
-use aeris_localization::{Text, chart_menu, common, tr};
+use aeris_localization::{chart_menu, common, tr};
 
-const TPO_CELL_CHOICES: [(Text, TpoCells); 2] = [
-    (chart_menu::TPO_LETTERS, TpoCells::Letters),
-    (chart_menu::TPO_BLOCKS, TpoCells::Blocks),
-];
-const TPO_PERIOD_MINUTES: [u16; 6] = [5, 10, 15, 30, 60, 120];
-const TPO_INITIAL_BALANCE_PERIODS: [u8; 4] = [1, 2, 3, 4];
 const VALUE_AREA_PERCENTS: [u8; 6] = [60, 65, 68, 70, 75, 80];
 const SESSIONS_PER_PROFILE: [u8; 6] = [1, 2, 3, 5, 10, 20];
 const PROFILE_ROW_COUNTS: [u16; 6] = [24, 48, 72, 96, 120, 240];
 
 fn profile_title(kind: SessionProfileKind) -> &'static str {
     match kind {
-        SessionProfileKind::Tpo => tr!(chart_menu::TPO_TITLE),
         SessionProfileKind::Volume => tr!(chart_menu::SESSION_VOLUME_PROFILE_TITLE),
     }
 }
 
 fn profile_removed_message(kind: SessionProfileKind) -> &'static str {
     match kind {
-        SessionProfileKind::Tpo => tr!(chart_menu::TPO_REMOVED),
         SessionProfileKind::Volume => tr!(chart_menu::SESSION_VOLUME_PROFILE_REMOVED),
     }
 }
@@ -154,17 +146,6 @@ impl WorkspaceSurface {
         }
     }
 
-    fn edit_tpo_draft(&mut self, edit: impl FnOnce(&mut TpoSettings), cx: &mut Context<Self>) {
-        self.edit_session_profile_draft(
-            |draft| {
-                if let SessionProfileSettings::Tpo(tpo) = draft {
-                    edit(tpo);
-                }
-            },
-            cx,
-        );
-    }
-
     fn edit_volume_profile_draft(
         &mut self,
         edit: impl FnOnce(&mut SessionVolumeProfileSettings),
@@ -172,9 +153,8 @@ impl WorkspaceSurface {
     ) {
         self.edit_session_profile_draft(
             |draft| {
-                if let SessionProfileSettings::Volume(volume) = draft {
-                    edit(volume);
-                }
+                let SessionProfileSettings::Volume(volume) = draft;
+                edit(volume);
             },
             cx,
         );
@@ -257,107 +237,6 @@ fn switch_row(
                 }),
         )
         .into_any_element()
-}
-
-fn tpo_groups(
-    app: &Entity<WorkspaceSurface>,
-    dialog: &SessionProfileDialogState,
-    tpo: TpoSettings,
-    theme: &AerisTheme,
-) -> [AnyElement; 2] {
-    let open_menu = dialog.menu.as_deref();
-    let period = SettingDropdown {
-        menu: "tpo_period",
-        label: tr!(chart_menu::TPO_PERIOD),
-        open_menu,
-        enabled: true,
-        choices: numeric_choices(&TPO_PERIOD_MINUTES, tpo.period_minutes, |minutes| {
-            tr!(chart_menu::PROFILE_MINUTES, minutes = minutes).into()
-        }),
-    }
-    .render(
-        app,
-        |surface, minutes, cx| surface.edit_tpo_draft(|tpo| tpo.period_minutes = minutes, cx),
-        theme,
-    );
-    let value_area = SettingDropdown {
-        menu: "tpo_value_area",
-        label: tr!(chart_menu::VALUE_AREA),
-        open_menu,
-        enabled: true,
-        choices: numeric_choices(&VALUE_AREA_PERCENTS, tpo.value_area_percent, percent_label),
-    }
-    .render(
-        app,
-        |surface, percent, cx| surface.edit_tpo_draft(|tpo| tpo.value_area_percent = percent, cx),
-        theme,
-    );
-    let initial_balance = SettingDropdown {
-        menu: "tpo_initial_balance",
-        label: tr!(chart_menu::INITIAL_BALANCE),
-        open_menu,
-        enabled: true,
-        choices: numeric_choices(
-            &TPO_INITIAL_BALANCE_PERIODS,
-            tpo.initial_balance_periods,
-            count_label,
-        ),
-    }
-    .render(
-        app,
-        |surface, periods, cx| {
-            surface.edit_tpo_draft(|tpo| tpo.initial_balance_periods = periods, cx);
-        },
-        theme,
-    );
-    let cells = SettingDropdown {
-        menu: "tpo_cells",
-        label: tr!(chart_menu::TPO_CELLS),
-        open_menu,
-        enabled: true,
-        choices: dropdown_choices(&TPO_CELL_CHOICES, |cells| tpo.cells == cells),
-    }
-    .render(
-        app,
-        |surface, cells, cx| surface.edit_tpo_draft(|tpo| tpo.cells = cells, cx),
-        theme,
-    );
-    [
-        settings_group(
-            tr!(chart_menu::CALCULATION),
-            [
-                setting_row(
-                    tr!(chart_menu::TPO_PERIOD),
-                    tr!(chart_menu::TPO_PERIOD_DESCRIPTION),
-                    period,
-                    theme,
-                ),
-                setting_row(
-                    tr!(chart_menu::VALUE_AREA),
-                    tr!(chart_menu::VALUE_AREA_DESCRIPTION),
-                    value_area,
-                    theme,
-                ),
-                setting_row(
-                    tr!(chart_menu::INITIAL_BALANCE),
-                    tr!(chart_menu::INITIAL_BALANCE_DESCRIPTION),
-                    initial_balance,
-                    theme,
-                ),
-            ],
-            theme,
-        ),
-        settings_group(
-            tr!(chart_menu::DISPLAY),
-            [setting_row(
-                tr!(chart_menu::TPO_CELLS),
-                tr!(chart_menu::TPO_CELLS_DESCRIPTION),
-                cells,
-                theme,
-            )],
-            theme,
-        ),
-    ]
 }
 
 fn volume_profile_groups(
@@ -489,7 +368,6 @@ pub(super) fn session_profile_dialog_layer(
 ) -> AnyElement {
     let colors = theme.colors;
     let groups = match dialog.draft {
-        SessionProfileSettings::Tpo(tpo) => tpo_groups(app, dialog, tpo, theme),
         SessionProfileSettings::Volume(volume) => volume_profile_groups(app, dialog, volume, theme),
     };
     let dismiss = app.clone();

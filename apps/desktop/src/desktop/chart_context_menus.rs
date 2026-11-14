@@ -1690,6 +1690,7 @@ fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
         | ChartType::HollowCandlesBearish
         | ChartType::HeikinAshi => vec![candle_group(ui, title, appearance, defaults)],
         ChartType::Footprint => vec![footprint_group(ui, title, snapshot.order_flow)],
+        ChartType::Tpo => vec![tpo_group(ui, title, snapshot.tpo)],
         ChartType::Bars => vec![bar_group(ui, title, appearance, defaults)],
         ChartType::Line | ChartType::LineWithMarkers | ChartType::BrushableArea => {
             vec![line_group(ui, title, appearance, colors)]
@@ -1852,6 +1853,91 @@ fn footprint_group(
                     rows("25", 25),
                     rows("50", 50),
                     rows("100", 100),
+                ],
+            ),
+        ],
+        ui.theme,
+    )
+}
+
+/// The TPO chart type's settings: how prints draw, the minutes each letter covers, the value
+/// area and the initial balance. Every choice is inside the range the chart accepts.
+fn tpo_group(ui: SettingsUi<'_>, title: &'static str, settings: TpoSettings) -> AnyElement {
+    let cells = |label, cells| {
+        (
+            label,
+            settings.cells == cells,
+            ChartSettingsAction::TpoCells(cells),
+        )
+    };
+    let period = |label, minutes| {
+        (
+            label,
+            settings.period_minutes == minutes,
+            ChartSettingsAction::TpoPeriod(minutes),
+        )
+    };
+    let value_area = |label, percent| {
+        (
+            label,
+            settings.value_area_percent == percent,
+            ChartSettingsAction::TpoValueArea(percent),
+        )
+    };
+    let initial_balance = |label, periods| {
+        (
+            label,
+            settings.initial_balance_periods == periods,
+            ChartSettingsAction::TpoInitialBalance(periods),
+        )
+    };
+    settings_group(
+        title,
+        [
+            settings_select_row(
+                ui,
+                ChoiceRow::new("tpo_cells", tr!(chart_menu::TPO_CELLS))
+                    .hint(tr!(chart_menu::TPO_CELLS_DESCRIPTION)),
+                &[
+                    cells(tr!(chart_menu::TPO_LETTERS), TpoCells::Letters),
+                    cells(tr!(chart_menu::TPO_BLOCKS), TpoCells::Blocks),
+                ],
+            ),
+            settings_select_row(
+                ui,
+                ChoiceRow::new("tpo_period", tr!(chart_menu::TPO_PERIOD))
+                    .hint(tr!(chart_menu::TPO_PERIOD_DESCRIPTION)),
+                &[
+                    period("5", 5),
+                    period("15", 15),
+                    period("30", 30),
+                    period("60", 60),
+                    period("120", 120),
+                    period("240", 240),
+                ],
+            ),
+            settings_select_row(
+                ui,
+                ChoiceRow::new("tpo_value_area", tr!(chart_menu::VALUE_AREA))
+                    .hint(tr!(chart_menu::VALUE_AREA_DESCRIPTION)),
+                &[
+                    value_area("60%", 60),
+                    value_area("65%", 65),
+                    value_area("68%", 68),
+                    value_area("70%", 70),
+                    value_area("75%", 75),
+                    value_area("80%", 80),
+                ],
+            ),
+            settings_select_row(
+                ui,
+                ChoiceRow::new("tpo_initial_balance", tr!(chart_menu::INITIAL_BALANCE))
+                    .hint(tr!(chart_menu::INITIAL_BALANCE_DESCRIPTION)),
+                &[
+                    initial_balance("1", 1),
+                    initial_balance("2", 2),
+                    initial_balance("3", 3),
+                    initial_balance("4", 4),
                 ],
             ),
         ],

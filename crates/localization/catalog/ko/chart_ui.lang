@@ -13,7 +13,6 @@ indicator_macd = MACD
 indicator_stochastic = 스토캐스틱
 indicator_atr = 평균 진폭(ATR)
 indicator_volume_profile = 볼륨 프로파일(보이는 범위)
-indicator_tpo = TPO 프로파일(마켓 프로파일)
 indicator_session_volume_profile = 볼륨 프로파일(세션)
 
 # Aeris Charts 기본 지표 이름.
@@ -88,7 +87,6 @@ params_period_14 = 기간 14
 params_macd = 단기 12 · 장기 26 · 시그널 9
 params_stochastic = %K 14 · %D 3
 params_volume_profile = 행 48 · 밸류 영역 70%
-params_tpo = 문자 · 30분 · 밸류 영역 70%
 params_session_volume_profile = 세션별 · 행 48 · 밸류 영역 70%
 params_alma = 기간 14 · 오프셋 0.85 · 시그마 6
 params_kama = 기간 10 · 단기 2 · 장기 30
@@ -121,6 +119,7 @@ chart_type_hollow_candles = 할로우 캔들
 chart_type_hollow_candles_bullish = 할로우 캔들: 상승만
 chart_type_hollow_candles_bearish = 할로우 캔들: 하락만
 chart_type_footprint = 풋프린트
+chart_type_tpo = TPO(마켓 프로파일)
 chart_type_bars = 바
 chart_type_line = 라인
 chart_type_line_with_markers = 마커 포함 라인
@@ -142,7 +141,6 @@ stamp_target = 목표
 # 차트 범례 행과 행 컨트롤.
 legend_waiting_for_order_flow = 오더 플로우 대기 중
 legend_volume_profile = 볼륨 프로파일
-legend_tpo = TPO
 legend_session_volume_profile = 세션 볼륨 프로파일
 legend_big_trades = 대량 체결
 legend_order_book = 호가창

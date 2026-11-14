@@ -13,7 +13,6 @@ indicator_macd = MACD
 indicator_stochastic = ストキャスティクス
 indicator_atr = アベレージ・トゥルー・レンジ（ATR）
 indicator_volume_profile = 価格帯別出来高（表示範囲）
-indicator_tpo = TPOプロファイル（マーケットプロファイル）
 indicator_session_volume_profile = 価格帯別出来高（セッション）
 
 # Aeris Charts の標準搭載インジケーター名。
@@ -88,7 +87,6 @@ params_period_14 = 期間 14
 params_macd = 短期 12 · 長期 26 · シグナル 9
 params_stochastic = %K 14 · %D 3
 params_volume_profile = 行数 48 · バリューエリア 70%
-params_tpo = 文字 · 30分 · バリューエリア 70%
 params_session_volume_profile = セッションごと · 行数 48 · バリューエリア 70%
 params_alma = 期間 14 · オフセット 0.85 · シグマ 6
 params_kama = 期間 10 · 短期 2 · 長期 30
@@ -121,6 +119,7 @@ chart_type_hollow_candles = 中空ローソク足
 chart_type_hollow_candles_bullish = 中空ローソク足：陽線のみ
 chart_type_hollow_candles_bearish = 中空ローソク足：陰線のみ
 chart_type_footprint = フットプリント
+chart_type_tpo = TPO（マーケットプロファイル）
 chart_type_bars = バー
 chart_type_line = ライン
 chart_type_line_with_markers = マーカー付きライン
@@ -142,7 +141,6 @@ stamp_target = ターゲット
 # チャートの凡例の行と行の操作。
 legend_waiting_for_order_flow = オーダーフローを待機中
 legend_volume_profile = 価格帯別出来高
-legend_tpo = TPO
 legend_session_volume_profile = セッション価格帯別出来高
 legend_big_trades = 大口約定
 legend_order_book = 板

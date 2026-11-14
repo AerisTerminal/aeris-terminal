@@ -1376,13 +1376,32 @@ fn migrated_picker_indicators_are_runtime_managed() {
 }
 
 #[test]
-fn session_profile_settings_round_trip_and_damaged_values_restore_defaults() {
-    let tpo = SessionProfileSettings::Tpo(TpoSettings {
+fn tpo_and_session_volume_profile_settings_round_trip_and_damaged_values_restore_defaults() {
+    let tpo = TpoSettings {
         cells: TpoCells::Blocks,
         period_minutes: 60,
         value_area_percent: 80,
         initial_balance_periods: 1,
-    });
+    };
+    let tpo_state = persisted_tpo_settings(tpo);
+    assert_eq!(restored_tpo_settings(&tpo_state), Some(tpo));
+    for damaged in [
+        WorkspaceSessionProfileState {
+            tpo_cells: 2,
+            ..tpo_state.clone()
+        },
+        WorkspaceSessionProfileState {
+            tpo_period_minutes: 1,
+            ..tpo_state.clone()
+        },
+        WorkspaceSessionProfileState {
+            value_area_percent: 300,
+            ..tpo_state.clone()
+        },
+    ] {
+        assert_eq!(restored_tpo_settings(&damaged), None, "{damaged:?}");
+    }
+
     let volume = SessionProfileSettings::Volume(SessionVolumeProfileSettings {
         sessions_per_profile: 5,
         row_count: 120,
@@ -1390,92 +1409,73 @@ fn session_profile_settings_round_trip_and_damaged_values_restore_defaults() {
         show_developing: true,
         extend_naked_levels: false,
     });
-    let saved = persisted_legacy_indicator_states([
-        ChartIndicatorState {
-            indicator: ChartIndicator::Tpo,
-            visible: false,
-            volume: None,
-            session_profile: Some(tpo),
-        },
-        ChartIndicatorState {
-            indicator: ChartIndicator::SessionVolumeProfile,
-            visible: true,
-            volume: None,
-            session_profile: Some(volume),
-        },
-    ]);
-    assert_eq!(
-        saved
-            .iter()
-            .map(|state| state.kind.as_str())
-            .collect::<Vec<_>>(),
-        ["tpo", "session_volume_profile"]
-    );
+    let saved = persisted_legacy_indicator_states([ChartIndicatorState {
+        indicator: ChartIndicator::SessionVolumeProfile,
+        visible: true,
+        volume: None,
+        session_profile: Some(volume),
+    }]);
+    assert_eq!(saved[0].kind, "session_volume_profile");
     let restored = restored_legacy_indicator_states(&saved);
-    assert_eq!(restored[0].session_profile, Some(tpo));
-    assert!(!restored[0].visible);
-    assert_eq!(restored[1].session_profile, Some(volume));
-
-    let tpo_state = saved[0]
-        .session_profile
-        .clone()
-        .expect("saved TPO settings");
-    let volume_state = saved[1]
+    assert_eq!(restored[0].session_profile, Some(volume));
+    let volume_state = saved[0]
         .session_profile
         .clone()
         .expect("saved profile settings");
-    let damaged = [
-        (
-            SessionProfileKind::Tpo,
-            WorkspaceSessionProfileState {
-                tpo_cells: 2,
-                ..tpo_state.clone()
-            },
-        ),
-        (
-            SessionProfileKind::Tpo,
-            WorkspaceSessionProfileState {
-                tpo_period_minutes: 1,
-                ..tpo_state.clone()
-            },
-        ),
-        (
-            SessionProfileKind::Tpo,
-            WorkspaceSessionProfileState {
-                value_area_percent: 300,
-                ..tpo_state
-            },
-        ),
-        (
-            SessionProfileKind::Volume,
-            WorkspaceSessionProfileState {
-                row_count: 100_000,
-                ..volume_state.clone()
-            },
-        ),
-        (
-            SessionProfileKind::Volume,
-            WorkspaceSessionProfileState {
-                sessions_per_profile: 0,
-                ..volume_state
-            },
-        ),
-    ];
-    for (kind, state) in damaged {
+    for damaged in [
+        WorkspaceSessionProfileState {
+            row_count: 100_000,
+            ..volume_state.clone()
+        },
+        WorkspaceSessionProfileState {
+            sessions_per_profile: 0,
+            ..volume_state
+        },
+    ] {
         assert_eq!(
-            restored_session_profile_settings(kind, &state),
+            restored_session_profile_settings(SessionProfileKind::Volume, &damaged),
             None,
-            "{state:?}"
+            "{damaged:?}"
         );
     }
 }
 
 #[test]
+fn a_tpo_chart_loads_bars_of_its_letter_period() {
+    use ChartInterval::{Day1, Hour1, Hour2, Hour4, Minute1, Minute5, Minute15, Minute30, Tick100};
+    // Every TPO period has its own timeframe when the provider offers them all.
+    for (minutes, interval) in [(5, Minute5), (15, Minute15), (30, Minute30), (60, Hour1)] {
+        assert_eq!(super::tpo_period_interval(minutes, &[]), Some(interval));
+    }
+    // A period between timeframes loads the longest one inside it, so a bar never spans two
+    // letters; one shorter than every offered timeframe loads the shortest.
+    assert_eq!(super::tpo_period_interval(10, &[]), Some(Minute5));
+    let hourly = [Minute1, Hour1, Hour4, Day1];
+    assert_eq!(super::tpo_period_interval(30, &hourly), Some(Hour1));
+    assert_eq!(super::tpo_period_interval(120, &hourly), Some(Hour1));
+    assert_eq!(super::tpo_period_interval(240, &hourly), Some(Hour4));
+    assert_eq!(super::tpo_period_interval(30, &[Minute1, Day1]), None);
+    // A timeframe chosen on a TPO chart is the period it stands for, snapped to TPO periods.
+    assert_eq!(super::tpo_period_minutes(Minute1), Some(5));
+    assert_eq!(super::tpo_period_minutes(Minute30), Some(30));
+    assert_eq!(super::tpo_period_minutes(Hour2), Some(120));
+    assert_eq!(super::tpo_period_minutes(Day1), Some(240));
+    assert_eq!(super::tpo_period_minutes(Tick100), None);
+}
+
+#[test]
 fn session_profiles_saved_without_settings_restore_defaults() {
-    // A profile saved without settings, or settings on another indicator, restore defaults.
+    // A profile saved without settings, or settings on another indicator, restore defaults; a
+    // pre-7 TPO entry the migration has not seen is not an indicator any more and is skipped.
     let restored = restored_legacy_indicator_states(&[
         WorkspaceChartIndicatorState {
             kind: "tpo".to_string(),
+            visible: true,
+            volume: None,
+            session_profile: None,
+        },
+        WorkspaceChartIndicatorState {
+            kind: "session_volume_profile".to_string(),
             visible: true,
             volume: None,
             session_profile: None,
@@ -1487,7 +1487,8 @@ fn session_profiles_saved_without_settings_restore_defaults() {
             session_profile: Some(WorkspaceSessionProfileState::default()),
         },
     ]);
-    assert_eq!(restored[0].indicator, ChartIndicator::Tpo);
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored[0].indicator, ChartIndicator::SessionVolumeProfile);
     assert_eq!(restored[0].session_profile, None);
     assert_eq!(restored[1].session_profile, None);
 }
@@ -2067,19 +2068,6 @@ mod instrument_drawings {
                 session_profile: None,
             },
             WorkspaceChartIndicatorState {
-                kind: ChartIndicator::Tpo.identifier().into(),
-                visible: true,
-                volume: None,
-                session_profile: Some(persisted_session_profile_settings(
-                    SessionProfileSettings::Tpo(TpoSettings {
-                        cells: TpoCells::Blocks,
-                        period_minutes: 15,
-                        value_area_percent: 68,
-                        initial_balance_periods: 4,
-                    }),
-                )),
-            },
-            WorkspaceChartIndicatorState {
                 kind: ChartIndicator::SessionVolumeProfile.identifier().into(),
                 visible: false,
                 volume: None,
@@ -2113,6 +2101,12 @@ mod instrument_drawings {
             indicators: false,
             ..ChartLegendOptions::default()
         }));
+        original.tpo = Some(persisted_tpo_settings(TpoSettings {
+            cells: TpoCells::Blocks,
+            period_minutes: 15,
+            value_area_percent: 68,
+            initial_balance_periods: 4,
+        }));
         original.time_zone = "America/New_York".into();
         original.show_order_management_lines = Some(false);
         original.show_execution_marks = Some(false);
@@ -2140,6 +2134,7 @@ mod instrument_drawings {
         assert_eq!(loaded.crosshair_mode, original.crosshair_mode);
         assert_eq!(loaded.appearance, original.appearance);
         assert_eq!(loaded.order_flow, original.order_flow);
+        assert_eq!(loaded.tpo, original.tpo);
         assert_eq!(loaded.studies, original.studies);
         assert_eq!(loaded.legend, original.legend);
         assert_eq!(loaded.time_zone, original.time_zone);
@@ -2160,15 +2155,8 @@ mod instrument_drawings {
             initial_balance_periods: 4,
         };
         let restored = WorkspaceChartState {
-            chart_type: ChartType::Candles.identifier().into(),
-            indicators: vec![WorkspaceChartIndicatorState {
-                kind: ChartIndicator::Tpo.identifier().into(),
-                visible: true,
-                volume: None,
-                session_profile: Some(persisted_session_profile_settings(
-                    SessionProfileSettings::Tpo(settings),
-                )),
-            }],
+            chart_type: ChartType::Tpo.identifier().into(),
+            tpo: Some(persisted_tpo_settings(settings)),
             ..WorkspaceChartState::default()
         };
         let (surface, _requests, cx) = open_surface(cx, instrument("A"), Some(restored));
@@ -2178,11 +2166,7 @@ mod instrument_drawings {
         let profile = |surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext| {
             cx.read(|cx| {
                 let chart = surface.read(cx).chart.as_ref().expect("chart").read(cx);
-                (
-                    chart.session_profile_settings(SessionProfileKind::Tpo),
-                    chart.session_profile_drawn(SessionProfileKind::Tpo),
-                    chart.session_profile_settings(SessionProfileKind::Volume),
-                )
+                (chart.chart_type(), chart.tpo_settings(), chart.tpo_drawn())
             })
         };
 
@@ -2191,8 +2175,8 @@ mod instrument_drawings {
         show(&surface, "A", cx);
         assert_eq!(
             profile(&surface, cx),
-            (Some(SessionProfileSettings::Tpo(settings)), true, None),
-            "the saved TPO reaches Aeris Charts with its settings and is drawn"
+            (ChartType::Tpo, settings, true),
+            "the saved TPO chart reaches Aeris Charts with its settings and is drawn"
         );
 
         // An instrument whose venue and contract hours are unknown has no trading days: the
@@ -2204,22 +2188,17 @@ mod instrument_drawings {
             contract_metadata: None,
             ..instrument("A")
         };
+        // A replacement chart keeps the outgoing chart's presentation, as a switch does.
         surface.update(cx, |surface, cx| {
+            surface.retain_chart_presentation(cx);
             surface.product = Some(unlisted.clone());
             surface.install_snapshot_chart(&snapshot, cx);
         });
-        assert_eq!(
-            profile(&surface, cx),
-            (Some(SessionProfileSettings::Tpo(settings)), false, None)
-        );
-        assert_eq!(
-            saved(&surface, cx)
-                .indicators
-                .iter()
-                .map(|indicator| indicator.kind.as_str())
-                .collect::<Vec<_>>(),
-            vec![ChartIndicator::Tpo.identifier()]
-        );
+        assert_eq!(profile(&surface, cx), (ChartType::Tpo, settings, false));
+        let saved_state = saved(&surface, cx);
+        assert_eq!(saved_state.chart_type, ChartType::Tpo.identifier());
+        assert_eq!(saved_state.tpo, Some(persisted_tpo_settings(settings)));
+        assert_eq!(saved_state.indicators, Vec::new());
 
         // Contract hours from the provider make the calendar known again.
         let mut scheduled = unlisted;
@@ -2235,11 +2214,12 @@ mod instrument_drawings {
             ..aeris_contracts::ProviderContractMetadata::default()
         }));
         surface.update(cx, |surface, cx| {
+            surface.retain_chart_presentation(cx);
             surface.product = Some(scheduled);
             surface.install_snapshot_chart(&snapshot, cx);
         });
         assert!(
-            profile(&surface, cx).1,
+            profile(&surface, cx).2,
             "contract hours supply the trading days"
         );
     }
