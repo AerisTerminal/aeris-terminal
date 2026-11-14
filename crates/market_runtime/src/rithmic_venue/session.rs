@@ -487,7 +487,7 @@ fn subscribe(
         .orders
         .subscribe_order_updates(account.key())
         .map_err(lost("the order updates subscription"))?;
-    let accepted =
+    let outcome =
         plants.await_order(
             context,
             "the order updates subscription",
@@ -495,13 +495,15 @@ fn subscribe(
                 DecodedOrderMessage::RequestComplete(completion)
                     if completion.request == RithmicRequestKind::OrderUpdates =>
                 {
-                    Some(Ok(completion.outcome.is_accepted()))
+                    Some(Ok(completion.outcome))
                 }
                 _ => None,
             },
         )?;
-    if !accepted {
-        diagnostic!("Aeris broker venue: Rithmic refused order updates for one account");
+    if !outcome.is_accepted() {
+        diagnostic!(
+            "Aeris broker venue: Rithmic refused order updates for one account: {outcome:?}"
+        );
         return Ok(false);
     }
     plants
@@ -511,22 +513,21 @@ fn subscribe(
             action: SubscriptionAction::Subscribe,
         })
         .map_err(lost("the P&L updates subscription"))?;
-    let accepted =
-        plants.await_pnl(
-            context,
-            "the P&L updates subscription",
-            |message| match message {
-                DecodedPnlMessage::RequestComplete {
-                    request: RithmicRequestKind::PnlUpdates,
-                    outcome,
-                } => Some(outcome.is_accepted()),
-                _ => None,
-            },
-        )?;
-    if !accepted {
-        diagnostic!("Aeris broker venue: Rithmic refused P&L updates for one account");
+    let outcome = plants.await_pnl(
+        context,
+        "the P&L updates subscription",
+        |message| match message {
+            DecodedPnlMessage::RequestComplete {
+                request: RithmicRequestKind::PnlUpdates,
+                outcome,
+            } => Some(outcome),
+            _ => None,
+        },
+    )?;
+    if !outcome.is_accepted() {
+        diagnostic!("Aeris broker venue: Rithmic refused P&L updates for one account: {outcome:?}");
     }
-    Ok(accepted)
+    Ok(outcome.is_accepted())
 }
 
 /// An attached session: the plants, the owner's request receiver for this generation and
