@@ -155,7 +155,8 @@ use aeris_contracts::{
     WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
-    AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_FACES, RadiusToken, ThemeColor, TypographyRole,
+    AerisTheme, BRAND_FONT_BYTES, NUMERIC_FONT_BYTES, PLATFORM_FONT_FACES, RadiusToken, ThemeColor,
+    TypographyRole,
 };
 use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
@@ -6174,7 +6175,7 @@ fn prepare_application(cx: &mut App) {
         PLATFORM_FONT_FACES
             .iter()
             .map(|face| face.bytes)
-            .chain([BRAND_FONT_BYTES])
+            .chain([NUMERIC_FONT_BYTES, BRAND_FONT_BYTES])
             .map(Cow::Borrowed)
             .collect(),
     ) {

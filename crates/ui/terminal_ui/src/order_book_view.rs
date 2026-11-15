@@ -2372,12 +2372,23 @@ const fn column_alignment(column: OrderBookColumn) -> CellAlignment {
 }
 
 /// An outline in the cell's own text token, with strong text, marks a highlighted
-/// value without changing its fill.
+/// value without changing its fill. The outline is an overlay painted after the
+/// quantity bar and text, inset on the left by one border width so the row's
+/// column rail at the cell's left edge never paints over its corners.
 fn highlight_cell(cell: Div, highlighted: bool, color: ThemeColor, theme: &AerisTheme) -> Div {
     if highlighted {
-        cell.border(px(theme.dimensions.border_width))
-            .border_color(gpui_color(color))
-            .font_weight(platform_font_weight(TypographyRole::Strong))
+        let border_width = px(theme.dimensions.border_width);
+        cell.font_weight(platform_font_weight(TypographyRole::Strong))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(border_width)
+                    .right_0()
+                    .border(border_width)
+                    .border_color(gpui_color(color)),
+            )
     } else {
         cell
     }

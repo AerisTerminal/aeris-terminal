@@ -49,7 +49,9 @@ const PLATFORM_FONTS: [(&[u8], &str); 4] = [
         "800",
     ),
 ];
-
+/// The variable Manrope face the platform stylesheet uses for numeric readouts.
+const NUMERIC_FONT: &[u8] =
+    include_bytes!("../../../ui/design_system/assets/fonts/manrope_variable.ttf");
 const BRAND_FONT: &[u8] = include_bytes!(
     "../../../ui/design_system/assets/fonts/faculty-glyphic/FacultyGlyphic-Regular.ttf"
 );
@@ -289,7 +291,10 @@ fn browser_font_faces() -> String {
     PLATFORM_FONTS
         .into_iter()
         .map(|(face, weight)| ("Inter", face, weight))
-        .chain([("Faculty Glyphic", BRAND_FONT, "400")])
+        .chain([
+            ("Manrope", NUMERIC_FONT, "200 800"),
+            ("Faculty Glyphic", BRAND_FONT, "400"),
+        ])
         .map(|(family, face, weight)| {
             let face = STANDARD.encode(face);
             format!(
@@ -539,7 +544,8 @@ mod tests {
         for weight in ["400", "500", "700", "800"] {
             assert!(response.contains(&format!("font-weight:{weight};font-display:swap")));
         }
-
+        assert!(response.contains("font-family:\"Manrope\""));
+        assert!(response.contains("font-weight:200 800;font-display:swap"));
         assert!(response.contains("font-weight:400;font-display:swap"));
         assert!(response.contains("font-family:\"Faculty Glyphic\""));
         assert!(response.contains("data:font/ttf;base64,"));
