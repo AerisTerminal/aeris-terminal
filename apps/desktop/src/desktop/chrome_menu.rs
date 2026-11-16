@@ -44,8 +44,8 @@ pub(super) fn chrome_menu_extent(
     ChromeMenuExtent { width, list_height }
 }
 
-/// The symbol and indicator menu body. The chrome overlay panel around it draws the primary
-/// `surface` inside the floating-layer `border-secondary` edge, so the body has no fill of its own.
+/// The symbol and indicator menu body. The chrome overlay panel around it draws the
+/// `surface-secondary` floating-layer surface, so the body has no fill of its own.
 pub(super) fn chrome_menu_surface(
     colors: &aeris_design_system::ThemeColors,
     extent: ChromeMenuExtent,
@@ -134,7 +134,7 @@ pub(super) fn chrome_menu_search_header(
 }
 
 /// The inset search field of the symbol and indicator menu headers: the platform text field
-/// on `surface-secondary`, without a search mark. Focus keeps the resting border.
+/// on its `field_surface`, without a search mark. Focus keeps the resting border.
 pub(super) fn chrome_menu_search_field(input: &Entity<InputState>, theme: &AerisTheme) -> Div {
     div()
         .flex_1()
@@ -144,7 +144,6 @@ pub(super) fn chrome_menu_search_field(input: &Entity<InputState>, theme: &Aeris
         .child(
             Input::new(input)
                 .platform(theme)
-                .fill(gpui_color(theme.colors.surface_secondary))
                 .focus_bordered(false)
                 .flex_1(),
         )

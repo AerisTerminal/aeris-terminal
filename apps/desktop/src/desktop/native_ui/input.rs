@@ -69,13 +69,6 @@ impl Input {
         self
     }
 
-    /// Fills the field with `fill` at rest, on hover and while focused.
-    pub(crate) fn fill(mut self, fill: Hsla) -> Self {
-        self.fill = Some(fill);
-        self.hover_fill = Some(fill);
-        self
-    }
-
     pub(crate) fn appearance(mut self, appearance: bool) -> Self {
         self.set_presentation(Self::APPEARANCE, appearance);
         self

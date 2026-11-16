@@ -17,7 +17,7 @@ use super::{
     platform_font_weight,
     popup_fit::fit_to_window,
     rem_scale::ROOT_REM_PX,
-    theme::{gpui_color, menu_surface, platform_border_width},
+    theme::{gpui_color, platform_border_width, popover_surface},
 };
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -295,7 +295,7 @@ impl MenuRow {
             kind,
             scale: MenuScale::BASE,
             theme: *theme,
-            resting_fill: theme.colors.surface,
+            resting_fill: theme.colors.surface_secondary,
             label: label.into(),
             leading_icon: None,
             leading: None,
@@ -306,13 +306,6 @@ impl MenuRow {
             hover: None,
             behavior: MenuRowBehavior::default(),
         }
-    }
-
-    /// The surface the row sits on, which its hover and highlight fills are blended over.
-    /// Rows default to the menu's `surface`.
-    pub(crate) fn resting_fill(mut self, fill: ThemeColor) -> Self {
-        self.resting_fill = fill;
-        self
     }
 
     /// Sizes the row, its text and its spacing for a screen-aware menu.
@@ -603,7 +596,7 @@ pub(crate) const ANCHOR_GAP: Pixels = px(4.0);
 
 /// `Aeris`'s one menu surface: dropdowns, context menus, flyouts and select menus.
 ///
-/// The panel owns the flat menu look (the `menu_surface` fill and edge,
+/// The panel owns the flat menu look (the `popover_surface` fill and edge,
 /// `--radius-compact`, no cast shadow), its placement, scrolling, entry motion and click containment. Its content is
 /// inset from the rounded border: GPUI clips to rectangles, and any inset of at least
 /// `r(1 - 1/√2)` keeps a row's rectangular highlight inside the panel's rounded corner, so rows
@@ -739,7 +732,7 @@ impl RenderOnce for MenuPanel {
             .when_some(self.scroll, |body, scroll| body.track_scroll(&scroll));
         let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
         let frame = div().id(self.id.clone()).occlude().flex().flex_col();
-        let panel = menu_surface(frame, &self.theme, radius)
+        let panel = popover_surface(frame, &self.theme, radius)
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .text_color(gpui_color(colors.text_default))

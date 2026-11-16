@@ -153,8 +153,9 @@ pub(crate) fn platform_border_width(theme: &AerisTheme) -> Pixels {
     px(theme.dimensions.border_width)
 }
 
-/// Floating-layer chrome (dialogs, popovers, toasts, hints and floating panels): the Theme
-/// System `surface-secondary` fill with a 1px `border-secondary` edge, in every theme.
+/// Floating-layer chrome (dialogs, popovers, toasts, hints, floating panels and every menu,
+/// dropdown, context menu, flyout and select menu): the Theme System `surface-secondary` fill
+/// with a 1px `border-secondary` edge, in every theme.
 pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
     let colors = &theme.colors;
     element
@@ -162,17 +163,6 @@ pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius:
         .border(platform_border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
-}
-
-/// Menu chrome (dropdowns, context menus, flyouts and select menus): the primary `surface`
-/// with its 1px `border` edge.
-pub(crate) fn menu_surface<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
-    let colors = &theme.colors;
-    element
-        .rounded(radius)
-        .border(platform_border_width(theme))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
 }
 
 /// Projects `Aeris`'s semantic design contract into the unstyled Base
@@ -239,9 +229,7 @@ mod tests {
 
     use gpui::Styled;
 
-    use super::{
-        PanelEdges, base_theme, gpui_color, input_appearance, menu_surface, popover_surface,
-    };
+    use super::{PanelEdges, base_theme, gpui_color, input_appearance, popover_surface};
 
     #[test]
     fn only_panel_corners_between_two_gaps_are_rounded() {
@@ -262,30 +250,24 @@ mod tests {
     }
 
     #[test]
-    fn floating_layers_sit_on_the_secondary_surface_and_menus_on_the_primary_one() {
+    fn floating_layers_and_menus_sit_on_the_secondary_surface() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let colors = theme.colors;
-            for (mut layer, fill, edge) in [
-                (
-                    popover_surface(gpui::div(), &theme, gpui::px(6.0)),
-                    colors.surface_secondary,
-                    colors.border_secondary,
-                ),
-                (
-                    menu_surface(gpui::div(), &theme, gpui::px(6.0)),
-                    colors.surface,
-                    colors.border,
-                ),
-            ] {
-                let style = layer.style();
-                assert_eq!(style.background, Some(gpui_color(fill).into()));
-                assert_eq!(style.border_color, Some(gpui_color(edge)));
-                assert_eq!(style.box_shadow, None);
-                assert_eq!(
-                    style.border_widths.top,
-                    Some(gpui::px(theme.dimensions.border_width).into())
-                );
-            }
+            let mut layer = popover_surface(gpui::div(), &theme, gpui::px(6.0));
+            let style = layer.style();
+            assert_eq!(
+                style.background,
+                Some(gpui_color(colors.surface_secondary).into())
+            );
+            assert_eq!(
+                style.border_color,
+                Some(gpui_color(colors.border_secondary))
+            );
+            assert_eq!(style.box_shadow, None);
+            assert_eq!(
+                style.border_widths.top,
+                Some(gpui::px(theme.dimensions.border_width).into())
+            );
         }
     }
 

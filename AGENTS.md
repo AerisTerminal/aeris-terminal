@@ -957,8 +957,8 @@ When changing shared platform tokens such as colors, typography, radii, or inter
 Theme presets are the `[data-theme="<id>"]` blocks in `platform.css`, compiled into `ThemePreset` and
 `AerisTheme::resolve`; the desktop opens in `AerisTheme::initial()` (Aeris, dark), the stylesheet's
 `:root` palette; `themes.md` is their palette source and every theme block must match it. Floating
-layers sit on `surface-secondary` with a `border-secondary` edge, while dropdown and context menus
-sit on the primary `surface` with its `border` edge. Presets are platform-only:
+layers, dropdown and context menus included, sit on `surface-secondary` with a `border-secondary`
+edge through the one `popover_surface`. Presets are platform-only:
 `crates/ui/chart_integration` projects every preset, Aeris included, onto Aeris Charts through its
 existing appearance and options APIs, and Aeris Charts never receives a preset identity.
 `--surface-backdrop` is the workspace page backdrop: every theme block, presets included, carries

@@ -265,8 +265,8 @@ use native_ui::{
     switch::{Switch, SwitchRow},
     tab::{Tab, TabList},
     theme::{
-        PanelEdges, base_theme, field_border, field_surface, gpui_color, menu_surface,
-        panel_corners, panel_focus_border, platform_border_width, popover_surface,
+        PanelEdges, base_theme, field_border, field_surface, gpui_color, panel_corners,
+        panel_focus_border, platform_border_width, popover_surface,
     },
     tooltip::{TooltipSpec, with_tooltip},
 };

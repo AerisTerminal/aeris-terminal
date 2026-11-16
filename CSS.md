@@ -27,13 +27,11 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
-- Floating layers (dialogs, popovers, toasts, hints, floating toolbars and the large workspace
-  panels) use `popover_surface` from `desktop/native_ui/theme.rs`: a `surface-secondary` fill
-  with a 1px `border-secondary` edge, in every theme.
-- Dropdown menus (header dropdowns such as the time zone menu, context menus, flyouts and select
-  menus) sit on the primary surface instead: `menu_surface` paints `surface` with a 1px `border`
-  edge, and their rows use the primary-surface tokens. The symbol and indicator menus are large
-  panels: they keep the `surface` fill inside the floating-layer `border-secondary` edge.
+- Floating layers (dialogs, popovers, toasts, hints, floating toolbars, the large workspace
+  panels and every menu: header dropdowns such as the time zone menu, context menus, flyouts,
+  select menus and the symbol and indicator menus) use `popover_surface` from
+  `desktop/native_ui/theme.rs`: a `surface-secondary` fill with a 1px `border-secondary` edge,
+  in every theme. Menu rows rest on that `surface-secondary` fill.
 - No floating layer or menu casts a shadow. Menus, dropdowns, select menus, dialogs, the color
   picker and the large workspace panels use `--radius-compact` (`RadiusToken::Compact`).
 - The workspace page background is `surface-backdrop`: it paints the gaps between panels and the
@@ -127,8 +125,7 @@ normal platform weight; there is no bold button. `close_button` is the one close
 select menu. The panel draws the menu surface (see Rules). Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
 `checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. Rows rest on
-the panel's `surface` fill; a row placed on another surface (the command palette dialog) names it
-with `resting_fill`. The chart and price-axis context menus have no dividers. A `destructive` row
+the panel's `surface-secondary` fill, which their hover and highlight fills blend over. The chart and price-axis context menus have no dividers. A `destructive` row
 keeps the shared neutral row fills and colours only its label and glyph: `text-danger` at rest,
 `danger-hover` while hovered or highlighted, and `danger-disabled` with no hover while disabled.
 Pass glyphs through `leading_icon` so the row colours them.

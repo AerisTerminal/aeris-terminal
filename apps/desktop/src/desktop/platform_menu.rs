@@ -1,8 +1,8 @@
 //! The platform menu: the one dropdown under the header avatar. It stacks every
 //! application-level section in a single panel: account (profile, plan, sign-in actions and a
-//! newer version's restart or download), Theme
-//! with a preview card per mode and a chip per palette preset, Window with frameless mode and the drawing toolbar switch, the
-//! keyboard shortcuts list, and
+//! newer version's restart or download), Theme with Light and Dark tabs and a chip per palette
+//! preset, the frameless mode and drawing toolbar switches, Language, the keyboard shortcuts and
+//! market recording rows, and
 //! About with version, system, validation mode, provider notices while its session is held, and
 //! updates.
 
@@ -23,11 +23,11 @@ const IDENTITY_HEIGHT: f32 = 52.0;
 const ACCOUNT_ERROR_HEIGHT: f32 = 24.0;
 const SECTION_TITLE_HEIGHT: f32 = 28.0;
 const SECTION_BOTTOM_PADDING: f32 = 12.0;
-const THEME_PREVIEW_HEIGHT: f32 = 72.0;
-const THEME_CARD_GAP: f32 = 6.0;
-const THEME_CARD_LABEL_HEIGHT: f32 = 16.0;
-const PRESET_GRID_TOP: f32 = 10.0;
-const PRESET_CHIP_HEIGHT: f32 = 28.0;
+/// Every setting is one line at the menu's row height: its label on the leading edge and its
+/// control (tabs, switch or dropdown) on the trailing edge.
+const SETTING_ROW_HEIGHT: f32 = CHART_CONTEXT_MENU_ROW_HEIGHT;
+const PRESET_GRID_BOTTOM_PADDING: f32 = 8.0;
+const PRESET_CHIP_HEIGHT: f32 = 24.0;
 const PRESET_CHIP_GAP: f32 = 4.0;
 const PRESET_SWATCH_SIZE: f32 = 14.0;
 /// Space between the swatch ring and its primary-color dot.
@@ -39,21 +39,13 @@ const _: () = assert!(
     "PRESET_GRID_HEIGHT assumes four preset rows"
 );
 const PRESET_GRID_HEIGHT: f32 = 4.0 * PRESET_CHIP_HEIGHT + 3.0 * PRESET_CHIP_GAP;
-const THEME_SECTION_HEIGHT: f32 = SECTION_TITLE_HEIGHT
-    + THEME_PREVIEW_HEIGHT
-    + THEME_CARD_GAP
-    + THEME_CARD_LABEL_HEIGHT
-    + PRESET_GRID_TOP
-    + PRESET_GRID_HEIGHT
-    + SECTION_BOTTOM_PADDING;
-/// A label line and up to two description lines, since translated descriptions wrap.
-const WINDOW_SETTING_HEIGHT: f32 = 64.0;
-const WINDOW_SECTION_HEIGHT: f32 =
-    SECTION_TITLE_HEIGHT + 2.0 * WINDOW_SETTING_HEIGHT + SECTION_BOTTOM_PADDING;
-/// The language dropdown trigger is a default-size button.
+const THEME_SECTION_HEIGHT: f32 =
+    SETTING_ROW_HEIGHT + PRESET_GRID_HEIGHT + PRESET_GRID_BOTTOM_PADDING;
+const WINDOW_SECTION_HEIGHT: f32 = 2.0 * SETTING_ROW_HEIGHT;
+/// The language dropdown trigger is a default-size button, wide enough for every native name.
 const LANGUAGE_TRIGGER_HEIGHT: f32 = 28.0;
-const LANGUAGE_SECTION_HEIGHT: f32 =
-    SECTION_TITLE_HEIGHT + LANGUAGE_TRIGGER_HEIGHT + SECTION_BOTTOM_PADDING;
+const LANGUAGE_TRIGGER_WIDTH: f32 = 160.0;
+const LANGUAGE_SECTION_HEIGHT: f32 = SETTING_ROW_HEIGHT;
 const ABOUT_BRAND_HEIGHT: f32 = 40.0;
 const ABOUT_DETAIL_HEIGHT: f32 = 26.0;
 const ABOUT_UPDATE_HEIGHT: f32 = 44.0;
@@ -311,7 +303,6 @@ pub(super) fn platform_menu_layer(
         }))
         .when(layout.has_account_rows(), MenuPanel::separator)
         .child(theme_section(theme, &select_theme))
-        .separator()
         .child(window_section(
             WindowSettings {
                 frameless: window_frame.frameless(),
@@ -321,7 +312,6 @@ pub(super) fn platform_menu_layer(
             &toggle_drawing_toolbar,
             theme,
         ))
-        .separator()
         .child(language_section(
             terminal,
             language,
@@ -424,9 +414,7 @@ impl PlatformMenuLayout {
             + error
             + account_separator
             + THEME_SECTION_HEIGHT
-            + separator
             + WINDOW_SECTION_HEIGHT
-            + separator
             + LANGUAGE_SECTION_HEIGHT
             + separator
             + 2.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
@@ -707,30 +695,57 @@ const fn theme_mode_name(mode: ThemeMode) -> Text {
     }
 }
 
-const fn theme_card_id(mode: ThemeMode) -> &'static str {
+const fn theme_mode_tab_id(mode: ThemeMode) -> &'static str {
     match mode {
         ThemeMode::Light => "platform_menu_theme_light",
         ThemeMode::Dark => "platform_menu_theme_dark",
     }
 }
 
-/// Theme section: one preview tile per mode in the selected preset's own tokens, then one
-/// chip per palette preset. The menu stays open after a pick so the whole panel re-renders in
-/// the new theme.
+/// One setting line: the label on the leading edge and its control on the trailing edge.
+fn setting_row(label: &'static str, control: impl IntoElement, theme: &AerisTheme) -> Div {
+    div()
+        .h(px(SETTING_ROW_HEIGHT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .text_color(gpui_color(theme.colors.text_default))
+                .child(label),
+        )
+        .child(control)
+}
+
+/// Theme section: a Light and Dark tab pair on the Theme row, then one chip per palette preset.
+/// The menu stays open after a pick so the whole panel re-renders in the new theme.
 fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
+    let label = tr!(shell::SECTION_THEME);
+    let modes = TabList::new("platform_menu_theme_modes", label, theme)
+        .compact()
+        .children(THEME_MODES.map(|mode| {
+            let preview = AerisTheme::resolve(theme.preset, mode);
+            let on_select = on_select.clone();
+            Tab::new(theme_mode_tab_id(mode), theme)
+                .compact()
+                .selected(theme.mode == mode)
+                .on_click(move |_, window, cx| {
+                    on_select(preview, window, cx);
+                    cx.stop_propagation();
+                })
+                .child(tr!(theme_mode_name(mode)))
+        }));
     section()
         .h(px(THEME_SECTION_HEIGHT))
-        .pb(px(SECTION_BOTTOM_PADDING))
-        .child(section_title(tr!(shell::SECTION_THEME), theme))
+        .pb(px(PRESET_GRID_BOTTOM_PADDING))
+        .child(setting_row(label, modes, theme))
         .child(
             div()
-                .flex()
-                .gap_2()
-                .children(THEME_MODES.map(|mode| theme_card(mode, theme, on_select.clone()))),
-        )
-        .child(
-            div()
-                .mt(px(PRESET_GRID_TOP))
                 .h(px(PRESET_GRID_HEIGHT))
                 .flex()
                 .flex_col()
@@ -826,111 +841,6 @@ fn preset_chip(preset: ThemePreset, theme: &AerisTheme, on_select: ThemeSelect) 
         .into_any_element()
 }
 
-fn theme_card(mode: ThemeMode, theme: &AerisTheme, on_select: ThemeSelect) -> AnyElement {
-    let colors = theme.colors;
-    let selected = theme.mode == mode;
-    let preview = AerisTheme::resolve(theme.preset, mode);
-    BaseButton::new(theme_card_id(mode))
-        .accessibility_label(tr!(shell::THEME_CARD_ARIA, mode = theme_mode_name(mode)))
-        .group(theme_card_id(mode))
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(THEME_CARD_GAP))
-        .cursor_pointer()
-        .on_click(move |_, window, cx| {
-            on_select(preview, window, cx);
-            cx.stop_propagation();
-        })
-        .child(theme_preview(
-            &preview,
-            theme,
-            selected,
-            theme_card_id(mode),
-        ))
-        .child(
-            div()
-                .h(px(THEME_CARD_LABEL_HEIGHT))
-                .flex()
-                .items_center()
-                .text_xs()
-                .text_color(gpui_color(if selected {
-                    colors.text_default
-                } else {
-                    colors.text_secondary
-                }))
-                .child(tr!(theme_mode_name(mode))),
-        )
-        .into_any_element()
-}
-
-/// Inset of the preview's sample window from the tile's top and left edges; it runs off the
-/// right and bottom edges.
-const THEME_PREVIEW_WINDOW_TOP: f32 = 22.0;
-const THEME_PREVIEW_WINDOW_LEFT: f32 = 16.0;
-const THEME_PREVIEW_BADGE_SIZE: f32 = 18.0;
-
-/// A tile in the previewed mode's own tokens: a `surface-secondary` backdrop with one sample
-/// window on `surface` showing "Aa" in that mode's text color, and a `primary` check badge on
-/// the selected mode. Colors resolve over the mode's `surface` because its dark tints are
-/// translucent and the tile must look the same in either menu. GPUI clips to rectangles, so
-/// the window takes the tile's radius at the corner it shares with it.
-fn theme_preview(
-    preview: &AerisTheme,
-    theme: &AerisTheme,
-    selected: bool,
-    group: &'static str,
-) -> Div {
-    let colors = preview.colors;
-    let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
-    let tile = colors.surface_secondary.over(colors.surface);
-    let hovered = colors.hover_bg.over(tile);
-    let badge = selected.then(|| {
-        div()
-            .absolute()
-            .right(px(8.0))
-            .bottom(px(8.0))
-            .size(px(THEME_PREVIEW_BADGE_SIZE))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(gpui_color(theme.colors.primary))
-            .child(
-                header_icon(HugeIcon::Tick)
-                    .with_size(px(12.0))
-                    .color(gpui_color(theme.colors.primary_foreground)),
-            )
-    });
-    div()
-        .relative()
-        .h(px(THEME_PREVIEW_HEIGHT))
-        .w_full()
-        .rounded(radius)
-        .bg(gpui_color(tile))
-        .when(!selected, |preview| {
-            preview.group_hover(group, move |style| style.bg(gpui_color(hovered)))
-        })
-        .child(
-            div()
-                .absolute()
-                .top(px(THEME_PREVIEW_WINDOW_TOP))
-                .left(px(THEME_PREVIEW_WINDOW_LEFT))
-                .right_0()
-                .bottom_0()
-                .rounded_tl(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .rounded_br(radius)
-                .bg(gpui_color(colors.surface))
-                .pl(px(8.0))
-                .pt(px(4.0))
-                .text_lg()
-                .text_color(gpui_color(colors.text_default))
-                .child("Aa")
-                .children(badge),
-        )
-}
-
 /// The frameless mode and drawing toolbar switch callbacks.
 fn window_toggles(terminal: &Entity<TerminalApp>) -> (WindowToggle, WindowToggle) {
     let frameless_terminal = terminal.clone();
@@ -959,8 +869,7 @@ struct WindowSettings {
     drawing_toolbar_visible: bool,
 }
 
-/// Window section: the frameless mode and drawing toolbar switches, each with a one-line
-/// description of what it does.
+/// Window section: the frameless mode and drawing toolbar switches, one line each.
 fn window_section(
     settings: WindowSettings,
     on_frameless: &WindowToggle,
@@ -969,41 +878,34 @@ fn window_section(
 ) -> Div {
     section()
         .h(px(WINDOW_SECTION_HEIGHT))
-        .pb(px(SECTION_BOTTOM_PADDING))
-        .child(section_title(tr!(shell::SECTION_WINDOW), theme))
         .child(window_switch(
-            SwitchRow::new(
-                "platform_menu_frameless_window",
-                tr!(shell::WINDOW_FRAMELESS),
-                settings.frameless,
-                theme,
-            )
-            .description(tr!(shell::WINDOW_FRAMELESS_DESCRIPTION)),
+            "platform_menu_frameless_window",
+            tr!(shell::WINDOW_FRAMELESS),
+            settings.frameless,
             on_frameless,
+            theme,
         ))
         .child(window_switch(
-            SwitchRow::new(
-                "platform_menu_drawing_toolbar",
-                tr!(shell::WINDOW_DRAWING_TOOLBAR),
-                settings.drawing_toolbar_visible,
-                theme,
-            )
-            .description(tr!(shell::WINDOW_DRAWING_TOOLBAR_DESCRIPTION)),
+            "platform_menu_drawing_toolbar",
+            tr!(shell::WINDOW_DRAWING_TOOLBAR),
+            settings.drawing_toolbar_visible,
             on_drawing_toolbar,
+            theme,
         ))
 }
 
-fn window_switch(row: SwitchRow, on_toggle: &WindowToggle) -> Div {
+fn window_switch(
+    id: &'static str,
+    label: &'static str,
+    checked: bool,
+    on_toggle: &WindowToggle,
+    theme: &AerisTheme,
+) -> Div {
     let on_toggle = on_toggle.clone();
-    div()
-        .h(px(WINDOW_SETTING_HEIGHT))
-        .flex_none()
-        .flex()
-        .flex_col()
-        .justify_center()
-        .child(row.on_change(move |enabled, _, window, cx| {
-            on_toggle(enabled, window, cx);
-        }))
+    let switch = Switch::new(id, label, checked, theme).on_change(move |enabled, _, window, cx| {
+        on_toggle(enabled, window, cx);
+    });
+    setting_row(label, switch, theme)
 }
 
 /// Language section: a dropdown of every choice with the current one marked. Pinned languages
@@ -1067,22 +969,23 @@ fn language_section(
         )
     });
     let dismiss = terminal.clone();
+    let control = div()
+        .w(px(LANGUAGE_TRIGGER_WIDTH))
+        .h(px(LANGUAGE_TRIGGER_HEIGHT))
+        .flex_none()
+        .child(
+            MenuAnchor::new("platform_menu_language_anchor", trigger)
+                .full_width()
+                .menu(panel)
+                .on_dismiss(move |_, cx| {
+                    dismiss.update(cx, |terminal, terminal_cx| {
+                        terminal.set_platform_language_menu_open(false, terminal_cx);
+                    });
+                }),
+        );
     section()
         .h(px(LANGUAGE_SECTION_HEIGHT))
-        .pb(px(SECTION_BOTTOM_PADDING))
-        .child(section_title(tr!(menu::LANGUAGE), theme))
-        .child(
-            div().h(px(LANGUAGE_TRIGGER_HEIGHT)).flex_none().child(
-                MenuAnchor::new("platform_menu_language_anchor", trigger)
-                    .full_width()
-                    .menu(panel)
-                    .on_dismiss(move |_, cx| {
-                        dismiss.update(cx, |terminal, terminal_cx| {
-                            terminal.set_platform_language_menu_open(false, terminal_cx);
-                        });
-                    }),
-            ),
-        )
+        .child(setting_row(tr!(menu::LANGUAGE), control, theme))
 }
 
 fn language_choice_label(preference: LanguagePreference) -> &'static str {
@@ -1555,7 +1458,7 @@ mod tests {
             + WINDOW_SECTION_HEIGHT
             + LANGUAGE_SECTION_HEIGHT
             + 2.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
-            + 4.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
+            + 2.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
             + about_section_height(2, None);
         assert!((development.height(panel_chrome) - expected).abs() < f32::EPSILON);
         let signed_in = PlatformMenuLayout {
@@ -1573,7 +1476,7 @@ mod tests {
             + WINDOW_SECTION_HEIGHT
             + LANGUAGE_SECTION_HEIGHT
             + about_section_height(1, attributed)
-            + 6.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
+            + 4.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
         assert!((signed_in.height(panel_chrome) - expected).abs() < f32::EPSILON);
     }
 

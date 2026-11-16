@@ -63,13 +63,10 @@ pub(super) fn chrome_overlay_layer(
         theme,
         ChromeOverlayPanelStyle {
             interval_popup: compact_panel,
-            surface: match overlay {
-                _ if menu_overlay => ChromeOverlaySurface::Frameless,
-                ChromeOverlay::Instrument | ChromeOverlay::Indicator => {
-                    ChromeOverlaySurface::Primary
-                }
-                ChromeOverlay::Accounts => ChromeOverlaySurface::Floating,
-                _ => ChromeOverlaySurface::Menu,
+            surface: if menu_overlay {
+                ChromeOverlaySurface::Frameless
+            } else {
+                ChromeOverlaySurface::Floating
             },
         },
         closing,
@@ -364,11 +361,8 @@ pub(super) struct ChromeOverlayPanelStyle {
 pub(super) enum ChromeOverlaySurface {
     /// The content is one or more `MenuPanel`s that draw their own surface.
     Frameless,
-    /// Menus such as the quick timeframe popup: the primary `menu_surface`.
-    Menu,
-    /// The symbol and indicator menus: a `surface` fill inside the floating-layer edge.
-    Primary,
-    /// Floating panels such as Accounts: the secondary `popover_surface`.
+    /// Every other overlay (the quick timeframe popup, the symbol and indicator menus and
+    /// floating panels such as Accounts): the secondary `popover_surface`.
     Floating,
 }
 
@@ -390,10 +384,6 @@ pub(super) fn chrome_overlay_panel(
         .flex_none()
         .map(|panel| match style.surface {
             ChromeOverlaySurface::Frameless => panel.max_h_full(),
-            ChromeOverlaySurface::Menu => menu_surface(panel, theme, radius),
-            ChromeOverlaySurface::Primary => {
-                popover_surface(panel, theme, radius).bg(gpui_color(theme.colors.surface))
-            }
             ChromeOverlaySurface::Floating => popover_surface(panel, theme, radius),
         })
         .when(style.interval_popup && !frameless, |panel| {
