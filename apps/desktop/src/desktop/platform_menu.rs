@@ -35,10 +35,10 @@ const PRESET_SWATCH_INSET: f32 = 2.0;
 /// Presets lay out two per row.
 const PRESET_ROWS: usize = ThemePreset::ALL.len().div_ceil(2);
 const _: () = assert!(
-    PRESET_ROWS == 4,
-    "PRESET_GRID_HEIGHT assumes four preset rows"
+    PRESET_ROWS == 5,
+    "PRESET_GRID_HEIGHT assumes five preset rows"
 );
-const PRESET_GRID_HEIGHT: f32 = 4.0 * PRESET_CHIP_HEIGHT + 3.0 * PRESET_CHIP_GAP;
+const PRESET_GRID_HEIGHT: f32 = 5.0 * PRESET_CHIP_HEIGHT + 4.0 * PRESET_CHIP_GAP;
 const THEME_SECTION_HEIGHT: f32 =
     SETTING_ROW_HEIGHT + PRESET_GRID_HEIGHT + PRESET_GRID_BOTTOM_PADDING;
 const WINDOW_SECTION_HEIGHT: f32 = 2.0 * SETTING_ROW_HEIGHT;
@@ -776,6 +776,7 @@ const fn preset_chip_id(preset: ThemePreset) -> &'static str {
         ThemePreset::Dracula => "platform_menu_preset_dracula",
         ThemePreset::Solarized => "platform_menu_preset_solarized",
         ThemePreset::Gruvbox => "platform_menu_preset_gruvbox",
+        ThemePreset::Dark => "platform_menu_preset_dark",
     }
 }
 

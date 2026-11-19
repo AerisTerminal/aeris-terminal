@@ -164,9 +164,9 @@ while invalid.
 
 ## Theme presets
 
-The Theme CSS below is the default Aeris preset. `platform.css` also carries seven presets as
+The Theme CSS below is the default High Contrast preset. `platform.css` also carries eight presets as
 `[data-theme="…"]` (light) and `[data-theme="…"].dark` (dark) blocks, copied value for value from
-`themes.md`: `tokyo-night`, `catppuccin`, `github`, `one`, `dracula`, `solarized` and `gruvbox`.
+`themes.md`: `tokyo-night`, `catppuccin`, `github`, `one`, `dracula`, `solarized`, `gruvbox` and `dark`.
 Every preset block declares the same tokens as Aeris and only recolors the platform; radii and
 `--border-width` must match Aeris, and the build rejects a preset that misses a token or changes a shape
 token.
@@ -291,11 +291,11 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
 .dark {
   /* Surfaces */
   --surface: #000000;
-  --surface-secondary: #171717;
+  --surface-secondary: #232324;
   --surface-backdrop: #262626;
 
   /* Borders */
-  --border: #2c2c2c;
+  --border: #3c3c3c;
   --border-secondary: #404040;
   --border-subtle: #fafafa12;
   --border-width: 1px;

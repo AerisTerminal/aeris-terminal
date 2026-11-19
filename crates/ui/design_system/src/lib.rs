@@ -198,8 +198,8 @@ impl ThemeMode {
     }
 }
 
-/// A named platform palette. Aeris is the `:root`/`.dark` default; every other preset is a
-/// `[data-theme="…"]` block in `platform.css` with light and dark modes.
+/// A named platform palette. High Contrast (`Aeris`) is the `:root`/`.dark` default; every other
+/// preset is a `[data-theme="…"]` block in `platform.css` with light and dark modes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ThemePreset {
     #[default]
@@ -211,13 +211,14 @@ pub enum ThemePreset {
     Dracula,
     Solarized,
     Gruvbox,
+    Dark,
 }
 
 const _: () = assert!(ThemePreset::ALL.len() == PRESET_COUNT + 1);
 
 impl ThemePreset {
-    /// Every preset in picker order, Aeris first.
-    pub const ALL: [Self; 8] = [
+    /// Every preset in picker order, High Contrast (default) first.
+    pub const ALL: [Self; 9] = [
         Self::Aeris,
         Self::TokyoNight,
         Self::Catppuccin,
@@ -226,6 +227,7 @@ impl ThemePreset {
         Self::Dracula,
         Self::Solarized,
         Self::Gruvbox,
+        Self::Dark,
     ];
 
     /// The stable identifier: the `data-theme` attribute value, or `aeris` for the default.
@@ -241,7 +243,7 @@ impl ThemePreset {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Aeris => "Aeris",
+            Self::Aeris => "High Contrast",
             Self::TokyoNight => "Tokyo Night",
             Self::Catppuccin => "Catppuccin",
             Self::Github => "GitHub",
@@ -249,6 +251,7 @@ impl ThemePreset {
             Self::Dracula => "Dracula",
             Self::Solarized => "Solarized",
             Self::Gruvbox => "Gruvbox",
+            Self::Dark => "Dark",
         }
     }
 
@@ -269,6 +272,7 @@ impl ThemePreset {
             Self::Dracula => Some(4),
             Self::Solarized => Some(5),
             Self::Gruvbox => Some(6),
+            Self::Dark => Some(7),
         }
     }
 }
@@ -684,8 +688,8 @@ mod tests {
             ThemeColor::from_rgb8(255, 255, 255)
         );
         assert_eq!(dark.surface, ThemeColor::from_rgb8(0, 0, 0));
-        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(23, 23, 23));
-        assert_eq!(dark.border, ThemeColor::from_rgb8(44, 44, 44));
+        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(35, 35, 36));
+        assert_eq!(dark.border, ThemeColor::from_rgb8(60, 60, 60));
         assert_eq!(dark.border_secondary, ThemeColor::from_rgb8(64, 64, 64));
         assert_eq!(light.text_default, ThemeColor::from_rgb8(10, 10, 10));
         assert_eq!(dark.text_default, ThemeColor::from_rgb8(193, 193, 193));
@@ -1050,7 +1054,8 @@ mod tests {
                 "one",
                 "dracula",
                 "solarized",
-                "gruvbox"
+                "gruvbox",
+                "dark"
             ]
         );
         for preset in ThemePreset::ALL {
@@ -1061,7 +1066,11 @@ mod tests {
             assert_ne!(light.colors.surface, dark.colors.surface);
             assert_eq!(light.dimensions, AerisTheme::light().dimensions);
             if preset != ThemePreset::Aeris {
-                assert_ne!(light.colors, AerisTheme::light().colors);
+                if preset == ThemePreset::Dark {
+                    assert_eq!(light.colors, AerisTheme::light().colors);
+                } else {
+                    assert_ne!(light.colors, AerisTheme::light().colors);
+                }
                 assert_ne!(dark.colors, AerisTheme::dark().colors);
             }
         }
@@ -1071,8 +1080,33 @@ mod tests {
         assert_eq!(AerisTheme::default(), initial);
         assert_eq!(initial.colors.surface, ThemeColor::from_rgb8(0, 0, 0));
         assert_eq!(
+            initial.colors.surface_secondary,
+            ThemeColor::from_rgb8(0x23, 0x23, 0x24)
+        );
+        assert_eq!(
+            initial.colors.border,
+            ThemeColor::from_rgb8(0x3c, 0x3c, 0x3c)
+        );
+        assert_eq!(
             token_source(&initial.color_tokens(), "border-secondary"),
             "#404040"
+        );
+        let near_black = AerisTheme::resolve(ThemePreset::Dark, ThemeMode::Dark);
+        assert_eq!(
+            near_black.colors.surface,
+            ThemeColor::from_rgb8(0x0a, 0x0a, 0x0a)
+        );
+        assert_eq!(
+            near_black.colors.surface_secondary,
+            ThemeColor::from_rgb8(0x29, 0x29, 0x29)
+        );
+        assert_eq!(
+            near_black.colors.border,
+            ThemeColor::from_rgb8(0x40, 0x40, 0x40)
+        );
+        assert_eq!(
+            near_black.colors.border_secondary,
+            ThemeColor::from_rgb8(0x4c, 0x4c, 0x4c)
         );
         let tokyo = AerisTheme::resolve(ThemePreset::TokyoNight, ThemeMode::Dark);
         assert_eq!(

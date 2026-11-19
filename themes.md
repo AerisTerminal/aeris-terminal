@@ -1,29 +1,31 @@
 # Theme presets
 
-Every Theme Studio theme in one place: the default Aeris theme plus seven presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the Aeris theme.
+Every Theme Studio theme in one place: the default High Contrast theme plus eight presets, each with a light and a dark version. Every block has the same tokens, in the same order and with the same comments, as the High Contrast theme.
 
 The surfaces come in three layers: `--surface` for pages and panels, `--surface-secondary` for subtle fills, and `--surface-backdrop` for the page backdrop that shows through the gaps between workspace panels. The backdrop belongs to the native desktop platform: web pages use `--surface` as their page background and never read `--surface-backdrop`.
 
 ## How to use
 
-1. Copy the CSS blocks below into one stylesheet, **in the order shown**. Aeris comes first because it is the fallback when no preset is selected.
-2. Pick a theme with `data-theme` on `<html>`. Leave it off for Aeris.
+1. Copy the CSS blocks below into one stylesheet, **in the order shown**. High Contrast comes first because it is the fallback when no preset is selected.
+2. Pick a theme with `data-theme` on `<html>`. Leave it off for High Contrast.
 3. Turn dark mode on with the `dark` class on the same `<html>` element.
 
 ```html
-<html>                                        <!-- Aeris, light -->
-<html class="dark">                           <!-- Aeris, dark -->
+<html>                                        <!-- High Contrast, light -->
+<html class="dark">                           <!-- High Contrast, dark -->
 <html data-theme="tokyo-night">               <!-- Tokyo Night, light -->
 <html data-theme="tokyo-night" class="dark">  <!-- Tokyo Night, dark -->
 ```
 
 ```js
 document.documentElement.dataset.theme = 'catppuccin'; // switch preset
-delete document.documentElement.dataset.theme;          // back to Aeris
+delete document.documentElement.dataset.theme;          // back to High Contrast
 document.documentElement.classList.toggle('dark');      // light / dark
 ```
 
 Components pick the colours up through the variables, for example `background: var(--surface)`, `color: var(--text-default)` or `background: var(--primary)`.
+
+`--text-default` is for the main platform (the trading terminal). `--text-web-default` is for the website and landing pages. In the dark mode of High Contrast and Dark it is a brighter `#ededed` instead of `#c1c1c1`; in every other block it matches `--text-default`. Icons use `currentColor`, so an icon takes the same colour as the text it sits in. `--text-secondary` and `--text-muted` are shared by both.
 
 Floating layers (menus, dialogs, tooltips) sit on `--surface-secondary` with a 1px `--border-secondary` edge in every theme.
 
@@ -31,7 +33,7 @@ Floating layers (menus, dialogs, tooltips) sit on `--surface-secondary` with a 1
 
 | Theme | `data-theme` | Light | Dark |
 | --- | --- | --- | --- |
-| [Aeris (default)](#1-aeris-default) | none | Light | Pure black |
+| [High Contrast (default)](#1-high-contrast-default) | none | Light | Pure black |
 | [Tokyo Night](#2-tokyo-night) | `tokyo-night` | Day | Night |
 | [Catppuccin](#3-catppuccin) | `catppuccin` | Latte | Mocha |
 | [GitHub](#4-github) | `github` | GitHub Light | GitHub Dark |
@@ -39,10 +41,11 @@ Floating layers (menus, dialogs, tooltips) sit on `--surface-secondary` with a 1
 | [Dracula](#6-dracula) | `dracula` | Alucard | Dracula |
 | [Solarized](#7-solarized) | `solarized` | Solarized Light | Solarized Dark |
 | [Gruvbox](#8-gruvbox) | `gruvbox` | Gruvbox Light | Gruvbox Dark (medium) |
+| [Dark](#9-dark) | `dark` | Light | Near-black (`#0a0a0a`) |
 
-## 1. Aeris (default)
+## 1. High Contrast (default)
 
-The default theme. It applies whenever no `data-theme` is set. Dark mode uses a pure black `#000000` surface with a `#171717` secondary surface and solid `#2c2c2c` / `#404040` borders. Light mode uses a strong `--border-secondary` and hover / active fills. Menus, dialogs and tooltips sit on `--surface-secondary` with a `--border-secondary` edge, like every preset.
+The default theme. It applies whenever no `data-theme` is set. Dark mode uses a pure black `#000000` surface with a `#232324` secondary surface and solid `#3c3c3c` / `#404040` borders. Light mode uses a strong `--border-secondary` and hover / active fills. Menus, dialogs and tooltips sit on `--surface-secondary` with a `--border-secondary` edge, like every preset.
 
 ```css
 :root {
@@ -59,6 +62,7 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
 
   /* Text */
   --text-default: #0a0a0a;
+  --text-web-default: #0a0a0a;
   --text-secondary: #0a0a0a94;
   --text-muted: #0a0a0a40;
   --text-positive: #0b9981;
@@ -158,17 +162,18 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
 .dark {
   /* Surfaces */
   --surface: #000000;
-  --surface-secondary: #171717;
+  --surface-secondary: #232324;
   --surface-backdrop: #262626;
 
   /* Borders */
-  --border: #2c2c2c;
+  --border: #3c3c3c;
   --border-secondary: #404040;
   --border-subtle: #fafafa12;
   --border-width: 1px;
 
   /* Text */
   --text-default: #c1c1c1;
+  --text-web-default: #ededed;
   --text-secondary: #fafafa8c;
   --text-muted: #fafafa59;
   --text-positive: #0b9981;
@@ -278,6 +283,7 @@ Day (light) and Night (dark).
 
   /* Text */
   --text-default: #3760bf;
+  --text-web-default: #3760bf;
   --text-secondary: #3760bf94;
   --text-muted: #3760bf40;
   --text-positive: var(--positive);
@@ -388,6 +394,7 @@ Day (light) and Night (dark).
 
   /* Text */
   --text-default: #c0caf5;
+  --text-web-default: #c0caf5;
   --text-secondary: #c0caf59e;
   --text-muted: #c0caf561;
   --text-positive: var(--positive);
@@ -497,6 +504,7 @@ Latte (light) and Mocha (dark).
 
   /* Text */
   --text-default: #4c4f69;
+  --text-web-default: #4c4f69;
   --text-secondary: #4c4f6994;
   --text-muted: #4c4f6940;
   --text-positive: var(--positive);
@@ -607,6 +615,7 @@ Latte (light) and Mocha (dark).
 
   /* Text */
   --text-default: #cdd6f4;
+  --text-web-default: #cdd6f4;
   --text-secondary: #cdd6f49e;
   --text-muted: #cdd6f461;
   --text-positive: var(--positive);
@@ -716,6 +725,7 @@ GitHub Light (light) and GitHub Dark (dark).
 
   /* Text */
   --text-default: #1f2328;
+  --text-web-default: #1f2328;
   --text-secondary: #1f232894;
   --text-muted: #1f232840;
   --text-positive: var(--positive);
@@ -826,6 +836,7 @@ GitHub Light (light) and GitHub Dark (dark).
 
   /* Text */
   --text-default: #e6edf3;
+  --text-web-default: #e6edf3;
   --text-secondary: #e6edf39e;
   --text-muted: #e6edf361;
   --text-positive: var(--positive);
@@ -935,6 +946,7 @@ Atom One Light (light) and One Dark Pro (dark).
 
   /* Text */
   --text-default: #383a42;
+  --text-web-default: #383a42;
   --text-secondary: #383a4294;
   --text-muted: #383a4240;
   --text-positive: var(--positive);
@@ -1045,6 +1057,7 @@ Atom One Light (light) and One Dark Pro (dark).
 
   /* Text */
   --text-default: #abb2bf;
+  --text-web-default: #abb2bf;
   --text-secondary: #abb2bf9e;
   --text-muted: #abb2bf61;
   --text-positive: var(--positive);
@@ -1154,6 +1167,7 @@ Alucard (light) and Dracula (dark).
 
   /* Text */
   --text-default: #1f1f1f;
+  --text-web-default: #1f1f1f;
   --text-secondary: #1f1f1f94;
   --text-muted: #1f1f1f40;
   --text-positive: var(--positive);
@@ -1264,6 +1278,7 @@ Alucard (light) and Dracula (dark).
 
   /* Text */
   --text-default: #f8f8f2;
+  --text-web-default: #f8f8f2;
   --text-secondary: #f8f8f29e;
   --text-muted: #f8f8f261;
   --text-positive: var(--positive);
@@ -1373,6 +1388,7 @@ Solarized Light (light) and Solarized Dark (dark).
 
   /* Text */
   --text-default: #586e75;
+  --text-web-default: #586e75;
   --text-secondary: #586e7594;
   --text-muted: #586e7540;
   --text-positive: var(--positive);
@@ -1483,6 +1499,7 @@ Solarized Light (light) and Solarized Dark (dark).
 
   /* Text */
   --text-default: #93a1a1;
+  --text-web-default: #93a1a1;
   --text-secondary: #93a1a19e;
   --text-muted: #93a1a161;
   --text-positive: var(--positive);
@@ -1592,6 +1609,7 @@ Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
 
   /* Text */
   --text-default: #3c3836;
+  --text-web-default: #3c3836;
   --text-secondary: #3c383694;
   --text-muted: #3c383640;
   --text-positive: var(--positive);
@@ -1702,6 +1720,7 @@ Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
 
   /* Text */
   --text-default: #ebdbb2;
+  --text-web-default: #ebdbb2;
   --text-secondary: #ebdbb29e;
   --text-muted: #ebdbb261;
   --text-positive: var(--positive);
@@ -1789,5 +1808,226 @@ Gruvbox Light (light) and Gruvbox Dark (medium) (dark).
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
   --buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);
   --sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);
+}
+```
+
+## 9. Dark
+
+Dark mode uses a near-black `#0a0a0a` surface instead of High Contrast's pure black `#000000`, with a `#292929` secondary surface, a `#262626` backdrop and solid `#404040` / `#4c4c4c` borders. The lifted surface and lighter borders give slightly lower contrast, for people who see halation on pure black. Light mode matches High Contrast light.
+
+```css
+[data-theme="dark"] {
+  /* Surfaces */
+  --surface: #ffffff;
+  --surface-secondary: #fafafa;
+  --surface-backdrop: #e5e5e5;
+
+  /* Borders */
+  --border: #0a0a0a33;
+  --border-secondary: #0a0a0a33;
+  --border-subtle: #0a0a0a12;
+  --border-width: 1px;
+
+  /* Text */
+  --text-default: #0a0a0a;
+  --text-web-default: #0a0a0a;
+  --text-secondary: #0a0a0a94;
+  --text-muted: #0a0a0a40;
+  --text-positive: #0b9981;
+  --text-negative: #f23645;
+  --text-danger: var(--danger);
+  --text-warning: #ff6900;
+
+  /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
+  --hover-bg: #0a0a0a14;
+  --active-bg: #0a0a0a1f;
+  --disabled-bg: #0a0a0a0d;
+
+  /* Status — gains / losses, success / failure. Shared with the main platform. */
+  --positive: #089981;
+  --positive-subtle: #dcf5f0;
+  --negative: #f7525f;
+  --negative-subtle: #ffe2e2;
+  --warning: #ff6900;
+  --warning-subtle: #ffedd4;
+  --indigo: #615fff;
+  --indigo-subtle: #e0e7ff;
+  --purple: #ad46ff;
+  --purple-subtle: #f3e8ff;
+
+  /* Actions */
+  --primary: #006EDD;
+  --primary-hover: color-mix(in srgb, var(--primary) 80%, transparent);
+  --primary-active: #0050b2;
+  --primary-disabled: color-mix(in srgb, var(--primary) 30%, var(--surface));
+  --primary-disabled-foreground: color-mix(in srgb, var(--primary) 65%, var(--surface));
+  --primary-subtle: color-mix(in srgb, var(--primary) 12%, var(--surface));
+  --primary-foreground: #ffffff;
+  --danger: #f7525f;
+  --danger-hover: #e5404d;
+  --danger-disabled: #ffc9c9;
+  --danger-disabled-foreground: #ffa2a2;
+  --danger-ring: #ffc9c9;
+  --danger-foreground: #ffffff;
+  --warning-hover: #e05c00;
+  --warning-foreground: #ffffff;
+
+  /* Buttons — neutral default button */
+  --button-fill: #0a0a0af2;
+  --button-fill-hover: #0a0a0ada;
+  --button-fill-active: #0a0a0ac2;
+  --button-fill-foreground: #fafafaf2;
+  --button-fill-subtle: #0a0a0a14;
+
+  /* Trade — dedicated buy / sell buttons. Hover and press darken the fill; no shadows. */
+  --buy: var(--primary);
+  --buy-hover: var(--primary-hover);
+  --buy-active: var(--primary-active);
+  --buy-disabled: var(--primary-disabled);
+  --buy-disabled-foreground: var(--primary-disabled-foreground);
+  --buy-foreground: var(--primary-foreground);
+  --sell: #f7525f;
+  --sell-hover: #e5404d;
+  --sell-active: #c9303c;
+  --sell-disabled: #ffc9c9;
+  --sell-disabled-foreground: #ffa2a2;
+  --sell-foreground: #ffffff;
+  /* Tinted buy / sell for resting order types (limit, stop). */
+  --buy-subtle: color-mix(in srgb, var(--buy) 12%, var(--surface));
+  --buy-subtle-hover: color-mix(in srgb, var(--buy) 20%, var(--surface));
+  --buy-subtle-active: color-mix(in srgb, var(--buy) 28%, var(--surface));
+  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #000000);
+  --sell-subtle: color-mix(in srgb, var(--sell) 12%, var(--surface));
+  --sell-subtle-hover: color-mix(in srgb, var(--sell) 20%, var(--surface));
+  --sell-subtle-active: color-mix(in srgb, var(--sell) 28%, var(--surface));
+  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #000000);
+
+  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
+  --book-bid-fill: color-mix(in srgb, var(--primary) 40%, var(--surface));
+  --book-bid-text: var(--primary);
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 40%, var(--surface));
+  --book-ask-text: color-mix(in srgb, #ff2f5e 75%, #000000);
+  --book-fill-text: #000000;
+
+  /* Focus */
+  --ring-primary: var(--primary);
+
+  /* Radius */
+  --radius-small: 4px;
+  --radius-compact: 6px;
+  --radius-default: 8px;
+  --radius-medium: 14px;
+  --radius-large: 999px;
+
+  /* Chart */
+  --bullish: #0b9981;
+  --bearish: #f23645;
+  /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
+  --buy-bubble: color-mix(in srgb, #0b9981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f23645 35%, transparent);
+}
+
+[data-theme="dark"].dark {
+  /* Surfaces */
+  --surface: #0a0a0a;
+  --surface-secondary: #292929;
+  --surface-backdrop: #262626;
+
+  /* Borders */
+  --border: #404040;
+  --border-secondary: #4c4c4c;
+  --border-subtle: #fafafa12;
+  --border-width: 1px;
+
+  /* Text */
+  --text-default: #c1c1c1;
+  --text-web-default: #ededed;
+  --text-secondary: #fafafa8c;
+  --text-muted: #fafafa59;
+  --text-positive: #0b9981;
+  --text-negative: #f23645;
+  --text-danger: #ffa2a2;
+  --text-warning: #ffb86a;
+
+  /* Interaction states */
+  --hover-bg: #fafafa1f;
+  --active-bg: #fafafa26;
+  --disabled-bg: #fafafa0d;
+
+  /* Status — gains / losses, success / failure. Shared with the main platform. */
+  --positive: #089981;
+  --positive-subtle: #193c37;
+  --negative: #f7525f;
+  --negative-subtle: #532b2e;
+  --warning: #ff6900;
+  --warning-subtle: #7e2a0c;
+  --indigo: #615fff;
+  --indigo-subtle: #312c85;
+  --purple: #ad46ff;
+  --purple-subtle: #59168b;
+
+  /* Actions */
+  --primary: #006EDD;
+  --primary-hover: color-mix(in srgb, var(--primary) 80%, transparent);
+  --primary-active: #0050b2;
+  --primary-disabled: color-mix(in srgb, var(--primary) 35%, var(--surface));
+  --primary-disabled-foreground: color-mix(in srgb, var(--primary) 65%, white);
+  --primary-subtle: color-mix(in srgb, var(--primary) 22%, var(--surface));
+  --primary-foreground: #ffffff;
+  --danger: #f7525f;
+  --danger-hover: #f96a75;
+  --danger-disabled: #6b3135;
+  --danger-disabled-foreground: #d0646c;
+  --danger-ring: #c10007;
+  --danger-foreground: #ffffff;
+  --warning-hover: #ff7b1f;
+  --warning-foreground: #ffffff;
+
+  /* Buttons — neutral default button */
+  --button-fill: #fafafad9;
+  --button-fill-hover: #fafafac3;
+  --button-fill-active: #fafafaad;
+  --button-fill-foreground: #0a0a0ad9;
+  --button-fill-subtle: #fafafa14;
+
+  /* Trade — dedicated buy / sell buttons. Hover and press brighten the fill; no shadows. */
+  --buy: var(--primary);
+  --buy-hover: var(--primary-hover);
+  --buy-active: var(--primary-active);
+  --buy-disabled: var(--primary-disabled);
+  --buy-disabled-foreground: var(--primary-disabled-foreground);
+  --buy-foreground: var(--primary-foreground);
+  --sell: #f7525f;
+  --sell-hover: #f96a75;
+  --sell-active: #fb838c;
+  --sell-disabled: #6b3135;
+  --sell-disabled-foreground: #ae8e90;
+  --sell-foreground: #ffffff;
+  /* Tinted buy / sell for resting order types (limit, stop). */
+  --buy-subtle: color-mix(in srgb, var(--buy) 18%, var(--surface));
+  --buy-subtle-hover: color-mix(in srgb, var(--buy) 26%, var(--surface));
+  --buy-subtle-active: color-mix(in srgb, var(--buy) 34%, var(--surface));
+  --buy-subtle-foreground: color-mix(in srgb, var(--buy) 70%, #ffffff);
+  --sell-subtle: color-mix(in srgb, var(--sell) 18%, var(--surface));
+  --sell-subtle-hover: color-mix(in srgb, var(--sell) 26%, var(--surface));
+  --sell-subtle-active: color-mix(in srgb, var(--sell) 34%, var(--surface));
+  --sell-subtle-foreground: color-mix(in srgb, var(--sell) 70%, #ffffff);
+
+  /* Order book — depth-bar fills, the price text beside them, and the text drawn on top of a fill. */
+  --book-bid-fill: color-mix(in srgb, var(--primary) 35%, var(--surface));
+  --book-bid-text: color-mix(in srgb, var(--primary) 80%, #ffffff);
+  --book-ask-fill: color-mix(in srgb, #ff2f5e 35%, var(--surface));
+  --book-ask-text: color-mix(in srgb, #ff2f5e 85%, #ffffff);
+  --book-fill-text: #ffffff;
+
+  /* Focus */
+  --ring-primary: var(--primary);
+
+  /* Chart */
+  --bullish: #0b9981;
+  --bearish: #f23645;
+  /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
+  --buy-bubble: color-mix(in srgb, #0b9981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f23645 35%, transparent);
 }
 ```
