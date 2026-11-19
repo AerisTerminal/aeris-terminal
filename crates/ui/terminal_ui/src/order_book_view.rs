@@ -20,11 +20,14 @@ use gpui::{
 use std::cmp::Ordering;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
-const HEADER_HEIGHT: f32 = 28.0;
+const HEADER_HEIGHT: f32 = 26.0;
 /// The Level 1 note above the column labels for top-of-book-only providers.
-const LEVEL_ONE_NOTE_HEIGHT: f32 = 18.0;
-const ROW_HEIGHT: f32 = 16.0;
-const TEXT_SIZE: f32 = 11.0;
+const LEVEL_ONE_NOTE_HEIGHT: f32 = 20.0;
+const ROW_HEIGHT: f32 = 22.0;
+const FOOTER_HEIGHT: f32 = 28.0;
+const TEXT_SIZE: f32 = 12.0;
+const HEADER_TEXT_SIZE: f32 = 11.0;
+const BAR_INSET_Y: f32 = 2.0;
 const MAXIMUM_TRADE_PRICES_FOR_GRID_INFERENCE: usize = 64;
 // Match the reference ladder's four-significant-figure Hyperliquid grouping.
 // Derive this from price magnitude rather than the current top-20 snapshot's
@@ -825,7 +828,7 @@ impl Render for ReadOnlyOrderBookView {
                         .flatten(),
                     )
                     .child(render_ladder(
-                        frame,
+                        frame.clone(),
                         empty_copy,
                         columns,
                         &ladder_scroll,
@@ -837,7 +840,12 @@ impl Render for ReadOnlyOrderBookView {
                             highlights: self.highlights,
                             volume_peak: self.volume_peak,
                         },
-                    )),
+                    ))
+                    .children(
+                        frame
+                            .as_deref()
+                            .and_then(|frame| render_depth_footer(frame, &self.theme)),
+                    ),
             );
         self.render_metrics
             .record(render_started.elapsed().as_nanos());
@@ -872,6 +880,7 @@ fn render_header(
     // Column labels are fractions of the full row, exactly like the ladder below, so the
     // Level 1 note takes its own line instead of a share of the label row.
     let labels = div()
+        .relative()
         .h(px(HEADER_HEIGHT))
         .flex_none()
         .flex()
@@ -885,28 +894,172 @@ fn render_header(
                         columns.width(column),
                         column.label().to_uppercase(),
                         column_alignment(column),
+                        column == OrderBookColumn::Price,
+                        theme,
                     )
                 }),
-        );
+        )
+        .children(column_rails(columns, theme));
     div()
         .flex_none()
         .flex()
         .flex_col()
         .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(theme.colors.border))
-        .text_size(px(TEXT_SIZE))
+        .text_size(px(HEADER_TEXT_SIZE))
+        .font_weight(platform_font_weight(TypographyRole::Emphasis))
         .text_color(gpui_color(theme.colors.text_secondary))
-        .bg(gpui_color(theme.colors.surface_secondary))
+        .bg(gpui_color(theme.colors.surface))
         .children(top_of_book_only.then(|| {
             div()
                 .h(px(LEVEL_ONE_NOTE_HEIGHT))
                 .flex()
                 .items_center()
                 .px_2()
+                .border_b(px(theme.dimensions.border_width))
+                .border_color(gpui_color(theme.colors.border))
+                .text_color(gpui_color(theme.colors.text_secondary))
                 .truncate()
                 .child(tr!(chart_ui::BOOK_LEVEL_ONE_NOTE))
         }))
         .child(labels)
+}
+
+struct DepthTotals {
+    bid_pct: i128,
+    ask_pct: i128,
+    bid_ratio: f32,
+    ask_ratio: f32,
+    bid_total_text: String,
+    ask_total_text: String,
+}
+
+fn depth_totals(frame: &OrderBookFrame) -> Option<DepthTotals> {
+    let mut total_bid: i128 = 0;
+    let mut total_ask: i128 = 0;
+    for row in &frame.rows {
+        if let Some(quantity) = row.bid.as_ref().and_then(|level| level.quantity)
+            && quantity > 0
+        {
+            total_bid = total_bid.saturating_add(i128::from(quantity));
+        }
+        if let Some(quantity) = row.ask.as_ref().and_then(|level| level.quantity)
+            && quantity > 0
+        {
+            total_ask = total_ask.saturating_add(i128::from(quantity));
+        }
+    }
+    let combined = total_bid.saturating_add(total_ask);
+    if combined <= 0 {
+        return None;
+    }
+    let bid_basis_points = total_bid
+        .saturating_mul(10_000)
+        .checked_div(combined)
+        .unwrap_or(5_000)
+        .clamp(0, 10_000);
+    let bid_pct = (bid_basis_points + 50) / 100;
+    let bid_ratio = f32::from(u16::try_from(bid_basis_points).unwrap_or(5_000)) / 10_000.0;
+    Some(DepthTotals {
+        bid_pct,
+        ask_pct: 100 - bid_pct,
+        bid_ratio,
+        ask_ratio: (1.0 - bid_ratio).clamp(0.0, 1.0),
+        bid_total_text: compact_quantity_text(
+            i64::try_from(total_bid).unwrap_or(i64::MAX),
+            frame.quantity_scale,
+        ),
+        ask_total_text: compact_quantity_text(
+            i64::try_from(total_ask).unwrap_or(i64::MAX),
+            frame.quantity_scale,
+        ),
+    })
+}
+
+fn render_depth_footer(
+    frame: &OrderBookFrame,
+    theme: &AerisTheme,
+) -> Option<impl IntoElement + use<>> {
+    let totals = depth_totals(frame)?;
+    let colors = theme.colors;
+    Some(
+        div()
+            .id("order_book_depth_footer")
+            .h(px(FOOTER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .border_t(px(theme.dimensions.border_width))
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(colors.surface))
+            .font_family(platform_numeric_font_family())
+            .font_features(platform_tabular_numerals())
+            .text_size(px(HEADER_TEXT_SIZE))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_weight(platform_font_weight(TypographyRole::Emphasis))
+                            .text_color(gpui_color(colors.book_bid_text))
+                            .child(format!("{}%", totals.bid_pct)),
+                    )
+                    .child(
+                        div()
+                            .text_color(gpui_color(colors.text_secondary))
+                            .child(totals.bid_total_text),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(24.0))
+                    .h(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .overflow_hidden()
+                    .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+                    .bg(gpui_color(colors.disabled_bg))
+                    .children((totals.bid_ratio > 0.0).then(|| {
+                        div()
+                            .h_full()
+                            .w(relative(totals.bid_ratio))
+                            .rounded_l(px(f32::from(RadiusToken::Full.logical_pixels())))
+                            .bg(gpui_color(colors.book_bid_fill))
+                    }))
+                    .children((totals.ask_ratio > 0.0).then(|| {
+                        div()
+                            .h_full()
+                            .w(relative(totals.ask_ratio))
+                            .rounded_r(px(f32::from(RadiusToken::Full.logical_pixels())))
+                            .bg(gpui_color(colors.book_ask_fill))
+                    })),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(gpui_color(colors.text_secondary))
+                            .child(totals.ask_total_text),
+                    )
+                    .child(
+                        div()
+                            .font_weight(platform_font_weight(TypographyRole::Emphasis))
+                            .text_color(gpui_color(colors.book_ask_text))
+                            .child(format!("{}%", totals.ask_pct)),
+                    ),
+            ),
+    )
 }
 
 /// Empty-panel copy: loading until the first frame, and the unavailable
@@ -954,6 +1107,7 @@ fn render_ladder(
             .children(spread_row(
                 frame.best_bid.as_ref(),
                 frame.best_ask.as_ref(),
+                frame.price_scale,
                 theme,
             ))
             .child(
@@ -1648,10 +1802,13 @@ fn render_ladder_item(
             )
             .into_any_element()
         }),
-        LadderItemIndex::Spread => {
-            spread_row(frame.best_bid.as_ref(), frame.best_ask.as_ref(), theme)
-                .map(gpui::IntoElement::into_any_element)
-        }
+        LadderItemIndex::Spread => spread_row(
+            frame.best_bid.as_ref(),
+            frame.best_ask.as_ref(),
+            frame.price_scale,
+            theme,
+        )
+        .map(gpui::IntoElement::into_any_element),
         LadderItemIndex::Bid(row_index) => frame.rows.get(row_index)?.bid.as_ref().map(|level| {
             render_level_row(
                 frame,
@@ -1761,14 +1918,17 @@ impl Render for OrderBookLevelDrag {
             OrderSide::Sell => colors.book_ask_text,
         };
         div()
-            .h(px(ROW_HEIGHT + 6.0))
+            .h(px(ROW_HEIGHT + 4.0))
             .px_2()
             .flex()
             .items_center()
             .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
             .border(px(self.theme.dimensions.border_width))
             .border_color(gpui_color(color))
-            .bg(gpui_color(colors.surface))
+            .bg(gpui_color(colors.surface_secondary))
+            .font_family(platform_numeric_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Emphasis))
+            .font_features(platform_tabular_numerals())
             .text_size(px(TEXT_SIZE))
             .text_color(gpui_color(color))
             .child(self.label.clone())
@@ -1807,6 +1967,7 @@ struct LevelCellContext<'a> {
     position_marker: Option<&'a OrderBookPositionMarker>,
     pnl_position: Option<&'a OrderBookPositionMarker>,
     queue: Option<&'a OrderQueueLevel>,
+    is_inside_market: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1835,6 +1996,13 @@ impl RowRenderStats {
             maximum_trade_quantity,
             trade_volumes: Some(trade_volumes),
         }
+    }
+}
+
+fn is_inside_market_level(frame: &OrderBookFrame, side: BookColumnSide, price: i64) -> bool {
+    match side {
+        BookColumnSide::Bid => display_best_bid(frame).is_some_and(|best| best.price == price),
+        BookColumnSide::Ask => display_best_ask(frame).is_some_and(|best| best.price == price),
     }
 }
 
@@ -1870,6 +2038,7 @@ fn render_level_row(
         .find(|order| order.price == level.price && order.side == order_book_level_side(side));
     let drag = working_order
         .map(|order| working_order_drag(order, level.price, frame.price_scale, interaction.theme));
+    let is_inside_market = is_inside_market_level(frame, side, level.price);
     let context = LevelCellContext {
         columns,
         price_color: appearance.text,
@@ -1892,6 +2061,7 @@ fn render_level_row(
         }),
         pnl_position: interaction.position_marker,
         queue: order_queue_at(frame, side, level.price),
+        is_inside_market,
     };
     div()
         .id((row_id, signed_price_element_id(level.price)))
@@ -1902,6 +2072,7 @@ fn render_level_row(
         .items_center()
         .relative()
         .overflow_hidden()
+        .cursor_pointer()
         .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border))
         .font_family(platform_numeric_font_family())
@@ -1979,6 +2150,7 @@ fn render_empty_price_tick(
         .items_center()
         .relative()
         .overflow_hidden()
+        .cursor_pointer()
         .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border))
         .font_family(platform_numeric_font_family())
@@ -2081,33 +2253,36 @@ struct EmptyPriceCellContext<'a> {
 
 fn render_empty_price_cell(context: &EmptyPriceCellContext<'_>) -> AnyElement {
     let width = context.columns.width(context.column);
+    let theme = context.interaction.theme;
+    let position_marker = context
+        .interaction
+        .position_marker
+        .filter(|marker| marker.price == context.price && marker.side == context.click_side);
     match context.column {
-        OrderBookColumn::Price => table_cell(width)
-            .px_1()
-            .text_center()
-            .text_color(gpui_color(context.price_color))
-            .child(grouped_fixed_point_text(context.price, context.price_scale))
-            .into_any_element(),
+        OrderBookColumn::Price => price_spine_cell(
+            width,
+            grouped_fixed_point_text(context.price, context.price_scale),
+            context.price_color,
+            false,
+            context.working_order,
+            position_marker,
+            theme,
+        )
+        .into_any_element(),
         OrderBookColumn::SellTrades => sell_trades_cell(width, context.traded),
         OrderBookColumn::BuyTrades => buy_trades_cell(width, context.traded),
         OrderBookColumn::Delta => delta_cell(width, context.traded),
         OrderBookColumn::Volume => volume_cell(width, context.traded),
-        OrderBookColumn::Orders => working_order_cell(
-            width,
-            context.working_order,
-            context.interaction.position_marker.filter(|marker| {
-                marker.price == context.price && marker.side == context.click_side
-            }),
-            None,
-            context.interaction.theme,
-        )
-        .into_any_element(),
+        OrderBookColumn::Orders => {
+            working_order_cell(width, context.working_order, position_marker, None, theme)
+                .into_any_element()
+        }
         OrderBookColumn::ProfitLoss => pnl_cell(
             width,
             context.interaction.position_marker,
             context.price,
             context.price_scale,
-            context.interaction.theme,
+            theme,
         )
         .into_any_element(),
         OrderBookColumn::Queue => queue_cell(
@@ -2122,7 +2297,12 @@ fn render_empty_price_cell(context: &EmptyPriceCellContext<'_>) -> AnyElement {
 }
 
 fn price_grid_center_row(frame: &OrderBookFrame, theme: &AerisTheme) -> AnyElement {
-    if let Some(row) = spread_row(display_best_bid(frame), display_best_ask(frame), theme) {
+    if let Some(row) = spread_row(
+        display_best_bid(frame),
+        display_best_ask(frame),
+        frame.price_scale,
+        theme,
+    ) {
         return row.into_any_element();
     }
     div()
@@ -2158,12 +2338,16 @@ fn render_level_cell(
             context,
         ),
         OrderBookColumn::SellTrades => sell_trades_cell(width, context.traded),
-        OrderBookColumn::Price => table_cell(width)
-            .px_1()
-            .text_center()
-            .text_color(gpui_color(context.price_color))
-            .child(level.price_text.clone())
-            .into_any_element(),
+        OrderBookColumn::Price => price_spine_cell(
+            width,
+            level.price_text.clone(),
+            context.price_color,
+            context.is_inside_market,
+            context.working_order,
+            context.position_marker,
+            context.theme,
+        )
+        .into_any_element(),
         OrderBookColumn::BuyTrades => buy_trades_cell(width, context.traded),
         OrderBookColumn::Ask => resting_quantity_cell(
             width,
@@ -2189,6 +2373,66 @@ fn render_level_cell(
         )
         .into_any_element(),
     }
+}
+
+fn price_spine_cell(
+    width: f32,
+    price_text: String,
+    price_color: ThemeColor,
+    is_inside_market: bool,
+    working_order: Option<&OrderBookWorkingOrder>,
+    position_marker: Option<&OrderBookPositionMarker>,
+    theme: &AerisTheme,
+) -> Div {
+    let colors = theme.colors;
+    let accent = if position_marker.is_some() {
+        Some(colors.primary)
+    } else if let Some(order) = working_order {
+        Some(match order.order_side {
+            OrderSide::Buy => colors.book_bid_text,
+            OrderSide::Sell => colors.book_ask_text,
+        })
+    } else if is_inside_market {
+        Some(price_color)
+    } else {
+        None
+    };
+    let mut cell = table_cell(width)
+        .relative()
+        .px_2()
+        .justify_center()
+        .text_center()
+        .bg(gpui_color(if position_marker.is_some() {
+            colors.primary_subtle
+        } else {
+            colors.surface_secondary
+        }))
+        .text_color(gpui_color(if position_marker.is_some() {
+            colors.primary
+        } else {
+            price_color
+        }));
+    if position_marker.is_some() {
+        cell = cell.font_weight(platform_font_weight(TypographyRole::Strong));
+    } else if is_inside_market || working_order.is_some() {
+        cell = cell.font_weight(platform_font_weight(TypographyRole::Emphasis));
+    }
+    cell.children(accent.map(|color| {
+        div()
+            .absolute()
+            .top(px(BAR_INSET_Y))
+            .bottom(px(BAR_INSET_Y))
+            .left(px(theme.dimensions.border_width))
+            .w(px(2.0))
+            .rounded_r(bar_radius())
+            .bg(gpui_color(color))
+    }))
+    .child(div().relative().truncate().child(price_text))
+}
+
+/// Depth, trade and volume bars round their open end with `--radius-small`.
+fn bar_radius() -> gpui::Pixels {
+    px(f32::from(RadiusToken::Sm.logical_pixels()))
 }
 
 /// The ready queue resting at `price` on `side`; a queue that is loading or
@@ -2347,9 +2591,18 @@ fn table_cell(width: f32) -> Div {
         .whitespace_nowrap()
 }
 
-fn header_cell(width: f32, label: String, alignment: CellAlignment) -> impl IntoElement {
+fn header_cell(
+    width: f32,
+    label: String,
+    alignment: CellAlignment,
+    is_price_spine: bool,
+    theme: &AerisTheme,
+) -> impl IntoElement {
     let cell = table_cell(width)
-        .px_1()
+        .px_2()
+        .when(is_price_spine, |cell| {
+            cell.bg(gpui_color(theme.colors.surface_secondary))
+        })
         .child(div().w_full().truncate().child(label));
     match alignment {
         CellAlignment::Left => cell.text_left(),
@@ -2384,10 +2637,10 @@ fn highlight_cell(cell: Div, highlighted: bool, color: ThemeColor, theme: &Aeris
             .child(
                 div()
                     .absolute()
-                    .top_0()
-                    .bottom_0()
+                    .top(border_width)
+                    .bottom(border_width)
                     .left(border_width)
-                    .right_0()
+                    .right(border_width)
                     .border(border_width)
                     .border_color(gpui_color(color)),
             )
@@ -2410,19 +2663,17 @@ fn resting_quantity_cell(
             context.traded.highlights.large_lot_quantity(),
         )
     });
-    highlight_cell(
-        quantity_cell(
-            width,
-            level,
-            appearance,
-            column_side == BookColumnSide::Bid,
-            context.maximum_quantity,
-        ),
-        large_lot,
-        appearance.text,
-        context.theme,
-    )
-    .into_any_element()
+    let mut cell = quantity_cell(
+        width,
+        level,
+        appearance,
+        column_side == BookColumnSide::Bid,
+        context.maximum_quantity,
+    );
+    if level.is_some() && context.is_inside_market {
+        cell = cell.font_weight(platform_font_weight(TypographyRole::Emphasis));
+    }
+    highlight_cell(cell, large_lot, appearance.text, context.theme).into_any_element()
 }
 
 fn sell_trades_cell(width: f32, row: TradedRow<'_>) -> AnyElement {
@@ -2510,15 +2761,16 @@ fn volume_cell(width: f32, row: TradedRow<'_>) -> AnyElement {
     };
     let cell = table_cell(width)
         .relative()
-        .px_1()
+        .px_2()
         .text_color(gpui_color(text_color))
         .children((total > 0).then(|| {
             div()
                 .absolute()
-                .top_0()
-                .bottom_0()
+                .top(px(BAR_INSET_Y))
+                .bottom(px(BAR_INSET_Y))
                 .left_0()
                 .w(relative(bar_width))
+                .rounded_r(bar_radius())
                 .bg(gpui_color(fill))
         }))
         .child(div().relative().w_full().truncate().child(text));
@@ -2541,8 +2793,8 @@ fn trade_volume_cell(
     let width = visible_quantity_width(quantity, maximum_trade_quantity);
     let bar = div()
         .absolute()
-        .top_0()
-        .bottom_0()
+        .top(px(BAR_INSET_Y))
+        .bottom(px(BAR_INSET_Y))
         .w(relative(width))
         .bg(gpui_color(appearance.fill));
     let text = if quantity > 0 {
@@ -2556,9 +2808,9 @@ fn trade_volume_cell(
         .text_color(gpui_color(appearance.text))
         .children((quantity > 0).then(|| {
             if align_right {
-                bar.right_0().into_any_element()
+                bar.right_0().rounded_l(bar_radius()).into_any_element()
             } else {
-                bar.left_0().into_any_element()
+                bar.left_0().rounded_r(bar_radius()).into_any_element()
             }
         }))
         .child(div().relative().w_full().truncate().child(text));
@@ -2579,19 +2831,19 @@ fn quantity_cell(
         });
     let bar = div()
         .absolute()
-        .top_0()
-        .bottom_0()
+        .top(px(BAR_INSET_Y))
+        .bottom(px(BAR_INSET_Y))
         .w(relative(width))
         .bg(gpui_color(appearance.fill));
     let cell = table_cell(column_width)
         .relative()
-        .px_1()
+        .px_2()
         .text_color(gpui_color(appearance.text))
         .children(level.map(|_| {
             if align_right {
-                bar.right_0().into_any_element()
+                bar.right_0().rounded_l(bar_radius()).into_any_element()
             } else {
-                bar.left_0().into_any_element()
+                bar.left_0().rounded_r(bar_radius()).into_any_element()
             }
         }))
         .child(
@@ -2652,10 +2904,17 @@ fn column_rails(
 fn spread_row(
     best_bid: Option<&OrderBookColumnLevel>,
     best_ask: Option<&OrderBookColumnLevel>,
+    price_scale: u8,
     theme: &AerisTheme,
 ) -> Option<impl IntoElement + use<>> {
     let bid = best_bid?;
     let ask = best_ask?;
+    let colors = theme.colors;
+    let spread_text = ask
+        .price
+        .checked_sub(bid.price)
+        .filter(|delta| *delta >= 0)
+        .map(|delta| grouped_fixed_point_text(delta, price_scale));
     Some(
         div()
             .w_full()
@@ -2664,15 +2923,36 @@ fn spread_row(
             .flex()
             .items_center()
             .justify_center()
+            .gap_2()
+            .px_2()
             .border_b(px(theme.dimensions.border_width))
-            .border_color(gpui_color(theme.colors.border))
-            .bg(gpui_color(theme.colors.surface_secondary))
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(colors.surface_secondary))
             .font_family(platform_numeric_font_family())
-            .font_weight(platform_font_weight(TypographyRole::Normal))
             .font_features(platform_tabular_numerals())
-            .text_size(px(TEXT_SIZE))
-            .text_color(gpui_color(theme.colors.text_secondary))
-            .child(format!("{}  —  {}", bid.price_text, ask.price_text)),
+            .text_size(px(HEADER_TEXT_SIZE))
+            .child(
+                div()
+                    .font_weight(platform_font_weight(TypographyRole::Emphasis))
+                    .text_color(gpui_color(colors.book_bid_text))
+                    .child(bid.price_text.clone()),
+            )
+            .children(spread_text.map(|spread| {
+                div()
+                    .px(px(6.0))
+                    .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+                    .border(px(theme.dimensions.border_width))
+                    .border_color(gpui_color(colors.border_secondary))
+                    .bg(gpui_color(colors.surface_secondary))
+                    .text_color(gpui_color(colors.text_secondary))
+                    .child(spread)
+            }))
+            .child(
+                div()
+                    .font_weight(platform_font_weight(TypographyRole::Emphasis))
+                    .text_color(gpui_color(colors.book_ask_text))
+                    .child(ask.price_text.clone()),
+            ),
     )
 }
 
