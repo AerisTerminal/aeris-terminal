@@ -456,6 +456,12 @@ fn handle_session_message(
                 stop.store(true, Ordering::Release);
                 return Ok(false);
             }
+            for event in canonical.take_extra_events() {
+                if !emitter.send(ProviderSessionEvent::Market { generation, event }) {
+                    stop.store(true, Ordering::Release);
+                    return Ok(false);
+                }
+            }
             for instrument in canonical.take_depth_resnapshots() {
                 connection
                     .request_depth_by_order_snapshot(instrument.depth_snapshot_request())
@@ -923,6 +929,7 @@ fn advance_subscription(
                 connection
                     .request_depth_by_order_snapshot(instrument.depth_snapshot_request())
                     .map_err(session_failure)?;
+                canonical.mark_depth_snapshot_requested(&instrument.descriptor.instrument_id);
                 plan.phase = SubscriptionPhase::SubscribeDepthSnapshot(index);
                 plan.deadline = Instant::now() + response_timeout;
                 false
@@ -964,7 +971,7 @@ fn begin_added_subscription(
     canonical: &mut CanonicalSessionState,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     let instrument = added.get(index).ok_or_else(malformed)?;
-    canonical.add_instrument(instrument.clone())?;
+    canonical.add_instrument_before_depth_snapshot(instrument.clone())?;
     connection
         .update_market_data(subscription_request(
             instrument,

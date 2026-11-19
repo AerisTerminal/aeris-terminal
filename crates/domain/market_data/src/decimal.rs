@@ -103,7 +103,7 @@ pub fn expand_decimal_exponent(raw: &str) -> Result<String, String> {
     if digits.trim_matches('0').is_empty() {
         return Ok("0".to_string());
     }
-    let mut point = i64::try_from(whole.len().max(1)).map_err(|_| malformed())? + i64::from(exp);
+    let mut point = i64::try_from(whole.len()).map_err(|_| malformed())? + i64::from(exp);
     // Strip leading zeroes; they shift the point with the digits.
     let leading = digits.bytes().take_while(|byte| *byte == b'0').count();
     digits.drain(..leading);

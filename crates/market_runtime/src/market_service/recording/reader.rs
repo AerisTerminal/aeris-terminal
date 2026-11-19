@@ -372,7 +372,11 @@ pub(super) fn trade_history(session: &RecordedSession, window: &HistoryWindow) -
         let Some((open_seconds, open, sequence)) = period_of(at, window.period_seconds) else {
             continue;
         };
-        if open < first_open || at > until || window.range.is_some_and(|(_, end)| open >= end) {
+        if open < first_open
+            || window
+                .range
+                .is_some_and(|(_, end)| at > until || open >= end)
+        {
             continue;
         }
         match bars.back_mut() {
@@ -412,12 +416,24 @@ pub(super) fn trade_history(session: &RecordedSession, window: &HistoryWindow) -
             );
         }
     }
+    finalize_trade_history(bars, history, window, period_nanos)
+}
+
+fn finalize_trade_history(
+    mut bars: VecDeque<(MarketBar, u32)>,
+    mut history: TradeHistory,
+    window: &HistoryWindow,
+    period_nanos: i64,
+) -> TradeHistory {
+    let clock_at = history
+        .handoff_boundary_unix_nanos
+        .unwrap_or(window.through_unix_nanos);
     if window.range.is_none()
         && let Some((last, _)) = bars.back()
         && last
             .exchange_timestamp_unix_nanos
             .saturating_add(period_nanos)
-            > window.through_unix_nanos
+            > clock_at
     {
         history.forming = bars.pop_back();
     }
@@ -425,7 +441,19 @@ pub(super) fn trade_history(session: &RecordedSession, window: &HistoryWindow) -
         bars.pop_front();
         history.backwards_exhausted = false;
     }
-    history.bars = bars.into_iter().map(|(bar, _)| bar).collect();
+    history.bars = bars
+        .into_iter()
+        .enumerate()
+        .map(|(index, (mut bar, _))| {
+            bar.source_sequence = u64::try_from(index).unwrap_or(0).saturating_add(1);
+            bar
+        })
+        .collect();
+    if let Some((ref mut forming, _)) = history.forming {
+        forming.source_sequence = u64::try_from(history.bars.len())
+            .unwrap_or(0)
+            .saturating_add(1);
+    }
     history
 }
 

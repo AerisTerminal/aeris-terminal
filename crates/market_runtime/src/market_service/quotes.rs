@@ -92,9 +92,19 @@ impl QuoteBook {
                 || previous.quote.ask != state.quote.ask
                 || previous.quote.bid_size != state.quote.bid_size
                 || previous.quote.ask_size != state.quote.ask_size
+                || previous.phase != state.phase
+                || state
+                    .quote
+                    .received_unix_nanos
+                    .saturating_sub(previous.quote.received_unix_nanos)
+                    >= 1_000_000_000
         });
-        self.latest.insert(key, state.clone());
-        changed.then_some(state)
+        if changed {
+            self.latest.insert(key, state.clone());
+            Some(state)
+        } else {
+            None
+        }
     }
 }
 

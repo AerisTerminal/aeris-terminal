@@ -433,14 +433,24 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         snapshot: &aeris_market_engine::SeriesSnapshot,
     ) -> Result<(), String> {
+        let existing_tick_trades = snapshot.bars.last().and_then(|last| {
+            self.series
+                .trade(series)
+                .and_then(|model| model.forming_tick_trades(last.source_sequence))
+        });
+        let is_tick = matches!(series.period, aeris_market_data::BarPeriod::Tick { .. });
         let (bars, forming) = match snapshot.bars.split_last() {
-            Some((last, head)) if snapshot.forming => (
-                head,
-                Some(FormingBar {
-                    bar: *last,
-                    trades: None,
-                }),
-            ),
+            Some((last, head))
+                if snapshot.forming && (!is_tick || existing_tick_trades.is_some()) =>
+            {
+                (
+                    head,
+                    Some(FormingBar {
+                        bar: *last,
+                        trades: existing_tick_trades,
+                    }),
+                )
+            }
             _ => (snapshot.bars.as_ref(), None),
         };
         self.install_trade_seed(

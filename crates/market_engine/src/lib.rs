@@ -557,7 +557,7 @@ impl MarketEngine {
                     .replace(consumer_id, None, series, streams);
             }
         }
-        self.publications.remove(consumer_id);
+        self.publications.suspend(consumer_id);
         Ok(())
     }
 

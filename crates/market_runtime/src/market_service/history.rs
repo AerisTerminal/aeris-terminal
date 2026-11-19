@@ -1225,6 +1225,9 @@ impl Coordinator<'_> {
         else {
             return;
         };
+        if self.install_forming_only_history(ticket, generation, range, &snapshot) {
+            return;
+        }
         if snapshot.bars.is_empty()
             || self.older_page_reaches_nothing_older(series, range, &snapshot)
         {
@@ -1324,6 +1327,44 @@ impl Coordinator<'_> {
             let _ = self.request_viewport_history(consumer_id, consumer_generation, viewport);
         }
         self.dispatch_deferred_history(ticket, generation);
+    }
+
+    fn install_forming_only_history(
+        &mut self,
+        ticket: &HistoryTicket,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+        snapshot: &HistorySnapshot,
+    ) -> bool {
+        if range.is_some() || !snapshot.bars.is_empty() {
+            return false;
+        }
+        let series = &ticket.series;
+        let Some(forming) = snapshot.forming else {
+            return false;
+        };
+        if self.provider_uses_candles(&series.provider_id) {
+            return false;
+        }
+        let seed = TradeHandoffSeed {
+            price_scale: snapshot.price_scale,
+            quantity_scale: snapshot.quantity_scale,
+            bars: &[],
+            forming: Some(forming),
+            handoff_boundary_unix_nanos: snapshot.handoff_boundary_unix_nanos,
+        };
+        if self.install_trade_seed(series, seed).is_err() {
+            return false;
+        }
+        self.pending.remove(series);
+        self.series_live_if_ready(series);
+        self.publish_seeded_handoff(series);
+        if let Some(coverage) = self.history.coverage_mut(series, ticket.provider) {
+            coverage.confirmed_empty = None;
+            coverage.current_empty = None;
+        }
+        self.dispatch_deferred_history(ticket, generation);
+        true
     }
 
     /// Realigns the live handoff onto the canonical snapshot after an install

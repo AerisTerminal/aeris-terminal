@@ -404,8 +404,6 @@ impl OrderLevelBook {
                 Ok(())
             }
         });
-        self.identity = Some(identity(&snapshot.metadata));
-        self.image = snapshot.image;
         if let Err(error) = validated {
             let reason = match error {
                 MarketDataValidationError::OrderLevelLimitExceeded { .. } => {
@@ -416,6 +414,8 @@ impl OrderLevelBook {
             self.discard(OrderLevelState::Recovering(reason));
             return Err(error);
         }
+        self.identity = Some(identity(&snapshot.metadata));
+        self.image = snapshot.image;
         self.clear();
         for order in &snapshot.orders {
             self.insert(order.clone());

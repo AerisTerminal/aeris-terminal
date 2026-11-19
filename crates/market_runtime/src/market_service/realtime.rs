@@ -511,14 +511,13 @@ impl SeriesLifecycle {
             observed_live: true,
         };
         for candle in &buffered {
-            if self
-                .forming
-                .map(|forming| forming.bar)
-                .or_else(|| self.bars.last().copied())
-                .is_some_and(|tail| {
-                    candle.exchange_timestamp_unix_nanos < tail.exchange_timestamp_unix_nanos
-                })
-            {
+            if let Some(forming) = self.forming.map(|forming| forming.bar) {
+                if candle.exchange_timestamp_unix_nanos < forming.exchange_timestamp_unix_nanos {
+                    continue;
+                }
+            } else if self.bars.last().is_some_and(|last| {
+                candle.exchange_timestamp_unix_nanos <= last.exchange_timestamp_unix_nanos
+            }) {
                 continue;
             }
             if self.ingest(*candle)? {
@@ -573,14 +572,13 @@ impl SeriesLifecycle {
             observed_live: false,
         };
         for candle in &buffered {
-            if self
-                .forming
-                .map(|forming| forming.bar)
-                .or_else(|| self.bars.last().copied())
-                .is_some_and(|tail| {
-                    candle.exchange_timestamp_unix_nanos < tail.exchange_timestamp_unix_nanos
-                })
-            {
+            if let Some(forming) = self.forming.map(|forming| forming.bar) {
+                if candle.exchange_timestamp_unix_nanos < forming.exchange_timestamp_unix_nanos {
+                    continue;
+                }
+            } else if self.bars.last().is_some_and(|last| {
+                candle.exchange_timestamp_unix_nanos <= last.exchange_timestamp_unix_nanos
+            }) {
                 continue;
             }
             if self.ingest(*candle)? {
@@ -1914,12 +1912,7 @@ impl Coordinator<'_> {
         }
         let instrument_id = snapshot.metadata.instrument_id.clone();
         let entitlement_id = snapshot.metadata.entitlement_id.clone();
-        let observed_unix_nanos = snapshot
-            .metadata
-            .timestamps
-            .exchange_unix_nanos
-            .or(snapshot.metadata.timestamps.provider_unix_nanos)
-            .unwrap_or(snapshot.metadata.timestamps.received_unix_nanos);
+        let observed_unix_nanos = snapshot.metadata.timestamps.received_unix_nanos;
         let (book_changed, trades_changed) = self
             .order_books
             .get_mut(&(provider.to_string(), instrument_id.clone()))
@@ -2012,12 +2005,7 @@ impl Coordinator<'_> {
         }
         let instrument_id = quote.metadata.instrument_id.clone();
         let entitlement_id = quote.metadata.entitlement_id.clone();
-        let observed_unix_nanos = quote
-            .metadata
-            .timestamps
-            .exchange_unix_nanos
-            .or(quote.metadata.timestamps.provider_unix_nanos)
-            .unwrap_or(quote.metadata.timestamps.received_unix_nanos);
+        let observed_unix_nanos = quote.metadata.timestamps.received_unix_nanos;
         let observed_at = self.clock.monotonic();
         let (quote_changed, trades_changed) = self
             .order_books

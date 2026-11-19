@@ -50,6 +50,9 @@ pub(super) struct CanonicalSessionState {
     /// than one book was owed a response. Which response it ended is unknown,
     /// so no later anonymous completion is attributed in this session.
     anonymous_completions_ambiguous: bool,
+    /// Additional canonical events produced by a single multi-instrument frame
+    /// (such as `DepthByOrderEnd`), drained immediately by the session worker.
+    extra_events: VecDeque<MarketEvent>,
 }
 
 /// Clocks carried by one provider frame, published together so an event never
@@ -834,6 +837,7 @@ impl CanonicalSessionState {
             retired_order_level_image: 0,
             withheld: BTreeSet::new(),
             anonymous_completions_ambiguous: false,
+            extra_events: VecDeque::new(),
         };
         for instrument in &config.instruments {
             state.install_books(instrument);
@@ -946,15 +950,22 @@ impl CanonicalSessionState {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let [instrument] = matching.as_slice() else {
-                    return Err(malformed());
-                };
-                self.advance_order_levels(
-                    instrument,
-                    source_ordinal,
-                    received_unix_nanos,
-                    |book, _, _| book.finish_initial_image(&event),
-                )
+                let mut first = None;
+                for instrument in matching {
+                    if let Some(produced) = self.advance_order_levels(
+                        &instrument,
+                        source_ordinal,
+                        received_unix_nanos,
+                        |book, _, _| book.finish_initial_image(&event),
+                    )? {
+                        if first.is_none() {
+                            first = Some(produced);
+                        } else {
+                            self.extra_events.push_back(produced);
+                        }
+                    }
+                }
+                Ok(first)
             }
         }
     }
@@ -1352,6 +1363,28 @@ impl CanonicalSessionState {
         self.install_books(&instrument);
         self.instruments.push(instrument);
         Ok(())
+    }
+
+    pub(super) fn add_instrument_before_depth_snapshot(
+        &mut self,
+        instrument: RithmicProviderInstrument,
+    ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+        let instrument_id = instrument.descriptor.instrument_id.clone();
+        self.add_instrument(instrument)?;
+        if let Some(book) = self.mbo_books.get_mut(&instrument_id) {
+            book.snapshot_request = SnapshotRequest::Idle;
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_depth_snapshot_requested(&mut self, instrument_id: &str) {
+        if let Some(book) = self.mbo_books.get_mut(instrument_id) {
+            book.snapshot_request = SnapshotRequest::Owed;
+        }
+    }
+
+    pub(super) fn take_extra_events(&mut self) -> Vec<MarketEvent> {
+        self.extra_events.drain(..).collect()
     }
 
     pub(super) fn remove_instrument(&mut self, instrument_id: &str) {

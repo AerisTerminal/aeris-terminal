@@ -68,13 +68,13 @@ impl Session<'_> {
             DecodedOrderMessage::ExchangeOrderNotification(notification) => {
                 self.on_exchange_notification(&notification)
             }
-            DecodedOrderMessage::OrderCommand(reply) => self.on_command(
+            DecodedOrderMessage::OrderCommand(reply) => self.on_command_handler(
                 reply.request,
                 reply.user_tag.as_deref(),
                 reply.basket_id.as_deref(),
                 &reply.outcome,
             ),
-            DecodedOrderMessage::PositionExit(reply) => self.on_exit(&reply.outcome),
+            DecodedOrderMessage::PositionExit(reply) => self.on_exit_handler(&reply.outcome),
             DecodedOrderMessage::RequestComplete(completion) => self.on_completion(
                 completion.request,
                 completion.user_tag.as_deref(),
@@ -231,7 +231,41 @@ impl Session<'_> {
         )
     }
 
-    /// Settles the command a reply answers; a refusal goes to the owner.
+    /// Records a handler-frame refusal immediately without removing the pending
+    /// slot until `RequestComplete` arrives.
+    fn on_command_handler(
+        &mut self,
+        request: RithmicRequestKind,
+        user_tag: Option<&str>,
+        basket_id: Option<&str>,
+        outcome: &RithmicRequestOutcome,
+    ) -> Result<(), SessionEnd> {
+        let Some(reason) = refusal(outcome) else {
+            return Ok(());
+        };
+        let Some(command) = Command::of(request) else {
+            return Ok(());
+        };
+        let key = if command == Command::Place {
+            user_tag
+        } else {
+            basket_id
+        };
+        let Some((broker_account, client_order_id)) = self.pending.handler_refused(command, key)
+        else {
+            return Ok(());
+        };
+        self.emit(
+            &broker_account,
+            VenueUpdate::Refused {
+                client_order_id,
+                reason,
+            },
+        )
+    }
+
+    /// Settles the command a terminal completion answers; a refusal goes to the
+    /// owner only if the handler frame did not already emit it.
     fn on_command(
         &mut self,
         request: RithmicRequestKind,
@@ -248,9 +282,12 @@ impl Session<'_> {
             basket_id
         };
         let refused = refusal(outcome);
-        let Some(pending) = self.pending.answered(command, key, refused.is_some()) else {
+        let Some(pending) = self.pending.answered(command, key, true) else {
             return Ok(());
         };
+        if pending.refused_by_handler {
+            return Ok(());
+        }
         match refused {
             Some(reason) => self.emit(
                 &pending.broker_account,
@@ -328,10 +365,32 @@ impl Session<'_> {
         )
     }
 
+    fn on_exit_handler(&mut self, outcome: &RithmicRequestOutcome) -> Result<(), SessionEnd> {
+        let Some(reason) = refusal(outcome) else {
+            return Ok(());
+        };
+        let Some(exit) = self.pending.exit.as_mut() else {
+            return Ok(());
+        };
+        if exit.refused_by_handler {
+            return Ok(());
+        }
+        exit.refused_by_handler = true;
+        let broker_account = exit.broker_account.clone();
+        let operation = VenueOperation::ExitPosition {
+            instrument_id: exit.instrument_id.clone(),
+        };
+        diagnostic!("Aeris broker venue: Rithmic refused to exit a position: {reason}");
+        self.refuse(&broker_account, operation, reason)
+    }
+
     fn on_exit(&mut self, outcome: &RithmicRequestOutcome) -> Result<(), SessionEnd> {
         let Some(exit) = self.pending.exit.take() else {
             return Ok(());
         };
+        if exit.refused_by_handler {
+            return Ok(());
+        }
         let Some(reason) = refusal(outcome) else {
             return Ok(());
         };

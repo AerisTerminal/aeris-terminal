@@ -209,6 +209,13 @@ impl TradeModel {
         self.replay_buffered()
     }
 
+    pub(super) fn forming_tick_trades(&self, sequence: u64) -> Option<u32> {
+        let TradeLiveCadence::Tick { forming, .. } = self.cadence else {
+            return None;
+        };
+        (self.forming_tail_sequence == Some(sequence)).then_some(forming)
+    }
+
     /// Closes the history/live seam.
     ///
     /// `bars` are the periods the provider has closed and the engine has
@@ -431,14 +438,19 @@ impl TradeModel {
                 let Some(trade_bucket) = trade_bucket else {
                     return Ok(false);
                 };
+                if let Some(last_bucket) = last_bucket
+                    && trade_bucket < last_bucket
+                {
+                    return Ok(false);
+                }
                 if last_bucket == Some(trade_bucket) {
                     updated_rithmic_bar(last, trade, last.exchange_timestamp_unix_nanos)?
                 } else {
-                    started_rithmic_bar(
-                        last,
-                        trade,
-                        self.calendar_bar_open(exchange_nanos, period),
-                    )?
+                    let next_open = self.calendar_bar_open(exchange_nanos, period);
+                    if next_open <= last.exchange_timestamp_unix_nanos {
+                        return Ok(false);
+                    }
+                    started_rithmic_bar(last, trade, next_open)?
                 }
             }
         };

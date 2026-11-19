@@ -199,6 +199,9 @@ where
                         }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => {
+                            if self.stopped() {
+                                return PassEnd::Stopped;
+                            }
                             std::thread::sleep(SCAN_BUDGET_RETRY);
                         }
                     }

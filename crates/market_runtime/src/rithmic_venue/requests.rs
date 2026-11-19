@@ -75,6 +75,7 @@ pub(super) struct PendingCommand {
     pub(super) broker_account: String,
     pub(super) client_order_id: ClientOrderId,
     deadline: Instant,
+    pub(super) refused_by_handler: bool,
 }
 
 /// The one outstanding bracket level move.
@@ -103,6 +104,7 @@ pub(super) struct PendingExit {
     pub(super) broker_account: String,
     pub(super) instrument_id: InstrumentId,
     deadline: Instant,
+    pub(super) refused_by_handler: bool,
 }
 
 struct PendingCancelAll {
@@ -179,7 +181,9 @@ impl Pending {
             .commands
             .pop_front_if(|command| command.deadline <= now)
         {
-            expired.push(Failed::command(command));
+            if !command.refused_by_handler {
+                expired.push(Failed::command(command));
+            }
         }
         while let Some(cancel_all) = self
             .cancel_alls
@@ -196,7 +200,9 @@ impl Pending {
                 broker_account: level.broker_account,
             });
         }
-        if let Some(exit) = self.exit.take_if(|exit| exit.deadline <= now) {
+        if let Some(exit) = self.exit.take_if(|exit| exit.deadline <= now)
+            && !exit.refused_by_handler
+        {
             expired.push(Failed {
                 broker_account: exit.broker_account,
                 operation: VenueOperation::ExitPosition {
@@ -207,9 +213,38 @@ impl Pending {
         expired
     }
 
-    /// Removes the command a reply answers. A refusal without the identifying field is
-    /// attributed to the oldest command of its kind, because Rithmic answers one session's
-    /// commands in order; an acceptance without it identifies nothing.
+    /// Marks the matching command as refused by Rithmic's handler frame without
+    /// removing it yet, so the trailing `RequestComplete` consumes the same slot
+    /// rather than shifting onto the next in-flight command.
+    pub(super) fn handler_refused(
+        &mut self,
+        command: Command,
+        key: Option<&str>,
+    ) -> Option<(String, ClientOrderId)> {
+        let index = match key {
+            Some(key) => self
+                .commands
+                .iter()
+                .position(|pending| pending.command == command && pending.key == key),
+            None => self
+                .commands
+                .iter()
+                .position(|pending| pending.command == command && !pending.refused_by_handler),
+        }?;
+        let pending = self.commands.get_mut(index)?;
+        if pending.refused_by_handler {
+            return None;
+        }
+        pending.refused_by_handler = true;
+        Some((
+            pending.broker_account.clone(),
+            pending.client_order_id.clone(),
+        ))
+    }
+
+    /// Removes the command a terminal completion answers. A completion without the
+    /// identifying field is attributed to the oldest command of its kind, because
+    /// Rithmic answers one session's commands in order.
     pub(super) fn answered(
         &mut self,
         command: Command,
@@ -261,7 +296,7 @@ fn find<'a>(accounts: &'a [RithmicAccount], broker_account: &str) -> Option<&'a 
         .find(|account| account.account_id.as_str() == broker_account)
 }
 
-/// The account's route to `exchange`, preferring Rithmic's default route.
+/// The account's route to `exchange`, skipping `DOWN` routes and preferring `UP` / default.
 pub(super) fn trade_route<'a>(
     routes: &'a [RithmicTradeRoute],
     account: &RithmicAccount,
@@ -273,8 +308,20 @@ pub(super) fn trade_route<'a>(
             route.exchange == exchange
                 && route.fcm_id == account.fcm_id
                 && route.ib_id == account.ib_id
+                && !route
+                    .status
+                    .as_deref()
+                    .is_some_and(|status| status.eq_ignore_ascii_case("DOWN"))
         })
-        .max_by_key(|route| route.is_default == Some(true))
+        .max_by_key(|route| {
+            (
+                route
+                    .status
+                    .as_deref()
+                    .is_some_and(|status| status.eq_ignore_ascii_case("UP")),
+                route.is_default == Some(true),
+            )
+        })
 }
 
 fn contract(instrument_id: &InstrumentId) -> Result<(&str, &str), String> {
@@ -430,6 +477,7 @@ impl Session<'_> {
                 broker_account: order.broker_account.clone(),
                 client_order_id: order.client_order_id.clone(),
                 deadline: self.command_deadline(),
+                refused_by_handler: false,
             },
         )
     }
@@ -470,6 +518,7 @@ impl Session<'_> {
                 broker_account: amendment.broker_account.clone(),
                 client_order_id: amendment.client_order_id.clone(),
                 deadline: self.command_deadline(),
+                refused_by_handler: false,
             },
         )
     }
@@ -496,6 +545,7 @@ impl Session<'_> {
                 broker_account: broker_account.to_string(),
                 client_order_id: client_order_id.clone(),
                 deadline: self.command_deadline(),
+                refused_by_handler: false,
             },
         )
     }
@@ -683,6 +733,7 @@ impl Session<'_> {
                     broker_account: broker_account.to_string(),
                     instrument_id: instrument_id.clone(),
                     deadline: self.command_deadline(),
+                    refused_by_handler: false,
                 });
                 Dispatch::Done
             }
@@ -819,6 +870,7 @@ mod tests {
             broker_account: "account-1".into(),
             client_order_id: ClientOrderId::try_new(client).expect("client id"),
             deadline,
+            refused_by_handler: false,
         }
     }
 
@@ -931,6 +983,7 @@ mod tests {
             broker_account: "account-4".into(),
             instrument_id: instrument_id.clone(),
             deadline: late,
+            refused_by_handler: false,
         });
 
         assert_eq!(pending.expire(start), Vec::new());

@@ -690,6 +690,9 @@ pub(crate) fn run(
                     SessionExit::Parked => {
                         diagnostic!("Aeris Hyperliquid realtime parked by demand owner");
                     }
+                    SessionExit::Replaced(next_sink) => {
+                        pending_epoch = Some(next_sink);
+                    }
                     SessionExit::Reconnect(reason) => {
                         if stop.load(Ordering::Acquire) {
                             return;
@@ -762,10 +765,10 @@ fn drain_controls(
     }
 }
 
-#[derive(PartialEq, Eq)]
 enum SessionExit {
     Reconnect(String),
     Parked,
+    Replaced(ProviderEventSink),
     Closed,
     #[cfg(feature = "probe")]
     ProbeFailure(u8),
@@ -915,6 +918,22 @@ struct SessionState {
     pending_ping: Option<Instant>,
 }
 
+impl SessionState {
+    fn new(started: Instant) -> Self {
+        Self {
+            pending_subscriptions: BTreeMap::new(),
+            connected: false,
+            active: BTreeMap::new(),
+            feed: FeedState::new(),
+            last_inbound: started,
+            // Make the first qualified RTT probe due immediately. Subsequent
+            // probes retain the normal interval from the actual send instant.
+            last_ping: started.checked_sub(PING_INTERVAL).unwrap_or(started),
+            pending_ping: None,
+        }
+    }
+}
+
 /// What one connection knows when decoding inbound market frames.
 struct FeedState {
     instruments: BTreeMap<String, HyperliquidInstrumentDemand>,
@@ -979,18 +998,7 @@ fn run_session(
         stop,
         wake,
     };
-    let started = Instant::now();
-    let mut state = SessionState {
-        pending_subscriptions: BTreeMap::new(),
-        connected: false,
-        active: BTreeMap::new(),
-        feed: FeedState::new(),
-        last_inbound: started,
-        // Make the first qualified RTT probe due immediately. Subsequent
-        // probes retain the normal interval from the actual send instant.
-        last_ping: started.checked_sub(PING_INTERVAL).unwrap_or(started),
-        pending_ping: None,
-    };
+    let mut state = SessionState::new(Instant::now());
     if reconcile_subscriptions(socket, demand, &mut state).is_err() {
         return SessionExit::Reconnect("subscription write failed".to_string());
     }
@@ -1002,7 +1010,7 @@ fn run_session(
         // Newest demand wins; Stop parks the socket until demand returns.
         #[cfg(feature = "probe")]
         let mut probe_failure = None;
-        let (changed, parked) = drain_session_controls(
+        let (changed, parked, replaced) = drain_session_controls(
             controls,
             demand,
             #[cfg(feature = "probe")]
@@ -1012,6 +1020,10 @@ fn run_session(
         if let Some(count) = probe_failure {
             socket.close();
             return SessionExit::ProbeFailure(count);
+        }
+        if let Some(next_sink) = replaced {
+            socket.close();
+            return SessionExit::Replaced(next_sink);
         }
         if parked {
             socket.close();
@@ -1079,9 +1091,10 @@ fn drain_session_controls(
     controls: &Receiver<HyperliquidRealtimeControl>,
     demand: &mut HyperliquidDemand,
     #[cfg(feature = "probe")] probe_failure: &mut Option<u8>,
-) -> (bool, bool) {
+) -> (bool, bool, Option<ProviderEventSink>) {
     let mut changed = false;
     let mut parked = false;
+    let mut replaced = None;
     while let Ok(control) = controls.try_recv() {
         match control {
             HyperliquidRealtimeControl::Subscribe(next) => {
@@ -1089,15 +1102,21 @@ fn drain_session_controls(
                 *demand = next;
                 parked = false;
             }
-            HyperliquidRealtimeControl::Connect(_) => {}
-            HyperliquidRealtimeControl::Stop => parked = true,
+            HyperliquidRealtimeControl::Connect(next_sink) => {
+                replaced = Some(next_sink);
+                parked = false;
+            }
+            HyperliquidRealtimeControl::Stop => {
+                parked = true;
+                replaced = None;
+            }
             #[cfg(feature = "probe")]
             HyperliquidRealtimeControl::FailWebSocket {
                 subsequent_connect_failures,
             } => *probe_failure = Some(subsequent_connect_failures),
         }
     }
-    (changed, parked)
+    (changed, parked, replaced)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2283,27 +2302,23 @@ mod tests {
         let mut demand = HyperliquidDemand::default();
         #[cfg(feature = "probe")]
         let mut probe_failure = None;
-        assert_eq!(
-            drain_session_controls(
-                &receiver,
-                &mut demand,
-                #[cfg(feature = "probe")]
-                &mut probe_failure
-            ),
-            (false, false)
+        let (changed, parked, replaced) = drain_session_controls(
+            &receiver,
+            &mut demand,
+            #[cfg(feature = "probe")]
+            &mut probe_failure,
         );
+        assert_eq!((changed, parked, replaced.is_some()), (false, false, false));
         sender
             .send(HyperliquidRealtimeControl::Subscribe(demand.clone()))
             .unwrap();
-        assert_eq!(
-            drain_session_controls(
-                &receiver,
-                &mut demand,
-                #[cfg(feature = "probe")]
-                &mut probe_failure
-            ),
-            (false, false)
+        let (changed, parked, replaced) = drain_session_controls(
+            &receiver,
+            &mut demand,
+            #[cfg(feature = "probe")]
+            &mut probe_failure,
         );
+        assert_eq!((changed, parked, replaced.is_some()), (false, false, false));
         let next = HyperliquidDemand {
             books: vec![HyperliquidInstrumentDemand::default()],
             ..Default::default()
@@ -2312,26 +2327,22 @@ mod tests {
         sender
             .send(HyperliquidRealtimeControl::Subscribe(next.clone()))
             .unwrap();
-        assert_eq!(
-            drain_session_controls(
-                &receiver,
-                &mut demand,
-                #[cfg(feature = "probe")]
-                &mut probe_failure
-            ),
-            (true, false)
+        let (changed, parked, replaced) = drain_session_controls(
+            &receiver,
+            &mut demand,
+            #[cfg(feature = "probe")]
+            &mut probe_failure,
         );
+        assert_eq!((changed, parked, replaced.is_some()), (true, false, false));
         assert_eq!(demand, next);
         sender.send(HyperliquidRealtimeControl::Stop).unwrap();
-        assert_eq!(
-            drain_session_controls(
-                &receiver,
-                &mut demand,
-                #[cfg(feature = "probe")]
-                &mut probe_failure
-            ),
-            (false, true)
+        let (changed, parked, replaced) = drain_session_controls(
+            &receiver,
+            &mut demand,
+            #[cfg(feature = "probe")]
+            &mut probe_failure,
         );
+        assert_eq!((changed, parked, replaced.is_some()), (false, true, false));
     }
 
     #[cfg(feature = "probe")]
@@ -2348,10 +2359,9 @@ mod tests {
             })
             .expect("probe control");
         let mut failures = None;
-        assert_eq!(
-            drain_session_controls(&receiver, &mut demand, &mut failures),
-            (false, false)
-        );
+        let (changed, parked, replaced) =
+            drain_session_controls(&receiver, &mut demand, &mut failures);
+        assert_eq!((changed, parked, replaced.is_some()), (false, false, false));
         assert_eq!(failures, Some(2));
         assert_eq!(demand.quotes.len(), 1);
         let mut remaining = 1;

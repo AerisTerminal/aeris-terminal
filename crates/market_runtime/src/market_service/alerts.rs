@@ -112,7 +112,10 @@ impl PriceAlertRegistry {
                     .map(move |item| (item.alert.id.clone(), (key.clone(), item.previous_price)))
             })
             .collect::<BTreeMap<_, _>>();
-        self.remove_consumer(consumer_id);
+        self.alerts.retain(|_, items| {
+            items.retain(|item| item.consumer_id != consumer_id);
+            !items.is_empty()
+        });
 
         for alert in alerts {
             let key = AlertInstrumentKey::from_instrument(&alert.instrument);

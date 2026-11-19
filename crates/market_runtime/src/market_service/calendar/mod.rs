@@ -234,7 +234,7 @@ impl MarketCalendarService {
             let local = DateTime::<Utc>::from_timestamp_millis(open)?.with_timezone(&timezone);
             let roll = hours
                 .iter()
-                .any(|segment| segment.open_seconds > 0 && segment.open_seconds < 86_400);
+                .any(|segment| segment.close_seconds < segment.open_seconds);
             let day = if roll {
                 local.date_naive().succ_opt()?
             } else {
