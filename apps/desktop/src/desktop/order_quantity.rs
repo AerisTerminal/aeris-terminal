@@ -86,12 +86,15 @@ pub(super) fn subscribe_order_quantity_inputs(
         let controls = &surface.read(cx).order_quantity;
         (controls.ticket_input.clone(), controls.menu_input.clone())
     };
-    let ticket_surface = surface.clone();
+    let ticket_surface = surface.downgrade();
     window
         .subscribe(
             &ticket_input,
             cx,
             move |_, event: &InputEvent, window, cx| {
+                let Some(ticket_surface) = ticket_surface.upgrade() else {
+                    return;
+                };
                 ticket_surface.update(cx, |surface, surface_cx| match event {
                     InputEvent::Change => surface.apply_ticket_quantity_text(surface_cx),
                     // Leaving or submitting the field shows the quantity orders will use.
@@ -103,9 +106,12 @@ pub(super) fn subscribe_order_quantity_inputs(
             },
         )
         .detach();
-    let menu_surface = surface.clone();
+    let menu_surface = surface.downgrade();
     window
         .subscribe(&menu_input, cx, move |_, event: &InputEvent, window, cx| {
+            let Some(menu_surface) = menu_surface.upgrade() else {
+                return;
+            };
             menu_surface.update(cx, |surface, surface_cx| match event {
                 InputEvent::Change => {
                     if surface.order_quantity.menu_invalid {

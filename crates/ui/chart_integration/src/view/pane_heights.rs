@@ -179,7 +179,7 @@ impl AerisChartView {
     fn pane_contents(&self) -> Vec<Option<ChartPaneContent>> {
         let mut contents = vec![None; self.engine.panes.len()];
         let bindings = self.engine.indicator_bindings();
-        for row in self.legend_rows_at(None) {
+        for row in self.unfiltered_legend_rows_at(None) {
             if row.pane == 0 {
                 continue;
             }

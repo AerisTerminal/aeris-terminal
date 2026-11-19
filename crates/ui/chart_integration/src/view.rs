@@ -1511,6 +1511,7 @@ impl AerisChartView {
             self.engine
                 .set_visible_logical_range(logical_start, logical_end);
             self.invalidate_series_layout();
+            self.fitted = true;
             return true;
         }
         self.engine

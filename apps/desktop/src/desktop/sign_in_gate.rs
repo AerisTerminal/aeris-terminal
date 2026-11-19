@@ -478,11 +478,11 @@ fn finish_signed_in_start(
                 context,
             } = started;
             let lifecycle = DesktopLifecycle::new(services, context, instance_lock);
-            mount_desktop(configured, lifecycle, None, cx);
             gate.borrow_mut().instance_lock = None;
             if let Err(error) = gate_window.update(cx, |_, window, _| window.remove_window()) {
                 diagnostic!("Aeris sign-in window could not close: {error}");
             }
+            mount_desktop(configured, lifecycle, None, cx);
         }
         Err(_) if closing => {
             let shutdown = state.shutdown(None, cx);

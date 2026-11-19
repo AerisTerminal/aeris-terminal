@@ -4616,9 +4616,12 @@ fn subscribe_symbol_input(
     let Some(input) = input else {
         return;
     };
-    let terminal = terminal.clone();
+    let terminal = terminal.downgrade();
     window
         .subscribe(&input, cx, move |_, event: &InputEvent, window, cx| {
+            let Some(terminal) = terminal.upgrade() else {
+                return;
+            };
             #[cfg(feature = "diagnostics")]
             let started = Instant::now();
             #[cfg(feature = "diagnostics")]
@@ -4680,45 +4683,43 @@ fn subscribe_indicator_input(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let terminal = terminal.clone();
-    let input = input.clone();
+    let terminal = terminal.downgrade();
     window
-        .subscribe(
-            &input.clone(),
-            cx,
-            move |_, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    // Enter adds only the highlighted row; with nothing highlighted it is a no-op.
-                    let entry = terminal.update(cx, |app, cx| {
-                        app.chrome
-                            .list_keyboard_active()
-                            .then(|| {
-                                app.indicator_menu_entries(cx)
-                                    .get(app.chrome.selection())
-                                    .copied()
-                            })
-                            .flatten()
-                    });
-                    if let Some(entry) = entry {
-                        let added =
-                            terminal.update(cx, |app, cx| app.add_indicator_menu_entry(entry, cx));
-                        if added {
-                            terminal.update(cx, |app, app_cx| {
-                                app.close_chrome_overlay(window, app_cx);
-                            });
-                        }
+        .subscribe(input, cx, move |input, event: &InputEvent, window, cx| {
+            let Some(terminal) = terminal.upgrade() else {
+                return;
+            };
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                // Enter adds only the highlighted row; with nothing highlighted it is a no-op.
+                let entry = terminal.update(cx, |app, cx| {
+                    app.chrome
+                        .list_keyboard_active()
+                        .then(|| {
+                            app.indicator_menu_entries(cx)
+                                .get(app.chrome.selection())
+                                .copied()
+                        })
+                        .flatten()
+                });
+                if let Some(entry) = entry {
+                    let added =
+                        terminal.update(cx, |app, cx| app.add_indicator_menu_entry(entry, cx));
+                    if added {
+                        terminal.update(cx, |app, app_cx| {
+                            app.close_chrome_overlay(window, app_cx);
+                        });
                     }
-                } else if matches!(event, InputEvent::Change) {
-                    let typed = !input.read(cx).value().trim().is_empty();
-                    terminal.update(cx, |app, cx| {
-                        app.chrome.set_list_keyboard(typed);
-                        app.chrome.set_selection(0);
-                        app.scrolls.indicator.set_offset(point(px(0.0), px(0.0)));
-                        cx.notify();
-                    });
                 }
-            },
-        )
+            } else if matches!(event, InputEvent::Change) {
+                let typed = !input.read(cx).value().trim().is_empty();
+                terminal.update(cx, |app, cx| {
+                    app.chrome.set_list_keyboard(typed);
+                    app.chrome.set_selection(0);
+                    app.scrolls.indicator.set_offset(point(px(0.0), px(0.0)));
+                    cx.notify();
+                });
+            }
+        })
         .detach();
 }
 
@@ -4728,13 +4729,13 @@ fn subscribe_timeframe_input(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let terminal = terminal.clone();
-    let input = input.clone();
+    let terminal = terminal.downgrade();
     window
-        .subscribe(
-            &input.clone(),
-            cx,
-            move |_, event: &InputEvent, window, cx| match event {
+        .subscribe(input, cx, move |input, event: &InputEvent, window, cx| {
+            let Some(terminal) = terminal.upgrade() else {
+                return;
+            };
+            match event {
                 InputEvent::PressEnter { .. } => {
                     terminal.update(cx, |app, app_cx| {
                         if !app.chrome.is_overlay_open(ChromeOverlay::QuickTimeframe) {
@@ -4767,8 +4768,8 @@ fn subscribe_timeframe_input(
                     });
                 }
                 InputEvent::Focus | InputEvent::Blur => {}
-            },
-        )
+            }
+        })
         .detach();
 }
 
@@ -4778,13 +4779,13 @@ fn subscribe_time_zone_input(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let terminal = terminal.clone();
-    let input = input.clone();
+    let terminal = terminal.downgrade();
     window
-        .subscribe(
-            &input.clone(),
-            cx,
-            move |_, event: &InputEvent, window, cx| match event {
+        .subscribe(input, cx, move |_, event: &InputEvent, window, cx| {
+            let Some(terminal) = terminal.upgrade() else {
+                return;
+            };
+            match event {
                 InputEvent::PressEnter { .. } => {
                     terminal.update(cx, |app, app_cx| {
                         if !app.chrome.is_overlay_open(ChromeOverlay::TimeZone) {
@@ -4804,8 +4805,8 @@ fn subscribe_time_zone_input(
                     });
                 }
                 InputEvent::Focus | InputEvent::Blur => {}
-            },
-        )
+            }
+        })
         .detach();
 }
 
@@ -4872,13 +4873,15 @@ fn subscribe_order_book_trading(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let click_workspace = workspace.clone();
-    let click_order_book = order_book.clone();
+    let click_workspace = workspace.downgrade();
     window
         .subscribe(
             order_book,
             cx,
-            move |_, event: &OrderBookLevelClick, _, cx| {
+            move |click_order_book, event: &OrderBookLevelClick, _, cx| {
+                let Some(click_workspace) = click_workspace.upgrade() else {
+                    return;
+                };
                 let order_entry = {
                     let surface = click_workspace.read(cx);
                     if surface.recording_replay_on() {
@@ -4940,18 +4943,32 @@ fn subscribe_order_book_trading_drop(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let drop_workspace = workspace.clone();
-    let drop_order_book = order_book.clone();
+    let drop_workspace = workspace.downgrade();
     window
         .subscribe(
             order_book,
             cx,
-            move |_, event: &OrderBookLevelDrop, _, cx| {
+            move |drop_order_book, event: &OrderBookLevelDrop, _, cx| {
+                let Some(drop_workspace) = drop_workspace.upgrade() else {
+                    return;
+                };
                 if event.source_side != event.target_side {
                     return;
                 }
                 let (account_id, store) = {
                     let surface = drop_workspace.read(cx);
+                    if surface.recording_replay_on() {
+                        surface.refuse_recording_replay_order();
+                        return;
+                    }
+                    // The ladder shows live prices; a replaying chart trades only the past.
+                    if surface.bar_replay_on(cx) {
+                        surface.lifecycle.trading_feedback().record_for_pane(
+                            &surface.trading_pane_token,
+                            Err(tr!(panels::REPLAY_BOOK_LIVE).to_string()),
+                        );
+                        return;
+                    }
                     if surface.selected_account_lock_reason(cx).is_some() {
                         return;
                     }

@@ -184,11 +184,13 @@ pub(super) fn process_command(
     if let MarketWorkerCommand::SelectCatalog(request) = &command {
         return process_catalog_select(market, client_id, record, request);
     }
+    if let MarketWorkerCommand::EngineSelect(request) = &command {
+        return process_engine_select(market, client_id, record, request);
+    }
     let EndpointRecord {
         product,
         interval,
         endpoint,
-        pending_selection,
         initial_selection_pending,
         ..
     } = record;
@@ -209,16 +211,9 @@ pub(super) fn process_command(
             request.consumer_id = endpoint.consumer_id;
             market.scan_provider_markets(client_id, request)
         }
-        MarketWorkerCommand::EngineSelect(request) => process_engine_select(
-            market,
-            client_id,
-            product,
-            interval,
-            endpoint,
-            pending_selection,
-            &request,
-        ),
-        MarketWorkerCommand::SelectCatalog(_) => unreachable!("handled before other commands"),
+        MarketWorkerCommand::EngineSelect(_) | MarketWorkerCommand::SelectCatalog(_) => {
+            unreachable!("handled before other commands")
+        }
         MarketWorkerCommand::Recovery {
             selection_generation,
             command,
@@ -274,24 +269,39 @@ fn process_catalog_select(
     request: &aeris_desktop::market_worker::CatalogSelectionRequest,
 ) -> Result<(), String> {
     let endpoint = &mut record.endpoint;
-    cancel_pending_recovery(endpoint)?;
-    market.select_and_demand(
-        client_id,
-        SelectionRequest {
-            consumer_id: endpoint.consumer_id,
-            generation: request.sequence,
-            instrument: aeris_market_runtime::InstrumentRequest::CatalogSymbol {
-                provider_id: request.provider.clone(),
-                symbol: request.symbol.clone(),
-                exchange: request.exchange.clone(),
-                entitlement_id: request.entitlement_id.clone(),
-                search_generation: request.search_generation,
+    let dispatch = cancel_pending_recovery(endpoint).and_then(|()| {
+        let streams = chart_demand_streams(market, &request.provider, endpoint.order_book)?;
+        market.select_and_demand(
+            client_id,
+            SelectionRequest {
+                consumer_id: endpoint.consumer_id,
+                generation: request.sequence,
+                instrument: aeris_market_runtime::InstrumentRequest::CatalogSymbol {
+                    provider_id: request.provider.clone(),
+                    symbol: request.symbol.clone(),
+                    exchange: request.exchange.clone(),
+                    entitlement_id: request.entitlement_id.clone(),
+                    search_generation: request.search_generation,
+                },
+                interval: request.interval,
+                streams,
+                viewport: None,
             },
-            interval: request.interval,
-            streams: chart_demand_streams(market, &request.provider, endpoint.order_book)?,
-            viewport: None,
-        },
-    )?;
+        )
+    });
+    if let Err(error) = dispatch {
+        endpoint
+            .messages
+            .send(PaneProjectionEvent::LocalCommandOutcome(
+                LocalCommandOutcome::CatalogSwitch {
+                    sequence: request.sequence,
+                    browser_generation: request.browser_generation,
+                    result: Err(error),
+                },
+            ))
+            .map_err(|send| send.to_string())?;
+        return Ok(());
+    }
     record.pending_selection = Some((request.sequence, record.product.clone(), request.interval));
     record.pending_catalog_selection = Some((request.sequence, request.browser_generation));
     Ok(())
@@ -300,31 +310,41 @@ fn process_catalog_select(
 fn process_engine_select(
     market: &MarketService,
     client_id: u64,
-    _product: &mut InstallProviderInstrument,
-    _interval: &mut aeris_market_data::ChartInterval,
-    endpoint: &mut WorkerEndpoint,
-    pending_selection: &mut Option<(
-        u64,
-        InstallProviderInstrument,
-        aeris_market_data::ChartInterval,
-    )>,
+    record: &mut EndpointRecord,
     request: &aeris_desktop::market_worker::EngineSelectionRequest,
 ) -> Result<(), String> {
-    cancel_pending_recovery(endpoint)?;
-    market.select_and_demand(
-        client_id,
-        SelectionRequest {
-            consumer_id: endpoint.consumer_id,
-            generation: request.sequence,
-            instrument: instrument_ref(&request.product),
-            interval: request.interval,
-            streams: chart_demand_streams(market, &request.product.provider, endpoint.order_book)?,
-            viewport: None,
-        },
-    )?;
+    let endpoint = &mut record.endpoint;
+    let dispatch = cancel_pending_recovery(endpoint).and_then(|()| {
+        let streams = chart_demand_streams(market, &request.product.provider, endpoint.order_book)?;
+        market.select_and_demand(
+            client_id,
+            SelectionRequest {
+                consumer_id: endpoint.consumer_id,
+                generation: request.sequence,
+                instrument: instrument_ref(&request.product),
+                interval: request.interval,
+                streams,
+                viewport: None,
+            },
+        )
+    });
+    if let Err(error) = dispatch {
+        diagnostic!("Aeris engine selection dispatch failed: {error}");
+        endpoint
+            .messages
+            .send(PaneProjectionEvent::LocalCommandOutcome(
+                LocalCommandOutcome::EngineSelection {
+                    sequence: request.sequence,
+                    succeeded: false,
+                },
+            ))
+            .map_err(|send| send.to_string())?;
+        return Ok(());
+    }
     // The endpoint adopts the new binding only after Selected arrives ahead
     // of its first snapshot. A failure leaves the old series live.
-    *pending_selection = Some((request.sequence, request.product.clone(), request.interval));
+    record.pending_selection = Some((request.sequence, request.product.clone(), request.interval));
+    record.pending_catalog_selection = None;
     Ok(())
 }
 

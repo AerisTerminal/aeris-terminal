@@ -112,8 +112,9 @@ pub(super) fn market_summary_instrument_for_switch(
 }
 
 fn market_summary_tab_instrument(surface: &WorkspaceSurface) -> Option<InstallProviderInstrument> {
+    let persisted = surface.persisted_product();
     market_summary_instrument_for_switch(
-        surface.product.as_ref(),
+        persisted.as_ref(),
         surface.chart_pane_controller.restore_product(),
         surface.showing_superseded_series(),
     )
@@ -3082,11 +3083,9 @@ impl TerminalApp {
     ) {
         let next_active_id = match self.tabs.close_plan(tab_id) {
             TabClose::LastTab => {
-                self.retire_market_summaries(cx);
-                self.retire_market_screener(cx);
-                self.retire_workflow_markets(cx);
-                self.retire_workspaces(cx);
-                window.remove_window();
+                if self.claim_close(cx) {
+                    window.remove_window();
+                }
                 return;
             }
             TabClose::NotOpen => return,
@@ -3166,8 +3165,7 @@ impl TerminalApp {
         let (product, interval) = {
             let active = active.read(cx);
             let product = active
-                .product
-                .clone()
+                .persisted_product()
                 .ok_or_else(|| tr!(shell::WORKSPACE_NO_MARKET_TO_COPY).to_string())?;
             (product, active.interval)
         };
@@ -3276,7 +3274,7 @@ impl TerminalApp {
         }
         let (product, interval, drawing_tool, side_panels, side_panel_size) = {
             let source = workspace.panes[workspace.active_pane].surface.read(cx);
-            let Some(product) = source.product.clone() else {
+            let Some(product) = source.persisted_product() else {
                 self.notices
                     .show_workspace_error(tr!(shell::PANE_NO_MARKET_TO_COPY));
                 cx.notify();

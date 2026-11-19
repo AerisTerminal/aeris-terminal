@@ -493,10 +493,14 @@ impl AerisChartView {
             .map_or_else(Vec::new, |row_size| {
                 self.configure_tpo_series(settings, row_size, sessions)
             });
-        let drawn = !boundaries.is_empty();
-        if let Err(error) = self.engine.set_tpo_sessions(PRICE_SERIES, boundaries) {
-            diagnostic!("Aeris Charts refused the TPO sessions: {error}");
-        }
+        let has_boundaries = !boundaries.is_empty();
+        let drawn = match self.engine.set_tpo_sessions(PRICE_SERIES, boundaries) {
+            Ok(()) => has_boundaries,
+            Err(error) => {
+                diagnostic!("Aeris Charts refused the TPO sessions: {error}");
+                false
+            }
+        };
         let tpo = &mut self.session_profiles.tpo;
         tpo.drawn = drawn;
         tpo.refresh_at = projected.and_then(|projected| projected.next_open);

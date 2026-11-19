@@ -171,9 +171,12 @@ pub(super) fn subscribe_order_ticket_inputs(
 ) {
     for number in TicketNumber::ALL {
         let input = surface.read(cx).order_ticket.input(number).clone();
-        let target = surface.clone();
+        let target = surface.downgrade();
         window
             .subscribe(&input, cx, move |_, event: &InputEvent, window, cx| {
+                let Some(target) = target.upgrade() else {
+                    return;
+                };
                 target.update(cx, |surface, surface_cx| match event {
                     InputEvent::Change => surface.apply_ticket_number_text(number, surface_cx),
                     // Leaving or submitting the field shows the value orders will use.

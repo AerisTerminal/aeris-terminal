@@ -86,6 +86,11 @@ impl<T> PaneProjectionSender<T> {
             if !self.state.receiver_alive.load(Ordering::Acquire) {
                 return Err(MarketWorkerSendError::Disconnected);
             }
+            if !self.state.publications_enabled.load(Ordering::Acquire)
+                && (self.state.is_publication)(&event)
+            {
+                return Ok(());
+            }
             let limit = if (self.state.is_publication)(&event) {
                 self.state.capacity
             } else {

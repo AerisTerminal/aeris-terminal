@@ -1805,6 +1805,7 @@ struct LevelCellContext<'a> {
     price_scale: u8,
     working_order: Option<&'a OrderBookWorkingOrder>,
     position_marker: Option<&'a OrderBookPositionMarker>,
+    pnl_position: Option<&'a OrderBookPositionMarker>,
     queue: Option<&'a OrderQueueLevel>,
 }
 
@@ -1889,6 +1890,7 @@ fn render_level_row(
         position_marker: interaction.position_marker.filter(|marker| {
             marker.price == level.price && marker.side == order_book_level_side(side)
         }),
+        pnl_position: interaction.position_marker,
         queue: order_queue_at(frame, side, level.price),
     };
     div()
@@ -2143,7 +2145,7 @@ fn render_level_cell(
     match column {
         OrderBookColumn::ProfitLoss => pnl_cell(
             width,
-            context.position_marker,
+            context.pnl_position,
             level.price,
             context.price_scale,
             context.theme,

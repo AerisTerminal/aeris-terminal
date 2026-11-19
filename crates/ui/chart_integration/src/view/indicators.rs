@@ -241,7 +241,22 @@ impl AerisChartView {
         self.legend_presentation_at(logical_index).rows
     }
 
+    /// All legend rows before `legend_options` visibility filtering, used for
+    /// identifying separate panes even when indicator legends are hidden.
+    pub(super) fn unfiltered_legend_rows_at(&self, logical_index: Option<i64>) -> Vec<LegendRow> {
+        self.build_legend_rows_at(logical_index)
+    }
+
     fn legend_presentation_at(&self, logical_index: Option<i64>) -> LegendPresentation {
+        let mut rows = self.build_legend_rows_at(logical_index);
+        let indicator_toggle = apply_legend_options(&mut rows, self.legend_options);
+        LegendPresentation {
+            rows,
+            indicator_toggle,
+        }
+    }
+
+    fn build_legend_rows_at(&self, logical_index: Option<i64>) -> Vec<LegendRow> {
         let trailing = self
             .order_flow_state
             .iter()
@@ -326,11 +341,7 @@ impl AerisChartView {
         for (item, title, visible) in session_profiles {
             insert_price_pane_legend_row(&mut rows, item, title, visible, true);
         }
-        let indicator_toggle = apply_legend_options(&mut rows, self.legend_options);
-        LegendPresentation {
-            rows,
-            indicator_toggle,
-        }
+        rows
     }
     fn volume_profile_visible(&self) -> Option<bool> {
         self.volume_profile

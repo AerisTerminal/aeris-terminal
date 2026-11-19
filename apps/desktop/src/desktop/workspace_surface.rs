@@ -5232,6 +5232,7 @@ impl WorkspaceSurface {
             return;
         }
         self.pending_linked_instrument = None;
+        self.pending_linked_interval = None;
         self.market_state.symbol_selection_pending = false;
         self.chart_state = if self.chart.is_some() {
             ChartState::Ready
@@ -5351,6 +5352,19 @@ impl WorkspaceSurface {
         };
         let product = previous.product;
         let interval = previous.interval;
+        if let Some(provider) = product
+            .as_ref()
+            .and_then(|product| ProviderId::find(&product.provider))
+            && provider != self.provider
+        {
+            self.provider = provider;
+            self.order_book.update(cx, |order_book, order_book_cx| {
+                order_book.set_order_queues_offered(
+                    super::provider_order_queues_available(provider),
+                    order_book_cx,
+                );
+            });
+        }
         self.product.clone_from(&product);
         self.descriptor = self.restore_descriptor.take().or_else(|| {
             product

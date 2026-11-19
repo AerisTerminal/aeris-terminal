@@ -285,8 +285,10 @@ pub(super) fn platform_menu_layer(
             UpdateAction::Download => terminal.open_download_page(terminal_cx),
         });
     });
+    let max_panel_height = (f32::from(viewport.height) - f32::from(origin.y) - 8.0).max(200.0);
     let panel = MenuPanel::new("platform_menu", MenuPlacement::At(origin), theme)
         .width(px(PLATFORM_MENU_WIDTH))
+        .max_height(px(max_panel_height))
         .animate_from(animation_origin)
         .children(header)
         .when(layout.identity, MenuPanel::separator)
