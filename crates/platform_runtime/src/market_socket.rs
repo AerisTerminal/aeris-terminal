@@ -372,13 +372,26 @@ fn split_host_port(url: &str) -> Result<(String, u16), MarketSocketError> {
         "ws" => 80,
         _ => return Err(invalid()),
     };
-    let authority = rest.split('/').next().ok_or_else(invalid)?;
+    let authority = rest.split(['/', '?', '#']).next().ok_or_else(invalid)?;
     if authority.is_empty() {
         return Err(invalid());
     }
     // Strip optional userinfo; provider feeds authenticate in-band, never in the URL.
     let authority = authority.rsplit('@').next().ok_or_else(invalid)?;
-    if let Some((host, port)) = authority.rsplit_once(':') {
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, rest) = bracketed.split_once(']').ok_or_else(invalid)?;
+        if host.is_empty() {
+            return Err(invalid());
+        }
+        if rest.is_empty() {
+            Ok((host.to_string(), default_port))
+        } else if let Some(port_text) = rest.strip_prefix(':') {
+            let port: u16 = port_text.parse().map_err(|_| invalid())?;
+            Ok((host.to_string(), port))
+        } else {
+            Err(invalid())
+        }
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
         let port: u16 = port.parse().map_err(|_| invalid())?;
         if host.is_empty() {
             return Err(invalid());

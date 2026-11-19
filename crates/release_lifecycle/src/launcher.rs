@@ -379,7 +379,7 @@ fn bootstrap_update_and_launch(executable: &Path, origin: &ReleaseOrigin) -> Res
     )
     .map_err(|error| error.to_string())?;
     let stable_launcher = stable_launcher_path(&install_root);
-    if executable != stable_launcher {
+    if !paths_equal(executable, &stable_launcher) {
         persist_stable_launcher(executable, &stable_launcher)?;
     }
     let hooks = NativeHooks {
@@ -568,7 +568,9 @@ fn install_remote_update(
     ) {
         return Ok(());
     }
-    if !checked.offer_eligible {
+    if !checked.offer_eligible
+        && (checked.active.is_some() || signed.manifest().rollout.percentage == 0)
+    {
         return Ok(());
     }
     let (downloads_root, bundle_root) = download_release_bundle(
@@ -2454,18 +2456,58 @@ impl LifecycleHooks for NativeHooks {
     }
 }
 
+#[cfg(windows)]
+fn normalized_path_components(path: &Path) -> Vec<String> {
+    let raw = path.to_string_lossy();
+    let stripped = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+    Path::new(stripped)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect()
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        normalized_path_components(left) == normalized_path_components(right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let path_parts = normalized_path_components(path);
+        let prefix_parts = normalized_path_components(prefix);
+        path_parts.len() >= prefix_parts.len() && path_parts[..prefix_parts.len()] == prefix_parts
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(prefix)
+    }
+}
+
 /// Waits on the processes running `executable`. Returns `false` on timeout.
 fn wait_for_executable_exit(executable: &Path, timeout: Duration) -> Result<bool, String> {
-    wait_for_processes_to_exit(|image| image == executable, timeout).map_err(redacted)
+    wait_for_processes_to_exit(|image| paths_equal(image, executable), timeout).map_err(redacted)
 }
 
 fn is_owned_desktop(versions: &Path, image: &Path) -> bool {
-    image.starts_with(versions)
-        && image.file_name()
-            == Some(std::ffi::OsStr::new(&format!(
-                "aeris_desktop{}",
-                std::env::consts::EXE_SUFFIX
-            )))
+    let expected = format!("aeris_desktop{}", std::env::consts::EXE_SUFFIX);
+    let matches_name = image.file_name().is_some_and(|name| {
+        #[cfg(windows)]
+        {
+            name.to_string_lossy().eq_ignore_ascii_case(&expected)
+        }
+        #[cfg(not(windows))]
+        {
+            name == std::ffi::OsStr::new(&expected)
+        }
+    });
+    path_starts_with(image, versions) && matches_name
 }
 
 fn owned_process_is_running(install_root: &Path) -> Result<bool, String> {

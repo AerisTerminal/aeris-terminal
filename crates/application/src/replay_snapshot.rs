@@ -400,6 +400,9 @@ impl ReplaySession {
         update: &ReplayTailUpdate,
     ) -> Result<SequenceDecision, ReplayValidationError> {
         validate_provenanced_market_bar(update.item())?;
+        if self.sequence_tracker.requires_snapshot() {
+            return Ok(SequenceDecision::SnapshotRequired);
+        }
         let Some(expected) = self.sequence_tracker.expected_sequence() else {
             return Ok(SequenceDecision::SnapshotRequired);
         };

@@ -312,6 +312,22 @@ impl MarketBarClientModel {
                 ResnapshotReason::SessionChanged,
             ));
         }
+        let current_schema_version = current
+            .items()
+            .first()
+            .ok_or(StreamProtocolError::EmptySnapshot)?
+            .provenance()
+            .schema_version;
+        if update.item().provenance().schema_version != current_schema_version {
+            self.session = None;
+            self.pending_resnapshot = Some(ResnapshotReason::SchemaChanged);
+            return Ok(MarketBarModelOutcome::ResnapshotRequired(
+                ResnapshotReason::SchemaChanged,
+            ));
+        }
+        if update.publication_generation() <= current.publication_generation() {
+            return Ok(MarketBarModelOutcome::Duplicate);
+        }
         let Some(mut candidate_session) = self.session else {
             return Ok(MarketBarModelOutcome::ResnapshotRequired(
                 self.pending_resnapshot

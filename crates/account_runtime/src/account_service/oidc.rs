@@ -439,6 +439,8 @@ fn clip_profile(value: &str, maximum_bytes: usize) -> String {
 
 pub(crate) fn oidc_agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
+        .https_only(true)
+        .max_redirects(0)
         .timeout_global(Some(Duration::from_secs(15)))
         .build();
     ureq::Agent::new_with_config(config)
@@ -851,12 +853,14 @@ mod tests {
                 }
                 write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("response");
             });
-            let result = super::refresh_grant(
-                &endpoints,
-                &super::oidc_agent(),
-                "fixture-client",
-                "fixture-refresh",
+            let test_agent = ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .max_redirects(0)
+                    .timeout_global(Some(std::time::Duration::from_secs(15)))
+                    .build(),
             );
+            let result =
+                super::refresh_grant(&endpoints, &test_agent, "fixture-client", "fixture-refresh");
             assert!(
                 matches!(result, Err(error) if error == expected),
                 "status {status}: {:?}",

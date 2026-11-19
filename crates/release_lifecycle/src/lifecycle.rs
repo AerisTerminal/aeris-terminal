@@ -1973,6 +1973,22 @@ pub fn native_installation_inventory(
                 service: "com.aeris.account".to_string(),
                 key: "account-profile-v1".to_string(),
             },
+            VaultEntry {
+                service: "aeris-context-data".to_string(),
+                key: "eia_api_key".to_string(),
+            },
+            VaultEntry {
+                service: "aeris-context-data".to_string(),
+                key: "usda_api_key".to_string(),
+            },
+            VaultEntry {
+                service: "aeris-context-data".to_string(),
+                key: "data_gov_api_key".to_string(),
+            },
+            VaultEntry {
+                service: "aeris-context-data".to_string(),
+                key: "fred_api_key".to_string(),
+            },
         ],
         registrations,
     })
@@ -2233,7 +2249,9 @@ fn write_json_atomic<T: Serialize>(
 ) -> Result<(), LifecycleError> {
     fs::create_dir_all(directory).map_err(|_| LifecycleError::StagingFailed)?;
     let bytes = serde_json::to_vec(value).map_err(|_| LifecycleError::JournalCorrupt)?;
-    if bytes.len() > MAXIMUM_MANIFEST_BYTES || !valid_identifier(name, 192) {
+    let limit =
+        usize::try_from(MAXIMUM_SIGNED_MANIFEST_FILE_BYTES).unwrap_or(MAXIMUM_MANIFEST_BYTES);
+    if bytes.len() > limit || !valid_identifier(name, 192) {
         return Err(LifecycleError::JournalCorrupt);
     }
     let destination = directory.join(name);
@@ -2267,7 +2285,14 @@ fn remove_owned_path(path: &Path) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    if metadata.file_type().is_symlink() {
+        #[cfg(windows)]
+        if metadata.is_dir() {
+            return fs::remove_dir(path);
+        }
+        return fs::remove_file(path);
+    }
+    if !metadata.is_dir() {
         return fs::remove_file(path);
     }
     for entry in fs::read_dir(path)? {

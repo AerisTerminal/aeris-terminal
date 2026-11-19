@@ -5,14 +5,21 @@
 //! 16 random bytes each, base64url-encoded. All material is generated with
 //! the OS CSPRNG and the verifier is zeroized on drop.
 
+use std::fmt;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 /// PKCE code verifier: 32 random bytes, base64url-encoded (43 characters).
-#[derive(Debug)]
 pub struct PkceVerifier {
     encoded: Zeroizing<String>,
+}
+
+impl fmt::Debug for PkceVerifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PkceVerifier([redacted])")
+    }
 }
 
 impl PkceVerifier {
@@ -85,6 +92,9 @@ mod tests {
         assert_eq!(first.encoded().len(), 43);
         assert_ne!(first.encoded(), second.encoded());
         assert_eq!(first.challenge().len(), 43);
+        let formatted = format!("{first:?}");
+        assert!(!formatted.contains(first.encoded()));
+        assert!(formatted.contains("redacted"));
     }
 
     #[test]

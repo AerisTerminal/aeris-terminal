@@ -747,7 +747,13 @@ fn active_refresh_rejection_signs_out_and_retires_the_vault() {
     seed_saved_session(&vault, "acct_01", "ada");
     active_session(&service, 14, "acct_01");
     assert!(matches!(
-        super::accept_refresh_grant(&service, 14, &vault, Err(oidc::RefreshGrantError::Rejected)),
+        super::accept_refresh_grant(
+            &service,
+            14,
+            &account("acct_01"),
+            &vault,
+            Err(oidc::RefreshGrantError::Rejected)
+        ),
         Err(SessionRefresh::Retired)
     ));
     let view = service.account_status();
@@ -764,7 +770,13 @@ fn stale_refresh_rejection_cannot_retire_newer_session_credentials() {
     seed_saved_session(&vault, "acct_02", "bob");
     active_session(&service, 16, "acct_02");
     assert!(matches!(
-        super::accept_refresh_grant(&service, 15, &vault, Err(oidc::RefreshGrantError::Rejected)),
+        super::accept_refresh_grant(
+            &service,
+            15,
+            &account("acct_02"),
+            &vault,
+            Err(oidc::RefreshGrantError::Rejected)
+        ),
         Err(SessionRefresh::Retired)
     ));
     assert_eq!(service.account_status().state, AccountSessionState::Active);
@@ -785,6 +797,7 @@ fn rotated_refresh_store_failure_fails_current_session_closed() {
         super::accept_refresh_grant(
             &service,
             18,
+            &account("acct_01"),
             &failing,
             Ok(verified("acct_01", "ada", Some("rotated")))
         ),
@@ -868,6 +881,7 @@ fn vault_io_never_runs_under_the_account_state_lock() {
     let Ok(refreshed) = super::accept_refresh_grant(
         &service,
         0,
+        &account("acct_01"),
         &probe,
         Ok(verified("acct_01", "ada-renamed", Some("rotated-session"))),
     ) else {
@@ -1606,4 +1620,54 @@ fn signed_in_views_carry_the_unlimited_plan_and_cleared_views_carry_nothing() {
         super::cleared_view(AccountSessionState::SignedOut, 4, AccountDetail::SignedOut);
     assert_eq!(cleared.plan_id, "");
     assert_eq!(cleared.account_id, "");
+}
+
+#[test]
+fn refresh_grant_subject_mismatch_does_not_overwrite_stored_refresh_token() {
+    let service = service();
+    let vault = MemoryVault::default();
+    seed_saved_session(&vault, "acct_01", "ada");
+    active_session(&service, 20, "acct_01");
+    assert!(matches!(
+        super::accept_refresh_grant(
+            &service,
+            20,
+            &account("acct_01"),
+            &vault,
+            Ok(verified("acct_other", "mallory", Some("rotated-other")))
+        ),
+        Err(SessionRefresh::Unavailable)
+    ));
+    let stored = vault
+        .load(REFRESH_VAULT_KEY)
+        .expect("reads")
+        .expect("original refresh token remains");
+    assert_eq!(String::from_utf8(stored).expect("utf8"), "saved-refresh");
+}
+
+#[test]
+fn complete_with_tokens_omits_oversized_photo_url_from_vault_cache_instead_of_failing_sign_in() {
+    let service = service();
+    let vault = MemoryVault::default();
+    service.begin_login(21).expect("login starts");
+    let mut long_profile = profile("ada", "ada@example.test");
+    long_profile.display_name = "a".repeat(aeris_account::MAXIMUM_PROFILE_NAME_BYTES);
+    long_profile.email = "e".repeat(aeris_account::MAXIMUM_PROFILE_EMAIL_BYTES);
+    long_profile.photo_url = format!(
+        "https://cdn.example.test/{}",
+        "p".repeat(aeris_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES - 25)
+    );
+    assert!(service.complete_with_tokens(
+        21,
+        &account("acct_01"),
+        &long_profile,
+        "refresh-token",
+        &vault,
+    ));
+    assert_eq!(service.account_status().state, AccountSessionState::Active);
+    let (_, loaded) = super::load_profile_material(&vault)
+        .expect("cached profile loads")
+        .expect("cached profile present");
+    assert_eq!(loaded.display_name, long_profile.display_name);
+    assert_eq!(loaded.photo_url, "");
 }

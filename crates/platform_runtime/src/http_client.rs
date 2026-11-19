@@ -156,20 +156,27 @@ impl<In: Transport> Connector<In> for CancellableConnector {
         }
         let end = deadline(details.timeout);
         for address in &details.addrs {
-            self.0.check()?;
-            let left = remaining(end, details.timeout)?;
-            if let Ok(stream) =
-                TcpStream::connect_timeout(address, left.min(Duration::from_millis(500)))
-            {
-                stream.set_nodelay(true)?;
-                return Ok(Some(Either::B(CancellableTransport {
-                    stream,
-                    cancellation: self.0.clone(),
-                    buffers: LazyBuffers::new(
-                        details.config.input_buffer_size(),
-                        details.config.output_buffer_size(),
-                    ),
-                })));
+            let mut slice = Duration::from_millis(500);
+            loop {
+                self.0.check()?;
+                let left = remaining(end, details.timeout)?;
+                match TcpStream::connect_timeout(address, left.min(slice)) {
+                    Ok(stream) => {
+                        stream.set_nodelay(true)?;
+                        return Ok(Some(Either::B(CancellableTransport {
+                            stream,
+                            cancellation: self.0.clone(),
+                            buffers: LazyBuffers::new(
+                                details.config.input_buffer_size(),
+                                details.config.output_buffer_size(),
+                            ),
+                        })));
+                    }
+                    Err(error) if would_wait(&error) && left > slice => {
+                        slice = slice.saturating_mul(2).min(Duration::from_secs(5));
+                    }
+                    Err(_) => break,
+                }
             }
         }
         self.0.check()?;

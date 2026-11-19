@@ -1210,10 +1210,10 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        // Retire every background completion before touching credentials.
-        // Workers re-check that fence under the vault commit lock, so a
-        // commit already in flight lands before these deletes.
-        if let Ok(mut state) = self.state.lock() {
+        // Hold the vault-commit lock across retirement and deletion so a newer
+        // login cannot write credentials before the old ones are deleted.
+        let commit = self.lock_vault_commit();
+        let sign_out_generation = if let Ok(mut state) = self.state.lock() {
             let generation = state.last_generation;
             state.restore_allowed = false;
             state.pending = None;
@@ -1222,8 +1222,10 @@ impl AccountService {
                 generation,
                 AccountDetail::SignedOut,
             );
-        }
-        let commit = self.lock_vault_commit();
+            Some(generation)
+        } else {
+            None
+        };
         let token = load_refresh_token(vault).unwrap_or_default();
         let refresh_deleted = vault.delete(REFRESH_VAULT_KEY).is_ok();
         let profile_deleted = vault.delete(PROFILE_VAULT_KEY).is_ok();
@@ -1241,17 +1243,19 @@ impl AccountService {
             let Ok(mut state) = self.state.lock() else {
                 return Err("account state is unavailable".to_string());
             };
-            // Profile leaves with the session: a later sign-in as another
-            // user never inherits these fields, even briefly.
-            state.view = cleared_view(
-                AccountSessionState::SignedOut,
-                state.last_generation,
-                if deleted {
-                    AccountDetail::SignedOut
-                } else {
-                    AccountDetail::SignOutCleanupAttention
-                },
-            );
+            // Only publish the final sign-out view if no newer login started
+            // while credentials were being deleted.
+            if sign_out_generation == Some(state.last_generation) && state.pending.is_none() {
+                state.view = cleared_view(
+                    AccountSessionState::SignedOut,
+                    state.last_generation,
+                    if deleted {
+                        AccountDetail::SignedOut
+                    } else {
+                        AccountDetail::SignOutCleanupAttention
+                    },
+                );
+            }
             state.view.clone()
         };
         if let Some((endpoints, token)) = revocation {
@@ -1437,7 +1441,7 @@ impl AccountService {
         let secret = Zeroizing::new(refresh_token.as_bytes().to_vec());
         let stored = !secret.is_empty()
             && vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_ok()
-            && store_profile_material(vault, account_id, profile).is_ok();
+            && store_profile_material_with_fallback(vault, account_id, profile);
         if !stored {
             let _ = self.retire_unusable_vault_material(vault);
         }
@@ -1597,7 +1601,7 @@ impl AccountService {
         if !self.state.lock().is_ok_and(|state| owns_session(&state)) {
             return false;
         }
-        if store_profile_material(vault, expected_account, &tokens.profile).is_err() {
+        if !store_profile_material_with_fallback(vault, expected_account, &tokens.profile) {
             diagnostic!("Aeris account profile cache write degraded");
         }
         let Ok(mut state) = self.state.lock() else {
@@ -1826,6 +1830,7 @@ where
 fn accept_refresh_grant<V>(
     service: &AccountService,
     generation: u64,
+    expected_account: &AccountId,
     vault: &V,
     outcome: Result<oidc::VerifiedTokens, oidc::RefreshGrantError>,
 ) -> Result<oidc::VerifiedTokens, SessionRefresh>
@@ -1835,6 +1840,10 @@ where
 {
     match outcome {
         Ok(tokens) => {
+            if tokens.subject != expected_account.as_str() {
+                diagnostic!("Aeris account refresh returned another subject");
+                return Err(SessionRefresh::Unavailable);
+            }
             if persist_rotated_refresh(service, generation, vault, tokens.refresh.as_ref()) {
                 Ok(tokens)
             } else {
@@ -1888,10 +1897,11 @@ where
         &service.config.client_id,
         &session.refresh_token,
     );
-    let tokens = match accept_refresh_grant(service, generation, vault, refresh) {
-        Ok(tokens) => tokens,
-        Err(outcome) => return outcome,
-    };
+    let tokens =
+        match accept_refresh_grant(service, generation, &session.account_id, vault, refresh) {
+            Ok(tokens) => tokens,
+            Err(outcome) => return outcome,
+        };
     drop(grant_permit);
     if service.apply_verified_profile(vault, generation, &session.account_id, &tokens) {
         SessionRefresh::Verified
@@ -1961,6 +1971,30 @@ where
         .ok()
         .filter(|token| !token.is_empty())
         .map(Zeroizing::new))
+}
+
+/// Caches the profile, omitting the optional `photo_url` when its length pushes
+/// the JSON past the native credential-vault secret limit.
+fn store_profile_material_with_fallback<V>(
+    vault: &V,
+    account_id: &AccountId,
+    profile: &AccountProfile,
+) -> bool
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    if store_profile_material(vault, account_id, profile).is_ok() {
+        return true;
+    }
+    if profile.photo_url.is_empty() {
+        return false;
+    }
+    let trimmed = AccountProfile {
+        photo_url: String::new(),
+        ..profile.clone()
+    };
+    store_profile_material(vault, account_id, &trimmed).is_ok()
 }
 
 fn store_profile_material<V>(

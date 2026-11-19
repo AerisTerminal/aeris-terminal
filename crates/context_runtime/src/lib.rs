@@ -32,8 +32,8 @@ const COMMAND_CAPACITY: usize = 64;
 const REPLY_CAPACITY: usize = 1;
 const MAXIMUM_STATUS_DETAIL_BYTES: usize = 256;
 const CONTEXT_VAULT_SERVICE: &str = "aeris-context-data";
-/// Most official-source requests one source refresh makes (EIA and USDA FAS make three).
-const MAXIMUM_REQUESTS_PER_REFRESH: u32 = 3;
+/// Most official-source requests one source refresh makes (NOAA checks up to four days × two files).
+const MAXIMUM_REQUESTS_PER_REFRESH: u32 = 8;
 type Reply<T> = SyncSender<Result<T, String>>;
 type PublicationWake = Arc<dyn Fn() + Send + Sync>;
 type SharedPublicationWake = Arc<Mutex<Option<PublicationWake>>>;
@@ -661,10 +661,11 @@ fn bound_vec<T>(values: &mut Vec<T>) {
 
 fn bounded_detail(mut detail: String) -> String {
     if detail.len() > MAXIMUM_STATUS_DETAIL_BYTES {
-        detail.truncate(MAXIMUM_STATUS_DETAIL_BYTES);
-        while !detail.is_char_boundary(detail.len()) {
-            detail.pop();
+        let mut end = MAXIMUM_STATUS_DETAIL_BYTES;
+        while end > 0 && !detail.is_char_boundary(end) {
+            end -= 1;
         }
+        detail.truncate(end);
     }
     detail
 }
@@ -863,8 +864,12 @@ mod tests {
             .expect_err("a stalled worker cannot reply");
         let waited = started.elapsed();
         assert!(error.contains("did not reply in time"), "{error}");
-        assert!(waited >= Duration::from_secs(4), "{waited:?}");
-        assert!(waited < Duration::from_secs(8), "{waited:?}");
+        let expected_wait = Duration::from_secs(u64::from(MAXIMUM_REQUESTS_PER_REFRESH + 1));
+        assert!(waited >= expected_wait, "{waited:?}");
+        assert!(
+            waited < expected_wait + Duration::from_secs(4),
+            "{waited:?}"
+        );
         drop(release);
         service
             .shutdown(Duration::from_secs(2))
@@ -887,5 +892,13 @@ mod tests {
         service
             .shutdown(Duration::from_secs(1))
             .expect("context service stops");
+    }
+
+    #[test]
+    fn bounded_detail_truncates_safely_on_multibyte_utf8_boundary() {
+        let detail = format!("{}€€€", "a".repeat(MAXIMUM_STATUS_DETAIL_BYTES - 1));
+        let bounded = bounded_detail(detail);
+        assert_eq!(bounded.len(), MAXIMUM_STATUS_DETAIL_BYTES - 1);
+        assert!(bounded.is_char_boundary(bounded.len()));
     }
 }

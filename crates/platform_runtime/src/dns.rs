@@ -75,6 +75,10 @@ fn resolve_with(
         }
     };
     check()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
     if host.is_empty() || host.len() > 253 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

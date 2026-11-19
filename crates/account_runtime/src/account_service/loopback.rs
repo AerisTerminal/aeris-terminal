@@ -407,19 +407,41 @@ pub fn validate_callback_query(
     if declined {
         return Err("sign-in was declined or cancelled in the browser".to_string());
     }
-    let (Some(code), Some(state)) = (code, state) else {
+    let (Some(raw_code), Some(raw_state)) = (code, state) else {
         return Err("authorization callback is invalid".to_string());
     };
+    let code =
+        percent_decode(raw_code).ok_or_else(|| "authorization callback is invalid".to_string())?;
+    let state =
+        percent_decode(raw_state).ok_or_else(|| "authorization callback is invalid".to_string())?;
     if code.is_empty() || code.len() > MAXIMUM_CODE_BYTES {
         return Err("authorization callback is invalid".to_string());
     }
     if state.len() > MAXIMUM_STATE_BYTES || state != expected_state {
         return Err("authorization state mismatch; retry sign-in".to_string());
     }
-    Ok(ValidatedCallback {
-        code: code.to_string(),
-        state: state.to_string(),
-    })
+    Ok(ValidatedCallback { code, state })
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push(u8::try_from((hi << 4) | lo).unwrap_or(0));
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 #[cfg(test)]

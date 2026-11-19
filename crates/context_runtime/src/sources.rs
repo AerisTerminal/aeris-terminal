@@ -45,6 +45,8 @@ impl OfficialContextFetcher {
             return Err("context HTTP timeout is invalid".to_string());
         }
         let config = ureq::Agent::config_builder()
+            .https_only(true)
+            .max_redirects(0)
             .timeout_global(Some(timeout))
             .build();
         Ok(Self {
@@ -173,11 +175,12 @@ impl OfficialContextFetcher {
         api_key: &str,
         fetched_unix_seconds: i64,
     ) -> Result<SourcePublication, ContextFetchError> {
+        let encoded_key = encode_query_component(api_key);
         let crude_url = format!(
-            "{EIA_CRUDE_URL}?api_key={api_key}&frequency=weekly&data[0]=value&facets[series][]=WCESTUS1&sort[0][column]=period&sort[0][direction]=desc&length=270"
+            "{EIA_CRUDE_URL}?api_key={encoded_key}&frequency=weekly&data[0]=value&facets[series][]=WCESTUS1&sort[0][column]=period&sort[0][direction]=desc&length=270"
         );
         let gas_url = format!(
-            "{EIA_GAS_URL}?api_key={api_key}&frequency=weekly&data[0]=value&facets[series][]=NW2_EPG0_SWO_R48_BCF&sort[0][column]=period&sort[0][direction]=desc&length=270"
+            "{EIA_GAS_URL}?api_key={encoded_key}&frequency=weekly&data[0]=value&facets[series][]=NW2_EPG0_SWO_R48_BCF&sort[0][column]=period&sort[0][direction]=desc&length=270"
         );
         let crude = self.get_json(ContextSource::Eia, &crude_url)?;
         let gas = self.get_json(ContextSource::Eia, &gas_url)?;
@@ -271,8 +274,9 @@ impl OfficialContextFetcher {
             .single()
             .ok_or_else(|| ContextFetchError::unavailable("USDA timestamp is invalid"))?
             .year();
+        let encoded_key = encode_query_component(api_key);
         let url = format!(
-            "{USDA_URL}?key={api_key}&format=JSON&commodity_desc=CORN&statisticcat_desc=CONDITION&agg_level_desc=NATIONAL&freq_desc=WEEKLY&year__GE={}&short_desc__LIKE=CONDITION",
+            "{USDA_URL}?key={encoded_key}&format=JSON&commodity_desc=CORN&statisticcat_desc=CONDITION&agg_level_desc=NATIONAL&freq_desc=WEEKLY&year__GE={}&short_desc__LIKE=CONDITION",
             year - 1
         );
         let json = self.get_json(ContextSource::Usda, &url)?;
@@ -363,10 +367,11 @@ impl OfficialContextFetcher {
                 "thousands of persons",
             ),
         ];
+        let encoded_key = encode_query_component(api_key);
         let mut publication = SourcePublication::empty(ContextSource::Fred);
         for (series_id, kind, label, unit) in series {
             let url = format!(
-                "{FRED_URL}?series_id={series_id}&api_key={api_key}&file_type=json&sort_order=desc&limit=2"
+                "{FRED_URL}?series_id={series_id}&api_key={encoded_key}&file_type=json&sort_order=desc&limit=2"
             );
             let json = self.get_json(ContextSource::Fred, &url)?;
             publication.macro_observations.push(parse_fred_series(
@@ -380,6 +385,21 @@ impl OfficialContextFetcher {
         }
         Ok(publication)
     }
+}
+
+fn encode_query_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0F)]));
+        }
+    }
+    encoded
 }
 
 fn transport_error(source: ContextSource, error: ureq::Error) -> ContextFetchError {
@@ -729,10 +749,11 @@ fn parse_bea_calendar(
     html: &str,
     fetched_unix_seconds: i64,
 ) -> Result<SourcePublication, ContextFetchError> {
-    let year = Utc
+    let fetched = Utc
         .timestamp_opt(fetched_unix_seconds, 0)
         .single()
-        .map_or(1970, |time| time.year());
+        .ok_or_else(|| ContextFetchError::unavailable("BEA timestamp is invalid"))?;
+    let year = fetched.year();
     let mut publication = SourcePublication::empty(ContextSource::Bea);
     for row in html.split("<tr class=\"scheduled-releases-type-").skip(1) {
         let Some(date_text) = between(row, "<div class=\"release-date\">", "</div>") else {
@@ -748,8 +769,14 @@ fn parse_bea_calendar(
             continue;
         };
         let title = strip_html(title_raw);
-        let local = parse_named_month_datetime(year, date_text, &strip_html(time_text))
+        let time_clean = strip_html(time_text);
+        let mut local = parse_named_month_datetime(year, date_text, &time_clean)
             .map_err(ContextFetchError::unavailable)?;
+        // BEA's upcoming schedule omits the year; in late Q4, January–March rows belong to the next year.
+        if fetched.month() >= 10 && local.month() <= 3 {
+            local = parse_named_month_datetime(year + 1, date_text, &time_clean)
+                .map_err(ContextFetchError::unavailable)?;
+        }
         let scheduled = eastern_timestamp(local)
             .ok_or_else(|| ContextFetchError::unavailable("BEA timestamp is out of range"))?;
         publication.economic_events.push(EconomicEvent {
@@ -837,7 +864,7 @@ fn parse_eia_series(
     let latest = &rows[0];
     let period = required_string(latest, "period", "EIA period")?;
     let value = required_decimal(latest, "value", "EIA value")?;
-    let (minimum, maximum) = seasonal_range(rows, period)?;
+    let (minimum, maximum) = seasonal_range(rows, period, value.1)?;
     Ok(ContextMetric {
         id: format!("eia:{id}"),
         kind,
@@ -941,9 +968,23 @@ fn parse_eia_release_schedule(
     Ok(events)
 }
 
+fn rescale_units(units: i128, from_scale: u8, to_scale: u8) -> Option<i128> {
+    if from_scale == to_scale {
+        return Some(units);
+    }
+    if from_scale < to_scale {
+        let factor = 10_i128.checked_pow(u32::from(to_scale - from_scale))?;
+        units.checked_mul(factor)
+    } else {
+        let factor = 10_i128.checked_pow(u32::from(from_scale - to_scale))?;
+        Some(units / factor)
+    }
+}
+
 fn seasonal_range(
     rows: &[Value],
     latest_period: &str,
+    target_scale: u8,
 ) -> Result<(Option<i128>, Option<i128>), ContextFetchError> {
     let target_week = iso_week(latest_period);
     let Some(target_week) = target_week else {
@@ -958,12 +999,16 @@ fn seasonal_range(
         let Some((year, week)) = iso_week(period) else {
             continue;
         };
-        if week.abs_diff(target_week.1) > 1 || !years.insert(year) || years.len() > 5 {
+        if year == target_week.0
+            || week.abs_diff(target_week.1) > 1
+            || !years.insert(year)
+            || years.len() > 5
+        {
             continue;
         }
         let (units, scale) = required_decimal(row, "value", "EIA value")?;
-        if scale == 0 {
-            values.push(units);
+        if let Some(rescaled) = rescale_units(units, scale, target_scale) {
+            values.push(rescaled);
         }
     }
     Ok(values
@@ -1456,6 +1501,62 @@ mod tests {
         assert_eq!(
             publication.economic_events[0].title,
             "GDP (Advance Estimate), 3rd Quarter 2026"
+        );
+    }
+
+    #[test]
+    fn bea_calendar_rolls_january_rows_into_next_year_during_q4() {
+        let november_2026 = Utc
+            .with_ymd_and_hms(2026, 11, 15, 12, 0, 0)
+            .single()
+            .expect("valid timestamp")
+            .timestamp();
+        let fixture = r#"<table><tr class="scheduled-releases-type-press"><td><div class="release-date">January 28</div><small class="text-muted">8:30 AM</small></td><td class="release-title">Personal Income and Outlays</td></tr></table>"#;
+        let publication = parse_bea_calendar(fixture, november_2026).expect("BEA fixture parses");
+        let scheduled = Utc
+            .timestamp_opt(publication.economic_events[0].scheduled_unix_seconds, 0)
+            .single()
+            .expect("valid scheduled timestamp");
+        assert_eq!(scheduled.year(), 2027);
+        assert_eq!(scheduled.month(), 1);
+    }
+
+    #[test]
+    fn eia_seasonal_range_excludes_current_year_and_matches_latest_scale() {
+        let json = serde_json::json!({
+            "response": {
+                "data": [
+                    { "period": "2026-06-12", "value": "450.5" },
+                    { "period": "2026-06-05", "value": "999" },
+                    { "period": "2025-06-13", "value": "420" },
+                    { "period": "2024-06-14", "value": "460.2" },
+                    { "period": "2023-06-16", "value": "440" },
+                    { "period": "2022-06-17", "value": "410" },
+                    { "period": "2021-06-18", "value": "430" }
+                ]
+            }
+        });
+        let metric = parse_eia_series(
+            &json,
+            "crude",
+            ContextMetricKind::CommercialCrudeStocks,
+            "Crude",
+            "thousand barrels",
+            EIA_CRUDE_URL,
+            FETCHED,
+        )
+        .expect("EIA series parses");
+        assert_eq!((metric.value_units, metric.value_scale), (4_505, 1));
+        assert_eq!(metric.five_year_min_units, Some(4_100));
+        assert_eq!(metric.five_year_max_units, Some(4_602));
+    }
+
+    #[test]
+    fn query_component_encodes_reserved_api_key_characters() {
+        assert_eq!(encode_query_component("abc-123_~.Z"), "abc-123_~.Z");
+        assert_eq!(
+            encode_query_component("k&a=b#c%20+ "),
+            "k%26a%3Db%23c%2520%2B%20"
         );
     }
 
