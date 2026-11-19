@@ -221,17 +221,8 @@ impl TradingCore {
         let discipline_state = self.next_discipline_state(fill);
         if completed {
             update_winner(rule_state.as_mut(), cycle.risk_realized_pnl)?;
-            cycle.cycle_id = cycle
-                .cycle_id
-                .checked_add(1)
-                .ok_or_else(|| "trade cycle id overflowed".to_string())?;
-            let reopened = next_quantity != 0;
-            cycle.restart(
-                zero,
-                zero_quantity,
-                reopened,
-                reopened.then_some(fill.execution_unix_nanos),
-            );
+            restart_completed_cycle(&mut cycle, zero, zero_quantity, next_quantity, fill)
+                .ok_or_else(|| "trade cycle overflowed".to_string())?;
         }
         let fee = super::fees::fee_for_fill(
             self.state.fee_schedules.get(&fill.account_id),
@@ -324,6 +315,29 @@ impl TradingCore {
             })
             .transpose()
     }
+}
+
+fn restart_completed_cycle(
+    cycle: &mut TradeCycle,
+    zero: FixedPoint,
+    zero_quantity: FixedPoint,
+    next_quantity: i64,
+    fill: &Fill,
+) -> Option<()> {
+    cycle.cycle_id = cycle.cycle_id.checked_add(1)?;
+    let reopened = next_quantity != 0;
+    let peak = if reopened {
+        FixedPoint::try_new(next_quantity.checked_abs()?, fill.quantity.scale()).ok()?
+    } else {
+        zero_quantity
+    };
+    cycle.restart(
+        zero,
+        peak,
+        reopened,
+        reopened.then_some(fill.execution_unix_nanos),
+    );
+    Some(())
 }
 
 fn update_peak(

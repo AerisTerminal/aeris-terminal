@@ -352,7 +352,9 @@ impl TradingCore {
             .state
             .order_groups
             .values()
-            .filter(|group| group.status == GroupStatus::Active)
+            .filter(|group| {
+                group.status == GroupStatus::Active && group.kind != crate::GroupKind::Oco
+            })
             .flat_map(|group| group.legs.iter().map(|leg| leg.order_id.clone()))
             .collect::<std::collections::BTreeSet<_>>();
         let candidates = self

@@ -452,6 +452,13 @@ impl TradingCore {
         }
         let mut step = OrderStep::new(self.state.next_sequence);
         for order in due {
+            if step
+                .updated
+                .iter()
+                .any(|(updated, _)| updated.id == order.id)
+            {
+                continue;
+            }
             let deadline = order
                 .expires_at_unix_nanos
                 .ok_or_else(|| "DAY order has no expiry deadline".to_string())?;
@@ -520,6 +527,12 @@ impl TradingCore {
         match VenueRoute::from_account(account)? {
             VenueRoute::Simulated => {}
             VenueRoute::Broker => return self.modify_broker_order(order, &command),
+        }
+        if let Some(lock) = self.state.risk_locks.get(&order.account_id)
+            && self.owned_leg_role(&order.client_order_id).is_none()
+            && !self.order_strictly_reduces_position(&order)
+        {
+            return Err(format!("account is risk-locked: {}", lock.reason));
         }
         command.provenance.venue_id.clone_from(&account.venue_id);
         if !matches!(
@@ -804,6 +817,26 @@ impl TradingCore {
         Ok(triggered)
     }
 
+    pub(super) fn order_strictly_reduces_position(&self, order: &Order) -> bool {
+        let Some(position) = self
+            .state
+            .positions
+            .get(&(order.account_id.clone(), order.instrument_id.clone()))
+        else {
+            return false;
+        };
+        let Ok(net) = position
+            .net_quantity
+            .exact_rescale(order.quantity.scale())
+            .map(FixedPoint::units)
+        else {
+            return false;
+        };
+        net != 0
+            && net.signum() != order.side.sign()
+            && order.quantity.units().unsigned_abs() <= net.unsigned_abs()
+    }
+
     pub(super) fn cancel_unfilled_immediate_orders(
         &mut self,
         observation: &SimulatedMarketObservation,
@@ -820,6 +853,7 @@ impl TradingCore {
                         TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill
                     )
                     && !candidate_ids.contains(&order.id)
+                    && self.quote_order_eligible(order, observation)
             })
             .map(|order| order.client_order_id.clone())
             .collect::<Vec<_>>();

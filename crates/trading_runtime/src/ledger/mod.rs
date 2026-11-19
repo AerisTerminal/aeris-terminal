@@ -469,18 +469,20 @@ impl TradingCore {
                         nonnegative_difference(current_session_pnl, floor)
                     })
                     .transpose()?;
-                let projected_contracts = FixedPoint::try_new(
-                    i64::try_from(self.projected_contracts_for_account(
-                        &profile.account_id,
-                        profile.max_contracts.scale(),
-                        None,
-                    )?)
-                    .map_err(|_| "risk contract quantity overflowed".to_string())?,
+                let projected_contracts = self.projected_contracts_for_account(
+                    &profile.account_id,
                     profile.max_contracts.scale(),
-                )
-                .map_err(|error| error.to_string())?;
-                let contracts_remaining =
-                    remaining_limit(profile.max_contracts, projected_contracts)?;
+                    None,
+                )?;
+                let target_scale = profile
+                    .max_contracts
+                    .scale()
+                    .max(projected_contracts.scale());
+                let scaled_limit = profile
+                    .max_contracts
+                    .exact_rescale(target_scale)
+                    .map_err(|error| error.to_string())?;
+                let contracts_remaining = remaining_limit(scaled_limit, projected_contracts)?;
                 let (consistency_current_percent, consistency_additional_profit_required) = profile
                     .consistency_max_single_trade_percent
                     .map(|limit| {

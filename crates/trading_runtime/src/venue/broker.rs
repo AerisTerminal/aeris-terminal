@@ -293,6 +293,7 @@ impl TradingCore {
                 warnings.clone(),
             ));
             event.detail = Some(broker_warnings_detail(&warnings));
+            event.validate().map_err(|error| error.to_string())?;
         }
         let outbound = self
             .venue_outbound
@@ -321,6 +322,11 @@ impl TradingCore {
         order: Order,
         command: &ModifyOrder,
     ) -> Result<Order, String> {
+        if let Some(lock) = self.state.risk_locks.get(&order.account_id)
+            && !self.order_strictly_reduces_position(&order)
+        {
+            return Err(format!("account is risk-locked: {}", lock.reason));
+        }
         if !matches!(
             order.status,
             OrderStatus::Working | OrderStatus::PartiallyFilled
@@ -567,12 +573,13 @@ impl TradingCore {
             net.scale(),
         )
         .map_err(|error| error.to_string())?;
+        let sequence = self.state.next_sequence;
+        self.state.next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| "order sequence overflowed".to_string())?;
         let order = PlaceOrder {
-            client_order_id: ClientOrderId::try_new(format!(
-                "ct-reverse-{}",
-                self.state.next_sequence
-            ))
-            .map_err(|error| error.to_string())?,
+            client_order_id: ClientOrderId::try_new(format!("ct-reverse-{sequence}"))
+                .map_err(|error| error.to_string())?,
             account_id: account_id.clone(),
             instrument_id: instrument_id.clone(),
             side,
@@ -1143,6 +1150,7 @@ impl TradingCore {
         snapshot: &VenueSnapshot,
     ) -> Result<(), String> {
         let mut reconfirmed = BTreeSet::new();
+        let mut unregistered_orders = BTreeSet::new();
         for report in &snapshot.orders {
             if let Some(order) = self.reported_order(account_id, report) {
                 reconfirmed.insert(order.id);
@@ -1153,6 +1161,8 @@ impl TradingCore {
                     Some("confirmed by reconcile"),
                     true,
                 )?;
+            } else if !self.state.instruments.contains_key(&report.instrument_id) {
+                unregistered_orders.insert(report.instrument_id.clone());
             } else if let Some(mirrored) = self.mirror_open_order(account_id, report)? {
                 reconfirmed.insert(mirrored);
             }
@@ -1184,7 +1194,8 @@ impl TradingCore {
                 None,
             )?;
         }
-        let unregistered = self.rebase_positions(account_id, &snapshot.positions)?;
+        let mut unregistered = self.rebase_positions(account_id, &snapshot.positions)?;
+        unregistered.extend(unregistered_orders);
         self.settle_reconciled(account_id, &unregistered)
     }
 
@@ -1682,14 +1693,15 @@ fn broker_report_detail(state: BrokerOrderState) -> &'static str {
 
 /// The English audit text a typed risk-warnings note mirrors for its clients.
 fn broker_warnings_detail(warnings: &[aeris_trading::RiskWarning]) -> String {
-    format!(
+    let joined = format!(
         "submitted to the broker · {}",
         warnings
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("; ")
-    )
+    );
+    crate::core::truncate_utf8_bytes(&joined, aeris_trading::MAXIMUM_TRADING_FIELD_BYTES)
 }
 
 /// How a broker deal found its owner order.

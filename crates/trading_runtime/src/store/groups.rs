@@ -495,7 +495,7 @@ impl TradingStore {
 
     /// Both pre-group protection tables still exist, so the group backfill and the awaiting
     /// conversion can read them.
-    pub(super) fn legacy_protection_tables_present(&self) -> Result<bool, String> {
+    pub(crate) fn legacy_protection_tables_present(&self) -> Result<bool, String> {
         self.connection
             .query_row(
                 "SELECT count(*) = 2 FROM sqlite_master

@@ -228,15 +228,17 @@ impl TradingCore {
                 .map(PlacementOutcome::BrokerProtected);
         }
         template.validate()?;
-        if self
-            .state
-            .orders
-            .values()
-            .any(|order| order.client_order_id == entry_command.client_order_id)
-        {
-            return Err(
-                "entry client identifier already belongs to a non-bracket order".to_string(),
-            );
+        if let Some(existing) = self.state.orders.by_client(&entry_command.client_order_id) {
+            let belongs_to_bracket = self
+                .state
+                .order_groups
+                .values()
+                .any(|group| group.entry.as_ref() == Some(&existing.id));
+            if !belongs_to_bracket {
+                return Err(
+                    "entry client identifier already belongs to a non-bracket order".to_string(),
+                );
+            }
         }
         self.check_bracket_stop_risk(
             &entry_command.account_id,

@@ -1580,9 +1580,27 @@ impl TradingCore {
         core.store
             .delete_legacy_brackets(&converted)
             .map_err(StoreError::Other)?;
+        let had_legacy_tables = core
+            .store
+            .legacy_protection_tables_present()
+            .map_err(StoreError::Other)?;
         core.store
             .complete_post_group_migrations()
             .map_err(StoreError::Other)?;
+        if had_legacy_tables
+            && !core
+                .store
+                .legacy_protection_tables_present()
+                .map_err(StoreError::Other)?
+        {
+            // Post-group migrations (V24–V34 + ledger backfill) populated ledger_entries,
+            // cost_basis, risk_sessions, and classified risk_locks in SQLite; reload so
+            // in-memory state matches the migrated store immediately.
+            core.state = core.store.load_state().map_err(StoreError::Other)?;
+            core.repair_loaded_position_projections()
+                .map_err(StoreError::Other)?;
+            core.verify_recovered_groups().map_err(StoreError::Other)?;
+        }
         core.report_interrupted_reverses()
             .map_err(StoreError::Other)?;
         core.recover_day_deadlines().map_err(StoreError::Other)?;
@@ -2043,7 +2061,10 @@ impl TradingCore {
             }
             Command::EvaluateRisk(order, reply) => {
                 let attached_stop = order.stop_price.is_some();
-                respond(&reply, self.evaluate_order_risk(&order, attached_stop));
+                respond(
+                    &reply,
+                    self.evaluate_order_risk(&order, attached_stop, false),
+                );
             }
             Command::Modify(order, reply) => {
                 respond(&reply, self.modify_order_from_market(order));
@@ -2231,13 +2252,27 @@ impl TradingCore {
                 self.state.fill_accounting.remove(&fill.id);
             }
         }
+        let group_pinned_orders = self
+            .state
+            .order_groups
+            .values()
+            .flat_map(|group| {
+                group
+                    .entry
+                    .iter()
+                    .chain(group.legs.iter().map(|leg| &leg.order_id))
+                    .cloned()
+            })
+            .collect::<BTreeSet<_>>();
         while self.state.orders.len() > self.retention.maximum_orders {
             let Some(retired) = self
                 .state
                 .orders
                 .values()
                 .filter(|order| {
-                    !order.status.is_open() && !self.state.broker_brackets.contains_key(&order.id)
+                    !order.status.is_open()
+                        && !self.state.broker_brackets.contains_key(&order.id)
+                        && !group_pinned_orders.contains(&order.id)
                 })
                 .min_by_key(|order| order.submitted_unix_nanos)
                 .map(|order| order.id.clone())
@@ -2249,18 +2284,27 @@ impl TradingCore {
     }
 }
 
+pub(crate) fn truncate_utf8_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
 pub(crate) fn order_acceptance_detail(warnings: &[RiskWarning]) -> String {
     if warnings.is_empty() {
         return "accepted by local simulated venue".to_string();
     }
-    warnings
+    let joined = warnings
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
-        .join(" · ")
-        .chars()
-        .take(256)
-        .collect()
+        .join(" · ");
+    truncate_utf8_bytes(&joined, aeris_trading::MAXIMUM_TRADING_FIELD_BYTES)
 }
 
 pub(crate) fn flatten_acceptance_event(order: &Order, sequence: u64) -> Result<OrderEvent, String> {

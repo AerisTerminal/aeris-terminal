@@ -70,6 +70,14 @@ fn per_unit_charge(
     fixed_point_from_i128_rounded(raw, raw_scale, currency_scale).map_err(|error| error.to_string())
 }
 
+fn strip_trailing_zeros(mut units: i128, mut scale: u8) -> (i128, u8) {
+    while scale > 0 && units != 0 && units % 10 == 0 {
+        units /= 10;
+        scale -= 1;
+    }
+    (units, scale)
+}
+
 /// Basis points of the fill notional (price times quantity times point value), rounded once
 /// into the account currency.
 fn notional_fee(
@@ -82,11 +90,21 @@ fn notional_fee(
         .contract
         .point_value
         .ok_or_else(|| "a notional fee model needs the contract's point value".to_string())?;
-    let raw = i128::from(fill.price.units())
-        * i128::from(fill.quantity.units())
-        * i128::from(point_value.units())
-        * i128::from(bps);
-    let raw_scale = fill.price.scale() + fill.quantity.scale() + point_value.scale() + 4;
+    let (price_u, price_s) =
+        strip_trailing_zeros(i128::from(fill.price.units()), fill.price.scale());
+    let (qty_u, qty_s) =
+        strip_trailing_zeros(i128::from(fill.quantity.units()), fill.quantity.scale());
+    let (pv_u, pv_s) = strip_trailing_zeros(i128::from(point_value.units()), point_value.scale());
+    let raw = price_u
+        .checked_mul(qty_u)
+        .and_then(|v| v.checked_mul(pv_u))
+        .and_then(|v| v.checked_mul(i128::from(bps)))
+        .ok_or_else(|| "notional fee calculation overflowed".to_string())?;
+    let raw_scale = price_s
+        .checked_add(qty_s)
+        .and_then(|s| s.checked_add(pv_s))
+        .and_then(|s| s.checked_add(4))
+        .ok_or_else(|| "notional fee scale overflowed".to_string())?;
     fixed_point_from_i128_rounded(raw, raw_scale, currency_scale).map_err(|error| error.to_string())
 }
 

@@ -353,7 +353,9 @@ pub(crate) fn admit(
         .map_err(|reason| owner.admission_detail(command, reason))?;
     let mut warnings = match risk {
         AdmissionRisk::Enforced { attached_stop } => {
-            owner.evaluate_order_risk(command, attached_stop)?.warnings
+            owner
+                .evaluate_order_risk(command, attached_stop, true)?
+                .warnings
         }
         AdmissionRisk::Disabled => {
             owner.validate_managed_exit(command)?;
@@ -637,14 +639,27 @@ impl TradingCore {
         self.state.risk_profiles.remove(account_id);
         self.state.risk_locks.remove(account_id);
         self.state.risk_rule_states.remove(account_id);
+        self.state.risk_sessions.remove(account_id);
+        self.state.equity_rings.remove(account_id);
+        self.state.ledger_checkpoints.remove(account_id);
+        self.state
+            .position_checkpoints
+            .retain(|(stored_account, _), _| stored_account != account_id);
         self.state
             .trade_cycles
             .retain(|(stored_account, _), _| stored_account != account_id);
         self.state.session_plans.remove(account_id);
         self.state.discipline_states.remove(account_id);
-        self.state
+        let removed_groups = self
+            .state
             .order_groups
-            .retain(|_, group| &group.account_id != account_id);
+            .iter()
+            .filter(|(_, group)| &group.account_id == account_id)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for group_id in removed_groups {
+            self.state.remove_group(&group_id);
+        }
         self.state.trade_copiers.remove(account_id);
         for config in self.state.trade_copiers.values_mut() {
             config

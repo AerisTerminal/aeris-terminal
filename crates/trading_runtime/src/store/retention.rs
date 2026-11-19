@@ -11,18 +11,21 @@ use super::{
 use crate::FixedPoint;
 use crate::core::ledger::{LedgerCheckpoint, PositionCheckpoint};
 
-/// Fills of an open order or a leg of a live order group are never pruned.
+/// Fills of an open order or a leg/entry of a live order group are never pruned.
 const GROUP_PIN_ORDER_ID: &str = "order_id NOT IN (
     SELECT order_id FROM order_group_legs WHERE group_id IN (
-        SELECT id FROM order_groups WHERE status IN ('pending', 'active')
+        SELECT group_id FROM order_groups WHERE status IN ('pending', 'active')
     )
+    UNION
+    SELECT entry_order_id FROM order_groups
+    WHERE entry_order_id IS NOT NULL AND status IN ('pending', 'active')
  )";
 
-/// The same live-group protection for the orders table itself.
+/// Orders still referenced by any retained group (entry or leg FK) are never pruned.
 const GROUP_PIN_ID: &str = "id NOT IN (
-    SELECT order_id FROM order_group_legs WHERE group_id IN (
-        SELECT id FROM order_groups WHERE status IN ('pending', 'active')
-    )
+    SELECT order_id FROM order_group_legs
+    UNION
+    SELECT entry_order_id FROM order_groups WHERE entry_order_id IS NOT NULL
  )";
 
 /// Replays the fills retention is about to prune onto the previous checkpoint so recovery can
@@ -76,6 +79,7 @@ impl TradingStore {
         account_id: &TradingAccountId,
     ) -> Result<(), String> {
         let checkpoint_tables = self.checkpoint_tables_present()?;
+        let risk_sessions_table = self.risk_sessions_table_present()?;
         let transaction = self.connection.transaction().map_err(database_error)?;
         if checkpoint_tables {
             for statement in [
@@ -87,6 +91,14 @@ impl TradingStore {
                     .execute(statement, [account_id.as_str()])
                     .map_err(database_error)?;
             }
+        }
+        if risk_sessions_table {
+            transaction
+                .execute(
+                    "DELETE FROM risk_sessions WHERE account_id = ?1",
+                    [account_id.as_str()],
+                )
+                .map_err(database_error)?;
         }
         for statement in [
             "DELETE FROM order_groups WHERE account_id = ?1",
@@ -149,8 +161,11 @@ fn candidate_fill_ids(
                     'pending_modify', 'partially_filled', 'pending_cancel')
              ) AND order_id NOT IN (
                 SELECT order_id FROM order_group_legs WHERE group_id IN (
-                    SELECT id FROM order_groups WHERE status IN ('pending', 'active')
+                    SELECT group_id FROM order_groups WHERE status IN ('pending', 'active')
                 )
+                UNION
+                SELECT entry_order_id FROM order_groups
+                WHERE entry_order_id IS NOT NULL AND status IN ('pending', 'active')
              ) AND (
                 id IN (
                     SELECT id FROM fills ORDER BY execution_unix_nanos DESC LIMIT -1 OFFSET ?1

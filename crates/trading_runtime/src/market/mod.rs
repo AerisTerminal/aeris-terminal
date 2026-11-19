@@ -616,28 +616,14 @@ impl TradingCore {
         // legacy/cache projection must never allow a durable fill to commit and only then turn the
         // command into an error; that produces invisible exposure and encourages repeated clicks.
         self.validate_mark_to_market(observation, &instrument)?;
-        self.update_owned_stops(observation, &instrument)?;
+        let practice_market_open = self.check_practice_market(&instrument).is_ok();
+        if practice_market_open {
+            self.update_owned_stops(observation, &instrument)?;
+        }
         let mut candidates =
             market_fill_candidates(&self.state.orders, &self.state.accounts, observation);
-        let mut stop_limits = self
-            .state
-            .orders
-            .crossing_for(
-                &observation.instrument_id,
-                observation.bid.units(),
-                observation.ask.units(),
-            )
-            .into_iter()
-            .filter(|order| {
-                super::is_simulated(&self.state.accounts, &order.account_id)
-                    && super::stop_limit_crossed(order, observation)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if self.check_practice_market(&instrument).is_err() {
-            candidates.clear();
-            stop_limits.clear();
-        } else {
+        let mut stop_limits = self.crossing_stop_limits(observation);
+        if practice_market_open {
             candidates.retain(|(order_id, _)| {
                 self.state
                     .orders
@@ -645,6 +631,9 @@ impl TradingCore {
                     .is_some_and(|order| self.quote_order_eligible(order, observation))
             });
             stop_limits.retain(|order| self.quote_order_eligible(order, observation));
+        } else {
+            candidates.clear();
+            stop_limits.clear();
         }
         let triggered = !stop_limits.is_empty();
         for order in stop_limits {
@@ -696,11 +685,30 @@ impl TradingCore {
         }
         self.update_mark_to_market(observation, &instrument)?;
         self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
-        self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
+        if practice_market_open {
+            self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
+        }
         Ok(fills)
     }
 
-    fn quote_order_eligible(
+    fn crossing_stop_limits(&self, observation: &SimulatedMarketObservation) -> Vec<Order> {
+        self.state
+            .orders
+            .crossing_for(
+                &observation.instrument_id,
+                observation.bid.units(),
+                observation.ask.units(),
+            )
+            .into_iter()
+            .filter(|order| {
+                super::is_simulated(&self.state.accounts, &order.account_id)
+                    && super::stop_limit_crossed(order, observation)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn quote_order_eligible(
         &self,
         order: &Order,
         observation: &SimulatedMarketObservation,

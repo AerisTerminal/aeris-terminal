@@ -200,11 +200,12 @@ impl TradingCore {
         &mut self,
         command: &PlaceOrder,
         attached_stop: bool,
+        persist_locks: bool,
     ) -> Result<RiskEvaluation, String> {
         if self.state.risk_locks.contains_key(&command.account_id) {
             return Err(self.admission_detail(command, aeris_trading::RejectReason::AccountLocked));
         }
-        self.check_session_plan(command)?;
+        self.check_session_plan(command, persist_locks)?;
         let discipline_warnings = self.check_discipline(command)?;
         let Some(profile) = self.state.risk_profiles.get(&command.account_id).cloned() else {
             return Ok(RiskEvaluation {
@@ -222,15 +223,21 @@ impl TradingCore {
                     .map_err(|error| error.to_string())?,
             });
         }
-        self.check_restriction(command, &profile)?;
+        self.check_restriction(command, &profile, persist_locks)?;
         let current_session_pnl = self.session_pnl(&profile)?.ok_or(BROKER_PNL_UNAVAILABLE)?;
-        self.check_loss_limits(command, &profile, current_session_pnl)?;
+        self.check_loss_limits(command, &profile, current_session_pnl, persist_locks)?;
         let projected_contracts = self.projected_contracts(command)?;
+        let target_scale = projected_contracts
+            .scale()
+            .max(profile.max_contracts.scale());
+        let projected_scaled = projected_contracts
+            .exact_rescale(target_scale)
+            .map_err(|error| error.to_string())?;
         let maximum_contracts = profile
             .max_contracts
-            .exact_rescale(command.quantity.scale())
+            .exact_rescale(target_scale)
             .map_err(|error| error.to_string())?;
-        if projected_contracts > maximum_contracts.units().unsigned_abs() {
+        if projected_scaled.units().unsigned_abs() > maximum_contracts.units().unsigned_abs() {
             return Err("order exceeds the account maximum-contract rule".to_string());
         }
         let mut warnings =
@@ -238,17 +245,16 @@ impl TradingCore {
         warnings.extend(discipline_warnings);
         Ok(RiskEvaluation {
             warnings,
-            projected_contracts: FixedPoint::try_new(
-                i64::try_from(projected_contracts)
-                    .map_err(|_| "projected contract quantity overflowed".to_string())?,
-                command.quantity.scale(),
-            )
-            .map_err(|error| error.to_string())?,
+            projected_contracts,
             current_realized_pnl: current_session_pnl,
         })
     }
 
-    pub(super) fn check_session_plan(&mut self, command: &PlaceOrder) -> Result<(), String> {
+    pub(super) fn check_session_plan(
+        &mut self,
+        command: &PlaceOrder,
+        persist_locks: bool,
+    ) -> Result<(), String> {
         if self.strictly_reduces_position(command)? {
             return Ok(());
         }
@@ -264,12 +270,14 @@ impl TradingCore {
         let pnl = self.plan_session_pnl(&plan)?;
         if pnl.units() < 0 && pnl.units().unsigned_abs() >= plan.maximum_loss.units().unsigned_abs()
         {
-            self.lock_account(
-                command.account_id.clone(),
-                RiskLockKind::SessionPlan,
-                "session plan maximum loss reached".to_string(),
-                command.submitted_unix_nanos,
-            )?;
+            if persist_locks {
+                self.lock_account(
+                    command.account_id.clone(),
+                    RiskLockKind::SessionPlan,
+                    "session plan maximum loss reached".to_string(),
+                    command.submitted_unix_nanos,
+                )?;
+            }
             return Err("account is risk-locked: session plan maximum loss reached".to_string());
         }
         Ok(())
@@ -347,17 +355,20 @@ impl TradingCore {
         &mut self,
         command: &PlaceOrder,
         profile: &RiskProfile,
+        persist_locks: bool,
     ) -> Result<(), String> {
         if profile
             .restricted_until_unix_nanos
             .is_some_and(|until| command.submitted_unix_nanos < until)
         {
-            self.lock_account(
-                command.account_id.clone(),
-                RiskLockKind::NewsRestriction,
-                "news/session restriction is active".to_string(),
-                command.submitted_unix_nanos,
-            )?;
+            if persist_locks {
+                self.lock_account(
+                    command.account_id.clone(),
+                    RiskLockKind::NewsRestriction,
+                    "news/session restriction is active".to_string(),
+                    command.submitted_unix_nanos,
+                )?;
+            }
             return Err("account is risk-locked: news/session restriction is active".to_string());
         }
         Ok(())
@@ -368,17 +379,20 @@ impl TradingCore {
         command: &PlaceOrder,
         profile: &RiskProfile,
         current_session_pnl: FixedPoint,
+        persist_locks: bool,
     ) -> Result<(), String> {
         let loss = current_session_pnl.units().unsigned_abs();
         if current_session_pnl.units() < 0
             && loss >= profile.daily_loss_limit.units().unsigned_abs()
         {
-            self.lock_account(
-                command.account_id.clone(),
-                RiskLockKind::DailyLossLimit,
-                "daily loss limit reached".to_string(),
-                command.submitted_unix_nanos,
-            )?;
+            if persist_locks {
+                self.lock_account(
+                    command.account_id.clone(),
+                    RiskLockKind::DailyLossLimit,
+                    "daily loss limit reached".to_string(),
+                    command.submitted_unix_nanos,
+                )?;
+            }
             return Err("account is risk-locked: daily loss limit reached".to_string());
         }
         if let Some(drawdown) = profile.trailing_drawdown {
@@ -389,27 +403,31 @@ impl TradingCore {
                 .ok_or_else(|| "risk rule state is unavailable".to_string())?;
             let floor = subtract_fixed(state.peak_session_pnl, drawdown)?;
             if current_session_pnl.units() <= floor.units() {
-                self.lock_account(
-                    command.account_id.clone(),
-                    RiskLockKind::TrailingDrawdown,
-                    format!(
-                        "{} trailing drawdown reached",
-                        profile.trailing_mode.as_str()
-                    ),
-                    command.submitted_unix_nanos,
-                )?;
+                if persist_locks {
+                    self.lock_account(
+                        command.account_id.clone(),
+                        RiskLockKind::TrailingDrawdown,
+                        format!(
+                            "{} trailing drawdown reached",
+                            profile.trailing_mode.as_str()
+                        ),
+                        command.submitted_unix_nanos,
+                    )?;
+                }
                 return Err("account is risk-locked: trailing drawdown reached".to_string());
             }
         }
         if let Some(target) = profile.daily_profit_target
             && current_session_pnl.units() >= target.units()
         {
-            self.lock_account(
-                command.account_id.clone(),
-                RiskLockKind::ProfitTarget,
-                "daily profit target reached".to_string(),
-                command.submitted_unix_nanos,
-            )?;
+            if persist_locks {
+                self.lock_account(
+                    command.account_id.clone(),
+                    RiskLockKind::ProfitTarget,
+                    "daily profit target reached".to_string(),
+                    command.submitted_unix_nanos,
+                )?;
+            }
             return Err("account is risk-locked: daily profit target reached".to_string());
         }
         if let Some(rule) = profile.maximum_drawdown
@@ -418,18 +436,20 @@ impl TradingCore {
                 .map_err(|error| error.to_string())?
             && standing.equity.units() <= standing.floor.units()
         {
-            self.lock_account(
-                command.account_id.clone(),
-                RiskLockKind::MaximumDrawdown,
-                "maximum drawdown reached".to_string(),
-                command.submitted_unix_nanos,
-            )?;
+            if persist_locks {
+                self.lock_account(
+                    command.account_id.clone(),
+                    RiskLockKind::MaximumDrawdown,
+                    "maximum drawdown reached".to_string(),
+                    command.submitted_unix_nanos,
+                )?;
+            }
             return Err("account is risk-locked: maximum drawdown reached".to_string());
         }
         Ok(())
     }
 
-    pub(super) fn projected_contracts(&self, command: &PlaceOrder) -> Result<u64, String> {
+    pub(super) fn projected_contracts(&self, command: &PlaceOrder) -> Result<FixedPoint, String> {
         self.projected_contracts_for_account(
             &command.account_id,
             command.quantity.scale(),
@@ -442,7 +462,27 @@ impl TradingCore {
         account_id: &TradingAccountId,
         quantity_scale: u8,
         command: Option<&PlaceOrder>,
-    ) -> Result<u64, String> {
+    ) -> Result<FixedPoint, String> {
+        let mut effective_scale = quantity_scale;
+        for position in self
+            .state
+            .positions
+            .values()
+            .filter(|position| &position.account_id == account_id)
+        {
+            effective_scale = effective_scale.max(position.net_quantity.scale());
+        }
+        for order in self.state.orders.open_orders().filter(|order| {
+            &order.account_id == account_id
+                && order.status.is_open()
+                && order.status != aeris_trading::OrderStatus::Inactive
+                && self.owned_leg_role(&order.client_order_id).is_none()
+        }) {
+            effective_scale = effective_scale.max(order.quantity.scale());
+        }
+        if let Some(command) = command {
+            effective_scale = effective_scale.max(command.quantity.scale());
+        }
         let mut scenarios = BTreeMap::<InstrumentId, (i128, i128, i128)>::new();
         for position in self
             .state
@@ -452,7 +492,7 @@ impl TradingCore {
         {
             let current = position
                 .net_quantity
-                .exact_rescale(quantity_scale)
+                .exact_rescale(effective_scale)
                 .map_err(|error| error.to_string())?;
             scenarios
                 .entry(position.instrument_id.clone())
@@ -462,11 +502,12 @@ impl TradingCore {
         for order in self.state.orders.open_orders().filter(|order| {
             &order.account_id == account_id
                 && order.status.is_open()
+                && order.status != aeris_trading::OrderStatus::Inactive
                 && self.owned_leg_role(&order.client_order_id).is_none()
         }) {
             let quantity = order
                 .quantity
-                .exact_rescale(quantity_scale)
+                .exact_rescale(effective_scale)
                 .map_err(|error| error.to_string())?;
             let scenario = scenarios.entry(order.instrument_id.clone()).or_default();
             match order.side {
@@ -477,7 +518,7 @@ impl TradingCore {
         if let Some(command) = command {
             let quantity = command
                 .quantity
-                .exact_rescale(quantity_scale)
+                .exact_rescale(effective_scale)
                 .map_err(|error| error.to_string())?;
             let scenario = scenarios.entry(command.instrument_id.clone()).or_default();
             match command.side {
@@ -498,7 +539,9 @@ impl TradingCore {
                     .checked_add(long.unsigned_abs().max(short.unsigned_abs()))
                     .ok_or_else(|| "risk contract quantity overflowed".to_string())
             })?;
-        u64::try_from(total).map_err(|_| "risk contract quantity overflowed".to_string())
+        let units =
+            i64::try_from(total).map_err(|_| "risk contract quantity overflowed".to_string())?;
+        FixedPoint::try_new(units, effective_scale).map_err(|error| error.to_string())
     }
 
     pub(super) fn risk_warnings(
@@ -510,8 +553,8 @@ impl TradingCore {
     ) -> Result<Vec<RiskWarning>, String> {
         let mut warnings = Vec::new();
         if current_realized.units() < 0
-            && current_realized.units().unsigned_abs() * 100
-                >= profile.daily_loss_limit.units().unsigned_abs() * 80
+            && u128::from(current_realized.units().unsigned_abs()) * 100
+                >= u128::from(profile.daily_loss_limit.units().unsigned_abs()) * 80
         {
             warnings.push(RiskWarning::ApproachingDailyLossLimit);
         }

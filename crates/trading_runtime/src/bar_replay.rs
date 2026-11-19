@@ -393,6 +393,15 @@ impl BarReplayTrading {
             self.orders[index].price = price;
             return Ok(());
         }
+        if order.role == ReplayOrderRole::Entry {
+            for child in &self.orders {
+                if child.entry_id == Some(order_id)
+                    && !protects(order.side, child.role, child.price, price)
+                {
+                    return Err(BarReplayTradingError::ProtectionOnWrongSide);
+                }
+            }
+        }
         self.orders[index].price = price;
         if marketable(order.side, order.order_type, price, bar.close) {
             self.execute(order_id, bar.close, bar.open_unix_nanos)?;
@@ -539,10 +548,17 @@ impl BarReplayTrading {
         }
         self.apply_fill(order.id, order.side, price, quantity, executed_unix_nanos)?;
         if order.role == ReplayOrderRole::Entry {
-            for child in &mut self.orders {
-                if child.entry_id == Some(order.id) {
-                    child.entry_id = None;
+            let matches_entry_side = self.position.as_ref().is_some_and(|position| {
+                position.net_quantity.units().signum() == order.side.sign()
+            });
+            if matches_entry_side {
+                for child in &mut self.orders {
+                    if child.entry_id == Some(order.id) {
+                        child.entry_id = None;
+                    }
                 }
+            } else {
+                self.orders.retain(|child| child.entry_id != Some(order.id));
             }
         }
         if self.position.is_none() {

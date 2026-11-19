@@ -44,7 +44,7 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
                 let until_deadline = deadline.saturating_sub(core.clock.wall_unix_nanos());
                 // A failed SQLite commit leaves the deadline due. Retry on a bounded
                 // cadence instead of spinning the owner at zero-duration timeouts.
-                let until_deadline = if until_deadline == 0 {
+                let until_deadline = if until_deadline <= 0 {
                     1_000_000_000
                 } else {
                     until_deadline
