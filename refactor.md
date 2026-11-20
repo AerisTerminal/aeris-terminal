@@ -103,7 +103,7 @@ apps/desktop (Composition Root — registers concrete adapters into MarketServic
 - [ ] **5.1 Slim down `apps/desktop/src/desktop/engine_market_worker.rs` (3,813 lines):** Remove redundant IPC-era protobuf round-trips for in-process calls where direct domain types already exist; keep `aeris_contracts` strictly for wire/persistence boundaries.
 - [ ] **5.2 Unify instrument metadata projection:** Consolidate repeated conversions between `InstallProviderInstrument`, `InstrumentDescriptor`, `ProviderCatalogSymbol`, and `InstrumentTerms` into one authoritative domain projection.
 - [ ] **5.3 Decompose `workspace_surface.rs` (8,356 lines), `desktop.rs` (6,469 lines), and `workspace_tabs.rs` (4,247 lines):** Split into cohesive controllers (chart pane controller, order-entry/trading controller, side-panel dock controller, layout/sync controller, keyboard command router).
-- [ ] **5.4 Decompose `order_book_view.rs` (4,320 lines):** Separate price-grid layout math, volume/delta/imbalance analytics, and GPUI cell rendering into distinct modules.
+- [x] **5.4 Decompose `order_book_view.rs` (4,320 lines):** Separate column/highlight definitions (`columns.rs`), price-grid layout math (`layout.rs`), volume/delta/imbalance analytics (`analytics.rs`), and GPUI cell rendering into distinct modules.
 
 ### Phase 6 — End-to-End Architectural Guardrails & Cleanup
 *Goal: Lock in the new boundaries permanently so coupling cannot creep back.*
