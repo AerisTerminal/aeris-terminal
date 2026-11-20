@@ -9,7 +9,9 @@ use std::{
     sync::{Condvar, Mutex},
 };
 
-use aeris_contracts::{InstallProviderInstrument, ProviderInstrumentClass};
+use aeris_contracts::InstallProviderInstrument;
+#[cfg(test)]
+use aeris_contracts::ProviderInstrumentClass;
 use aeris_instruments::{
     ContractDate, InstrumentClass, InstrumentDecimal, InstrumentId, PriceGrid, SessionHours,
 };
@@ -116,15 +118,12 @@ pub fn instrument_terms_from_install(
 }
 
 pub(super) fn instrument_class_from_provider(value: Option<i32>) -> InstrumentClass {
-    match value.and_then(|value| ProviderInstrumentClass::try_from(value).ok()) {
-        Some(ProviderInstrumentClass::Equity) => InstrumentClass::Equity,
-        Some(ProviderInstrumentClass::Option) => InstrumentClass::Option,
-        Some(ProviderInstrumentClass::Future) => InstrumentClass::Future,
-        Some(ProviderInstrumentClass::ForeignExchange) => InstrumentClass::ForeignExchange,
-        Some(ProviderInstrumentClass::CryptoSpot) => InstrumentClass::CryptoSpot,
-        Some(ProviderInstrumentClass::CryptoPerpetual) => InstrumentClass::CryptoPerpetual,
-        _ => InstrumentClass::Other,
-    }
+    value
+        .and_then(aeris_provider_spi::ResolvedInstrumentClass::from_wire_i32)
+        .map_or(
+            InstrumentClass::Other,
+            aeris_provider_spi::ResolvedInstrumentClass::to_instrument_class,
+        )
 }
 
 fn verified_session_hours(

@@ -540,32 +540,7 @@ type HistorySnapshot = aeris_provider_spi::ProviderHistorySnapshot;
 fn history_instrument_from_install(
     installed: &InstallProviderInstrument,
 ) -> aeris_provider_spi::HistoryInstrument {
-    aeris_provider_spi::HistoryInstrument {
-        provider: installed.provider.clone(),
-        session_generation: installed.session_generation,
-        instrument_id: installed.instrument_id.clone(),
-        provider_symbol: installed.provider_symbol.clone(),
-        display_symbol: installed.display_symbol.clone(),
-        venue_id: installed.venue_id.clone(),
-        entitlement_id: installed.entitlement_id.clone(),
-        price_scale: installed.price_scale,
-        quantity_scale: installed.quantity_scale,
-        price_increment: installed.price_increment,
-        contract: installed.contract_metadata.as_deref().map(|metadata| {
-            aeris_provider_spi::HistoryContractMetadata {
-                point_value: metadata
-                    .point_value
-                    .zip(metadata.point_value_scale)
-                    .and_then(|(value, scale)| {
-                        u8::try_from(scale).ok().map(|scale| (value, scale))
-                    }),
-                currency: metadata.currency.clone(),
-                expiration_date: metadata.contract_expiry.clone(),
-                first_notice_date: metadata.first_notice_date.clone(),
-                last_trade_date: metadata.last_trade_date.clone(),
-            }
-        }),
-    }
+    descriptors::resolved_from_install(installed).to_history_instrument()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -47,13 +47,6 @@ pub(crate) fn replay_runtime_snapshot(
         .currency
         .clone()
         .filter(|currency| !currency.trim().is_empty())
-        .or_else(|| {
-            installed
-                .contract_metadata
-                .as_deref()
-                .and_then(|terms| terms.currency.clone())
-        })
-        .filter(|currency| !currency.trim().is_empty())
         .ok_or_else(|| "engine snapshot trading currency is unknown".to_string())?;
     let instrument = InstrumentRevision {
         instrument_id: InstrumentId::try_new(series.instrument_id.clone())

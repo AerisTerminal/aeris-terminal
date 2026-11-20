@@ -544,6 +544,7 @@ impl MarketService {
             .map_err(String::from)
     }
 
+    #[cfg(any(test, feature = "replay"))]
     pub(super) fn start_composed(providers: Vec<ProviderRuntimeSpec>) -> Result<Self, String> {
         Self::start_from_builder(MarketServiceBuilder {
             providers,

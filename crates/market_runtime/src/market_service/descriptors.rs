@@ -3,10 +3,15 @@
 use crate::{ProviderConnectionKind, ProviderPresentationDescriptor};
 use aeris_contracts::{
     InstallProviderInstrument, ProviderContractMetadata, ProviderInstrumentClass,
+    ProviderSessionHours,
 };
 use aeris_instruments::{CalendarSourceKind, InstrumentClass, PriceGrid};
 use aeris_market_data::{BarPeriod, BarSeriesKey, ChartInterval};
 use aeris_market_engine::{GenerationId, StreamRequirements, Viewport};
+use aeris_provider_spi::{
+    ResolvedContractMetadata, ResolvedInstrumentClass, ResolvedProviderInstrument,
+    ResolvedSessionHours,
+};
 
 use crate::{CadenceError, resolve_series_key};
 
@@ -209,6 +214,94 @@ pub enum SelectionError {
     DemandRejected(String),
 }
 
+/// Projects a persisted `InstallProviderInstrument` into the provider-neutral SPI domain type.
+#[must_use]
+pub fn resolved_from_install(instrument: &InstallProviderInstrument) -> ResolvedProviderInstrument {
+    ResolvedProviderInstrument {
+        provider: instrument.provider.clone(),
+        session_generation: instrument.session_generation,
+        selection_generation: instrument.selection_generation,
+        instrument_id: instrument.instrument_id.clone(),
+        provider_symbol: instrument.provider_symbol.clone(),
+        display_symbol: instrument.display_symbol.clone(),
+        venue_id: instrument.venue_id.clone(),
+        price_scale: instrument.price_scale,
+        quantity_scale: instrument.quantity_scale,
+        entitlement_id: instrument.entitlement_id.clone(),
+        price_increment: instrument.price_increment,
+        contract_metadata: instrument.contract_metadata.as_deref().map(|metadata| {
+            Box::new(ResolvedContractMetadata {
+                point_value: metadata.point_value,
+                point_value_scale: metadata.point_value_scale,
+                currency: metadata.currency.clone(),
+                contract_expiry: metadata.contract_expiry.clone(),
+                first_notice_date: metadata.first_notice_date.clone(),
+                last_trade_date: metadata.last_trade_date.clone(),
+                session_hours: metadata
+                    .session_hours
+                    .iter()
+                    .map(|hours| ResolvedSessionHours {
+                        weekday: hours.weekday,
+                        open_seconds: hours.open_seconds,
+                        close_seconds: hours.close_seconds,
+                        timezone: hours.timezone.clone(),
+                    })
+                    .collect(),
+                order_quantity_increment: metadata.order_quantity_increment,
+                price_significant_figures: metadata.price_significant_figures,
+                price_max_decimals: metadata.price_max_decimals,
+                instrument_class: metadata
+                    .instrument_class
+                    .and_then(ResolvedInstrumentClass::from_wire_i32),
+            })
+        }),
+    }
+}
+
+/// Projects a provider-neutral `ResolvedProviderInstrument` into the persisted workspace contract.
+#[must_use]
+pub fn install_from_resolved(instrument: ResolvedProviderInstrument) -> InstallProviderInstrument {
+    InstallProviderInstrument {
+        provider: instrument.provider,
+        session_generation: instrument.session_generation,
+        selection_generation: instrument.selection_generation,
+        instrument_id: instrument.instrument_id,
+        provider_symbol: instrument.provider_symbol,
+        display_symbol: instrument.display_symbol,
+        venue_id: instrument.venue_id,
+        price_scale: instrument.price_scale,
+        quantity_scale: instrument.quantity_scale,
+        entitlement_id: instrument.entitlement_id,
+        price_increment: instrument.price_increment,
+        contract_metadata: instrument.contract_metadata.map(|metadata| {
+            Box::new(ProviderContractMetadata {
+                point_value: metadata.point_value,
+                point_value_scale: metadata.point_value_scale,
+                currency: metadata.currency,
+                contract_expiry: metadata.contract_expiry,
+                first_notice_date: metadata.first_notice_date,
+                last_trade_date: metadata.last_trade_date,
+                session_hours: metadata
+                    .session_hours
+                    .into_iter()
+                    .map(|hours| ProviderSessionHours {
+                        weekday: hours.weekday,
+                        open_seconds: hours.open_seconds,
+                        close_seconds: hours.close_seconds,
+                        timezone: hours.timezone,
+                    })
+                    .collect(),
+                order_quantity_increment: metadata.order_quantity_increment,
+                price_significant_figures: metadata.price_significant_figures,
+                price_max_decimals: metadata.price_max_decimals,
+                instrument_class: metadata
+                    .instrument_class
+                    .map(ResolvedInstrumentClass::to_wire_i32),
+            })
+        }),
+    }
+}
+
 impl InstrumentDescriptor {
     /// Projects validated catalog metadata without guessing absent contract terms.
     ///
@@ -221,22 +314,14 @@ impl InstrumentDescriptor {
     ) -> Result<Self, DescriptorError> {
         super::instrument_selection::validate_provider_instrument(instrument)
             .map_err(|_| DescriptorError::InvalidInstrument)?;
+        let resolved = resolved_from_install(instrument);
         let terms = super::instrument_terms_from_install(instrument).ok();
         Ok(Self {
             instrument: instrument.clone(),
             display_symbol: instrument.display_symbol.clone(),
             venue: instrument.venue_id.clone(),
-            asset_class: instrument.contract_metadata.as_deref().map_or(
-                InstrumentClass::Other,
-                |metadata| {
-                    super::trading_feed::instrument_class_from_provider(metadata.instrument_class)
-                },
-            ),
-            currency: instrument
-                .contract_metadata
-                .as_deref()
-                .and_then(|metadata| metadata.currency.clone())
-                .filter(|currency| !currency.trim().is_empty()),
+            asset_class: resolved.asset_class(),
+            currency: resolved.currency().map(str::to_string),
             price_scale: u8::try_from(instrument.price_scale)
                 .map_err(|_| DescriptorError::InvalidInstrument)?,
             price_grid: terms.map_or(PriceGrid::Unknown, |terms| terms.price_grid),
@@ -309,5 +394,32 @@ mod startup_tests {
         assert!(matches!(InstrumentRequest::startup(&restored),
             InstrumentRequest::Ref(InstrumentRef { instrument_id, .. })
                 if instrument_id == "hyperliquid:perp:ETH"));
+    }
+
+    #[test]
+    fn resolved_instrument_round_trips_install_contract_without_loss() {
+        let mut original = default_instrument();
+        original.price_increment = Some(25);
+        let metadata = original
+            .contract_metadata
+            .as_deref_mut()
+            .expect("default metadata");
+        metadata.point_value = Some(5000);
+        metadata.point_value_scale = Some(2);
+        metadata.contract_expiry = Some("2026-06-19".into());
+        metadata.session_hours.push(ProviderSessionHours {
+            weekday: 1,
+            open_seconds: 0,
+            close_seconds: 86_400,
+            timezone: "America/Chicago".into(),
+        });
+        metadata.order_quantity_increment = Some(1);
+        metadata.price_significant_figures = Some(5);
+        metadata.price_max_decimals = Some(2);
+
+        let resolved = resolved_from_install(&original);
+        assert_eq!(resolved.asset_class(), InstrumentClass::CryptoPerpetual);
+        assert_eq!(resolved.currency(), Some("USDC"));
+        assert_eq!(install_from_resolved(resolved), original);
     }
 }

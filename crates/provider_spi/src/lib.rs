@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod connection;
 pub mod fault;
 pub mod history;
+pub mod instrument;
 pub mod presentation;
 
 pub use auth::{
@@ -30,6 +31,10 @@ pub use fault::{ProviderFault, ProviderFaultKind};
 pub use history::{
     FormingBar, HistoryContractMetadata, HistoryFetchWindow, HistoryInstrument,
     ProviderHistorySnapshot,
+};
+pub use instrument::{
+    ResolvedContractMetadata, ResolvedInstrumentClass, ResolvedProviderInstrument,
+    ResolvedSessionHours,
 };
 pub use presentation::{
     ProviderAttribution, ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence,
