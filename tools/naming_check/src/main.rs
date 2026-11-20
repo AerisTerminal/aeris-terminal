@@ -852,6 +852,7 @@ fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
         "calendar/mod.rs",
         "coordinator.rs",
         "error.rs",
+        "order_book.rs",
         "provider_auth.rs",
         "provider_event.rs",
         "provider_session.rs",
@@ -862,7 +863,7 @@ fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
     .into_iter()
     .map(|name| generic_root.join(name))
     .collect::<Vec<_>>();
-    for folder in ["lifecycle", "history"] {
+    for folder in ["coordinator", "lifecycle", "history"] {
         for entry in fs::read_dir(generic_root.join(folder))? {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "rs") {
@@ -1072,6 +1073,7 @@ fn violates_calendar_boundary(path: &str, source: &str) -> bool {
 }
 fn violates_generic_market_provider_boundary(path: &str, source: &str) -> bool {
     let generic = [
+        "/coordinator/",
         "/lifecycle/",
         "/history/",
         "/calendar/mod.rs",
@@ -1079,6 +1081,7 @@ fn violates_generic_market_provider_boundary(path: &str, source: &str) -> bool {
         "/outbox.rs",
         "/coordinator.rs",
         "/error.rs",
+        "/order_book.rs",
         "/provider_auth.rs",
         "/provider_event.rs",
         "/provider_session.rs",
@@ -5321,9 +5324,15 @@ mod tests {
         for path in [
             "mod.rs",
             "coordinator.rs",
+            "coordinator/benchmark.rs",
+            "coordinator/demand.rs",
+            "coordinator/order_books.rs",
+            "coordinator/studies.rs",
+            "coordinator/trading_interest.rs",
             "error.rs",
             "history.rs",
             "instrument_selection.rs",
+            "order_book.rs",
             "provider_auth.rs",
             "provider_event.rs",
             "provider_session.rs",

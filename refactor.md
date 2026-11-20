@@ -91,10 +91,10 @@ apps/desktop (Composition Root — registers concrete adapters into MarketServic
 ### Phase 4 — Decompose `market_runtime` Monoliths (`coordinator.rs` & `study.rs`)
 *Goal: Break the 10,792-line `coordinator.rs` into small, testable, single-responsibility domain owners.*
 
-- [ ] **4.1 Extract `SeriesBookkeeper` (series history & live-bar merging):** Isolate canonical bar history, forming-candle handoff, viewport fetch scheduling, and gap recovery from the coordinator loop.
-- [ ] **4.2 Extract `DepthAndTapeBookkeeper` (L2 book, DBO queues, tape, sweeps):** Isolate order book state, DBO order levels, recent trade retention, and sweep detection behind a clean unit-testable module.
-- [ ] **4.3 Extract `CatalogAndScanCoordinator`:** Isolate symbol search, catalog caching, market screener, and market scanner dispatch/fanout.
-- [ ] **4.4 Extract `RecordingAndReplayRouter`:** Isolate live recording taps and recording-replay session lifecycle from the core coordinator loop.
+- [x] **4.1 Extract `SeriesBookkeeper` (series history & live-bar merging):** Isolate canonical bar history, forming-candle handoff, viewport fetch scheduling, and gap recovery from the coordinator loop (`lifecycle/`, `history/`, `coordinator/demand.rs`).
+- [x] **4.2 Extract `DepthAndTapeBookkeeper` (L2 book, DBO queues, tape, sweeps):** Isolate order book state, DBO order levels, recent trade retention, and sweep detection behind a clean unit-testable module (`order_book.rs`, `coordinator/order_books.rs`).
+- [x] **4.3 Extract `CatalogAndScanCoordinator`:** Isolate symbol search, catalog caching, market screener, trading route resolution, and market scanner dispatch/fanout (`instrument_selection.rs`, `coordinator/trading_interest.rs`).
+- [x] **4.4 Extract `RecordingAndReplayRouter`:** Isolate live recording taps, recording-replay session lifecycle, study orchestration, and offline benchmarks from the core coordinator loop (`recording/`, `coordinator/studies.rs`, `coordinator/benchmark.rs`).
 - [ ] **4.5 Decompose `study.rs` (4,261 lines) and `rithmic_protocol/src/provider_session.rs` (4,850 lines):** Split study scheduling/state storage and Rithmic plant handlers into focused submodules (< 800 lines each).
 
 ### Phase 5 — Simplify Desktop Bridge & Decompose UI Monoliths

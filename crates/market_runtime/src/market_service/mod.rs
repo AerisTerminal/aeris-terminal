@@ -721,52 +721,11 @@ struct TapeStreamCursor {
     through_ordinal: u64,
 }
 
-struct ProviderOrderBook {
-    instrument: InstallProviderInstrument,
-    calendar: calendar::MarketCalendarService,
-    top_of_book_only: bool,
-    /// Set while no current demand subscribes depth. Providers stop maintaining the
-    /// canonical image then, so consumers receive only the live top of book.
-    depth_unsubscribed: bool,
-    book: OrderBook,
-    top_of_book: Option<TopOfBookQuote>,
-    recent_trades: VecDeque<crate::RetainedMarketTrade>,
-    /// Sweeps classified once per ingested trade over the trailing window of
-    /// `recent_trades`; shared by every tape publication until reclassified.
-    trade_sweeps: Arc<[crate::MarketTradeSweep]>,
-    traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
-    trade_session_generation: u64,
-    last_trade_source_sequence: u64,
-    next_trade_ingestion_ordinal: u64,
-    trade_tape_revision: u64,
-    trade_tape_rewrite_generation: u64,
-    trade_tape_dirty: bool,
-    trade_tape_published_at: Option<std::time::Instant>,
-    retention_clock_unix_nanos: i64,
-    /// When the current session last delivered a newer top of book. Trade-built
-    /// series on the same instrument treat it as feed liveness between trades.
-    quote_observed_at: Option<std::time::Instant>,
-    /// Canonical market-by-order image. It mirrors the provider's order-level
-    /// stream, which flows only while the instrument holds a subscription.
-    order_levels: OrderLevelBook,
-    order_level_subscription: OrderLevelSubscription,
-    /// Images discarded since this book opened, for consumer diagnostics.
-    order_level_recoveries: u64,
-}
-
-/// Whether current demand holds one of a provider's bounded order-level
-/// subscriptions for an instrument.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OrderLevelSubscription {
-    Off,
-    Admitted,
-    /// Demanded while other instruments hold the provider's whole budget.
-    BudgetExhausted,
-}
-
 mod lifecycle;
+mod order_book;
 mod trade_sweeps;
 use lifecycle::TradeModel;
+use order_book::{OrderLevelSubscription, ProviderOrderBook};
 pub(crate) mod provider_event;
 pub(crate) mod provider_session;
 mod realtime;
