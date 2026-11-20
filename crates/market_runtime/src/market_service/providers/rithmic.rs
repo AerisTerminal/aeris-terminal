@@ -461,3 +461,11 @@ fn start_rithmic_record(
         workers: started.workers,
     })
 }
+
+pub(in super::super) fn default_broker_venue_runner(
+    revision: RithmicLoginRevision,
+) -> super::super::BrokerVenueRunner {
+    Arc::new(move |link, shutdown| {
+        aeris_rithmic_protocol_adapter::venue::run(link, &shutdown, &revision);
+    })
+}

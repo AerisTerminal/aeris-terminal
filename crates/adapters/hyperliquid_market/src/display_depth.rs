@@ -8,54 +8,69 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use aeris_hyperliquid_market_adapter::{
-    HYPERLIQUID_WS_URL, WsClientEvent, build_aggregated_l2_subscription, build_ping,
-    build_unsubscribe, decode_book_snapshot, parse_ws_frame,
-};
 use aeris_market_data::DepthSnapshot;
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
 use crate::{
-    hyperliquid_realtime::HyperliquidInstrumentDemand, market_service::ProviderCoordinatorWake,
+    HYPERLIQUID_WS_URL, WsClientEvent, build_aggregated_l2_subscription, build_ping,
+    build_unsubscribe, decode_book_snapshot, parse_ws_frame,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-pub(crate) const WORKER_NAME: &str = "aeris-hyperliquid-display-depth";
+pub const WORKER_NAME: &str = "aeris-hyperliquid-display-depth";
 const READ_TIMEOUT: Duration = Duration::from_millis(2);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const MESSAGE_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAXIMUM_DECODE_FAILURES_PER_CONNECTION: u32 = 100;
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const MAXIMUM_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const HEALTHY_RESET_DURATION: Duration = Duration::from_secs(30);
 
 /// `FlowSurface`'s 50x BTC-style ladder uses four significant figures upstream
 /// for markets whose prices have at most five integer digits, then performs
 /// the final side-aware 50x grouping in the ladder itself.
 const DISPLAY_N_SIG_FIGS: u8 = 4;
 
+/// One demanded instrument with the mapping the Hyperliquid workers need to decode it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct HyperliquidDisplayBookDemand {
+pub struct HyperliquidInstrumentDemand {
+    /// Exact wire `coin` for info/WebSocket calls.
+    pub wire_coin: String,
+    /// Stable engine instrument identity.
+    pub instrument_id: String,
+    /// Catalog entitlement revision.
+    pub entitlement_id: String,
+    /// Fixed-point scales from the install.
+    pub price_scale: u8,
+    /// Fixed-point scales from the install.
+    pub quantity_scale: u8,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HyperliquidDisplayBookDemand {
     pub instrument: HyperliquidInstrumentDemand,
     pub provider_generation: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct HyperliquidDisplayDepthDemand {
+pub struct HyperliquidDisplayDepthDemand {
     pub books: Vec<HyperliquidDisplayBookDemand>,
 }
 
-pub(crate) enum HyperliquidDisplayDepthControl {
+pub enum HyperliquidDisplayDepthControl {
     Subscribe(HyperliquidDisplayDepthDemand),
     Stop,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct HyperliquidDisplayBookSnapshot {
+pub struct HyperliquidDisplayBookSnapshot {
     pub provider_generation: u64,
     pub display_generation: u64,
     pub snapshot: DepthSnapshot,
 }
 
-pub(crate) enum HyperliquidDisplayDepthEvent {
+pub enum HyperliquidDisplayDepthEvent {
     Reset { display_generation: u64 },
     Snapshot(HyperliquidDisplayBookSnapshot),
 }
@@ -65,6 +80,46 @@ enum SessionExit {
     Reconnect,
     Parked,
     Closed,
+}
+
+struct ReconnectBackoff {
+    attempt: u32,
+    rng: u64,
+}
+
+impl ReconnectBackoff {
+    const fn new(seed: u64) -> Self {
+        Self {
+            attempt: 0,
+            rng: if seed == 0 { 0x4445_5054 } else { seed },
+        }
+    }
+
+    const fn reset(&mut self) {
+        self.attempt = 0;
+    }
+
+    fn healthy_for(&mut self, started: Instant) {
+        if started.elapsed() >= HEALTHY_RESET_DURATION {
+            self.reset();
+        }
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let shift = self.attempt.min(10);
+        let base_ms = u64::try_from(INITIAL_RECONNECT_DELAY.as_millis())
+            .unwrap_or(250)
+            .saturating_mul(1u64 << shift);
+        let max_ms = u64::try_from(MAXIMUM_RECONNECT_DELAY.as_millis()).unwrap_or(30_000);
+        let capped_ms = base_ms.min(max_ms);
+        self.attempt = self.attempt.saturating_add(1);
+        let jitter_range = (capped_ms / 4).max(1);
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        let jitter = self.rng % jitter_range;
+        Duration::from_millis(capped_ms.saturating_add(jitter).min(max_ms))
+    }
 }
 
 struct SessionState {
@@ -81,19 +136,14 @@ struct SessionState {
     last_ping: Instant,
 }
 
-pub(crate) fn run(
+pub fn run(
     controls: &Receiver<HyperliquidDisplayDepthControl>,
     events: &SyncSender<HyperliquidDisplayDepthEvent>,
     stop: &Arc<AtomicBool>,
-    wake: &ProviderCoordinatorWake,
+    wake: &(dyn Fn() + Send + Sync),
     _reconnect_delay: Duration,
 ) {
-    let clock = crate::market_service::clock::SystemClock;
-    let mut backoff = crate::market_service::reconnect::Backoff::new(
-        crate::market_service::reconnect::ReconnectPolicy::hyperliquid(),
-        &clock,
-        0x4445_5054,
-    );
+    let mut backoff = ReconnectBackoff::new(0x4445_5054);
     let mut demand = HyperliquidDisplayDepthDemand::default();
     let mut display_generation = 0u64;
     loop {
@@ -145,18 +195,14 @@ pub(crate) fn run(
                     continue;
                 }
                 SessionExit::Reconnect => {
-                    backoff.healthy_for(started, &clock);
+                    backoff.healthy_for(started);
                 }
             }
         }
         if stop.load(Ordering::Acquire) {
             return;
         }
-        let crate::market_service::reconnect::RetryDecision::Wait(delay) =
-            backoff.failure(crate::market_service::reconnect::RetryClass::Transient)
-        else {
-            unreachable!("Hyperliquid has no reconnect budget");
-        };
+        let delay = backoff.next_delay();
         sleep_cancellable(delay, stop);
     }
 }
@@ -180,7 +226,7 @@ fn run_session(
     controls: &Receiver<HyperliquidDisplayDepthControl>,
     events: &SyncSender<HyperliquidDisplayDepthEvent>,
     stop: &Arc<AtomicBool>,
-    wake: &ProviderCoordinatorWake,
+    wake: &(dyn Fn() + Send + Sync),
 ) -> SessionExit {
     let started = Instant::now();
     let mut state = SessionState {
@@ -267,7 +313,7 @@ fn reconcile_subscriptions(
     socket: &mut MarketSocket,
     demand: &HyperliquidDisplayDepthDemand,
     state: &mut SessionState,
-) -> Result<(), String> {
+) -> Result<(), ()> {
     let mut desired = BTreeMap::new();
     let mut instruments = BTreeMap::new();
     for book in &demand.books {
@@ -275,12 +321,12 @@ fn reconcile_subscriptions(
         if let Some(existing) = instruments.get(&coin)
             && existing != book
         {
-            return Err("Hyperliquid display depth has conflicting coin demand".to_string());
+            return Err(());
         }
         instruments.insert(coin.clone(), book.clone());
         desired.insert(
             coin.clone(),
-            build_aggregated_l2_subscription(&coin, DISPLAY_N_SIG_FIGS, None)?,
+            build_aggregated_l2_subscription(&coin, DISPLAY_N_SIG_FIGS, None).map_err(|_| ())?,
         );
     }
     let removed = state
@@ -296,12 +342,12 @@ fn reconcile_subscriptions(
         {
             socket
                 .send_text(&build_unsubscribe(subscription))
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| ())?;
         }
     }
     for (coin, frame) in &desired {
         if !state.active.contains_key(coin) {
-            socket.send_text(frame).map_err(|error| error.to_string())?;
+            socket.send_text(frame).map_err(|_| ())?;
             state.active.insert(coin.clone(), frame.clone());
         }
     }
@@ -350,7 +396,7 @@ fn flush_pending(
     pending: &mut BTreeMap<String, HyperliquidDisplayBookSnapshot>,
     last_published: &mut Option<String>,
     events: &SyncSender<HyperliquidDisplayDepthEvent>,
-    wake: &ProviderCoordinatorWake,
+    wake: &(dyn Fn() + Send + Sync),
 ) -> Result<(), ()> {
     while let Some(coin) = next_pending_coin(pending, last_published.as_deref()) {
         let Some(snapshot) = pending.remove(&coin) else {
@@ -359,7 +405,7 @@ fn flush_pending(
         match events.try_send(HyperliquidDisplayDepthEvent::Snapshot(snapshot)) {
             Ok(()) => {
                 *last_published = Some(coin);
-                wake.notify();
+                wake();
             }
             Err(TrySendError::Full(HyperliquidDisplayDepthEvent::Snapshot(snapshot))) => {
                 pending.insert(coin, snapshot);
@@ -375,14 +421,14 @@ fn emit(
     events: &SyncSender<HyperliquidDisplayDepthEvent>,
     event: HyperliquidDisplayDepthEvent,
     stop: &AtomicBool,
-    wake: &ProviderCoordinatorWake,
+    wake: &(dyn Fn() + Send + Sync),
 ) -> bool {
     if stop.load(Ordering::Acquire) {
         return true;
     }
     match events.try_send(event) {
         Ok(()) => {
-            wake.notify();
+            wake();
             false
         }
         Err(TrySendError::Disconnected(_)) => true,
@@ -428,7 +474,6 @@ mod tests {
         // A zero-capacity channel acknowledges each control when the worker
         // receives it, instead of guessing from a sleep under parallel load.
         let (controls, control_receiver) = sync_channel(0);
-        let wake = crate::market_service::ProviderCoordinatorWake::for_tests();
         let worker_stop = Arc::clone(&stop);
         let worker = std::thread::Builder::new()
             .name("display-depth-idle-test".to_string())
@@ -437,7 +482,7 @@ mod tests {
                     &control_receiver,
                     &events,
                     &worker_stop,
-                    &wake,
+                    &|| {},
                     Duration::ZERO,
                 );
             })
@@ -452,6 +497,7 @@ mod tests {
         stop.store(true, Ordering::Release);
         worker.join().expect("worker exits cleanly");
     }
+
     #[test]
     fn pending_books_rotate_past_continuously_updated_first_instrument() {
         let pending = BTreeMap::from([("BTC".into(), 1u8), ("ETH".into(), 2u8)]);

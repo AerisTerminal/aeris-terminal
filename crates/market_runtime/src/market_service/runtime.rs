@@ -447,6 +447,85 @@ impl MarketService {
     pub fn provider_presentations(&self) -> Vec<ProviderPresentationDescriptor> {
         self.runtime.provider_presentations.clone()
     }
+}
+
+/// Composition-root builder for [`MarketService`].
+///
+/// Allows registering built-in or custom provider plugins, auth adapters, and
+/// broker venue runners before starting the single in-process coordinator.
+#[derive(Default)]
+pub struct MarketServiceBuilder {
+    providers: Vec<ProviderRuntimeSpec>,
+    auth_adapters: Vec<(
+        &'static str,
+        Arc<dyn super::provider_auth::ProviderAuthAdapter>,
+    )>,
+    broker_venues: Vec<(String, super::BrokerVenueRunner)>,
+    include_built_in_defaults: bool,
+}
+
+impl MarketServiceBuilder {
+    /// Adds the standard built-in providers (Rithmic, Hyperliquid, and
+    /// local recording replay) along with their default auth and broker runners.
+    #[must_use]
+    pub fn with_built_in_providers(mut self) -> Self {
+        self.providers.push(ProviderRuntimeSpec::rithmic(
+            Box::new(LiveRithmicHistory),
+            true,
+        ));
+        self.providers.push(ProviderRuntimeSpec::hyperliquid(
+            Box::<LiveHyperliquidHistory>::default(),
+            true,
+        ));
+        self.providers.push(ProviderRuntimeSpec::recording_replay());
+        self.include_built_in_defaults = true;
+        self
+    }
+
+    /// Registers a provider-neutral authentication adapter for `provider_id`.
+    #[must_use]
+    pub fn register_auth(
+        mut self,
+        provider_id: &'static str,
+        adapter: Arc<dyn super::provider_auth::ProviderAuthAdapter>,
+    ) -> Self {
+        self.auth_adapters.push((provider_id, adapter));
+        self
+    }
+
+    /// Registers a pluggable broker venue worker runner for `venue_id`.
+    #[must_use]
+    pub fn register_broker_venue(
+        mut self,
+        venue_id: impl Into<String>,
+        runner: super::BrokerVenueRunner,
+    ) -> Self {
+        self.broker_venues.push((venue_id.into(), runner));
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn register_provider_spec(mut self, spec: ProviderRuntimeSpec) -> Self {
+        self.providers.push(spec);
+        self
+    }
+
+    /// Starts the composed [`MarketService`].
+    ///
+    /// # Errors
+    /// Returns [`MarketServiceError`] when the engine, any provider runtime, or a broker venue
+    /// registration fails.
+    pub fn start(self) -> Result<MarketService, MarketServiceError> {
+        MarketService::start_from_builder(self)
+    }
+}
+
+impl MarketService {
+    /// Returns a fresh composition-root builder for configuring and starting a [`MarketService`].
+    #[must_use]
+    pub fn builder() -> MarketServiceBuilder {
+        MarketServiceBuilder::default()
+    }
 
     /// Starts the desktop-owned in-process market runtime.
     ///
@@ -459,14 +538,29 @@ impl MarketService {
     /// Returns an error when the market engine or one of the bounded provider
     /// runtime workers cannot be initialized.
     pub fn start() -> Result<Self, String> {
-        Self::start_composed(vec![
-            ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), true),
-            ProviderRuntimeSpec::hyperliquid(Box::<LiveHyperliquidHistory>::default(), true),
-            ProviderRuntimeSpec::recording_replay(),
-        ])
+        Self::builder()
+            .with_built_in_providers()
+            .start()
+            .map_err(String::from)
     }
 
     pub(super) fn start_composed(providers: Vec<ProviderRuntimeSpec>) -> Result<Self, String> {
+        Self::start_from_builder(MarketServiceBuilder {
+            providers,
+            auth_adapters: Vec::new(),
+            broker_venues: Vec::new(),
+            include_built_in_defaults: true,
+        })
+        .map_err(String::from)
+    }
+
+    fn start_from_builder(builder: MarketServiceBuilder) -> Result<Self, MarketServiceError> {
+        let MarketServiceBuilder {
+            providers,
+            auth_adapters,
+            broker_venues,
+            include_built_in_defaults,
+        } = builder;
         let provider_presentations = providers
             .iter()
             .map(|provider| *provider.descriptor.presentation)
@@ -475,7 +569,8 @@ impl MarketService {
             .iter()
             .map(|provider| provider.descriptor)
             .collect::<Vec<_>>();
-        let engine = super::configured_engine_from_descriptors(&descriptors)?;
+        let engine = super::configured_engine_from_descriptors(&descriptors)
+            .map_err(MarketServiceError::Detail)?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let quote_releases = Arc::new(Mutex::new(Vec::new()));
         let quotes = Arc::new(Mutex::new(super::quotes::QuoteBook::default()));
@@ -500,27 +595,39 @@ impl MarketService {
             &engine,
             &active_provider_workers,
             &start_context,
+        )
+        .map_err(MarketServiceError::Detail)?;
+        let workers = vec![
+            spawn_coordinator(
+                engine,
+                OwnedCoordinatorChannels {
+                    commands: command_rx,
+                    providers: provider_registry,
+                    quote_releases: Arc::clone(&quote_releases),
+                    quotes: Arc::clone(&quotes),
+                    trading_feed: Arc::clone(&trading_feed),
+                    outbox: Arc::clone(&outbox),
+                    recording: Arc::clone(&recording),
+                },
+                Arc::clone(&shutdown),
+                Arc::new(super::clock::SystemClock),
+            )
+            .map_err(MarketServiceError::WorkerSpawnFailed)?,
+        ];
+        let (provider_auth, broker_venue_runners) = Self::build_registries(
+            include_built_in_defaults,
+            &start_context.rithmic_login,
+            auth_adapters,
+            broker_venues,
         )?;
-        let workers = vec![spawn_coordinator(
-            engine,
-            OwnedCoordinatorChannels {
-                commands: command_rx,
-                providers: provider_registry,
-                quote_releases: Arc::clone(&quote_releases),
-                quotes: Arc::clone(&quotes),
-                trading_feed: Arc::clone(&trading_feed),
-                outbox: Arc::clone(&outbox),
-                recording: Arc::clone(&recording),
-            },
-            Arc::clone(&shutdown),
-            Arc::new(super::clock::SystemClock),
-        )?];
         let market = Self::build_market_service(
             command_tx,
             shutdown,
             active_provider_workers,
             workers,
             start_context,
+            provider_auth,
+            broker_venue_runners,
             MarketServiceProviders {
                 presentations: provider_presentations,
             },
@@ -535,12 +642,55 @@ impl MarketService {
         Ok(market)
     }
 
+    fn build_registries(
+        include_built_in_defaults: bool,
+        rithmic_revision: &RithmicLoginRevision,
+        auth_adapters: Vec<(
+            &'static str,
+            Arc<dyn super::provider_auth::ProviderAuthAdapter>,
+        )>,
+        broker_venues: Vec<(String, super::BrokerVenueRunner)>,
+    ) -> Result<
+        (
+            super::provider_auth::ProviderAuthRegistry,
+            super::broker_venue::BrokerVenueRunnerRegistry,
+        ),
+        MarketServiceError,
+    > {
+        let mut provider_auth = super::provider_auth::ProviderAuthRegistry::default();
+        let mut broker_venue_runners = super::broker_venue::BrokerVenueRunnerRegistry::default();
+        if include_built_in_defaults {
+            let rithmic_login = Arc::new(super::providers::rithmic::RithmicLogin::new(
+                rithmic_revision.clone(),
+            ));
+            let revision = rithmic_login.revision.clone();
+            provider_auth.register(
+                super::RITHMIC_DESCRIPTOR.id,
+                rithmic_login as Arc<dyn super::provider_auth::ProviderAuthAdapter>,
+            );
+            broker_venue_runners.register(
+                aeris_trading::venue::BROKER_VENUE_ID,
+                super::providers::rithmic::default_broker_venue_runner(revision),
+            )?;
+        }
+        for (provider_id, adapter) in auth_adapters {
+            provider_auth.register(provider_id, adapter);
+        }
+        for (venue_id, runner) in broker_venues {
+            broker_venue_runners.register(venue_id, runner)?;
+        }
+        Ok((provider_auth, broker_venue_runners))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build_market_service(
         commands: SyncSender<Command>,
         shutdown: Arc<AtomicBool>,
         active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
         workers: Vec<thread::JoinHandle<()>>,
         context: super::ProviderStartContext,
+        provider_auth: super::provider_auth::ProviderAuthRegistry,
+        broker_venue_runners: super::broker_venue::BrokerVenueRunnerRegistry,
         providers: MarketServiceProviders,
         channels: RuntimeChannels,
     ) -> Self {
@@ -552,19 +702,12 @@ impl MarketService {
             recording,
         } = channels;
         let super::ProviderStartContext {
-            rithmic_login,
-            recording_replays,
+            recording_replays, ..
         } = context;
         let shutdown_wake = commands.clone();
         let MarketServiceProviders {
             presentations: provider_presentations,
         } = providers;
-        let rithmic_login = Arc::new(super::providers::rithmic::RithmicLogin::new(rithmic_login));
-        let mut provider_auth = super::provider_auth::ProviderAuthRegistry::default();
-        provider_auth.register(
-            super::RITHMIC_DESCRIPTOR.id,
-            Arc::clone(&rithmic_login) as Arc<dyn super::provider_auth::ProviderAuthAdapter>,
-        );
         Self {
             commands,
             runtime: Arc::new(MarketRuntime {
@@ -572,7 +715,7 @@ impl MarketService {
                 shutdown_wake,
                 provider_presentations,
                 provider_auth,
-                rithmic_login,
+                broker_venue_runners: Mutex::new(broker_venue_runners),
                 attached_broker_venues: Mutex::new(BTreeSet::new()),
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
@@ -1506,6 +1649,8 @@ mod tests {
                     Arc::new(super::super::clock::SystemClock),
                 )),
             },
+            super::super::provider_auth::ProviderAuthRegistry::default(),
+            super::super::broker_venue::BrokerVenueRunnerRegistry::default(),
             MarketServiceProviders {
                 presentations: vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
             },
@@ -1550,6 +1695,8 @@ mod tests {
                     Arc::new(super::super::clock::SystemClock),
                 )),
             },
+            super::super::provider_auth::ProviderAuthRegistry::default(),
+            super::super::broker_venue::BrokerVenueRunnerRegistry::default(),
             MarketServiceProviders {
                 presentations: vec![],
             },
@@ -1621,6 +1768,116 @@ mod tests {
         service
             .shutdown(Duration::from_secs(1))
             .expect("fourth runtime stops");
+    }
+
+    #[test]
+    fn pluggable_third_provider_auth_and_broker_venue_compose_without_runtime_edits() {
+        use aeris_provider_spi::{
+            ConnectionId, LoginFieldValue, ProviderAuthAdapter, ProviderAuthError,
+            ProviderLoginServer, SavedProviderLogin,
+        };
+        use aeris_trading::venue::{BrokerVenueLink, VenueCapabilities};
+        use std::sync::atomic::AtomicUsize;
+
+        struct MockThirdAuth;
+        impl ProviderAuthAdapter for MockThirdAuth {
+            fn servers(&self) -> Vec<ProviderLoginServer> {
+                vec![ProviderLoginServer {
+                    id: "mock-sim",
+                    label: "Mock Sim",
+                }]
+            }
+            fn discover_servers(
+                &self,
+                server_id: &str,
+                _stop: Arc<AtomicBool>,
+            ) -> Result<Vec<String>, ProviderAuthError> {
+                Ok(vec![format!("{server_id}:MockSim")])
+            }
+            fn saved_login(&self) -> Result<Option<SavedProviderLogin>, ProviderAuthError> {
+                Ok(None)
+            }
+            fn sign_in(
+                &self,
+                _fields: &[LoginFieldValue<'_>],
+                _stop: Arc<AtomicBool>,
+            ) -> Result<(), ProviderAuthError> {
+                Err(ProviderAuthError::InvalidFields("mock"))
+            }
+            fn forget_login(&self) -> Result<(), ProviderAuthError> {
+                Ok(())
+            }
+        }
+
+        const MOCK_PRESENTATION: crate::ProviderPresentationDescriptor =
+            crate::ProviderPresentationDescriptor {
+                id: "mock-third-provider",
+                ..super::super::RITHMIC_PRESENTATION
+            };
+        let mut spec = ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), false);
+        spec.descriptor.id = "mock-third-provider";
+        spec.descriptor.presentation = &MOCK_PRESENTATION;
+        spec.descriptor.capabilities.account_id = "mock-third-account";
+        spec.descriptor.capabilities.history.worker = "aeris-mock-third-history";
+        spec.descriptor.flush_demand = |_| {};
+
+        let broker_started = Arc::new(AtomicUsize::new(0));
+        let broker_started_flag = Arc::clone(&broker_started);
+        let service = MarketService::builder()
+            .register_provider_spec(spec)
+            .register_auth("mock-third-provider", Arc::new(MockThirdAuth))
+            .register_broker_venue(
+                "mock-broker",
+                Arc::new(move |mut link, shutdown| {
+                    let _ = (link.attach)(VenueCapabilities {
+                        bracket_levels: 0,
+                        client_order_id_limit: 32,
+                    });
+                    broker_started_flag.fetch_add(1, Ordering::AcqRel);
+                    while !shutdown.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                }),
+            )
+            .start()
+            .expect("composed service starts");
+
+        assert!(
+            service
+                .status()
+                .expect("status")
+                .providers
+                .iter()
+                .any(|provider| provider.provider == "mock-third-provider")
+        );
+        let systems = service
+            .discover_provider_servers("mock-third-provider", "mock-sim")
+            .expect("mock auth servers");
+        assert_eq!(systems, vec!["mock-sim:MockSim".to_string()]);
+
+        let link = BrokerVenueLink {
+            attach: Box::new(|_caps| {
+                let (_tx, rx) = aeris_trading::venue_outbox::bounded_venue_requests(4);
+                Ok((1, rx))
+            }),
+            events: Box::new(|_event| Ok(())),
+        };
+        service
+            .attach_broker_venue_for(
+                "mock-broker",
+                &ConnectionId::try_new("sim-1").expect("valid connection id"),
+                link,
+            )
+            .expect("mock broker attaches");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while broker_started.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(broker_started.load(Ordering::Acquire), 1);
+        service
+            .shutdown(Duration::from_secs(2))
+            .expect("composed service shuts down");
     }
 
     #[test]

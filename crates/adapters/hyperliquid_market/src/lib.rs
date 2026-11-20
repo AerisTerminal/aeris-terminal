@@ -17,6 +17,7 @@ mod budget;
 mod candles;
 mod context;
 mod decimal;
+pub mod display_depth;
 mod endpoints;
 pub mod history;
 mod http;

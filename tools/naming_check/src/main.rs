@@ -849,6 +849,7 @@ fn main() -> ExitCode {
 fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
     let generic_root = root.join("crates/market_runtime/src/market_service");
     let mut files = [
+        "broker_venue.rs",
         "calendar/mod.rs",
         "coordinator.rs",
         "error.rs",
@@ -1076,6 +1077,7 @@ fn violates_generic_market_provider_boundary(path: &str, source: &str) -> bool {
         "/coordinator/",
         "/lifecycle/",
         "/history/",
+        "/broker_venue.rs",
         "/calendar/mod.rs",
         "/quotes.rs",
         "/outbox.rs",
@@ -5323,6 +5325,7 @@ mod tests {
         }
         for path in [
             "mod.rs",
+            "broker_venue.rs",
             "coordinator.rs",
             "coordinator/benchmark.rs",
             "coordinator/demand.rs",

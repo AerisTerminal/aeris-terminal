@@ -106,6 +106,7 @@ impl Backoff {
         self.attempts = 0;
     }
 
+    #[cfg(test)]
     pub(crate) fn healthy_for(&mut self, since: std::time::Instant, clock: &dyn Clock) {
         if clock.monotonic().saturating_duration_since(since) >= self.policy.healthy_reset_after {
             self.reset();

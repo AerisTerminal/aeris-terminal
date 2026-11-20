@@ -669,11 +669,12 @@ fn spawn_hyperliquid_display_depth(
                 crate::hyperliquid_display_depth::WORKER_NAME,
                 activity,
             );
+            let notify = move || wake.notify();
             crate::hyperliquid_display_depth::run(
                 &controls,
                 &events,
                 &cancellation,
-                &wake,
+                &notify,
                 reconnect_delay,
             );
         })

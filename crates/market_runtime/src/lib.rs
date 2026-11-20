@@ -10,7 +10,7 @@ mod catalog;
 pub mod fence {
     pub use aeris_market_engine::fence::{ConsumerTag, EpochSequence, Fenced};
 }
-mod hyperliquid_display_depth;
+pub(crate) use aeris_hyperliquid_market_adapter::display_depth as hyperliquid_display_depth;
 mod hyperliquid_market_scan;
 mod hyperliquid_realtime;
 pub mod market_service;
@@ -460,8 +460,9 @@ pub use market_service::descriptors::{
     SelectionRequest,
 };
 pub use market_service::{
-    BrokerVenueLink, MAXIMUM_RECENT_LADDER_TRADES, MarketService, MarketServiceStatus,
-    QuoteSubscription, RECENT_LADDER_TRADE_RETENTION_NANOS, RithmicLoginSummary, RithmicServer,
+    BrokerVenueLink, BrokerVenueRunner, MAXIMUM_RECENT_LADDER_TRADES, MarketService,
+    MarketServiceBuilder, MarketServiceStatus, QuoteSubscription,
+    RECENT_LADDER_TRADE_RETENTION_NANOS, RithmicLoginSummary, RithmicServer,
     built_in_provider_presentations, is_recording_replay_provider, published_provider_descriptors,
 };
 pub use market_service::{

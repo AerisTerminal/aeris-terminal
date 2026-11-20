@@ -69,20 +69,7 @@ const CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAXIMUM_DECODE_FAILURES_PER_CONNECTION: u32 = 100;
 const MAXIMUM_SUBSCRIPTION_FRAMES_PER_DEMAND: usize = 512;
 
-/// One demanded instrument with the mapping the worker needs to decode it.
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct HyperliquidInstrumentDemand {
-    /// Exact wire `coin` for info/WebSocket calls.
-    pub wire_coin: String,
-    /// Stable engine instrument identity.
-    pub instrument_id: String,
-    /// Catalog entitlement revision.
-    pub entitlement_id: String,
-    /// Fixed-point scales from the install.
-    pub price_scale: u8,
-    /// Fixed-point scales from the install.
-    pub quantity_scale: u8,
-}
+pub(crate) use aeris_hyperliquid_market_adapter::display_depth::HyperliquidInstrumentDemand;
 
 /// One demanded candle feed with its native interval.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]

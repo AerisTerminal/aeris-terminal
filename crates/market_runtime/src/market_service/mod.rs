@@ -234,7 +234,7 @@ struct MarketRuntime {
     shutdown_wake: SyncSender<Command>,
     provider_presentations: Vec<ProviderPresentationDescriptor>,
     provider_auth: provider_auth::ProviderAuthRegistry,
-    rithmic_login: Arc<providers::rithmic::RithmicLogin>,
+    broker_venue_runners: Mutex<broker_venue::BrokerVenueRunnerRegistry>,
     attached_broker_venues: Mutex<BTreeSet<(String, String)>>,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
@@ -1417,9 +1417,10 @@ impl ProviderRuntimeEvent {
 
 mod broker_venue;
 pub mod calendar;
-pub use broker_venue::BrokerVenueLink;
+pub use broker_venue::{BrokerVenueLink, BrokerVenueRunner};
 pub use providers::rithmic::{RithmicLoginSummary, RithmicServer};
 mod runtime;
+pub use runtime::MarketServiceBuilder;
 use runtime::join_runtime_workers;
 
 mod command_fences;
