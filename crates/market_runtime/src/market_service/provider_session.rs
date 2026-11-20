@@ -6,17 +6,14 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{
-        Mutex,
-        mpsc::{Receiver, SyncSender, TrySendError},
-    },
+    sync::mpsc::{SyncSender, TrySendError},
     time::{Duration, Instant},
 };
 
 use aeris_market_engine::fence::{Epoch, EpochSequence, ProviderTag};
 
 use super::{
-    HistoryRequest, HyperliquidDisplayDepthControl, HyperliquidRealtimeControl, ProviderDemand,
+    HistoryRequest, ProviderDemand,
     clock::Clock,
     reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
 };
@@ -133,171 +130,14 @@ impl ProviderEventSink {
     }
 }
 
-pub(super) struct HyperliquidSession {
-    pub(super) controls: SyncSender<HyperliquidRealtimeControl>,
-    pub(super) display_controls: SyncSender<HyperliquidDisplayDepthControl>,
-    pub(super) history: SyncSender<HistoryRequest>,
-}
-
-fn try_control<T>(sender: &SyncSender<T>, control: T) -> Result<bool, ProviderSessionError> {
+pub(super) fn try_control<T>(
+    sender: &SyncSender<T>,
+    control: T,
+) -> Result<bool, ProviderSessionError> {
     match sender.try_send(control) {
         Ok(()) => Ok(true),
         Err(TrySendError::Full(_)) => Ok(false),
         Err(TrySendError::Disconnected(_)) => Err(ProviderSessionError::Unavailable),
-    }
-}
-
-impl ProviderSession for HyperliquidSession {
-    #[cfg(feature = "probe")]
-    fn probe_fail_websocket(
-        &self,
-        subsequent_connect_failures: u8,
-    ) -> Result<bool, ProviderSessionError> {
-        try_control(
-            &self.controls,
-            HyperliquidRealtimeControl::FailWebSocket {
-                subsequent_connect_failures,
-            },
-        )
-    }
-    fn connect(
-        &self,
-        epoch: Epoch<ProviderTag>,
-        sink: ProviderEventSink,
-    ) -> Result<bool, ProviderSessionError> {
-        debug_assert_eq!(sink.epoch, epoch);
-        try_control(&self.controls, HyperliquidRealtimeControl::Connect(sink))
-    }
-
-    fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
-        try_control(
-            &self.controls,
-            HyperliquidRealtimeControl::Subscribe(demand.hyperliquid_wire()),
-        )
-    }
-
-    fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError> {
-        try_control(&self.history, request)
-    }
-
-    fn release_idle(&self) -> Result<bool, ProviderSessionError> {
-        let main = try_control(&self.controls, HyperliquidRealtimeControl::Stop)?;
-        let display = try_control(&self.display_controls, HyperliquidDisplayDepthControl::Stop)?;
-        Ok(main && display)
-    }
-
-    fn shutdown(&self) {
-        let _ = self.release_idle();
-    }
-}
-
-pub(super) struct RithmicSession {
-    pub(super) controls: SyncSender<super::RithmicRealtimeControl>,
-    pub(super) history: SyncSender<HistoryRequest>,
-    pub(super) binding: std::sync::Arc<Mutex<RithmicBinding>>,
-}
-
-#[derive(Default)]
-pub(super) struct RithmicBinding {
-    pub(super) sink: Option<ProviderEventSink>,
-    pub(super) wire_generation: Option<u64>,
-    pub(super) pending: Option<crate::rithmic_realtime::RithmicRealtimeEvent>,
-}
-
-impl ProviderSession for RithmicSession {
-    fn adapter_retries_transport(&self) -> bool {
-        true
-    }
-    fn adapter_labels_sessions(&self) -> bool {
-        true
-    }
-    fn connect(
-        &self,
-        epoch: Epoch<ProviderTag>,
-        sink: ProviderEventSink,
-    ) -> Result<bool, ProviderSessionError> {
-        debug_assert_eq!(epoch, sink.epoch);
-        self.binding
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .sink = Some(sink);
-        Ok(true)
-    }
-
-    fn rebind(
-        &self,
-        epoch: Epoch<ProviderTag>,
-        sink: ProviderEventSink,
-    ) -> Result<bool, ProviderSessionError> {
-        debug_assert_eq!(epoch, sink.epoch);
-        let mut binding = self
-            .binding
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        binding.sink = Some(sink);
-        binding.wire_generation = binding
-            .pending
-            .as_ref()
-            .map(crate::rithmic_realtime::RithmicRealtimeEvent::generation);
-        Ok(true)
-    }
-
-    fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
-        let wire = demand
-            .rithmic_wire()
-            .map_err(|_| ProviderSessionError::InvalidDemand)?;
-        try_control(
-            &self.controls,
-            super::RithmicRealtimeControl::Subscribe(wire),
-        )
-    }
-
-    fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError> {
-        try_control(&self.history, request)
-    }
-
-    fn release_idle(&self) -> Result<bool, ProviderSessionError> {
-        try_control(&self.controls, super::RithmicRealtimeControl::Stop)
-    }
-
-    fn shutdown(&self) {
-        let _ = self.release_idle();
-    }
-}
-
-impl RithmicBinding {
-    pub(super) fn take(
-        &mut self,
-        events: &Receiver<crate::rithmic_realtime::RithmicRealtimeEvent>,
-    ) -> Option<super::ProviderEvent> {
-        let sink = self.sink?;
-        let event = match self.pending.take() {
-            Some(event) => event,
-            None => events.try_recv().ok()?,
-        };
-        let wire_generation = event.generation();
-        match self.wire_generation {
-            Some(current) if wire_generation < current => None,
-            Some(current) if wire_generation > current => {
-                self.pending = Some(event);
-                Some(super::ProviderEvent {
-                    provider: super::RITHMIC_DESCRIPTOR.id,
-                    generation: sink.epoch,
-                    wire_generation,
-                    kind: super::ProviderEventKind::TransportReplaced,
-                })
-            }
-            _ => {
-                self.wire_generation = Some(wire_generation);
-                let wire = super::ProviderEvent::rithmic(event);
-                Some(super::ProviderEvent {
-                    provider: wire.provider,
-                    generation: sink.epoch,
-                    wire_generation,
-                    kind: wire.kind,
-                })
-            }
-        }
     }
 }
 
@@ -556,10 +396,10 @@ impl ProviderRegistry {
     }
 
     #[cfg(feature = "probe")]
-    pub(super) fn probe_retries(&self, now: Instant) -> Vec<super::ProbeRetry> {
+    pub(super) fn probe_retries(&self, provider: &str, now: Instant) -> Vec<super::ProbeRetry> {
         self.retry_records
             .iter()
-            .filter(|record| record.provider == "hyperliquid")
+            .filter(|record| record.provider == provider)
             .map(|record| super::ProbeRetry {
                 attempt: record.attempt,
                 delay_ms: record.delay.as_millis().try_into().unwrap_or(u64::MAX),
@@ -746,11 +586,18 @@ impl Drop for ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hyperliquid_display_depth::HyperliquidDisplayDepthControl;
+    use crate::hyperliquid_realtime::HyperliquidRealtimeControl;
     use crate::market_service::{
         BarPeriod, BarSeriesKey, InstallProviderInstrument, MarketStream, ProviderInstrumentDemand,
-        StreamRequirements, clock::ScriptedClock,
+        StreamRequirements,
+        clock::ScriptedClock,
+        providers::{
+            hyperliquid::HyperliquidSession,
+            rithmic::{RithmicBinding, RithmicSession},
+        },
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc::Receiver};
     use std::time::Duration;
 
     struct ScriptedSession(Arc<Mutex<(usize, Vec<ProviderDemand>, usize)>>);
@@ -1288,7 +1135,7 @@ mod tests {
             assert!(registry.apply_demand("rithmic", &demand).unwrap());
             assert!(matches!(
                 queued.try_recv().unwrap(),
-                super::super::RithmicRealtimeControl::Subscribe(_)
+                crate::rithmic_realtime::RithmicRealtimeControl::Subscribe(_)
             ));
             assert!(
                 registry

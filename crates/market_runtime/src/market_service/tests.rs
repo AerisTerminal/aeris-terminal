@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    providers::{
+        hyperliquid::{HYPERLIQUID_PRESENTATION, start_hyperliquid_runtime},
+        rithmic::rithmic_supported_period,
+    },
+    *,
+};
+use aeris_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
 
 #[test]
 fn every_registered_provider_has_a_complete_published_descriptor() {
@@ -148,9 +155,10 @@ fn reconnect_status_is_plain_language_and_clears_after_streaming_resumes() {
 
 #[test]
 fn heartbeat_carries_measured_transport_rtt() {
-    let event = ProviderRuntimeEvent::Realtime(ProviderEvent::hyperliquid(
-        crate::hyperliquid_realtime::HyperliquidRealtimeEvent::Heartbeat(3, Some(18_000_000)),
-    ));
+    let event =
+        ProviderRuntimeEvent::Realtime(crate::hyperliquid_realtime::into_wire_provider_event(
+            crate::hyperliquid_realtime::HyperliquidRealtimeEvent::Heartbeat(3, Some(18_000_000)),
+        ));
     let metadata = event.metadata().expect("realtime event metadata");
     assert_eq!(metadata.provider, "hyperliquid");
     assert_eq!(metadata.generation, 3);
@@ -259,7 +267,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             maximum_order_level_instruments: 0,
             ..RITHMIC_DESCRIPTOR.capabilities
         },
-        start: ProviderRuntimeRegistry::start_hyperliquid_runtime,
+        start: start_hyperliquid_runtime,
         flush_demand: |_| {},
     };
     let mut engine =

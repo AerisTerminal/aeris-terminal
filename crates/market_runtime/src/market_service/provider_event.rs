@@ -2,59 +2,32 @@ use super::{
     DepthSnapshot, MarketBar, MarketTrade, OrderLevelEvent, TopOfBookQuote,
     lifecycle::RecoveryReason,
 };
-use crate::hyperliquid_realtime::HyperliquidRealtimeEvent;
-use crate::rithmic_realtime::RithmicRealtimeEvent;
 use aeris_market_engine::fence::{Epoch, ProviderTag};
-use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 use std::collections::BTreeMap;
 
-pub(super) const fn rithmic_invalidation_detail(
-    reason: Option<ProviderInvalidationReason>,
-) -> &'static str {
-    match reason {
-        Some(ProviderInvalidationReason::Transport) => "Rithmic transport connection failed",
-        Some(ProviderInvalidationReason::Authentication) => {
-            "Rithmic refused the saved login; check the user ID, password and system, and that the account has market data and Aeris enabled"
-        }
-        Some(ProviderInvalidationReason::AgreementRequired) => {
-            "Rithmic account requires an agreement before market data can stream"
-        }
-        Some(ProviderInvalidationReason::UnsupportedSystem) => {
-            "The selected Rithmic system is not offered on this server"
-        }
-        Some(ProviderInvalidationReason::SchemaMismatch) => {
-            "Rithmic protocol schema does not match the installed provider kit"
-        }
-        Some(ProviderInvalidationReason::HeartbeatSilence) => {
-            "Rithmic heartbeat response timed out"
-        }
-        Some(ProviderInvalidationReason::MessageSilence) => {
-            "Rithmic market-data stream stopped producing messages"
-        }
-        Some(ProviderInvalidationReason::SequenceGap) => {
-            "Rithmic market-data sequence continuity was lost"
-        }
-        Some(ProviderInvalidationReason::QueueOverflow) => {
-            "Rithmic callback queue overflowed before market data could be consumed"
-        }
-        Some(ProviderInvalidationReason::MalformedMessage) => {
-            "Rithmic sent market data that failed protocol validation"
-        }
-        None => "Rithmic live session is recovering",
-    }
+/// Canonical provider fault classification produced by adapters so the market
+/// runtime never matches provider-specific wire invalidation enums.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderFaultKind {
+    Transport,
+    Authentication,
+    AgreementRequired,
+    UnsupportedSystem,
+    SchemaMismatch,
+    HeartbeatSilence,
+    MessageSilence,
+    SequenceGap,
+    QueueOverflow,
+    MalformedMessage,
+    Transient,
 }
 
-pub(super) const fn rithmic_auto_recovers(reason: Option<ProviderInvalidationReason>) -> bool {
-    matches!(
-        reason,
-        None | Some(
-            ProviderInvalidationReason::Transport
-                | ProviderInvalidationReason::HeartbeatSilence
-                | ProviderInvalidationReason::MessageSilence
-                | ProviderInvalidationReason::SequenceGap
-                | ProviderInvalidationReason::QueueOverflow
-        )
-    )
+/// Normalized provider fault carrying recovery policy and user-safe detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderFault {
+    pub(crate) kind: ProviderFaultKind,
+    pub(crate) auto_recovers: bool,
+    pub(crate) detail: &'static str,
 }
 
 pub(super) struct ProviderEvent {
@@ -65,10 +38,10 @@ pub(super) struct ProviderEvent {
 }
 
 /// Untrusted adapter identity, retained only at adapter conversion boundaries.
-pub(super) struct WireProviderEvent {
-    pub(super) provider: &'static str,
-    pub(super) generation: u64,
-    pub(super) kind: ProviderEventKind,
+pub(crate) struct WireProviderEvent {
+    pub(crate) provider: &'static str,
+    pub(crate) generation: u64,
+    pub(crate) kind: ProviderEventKind,
 }
 
 /// Tracks accepted adapter generations; epoch minting belongs to `ProviderRegistry`.
@@ -138,13 +111,13 @@ impl ProviderEpochRegistry {
     }
 }
 
-pub(super) enum ProviderTradeBatch {
+pub(crate) enum ProviderTradeBatch {
     One(MarketTrade),
     Many(Vec<MarketTrade>),
 }
 
 #[derive(Clone)]
-pub(super) enum ProviderDisconnect {
+pub(crate) enum ProviderDisconnect {
     SequenceGap {
         detail: &'static str,
         auto_recover: bool,
@@ -161,7 +134,36 @@ pub(super) enum ProviderDisconnect {
     },
 }
 
-pub(super) enum ProviderEventKind {
+impl ProviderDisconnect {
+    pub(crate) const fn from_fault(fault: ProviderFault) -> Self {
+        match fault.kind {
+            ProviderFaultKind::SequenceGap => Self::SequenceGap {
+                detail: fault.detail,
+                auto_recover: fault.auto_recovers,
+            },
+            ProviderFaultKind::Transient => Self::Recover {
+                detail: fault.detail,
+                auto_recover: fault.auto_recovers,
+                retry_after: None,
+                provider_detail: None,
+            },
+            ProviderFaultKind::Transport
+            | ProviderFaultKind::Authentication
+            | ProviderFaultKind::AgreementRequired
+            | ProviderFaultKind::UnsupportedSystem
+            | ProviderFaultKind::SchemaMismatch
+            | ProviderFaultKind::HeartbeatSilence
+            | ProviderFaultKind::MessageSilence
+            | ProviderFaultKind::QueueOverflow
+            | ProviderFaultKind::MalformedMessage => Self::Fail {
+                detail: fault.detail,
+                auto_recover: fault.auto_recovers,
+            },
+        }
+    }
+}
+
+pub(crate) enum ProviderEventKind {
     /// The adapter replaced its transport; the registry must reserve a new epoch and rebind.
     TransportReplaced,
     Connecting,
@@ -184,118 +186,36 @@ pub(super) enum ProviderEventKind {
     },
 }
 
-pub(super) struct ProviderCandleSymbol {
-    pub(super) coin: String,
-    pub(super) interval: String,
+impl ProviderEventKind {
+    pub(crate) const fn recovering_from_fault(fault: ProviderFault) -> Self {
+        let recovery_reason = match fault.kind {
+            ProviderFaultKind::SequenceGap => Some(RecoveryReason::SequenceGap),
+            ProviderFaultKind::Transport
+            | ProviderFaultKind::Authentication
+            | ProviderFaultKind::AgreementRequired
+            | ProviderFaultKind::UnsupportedSystem
+            | ProviderFaultKind::SchemaMismatch
+            | ProviderFaultKind::HeartbeatSilence
+            | ProviderFaultKind::MessageSilence
+            | ProviderFaultKind::QueueOverflow
+            | ProviderFaultKind::MalformedMessage
+            | ProviderFaultKind::Transient => None,
+        };
+        Self::Recovering {
+            detail: fault.detail,
+            provider_detail: None,
+            recovery_reason,
+        }
+    }
+}
+
+pub(crate) struct ProviderCandleSymbol {
+    pub(crate) coin: String,
+    pub(crate) interval: String,
 }
 
 impl ProviderCandleSymbol {
     pub(super) fn matches(&self, coin: &str, interval: &str) -> bool {
         self.coin == coin && self.interval == interval
-    }
-}
-
-impl ProviderEvent {
-    pub(super) fn rithmic(event: RithmicRealtimeEvent) -> WireProviderEvent {
-        use RithmicRealtimeEvent as Wire;
-        let generation = event.generation();
-        let kind = match event {
-            Wire::Connecting(_) => ProviderEventKind::Connecting,
-            Wire::Connected(_) => ProviderEventKind::Connected,
-            Wire::Heartbeat(_, rtt) => ProviderEventKind::Heartbeat(rtt),
-            Wire::Failed(_, _error) => ProviderEventKind::Failed(
-                "Rithmic reconnect could not start; check provider configuration".into(),
-            ),
-            Wire::Recovering(_, reason) => ProviderEventKind::Recovering {
-                detail: rithmic_invalidation_detail(reason),
-                provider_detail: None,
-                recovery_reason: (reason == Some(ProviderInvalidationReason::SequenceGap))
-                    .then_some(RecoveryReason::SequenceGap),
-            },
-            Wire::Disconnected(_, reason) => {
-                let detail = rithmic_invalidation_detail(reason);
-                let auto_recover = rithmic_auto_recovers(reason);
-                let disposition = if reason == Some(ProviderInvalidationReason::SequenceGap) {
-                    ProviderDisconnect::SequenceGap {
-                        detail,
-                        auto_recover,
-                    }
-                } else if reason.is_some() {
-                    ProviderDisconnect::Fail {
-                        detail,
-                        auto_recover,
-                    }
-                } else {
-                    ProviderDisconnect::Recover {
-                        detail,
-                        auto_recover,
-                        retry_after: None,
-                        provider_detail: None,
-                    }
-                };
-                ProviderEventKind::Disconnected(disposition)
-            }
-            Wire::Trade(_, trade) => ProviderEventKind::Trades(ProviderTradeBatch::One(trade)),
-            Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
-            Wire::Depth(_, depth) => ProviderEventKind::Depth(depth),
-            Wire::OrderLevels(_, event) => ProviderEventKind::OrderLevels(event),
-        };
-        WireProviderEvent {
-            provider: "rithmic",
-            generation,
-            kind,
-        }
-    }
-
-    pub(super) fn hyperliquid(event: HyperliquidRealtimeEvent) -> WireProviderEvent {
-        use HyperliquidRealtimeEvent as Wire;
-        let generation = match &event {
-            Wire::Connecting(g)
-            | Wire::Connected(g)
-            | Wire::Candle(g, ..)
-            | Wire::Trades(g, _)
-            | Wire::Quote(g, _)
-            | Wire::Depth(g, _)
-            | Wire::Heartbeat(g, _)
-            | Wire::Recovering(g)
-            | Wire::Disconnected(g) => *g,
-        };
-        let kind = match event {
-            Wire::Connecting(_) => ProviderEventKind::Connecting,
-            Wire::Connected(_) => ProviderEventKind::Connected,
-            Wire::Heartbeat(_, rtt) => ProviderEventKind::Heartbeat(rtt),
-            Wire::Recovering(_) => ProviderEventKind::Recovering {
-                detail: "Hyperliquid live session is recovering",
-                provider_detail: None,
-                recovery_reason: None,
-            },
-            Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::Recover {
-                detail: "Hyperliquid live session is recovering",
-                auto_recover: false,
-                retry_after: None,
-                provider_detail: None,
-            }),
-            Wire::Candle(_, coin, interval, candle) => ProviderEventKind::Candle {
-                symbol: ProviderCandleSymbol { coin, interval },
-                bar: MarketBar {
-                    source_sequence: 1,
-                    exchange_timestamp_seconds: candle.open_nanos.div_euclid(1_000_000_000),
-                    exchange_timestamp_unix_nanos: candle.open_nanos,
-                    open: candle.open,
-                    high: candle.high,
-                    low: candle.low,
-                    close: candle.close,
-                    volume: candle.volume,
-                },
-            },
-            Wire::Trades(_, trades) => ProviderEventKind::Trades(ProviderTradeBatch::Many(trades)),
-            Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
-            Wire::Depth(_, depth) => ProviderEventKind::Depth(depth),
-        };
-        WireProviderEvent {
-            provider: "hyperliquid",
-            generation,
-            kind,
-        }
     }
 }

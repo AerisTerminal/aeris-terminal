@@ -100,7 +100,8 @@ fn chart_and_price_alert_share_one_provider_quote_until_last_release() {
 
     let transcript = transcript.lock().expect("demand transcript");
     let subscriptions = transcript.demands.iter().map(|demand| {
-        let wire = demand.rithmic_wire().expect("installed instrument");
+        let wire = crate::market_service::providers::rithmic::rithmic_wire(demand)
+            .expect("installed instrument");
         let quotes = wire.instruments.iter().filter(|item| item.quotes).count();
         assert!(quotes <= 1, "a shared quote never duplicates the wire subscription");
         quotes
@@ -237,12 +238,19 @@ fn scripted_hyperliquid_coordinator(
     let (display_controls, _display_control_receiver) = mpsc::sync_channel(8);
     let (_display_events, display_receiver) = mpsc::sync_channel(8);
     let (events, event_receiver) = mpsc::sync_channel(8);
-    let channels = Box::leak(Box::new(crate::market_service::HyperliquidChannels {
-        controls,
-        events: event_receiver,
-        display_controls,
-        display_events: display_receiver,
-    }));
+    let realtime = Box::leak(Box::new(
+        crate::market_service::providers::hyperliquid::realtime_channels(
+            controls,
+            event_receiver,
+            display_controls.clone(),
+        ),
+    ));
+    let display_depth = Box::leak(Box::new(
+        crate::market_service::providers::hyperliquid::display_depth_channels(
+            display_controls,
+            display_receiver,
+        ),
+    ));
     let providers = crate::market_service::ProviderDispatch {
         wake: None,
         records: std::collections::BTreeMap::from([(
@@ -251,9 +259,8 @@ fn scripted_hyperliquid_coordinator(
                 descriptor: crate::market_service::HYPERLIQUID_DESCRIPTOR,
                 history: Box::leak(Box::new(history)),
                 lifecycle: None,
-                hyperliquid: Some(channels),
-                rithmic: None,
-                recorded: None,
+                realtime: Some(realtime),
+                display_depth: Some(display_depth),
                 catalog: None,
             },
         )]),
@@ -368,7 +375,7 @@ fn rithmic_transport_recovery_does_not_stack_coordinator_retry() {
     }));
     boundary.demand(boundary.series(), 1);
     let epoch = boundary.coordinator.provider_registry.epoch("rithmic").expect("epoch");
-    let wire = crate::market_service::provider_event::ProviderEvent::rithmic(
+    let wire = crate::rithmic_realtime::into_wire_provider_event(
         RithmicRealtimeEvent::Disconnected(1, Some(ProviderInvalidationReason::Transport)),
     );
     boundary.coordinator.handle_bound_provider_event(ProviderEvent {

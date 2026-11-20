@@ -173,7 +173,7 @@ pub(super) enum SeriesState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RecoveryReason {
+pub(crate) enum RecoveryReason {
     ProviderReconnected,
     SequenceGap,
     QueueOverflow,

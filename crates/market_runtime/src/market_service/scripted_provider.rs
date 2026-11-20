@@ -3,15 +3,17 @@
 
 use super::{
     Arc, AtomicBool, BTreeSet, Command, Duration, HISTORY_CAPACITY, HYPERLIQUID_DESCRIPTOR,
-    HYPERLIQUID_PUBLIC_ACCOUNT_ID, HyperliquidChannels, HyperliquidDemand,
     InstallProviderInstrument, MarketEngine, MarketService, Mutex, Ordering,
     ProviderCatalogChannel, ProviderCatalogChannels, ProviderCatalogCommand,
     ProviderCoordinatorWake, ProviderRealtimeSpec, ProviderRuntimeLifecycle, ProviderRuntimeRecord,
     ProviderRuntimeSpec, ProviderStartContext, REALTIME_CAPACITY,
     RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver, RecvTimeoutError, SyncSender, TopOfBookQuote,
-    mpsc, thread, validate_provider_instrument,
+    mpsc, providers, thread, validate_provider_instrument,
 };
-use crate::hyperliquid_realtime::{HyperliquidRealtimeControl, HyperliquidRealtimeEvent};
+use crate::hyperliquid_realtime::{
+    HYPERLIQUID_PUBLIC_ACCOUNT_ID, HyperliquidDemand, HyperliquidRealtimeControl,
+    HyperliquidRealtimeEvent,
+};
 use aeris_market_data::{EventMetadata, QualifiedTimestamp, QuoteLevel};
 use aeris_market_engine::fence::{Fenced, ProviderTag};
 
@@ -162,14 +164,15 @@ fn start_scripted_runtime(
         history,
         cancellation,
         lifecycle: Arc::new(ProviderRuntimeLifecycle::default()),
-        hyperliquid: Some(HyperliquidChannels {
+        realtime: Some(providers::hyperliquid::realtime_channels(
             controls,
             events,
+            display_controls.clone(),
+        )),
+        display_depth: Some(providers::hyperliquid::display_depth_channels(
             display_controls,
             display_events,
-        }),
-        rithmic: None,
-        recorded: None,
+        )),
         catalog: ProviderCatalogChannels {
             enabled: false,
             channels: Box::new(UnavailableCatalog),

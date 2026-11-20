@@ -278,37 +278,10 @@ impl<'a> Coordinator<'a> {
         let mut provider_registry = super::provider_session::ProviderRegistry::new();
         for (&id, record) in &providers.records {
             provider_registry.register_control(id);
-            if let Some(channels) = record.hyperliquid {
+            if let Some(realtime) = record.realtime {
                 provider_registry.register(
                     id,
-                    Box::new(super::provider_session::HyperliquidSession {
-                        controls: channels.controls.clone(),
-                        display_controls: channels.display_controls.clone(),
-                        history: record.history.clone(),
-                    }),
-                    record.descriptor.capabilities.reconnect,
-                    clock.as_ref(),
-                );
-            }
-            if let Some(channels) = record.rithmic {
-                provider_registry.register(
-                    id,
-                    Box::new(super::provider_session::RithmicSession {
-                        controls: channels.controls.clone(),
-                        history: record.history.clone(),
-                        binding: Arc::clone(&channels.binding),
-                    }),
-                    record.descriptor.capabilities.reconnect,
-                    clock.as_ref(),
-                );
-            }
-            if let Some(channels) = record.recorded {
-                provider_registry.register(
-                    id,
-                    Box::new(super::recording::ReplaySession {
-                        controls: channels.controls.clone(),
-                        history: record.history.clone(),
-                    }),
+                    realtime.create_session(record.history),
                     record.descriptor.capabilities.reconnect,
                     clock.as_ref(),
                 );
@@ -2531,7 +2504,9 @@ impl Coordinator<'_> {
                         .map(|events| events.maximum_series_depth)
                         .max()
                         .unwrap_or(0),
-                    retry_attempts: self.provider_registry.probe_retries(self.clock.monotonic()),
+                    retry_attempts: self
+                        .provider_registry
+                        .probe_retries(super::HYPERLIQUID_DESCRIPTOR.id, self.clock.monotonic()),
                 }
             },
         }
@@ -2844,7 +2819,7 @@ mod tests {
         let demand = coordinator.provider_demand(&instrument.provider);
         assert_eq!(demand.instruments.len(), 1);
         assert!(demand.instruments[0].streams.contains(MarketStream::Quotes));
-        let wire = demand.hyperliquid_wire();
+        let wire = super::super::providers::hyperliquid::hyperliquid_wire(&demand);
         assert_eq!(wire.quotes.len(), 1);
         assert_eq!(wire.candles.len(), 0);
         coordinator.reconcile_order_books();
@@ -3340,9 +3315,8 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history,
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: Some(channel),
             },
         );
@@ -3478,7 +3452,12 @@ mod tests {
         let demand = coordinator.provider_demand(&instrument.provider);
         assert_eq!(demand.instruments.len(), 1);
         assert!(demand.instruments[0].streams.contains(MarketStream::Trades));
-        assert_eq!(demand.hyperliquid_wire().trades.len(), 1);
+        assert_eq!(
+            super::super::providers::hyperliquid::hyperliquid_wire(&demand)
+                .trades
+                .len(),
+            1
+        );
         assert_eq!(coordinator.engine.instrument_subscriptions().count(), 1);
         coordinator
             .replace_price_alerts(consumer(1), vec![])
@@ -3894,16 +3873,18 @@ mod tests {
     }
 
     fn hyperliquid_worker_session(
-        controls: std::sync::mpsc::SyncSender<super::super::HyperliquidRealtimeControl>,
+        controls: std::sync::mpsc::SyncSender<
+            crate::hyperliquid_realtime::HyperliquidRealtimeControl,
+        >,
     ) -> (
-        Box<super::super::provider_session::HyperliquidSession>,
-        std::sync::mpsc::Receiver<super::super::HyperliquidDisplayDepthControl>,
+        Box<super::super::providers::hyperliquid::HyperliquidSession>,
+        std::sync::mpsc::Receiver<crate::hyperliquid_display_depth::HyperliquidDisplayDepthControl>,
         std::sync::mpsc::Receiver<super::super::HistoryRequest>,
     ) {
         let (display_controls, display) = std::sync::mpsc::sync_channel(4);
         let (history, history_receiver) = std::sync::mpsc::sync_channel(1);
         (
-            Box::new(super::super::provider_session::HyperliquidSession {
+            Box::new(super::super::providers::hyperliquid::HyperliquidSession {
                 controls,
                 display_controls,
                 history,
@@ -4740,9 +4721,8 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_tx,
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
@@ -4810,7 +4790,7 @@ mod tests {
     struct LiveOnlyRithmicFixture {
         coordinator: Coordinator<'static>,
         history: std::sync::mpsc::Receiver<super::super::HistoryRequest>,
-        _controls: std::sync::mpsc::Receiver<super::super::RithmicRealtimeControl>,
+        _controls: std::sync::mpsc::Receiver<crate::rithmic_realtime::RithmicRealtimeControl>,
         clock: Arc<super::super::clock::ScriptedClock>,
         consumer_id: ConsumerId,
         series: BarSeriesKey,
@@ -6354,13 +6334,12 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
-        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+        coordinator.handle_provider_event(crate::hyperliquid_realtime::into_wire_provider_event(
             HyperliquidRealtimeEvent::Connecting(1),
         ));
         coordinator
@@ -6455,7 +6434,7 @@ mod tests {
         complete_hyperliquid_history_with_forming(&mut coordinator, &history);
         assert_opens_with_forming_bar(&drain_series_publications(&mut coordinator, consumer), 102);
 
-        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+        coordinator.handle_provider_event(crate::hyperliquid_realtime::into_wire_provider_event(
             HyperliquidRealtimeEvent::Connected(1),
         ));
         coordinator.publish_lifecycle_live();
@@ -6463,7 +6442,7 @@ mod tests {
             drain_series_publications(&mut coordinator, consumer).is_empty(),
             "going online must not republish the forming candle"
         );
-        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+        coordinator.handle_provider_event(crate::hyperliquid_realtime::into_wire_provider_event(
             HyperliquidRealtimeEvent::Candle(
                 1,
                 "BTC".into(),
@@ -6494,7 +6473,7 @@ mod tests {
     #[test]
     fn hyperliquid_history_after_online_opens_with_its_forming_candle() {
         let (mut coordinator, history, consumer, _) = connecting_hyperliquid_chart();
-        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+        coordinator.handle_provider_event(crate::hyperliquid_realtime::into_wire_provider_event(
             HyperliquidRealtimeEvent::Connected(1),
         ));
         complete_hyperliquid_history_with_forming(&mut coordinator, &history);
@@ -6627,9 +6606,8 @@ mod tests {
                     descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                     history: Box::leak(Box::new(history_tx)),
                     lifecycle: None,
-                    hyperliquid: None,
-                    rithmic: None,
-                    recorded: None,
+                    realtime: None,
+                    display_depth: None,
                     catalog: None,
                 },
             );
@@ -7000,9 +6978,8 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_tx,
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
@@ -7182,13 +7159,12 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+        coordinator.handle_provider_event(crate::rithmic_realtime::into_wire_provider_event(
             RithmicRealtimeEvent::Connecting(1),
         ));
         coordinator
@@ -7203,7 +7179,7 @@ mod tests {
         Coordinator<'static>,
         std::sync::mpsc::Receiver<super::super::HistoryRequest>,
         std::sync::mpsc::SyncSender<RithmicRealtimeEvent>,
-        std::sync::mpsc::Receiver<super::super::RithmicRealtimeControl>,
+        std::sync::mpsc::Receiver<crate::rithmic_realtime::RithmicRealtimeControl>,
     ) {
         let (history_sender, history_receiver) = std::sync::mpsc::sync_channel(4);
         let (controls, controls_receiver) = std::sync::mpsc::sync_channel(4);
@@ -7217,15 +7193,16 @@ mod tests {
                     descriptor: super::super::RITHMIC_DESCRIPTOR,
                     history: Box::leak(Box::new(history_sender)),
                     lifecycle: None,
-                    hyperliquid: None,
-                    rithmic: Some(Box::leak(Box::new(super::super::RithmicChannels {
-                        controls,
-                        events: event_receiver,
-                        binding: Arc::new(std::sync::Mutex::new(
-                            super::super::provider_session::RithmicBinding::default(),
-                        )),
-                    }))),
-                    recorded: None,
+                    realtime: Some(Box::leak(Box::new(
+                        super::super::providers::rithmic::realtime_channels(
+                            controls,
+                            event_receiver,
+                            Arc::new(std::sync::Mutex::new(
+                                super::super::providers::rithmic::RithmicBinding::default(),
+                            )),
+                        ),
+                    ))),
+                    display_depth: None,
                     catalog: None,
                 },
             )]),
@@ -7256,15 +7233,14 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history,
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
         coordinator.provider_registry.register(
             "hyperliquid",
-            Box::new(super::super::provider_session::HyperliquidSession {
+            Box::new(super::super::providers::hyperliquid::HyperliquidSession {
                 controls,
                 display_controls,
                 history: history.clone(),
@@ -7324,15 +7300,14 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history,
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
         coordinator.provider_registry.register(
             "hyperliquid",
-            Box::new(super::super::provider_session::HyperliquidSession {
+            Box::new(super::super::providers::hyperliquid::HyperliquidSession {
                 controls,
                 display_controls,
                 history: history.clone(),
@@ -7348,7 +7323,7 @@ mod tests {
         let session = coordinator.session_mut("hyperliquid");
         session.demand_dirty = true;
         session.engaged = true;
-        coordinator.flush_hyperliquid_demand();
+        coordinator.flush_dirty_demand("hyperliquid");
         let session = coordinator.session("hyperliquid");
         assert!(!session.demand_dirty);
         assert!(!session.engaged);
@@ -7810,13 +7785,12 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
-        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+        coordinator.handle_provider_event(crate::hyperliquid_realtime::into_wire_provider_event(
             HyperliquidRealtimeEvent::Connecting(1),
         ));
         coordinator
@@ -7835,7 +7809,7 @@ mod tests {
             definition_version: 1,
         };
         demand_series(&mut coordinator, consumer, 1, &selected);
-        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+        coordinator.handle_provider_event(crate::hyperliquid_realtime::into_wire_provider_event(
             HyperliquidRealtimeEvent::Connected(1),
         ));
         complete_hyperliquid_history_with_forming(&mut coordinator, &history_receiver);
@@ -7871,7 +7845,7 @@ mod tests {
                 u32::try_from(recoveries + 1).expect("small count"),
             );
         }
-        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+        coordinator.handle_provider_event(crate::hyperliquid_realtime::into_wire_provider_event(
             HyperliquidRealtimeEvent::Candle(
                 1,
                 "BTC".into(),
@@ -8058,9 +8032,8 @@ mod tests {
                 descriptor: *descriptor,
                 history: Box::leak(Box::new(history_tx)),
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
@@ -8211,7 +8184,7 @@ mod tests {
             "the live subscription stays up while history is empty"
         );
 
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+        coordinator.handle_provider_event(crate::rithmic_realtime::into_wire_provider_event(
             RithmicRealtimeEvent::Heartbeat(1, None),
         ));
         coordinator.retry_history();
@@ -8251,7 +8224,7 @@ mod tests {
             Some(super::super::EmptyCurrentHistory::Final)
         );
         send_fixture_trade(&mut coordinator, &selected, 3, 180_000_000_000);
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+        coordinator.handle_provider_event(crate::rithmic_realtime::into_wire_provider_event(
             RithmicRealtimeEvent::Heartbeat(1, None),
         ));
         assert_no_history_request(
@@ -8259,7 +8232,7 @@ mod tests {
             "a second empty answer is final for the provider generation",
         );
 
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+        coordinator.handle_provider_event(crate::rithmic_realtime::into_wire_provider_event(
             RithmicRealtimeEvent::Connecting(2),
         ));
         let request = history_receiver
@@ -8459,7 +8432,7 @@ mod tests {
         sequence: u64,
         timestamp: i64,
     ) {
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+        coordinator.handle_provider_event(crate::rithmic_realtime::into_wire_provider_event(
             RithmicRealtimeEvent::Trade(1, rithmic_trade_for_series(selected, sequence, timestamp)),
         ));
     }
@@ -9212,7 +9185,7 @@ mod tests {
         assert_eq!(demand.instruments.len(), 1);
         assert!(demand.instruments[0].trades);
 
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+        coordinator.handle_provider_event(crate::rithmic_realtime::into_wire_provider_event(
             RithmicRealtimeEvent::Disconnected(1, None),
         ));
         assert!(coordinator.session("rithmic").stop_pending.is_none());
@@ -9414,7 +9387,7 @@ mod tests {
         );
         assert!(coordinator.session("hyperliquid").demand_dirty);
 
-        coordinator.handle_provider_event(super::super::ProviderEvent::hyperliquid(
+        coordinator.handle_provider_event(crate::hyperliquid_realtime::into_wire_provider_event(
             HyperliquidRealtimeEvent::Heartbeat(1, None),
         ));
         assert_eq!(
@@ -9449,9 +9422,8 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_sender,
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );
@@ -9517,7 +9489,7 @@ mod tests {
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
 
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+        coordinator.handle_provider_event(crate::rithmic_realtime::into_wire_provider_event(
             RithmicRealtimeEvent::Connecting(2),
         ));
         let second_generation = ProviderGeneration(nonzero(2));
@@ -10288,9 +10260,8 @@ mod tests {
                     descriptor,
                     history: &history,
                     lifecycle: None,
-                    hyperliquid: None,
-                    rithmic: None,
-                    recorded: None,
+                    realtime: None,
+                    display_depth: None,
                     catalog: Some(&catalog),
                 },
             );
@@ -10388,9 +10359,8 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history: &history,
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: Some(&catalog),
             },
         );
@@ -10483,9 +10453,8 @@ mod tests {
                 descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
                 history: &history,
                 lifecycle: None,
-                hyperliquid: None,
-                rithmic: None,
-                recorded: None,
+                realtime: None,
+                display_depth: None,
                 catalog: None,
             },
         );

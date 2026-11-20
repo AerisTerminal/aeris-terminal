@@ -2,7 +2,7 @@ use super::coordinator::StudyChange;
 use super::lifecycle::{RecoveryReason, SeriesInput, SeriesLifecycle, SeriesState};
 use super::{
     AggressorSide, BTreeMap, BTreeSet, BarSeriesKey, CanonicalOrderBookState, ConsumerId,
-    Coordinator, DepthSnapshot, FailureStage, FormingBar, HyperliquidInstrumentDemand,
+    Coordinator, DepthSnapshot, DisplayDepthRequest, FailureStage, FormingBar,
     InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS,
     MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
     OrderBookApplyOutcome, OrderLevelApplyOutcome, OrderLevelBook, OrderLevelEvent,
@@ -13,10 +13,7 @@ use super::{
     TradeModel, VecDeque, id, merge_live_candle, series_state_payload, series_update_message,
 };
 #[cfg(test)]
-use super::{BarPeriod, Duration, HyperliquidDemand, RithmicRealtimeDemand, TradeHandoffSeed};
-use crate::hyperliquid_display_depth::{
-    HyperliquidDisplayBookDemand, HyperliquidDisplayDepthControl, HyperliquidDisplayDepthDemand,
-};
+use super::{BarPeriod, Duration, TradeHandoffSeed};
 use crate::study::{
     StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyNonBarChange, StudyQuoteView,
     StudyTradeWindow,
@@ -27,8 +24,6 @@ use crate::{
 };
 use aeris_market_data::{BookSide, MAXIMUM_ORDER_LEVEL_ORDERS};
 use aeris_observability::diagnostic;
-#[cfg(test)]
-use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 
@@ -959,9 +954,10 @@ impl Coordinator<'_> {
     }
 
     #[cfg(test)]
-    pub(super) fn rithmic_realtime_demand(&self) -> Result<RithmicRealtimeDemand, String> {
-        self.provider_demand(super::RITHMIC_DESCRIPTOR.id)
-            .rithmic_wire()
+    pub(super) fn rithmic_realtime_demand(
+        &self,
+    ) -> Result<crate::rithmic_realtime::RithmicRealtimeDemand, String> {
+        super::providers::rithmic::rithmic_wire(&self.provider_demand(super::RITHMIC_DESCRIPTOR.id))
     }
 
     pub(super) fn provider_demand(&self, provider_id: &str) -> ProviderDemand {
@@ -1106,32 +1102,41 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn send_rithmic_demand(&mut self) -> Result<(), String> {
-        if !self.providers.rithmic_realtime_enabled() {
+    pub(super) fn send_immediate_demand(&mut self, provider: &'static str) -> Result<(), String> {
+        if !self.providers.realtime_enabled(provider) {
             return Ok(());
         }
-        let neutral = self.provider_demand(super::RITHMIC_DESCRIPTOR.id);
-        if neutral.rithmic_wire()?.instruments.is_empty() {
+        let neutral = self.provider_demand(provider);
+        if neutral.missing_catalog {
+            let detail = self
+                .providers
+                .descriptor(provider)
+                .map_or("Provider instrument is not installed", |descriptor| {
+                    descriptor.capabilities.instrument_missing_detail
+                });
+            return Err(detail.to_string());
+        }
+        if !neutral.has_immediate_instrument_demand() {
             return Ok(());
         }
-        if self.session(super::RITHMIC_DESCRIPTOR.id).accepted.as_ref() == Some(&neutral)
-            && self.session(super::RITHMIC_DESCRIPTOR.id).pending.is_none()
+        if self.session(provider).accepted.as_ref() == Some(&neutral)
+            && self.session(provider).pending.is_none()
         {
             return Ok(());
         }
-        if !self.ensure_provider_connection(super::RITHMIC_DESCRIPTOR.id) {
+        if !self.ensure_provider_connection(provider) {
             return Ok(());
         }
         if self
             .provider_registry
-            .apply_demand(super::RITHMIC_DESCRIPTOR.id, &neutral)
+            .apply_demand(provider, &neutral)
             .is_ok_and(|sent| sent)
         {
-            let session = self.session_mut(super::RITHMIC_DESCRIPTOR.id);
+            let session = self.session_mut(provider);
             session.pending = None;
             session.accepted = Some(neutral);
         } else {
-            self.session_mut(super::RITHMIC_DESCRIPTOR.id).pending = Some(neutral);
+            self.session_mut(provider).pending = Some(neutral);
         }
         Ok(())
     }
@@ -1184,7 +1189,9 @@ impl Coordinator<'_> {
                     }
                 }
                 match descriptor.capabilities.trade_demand_policy {
-                    super::TradeDemandPolicy::Immediate => self.send_rithmic_demand()?,
+                    super::TradeDemandPolicy::Immediate => {
+                        self.send_immediate_demand(descriptor.id)?;
+                    }
                     super::TradeDemandPolicy::SessionManaged => {
                         self.flush_session_managed_demand(descriptor.id);
                     }
@@ -1714,7 +1721,7 @@ impl Coordinator<'_> {
                         .any(|series| series.provider_id == provider)
                         || self.price_alerts.has_active_provider(provider))
                 {
-                    let _ = self.send_rithmic_demand();
+                    let _ = self.send_immediate_demand(descriptor.id);
                 }
             }
             super::LiveModel::ProviderCandles => {
@@ -1750,7 +1757,7 @@ impl Coordinator<'_> {
                     if descriptor.capabilities.trade_demand_policy
                         == super::TradeDemandPolicy::Immediate
                     {
-                        let _ = self.send_rithmic_demand();
+                        let _ = self.send_immediate_demand(descriptor.id);
                     }
                     self.mark_lifecycle_recovering(
                         provider,
@@ -2314,90 +2321,68 @@ impl Coordinator<'_> {
     /// stream classes that require it; retaining canonical live state never
     /// implies an unrelated upstream subscription.
     #[cfg(test)]
-    pub(super) fn hyperliquid_demand(&self) -> HyperliquidDemand {
-        self.provider_demand(super::HYPERLIQUID_DESCRIPTOR.id)
-            .hyperliquid_wire()
+    pub(super) fn hyperliquid_demand(&self) -> crate::hyperliquid_realtime::HyperliquidDemand {
+        super::providers::hyperliquid::hyperliquid_wire(
+            &self.provider_demand(super::HYPERLIQUID_DESCRIPTOR.id),
+        )
     }
 
-    fn hyperliquid_display_depth_demand(
+    fn display_depth_requests(
         &self,
+        provider: &str,
         demand: &ProviderDemand,
-    ) -> HyperliquidDisplayDepthDemand {
+    ) -> Vec<DisplayDepthRequest> {
         let Some(provider_generation) = self
             .engine
-            .provider_status(super::HYPERLIQUID_DESCRIPTOR.id)
+            .provider_status(provider)
             .and_then(|status| status.generation)
         else {
-            return HyperliquidDisplayDepthDemand::default();
+            return Vec::new();
         };
-        let mut books = BTreeSet::new();
-        for requested in demand
+        demand
             .instruments
             .iter()
             .filter(|requested| requested.display_depth)
-        {
-            let Some(book) = self.order_books.get(&(
-                super::HYPERLIQUID_DESCRIPTOR.id.to_string(),
-                requested.instrument.instrument_id.clone(),
-            )) else {
-                continue;
-            };
-            let (Ok(price_scale), Ok(quantity_scale)) = (
-                u8::try_from(book.instrument.price_scale),
-                u8::try_from(book.instrument.quantity_scale),
-            ) else {
-                continue;
-            };
-            books.insert(HyperliquidDisplayBookDemand {
-                instrument: HyperliquidInstrumentDemand {
-                    wire_coin: book.instrument.provider_symbol.clone(),
-                    instrument_id: book.instrument.instrument_id.clone(),
-                    entitlement_id: book.instrument.entitlement_id.clone(),
-                    price_scale,
-                    quantity_scale,
-                },
-                provider_generation: provider_generation.0.get(),
-            });
-        }
-        HyperliquidDisplayDepthDemand {
-            books: books.into_iter().collect(),
-        }
+            .filter_map(|requested| {
+                let book = self.order_books.get(&(
+                    provider.to_string(),
+                    requested.instrument.instrument_id.clone(),
+                ))?;
+                Some(DisplayDepthRequest {
+                    instrument: book.instrument.clone(),
+                    provider_generation: provider_generation.0.get(),
+                })
+            })
+            .collect()
     }
 
     /// Hands the worker the rebuilt subscription set. The worker diffs it
     /// against live subscriptions, so presentation changes never reconnect.
-    pub(super) fn flush_hyperliquid_demand(&mut self) {
-        if !self
-            .provider_registry
-            .has_control(super::HYPERLIQUID_DESCRIPTOR.id)
-        {
+    pub(super) fn flush_dirty_demand(&mut self, provider: &'static str) {
+        if !self.provider_registry.has_control(provider) {
             return;
         }
-        if !self.session(super::HYPERLIQUID_DESCRIPTOR.id).demand_dirty {
+        if !self.session(provider).demand_dirty {
             return;
         }
-        let neutral = self.provider_demand(super::HYPERLIQUID_DESCRIPTOR.id);
-        let demand = neutral.hyperliquid_wire();
-        let display_demand = self.hyperliquid_display_depth_demand(&neutral);
-        let empty = demand.candles.is_empty()
-            && demand.trades.is_empty()
-            && demand.quotes.is_empty()
-            && demand.books.is_empty();
-        if empty && !self.session(super::HYPERLIQUID_DESCRIPTOR.id).engaged {
-            self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id)
-                .demand_dirty = false;
+        let neutral = self.provider_demand(provider);
+        let candle_wire_interval = self
+            .providers
+            .descriptor(provider)
+            .and_then(|descriptor| descriptor.capabilities.candle_wire_interval);
+        let display_requests = self.display_depth_requests(provider, &neutral);
+        let empty = !neutral.has_dirty_stream_demand(candle_wire_interval);
+        if empty && !self.session(provider).engaged {
+            self.session_mut(provider).demand_dirty = false;
             return;
         }
-        if !self.ensure_provider_connection(super::HYPERLIQUID_DESCRIPTOR.id) {
-            if self
-                .provider_registry
-                .is_failed(super::HYPERLIQUID_DESCRIPTOR.id)
-            {
+        if !self.ensure_provider_connection(provider) {
+            if self.provider_registry.is_failed(provider) {
                 // A terminal provider session can never deliver this demand,
                 // and every selection has already published its rejection.
                 // Clearing the dirty flag stops the coordinator from
                 // re-flushing the same undeliverable demand every turn.
-                let session = self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id);
+                let session = self.session_mut(provider);
                 session.demand_dirty = false;
                 session.engaged = false;
             }
@@ -2405,23 +2390,21 @@ impl Coordinator<'_> {
         }
         let raw = self
             .provider_registry
-            .apply_demand(super::HYPERLIQUID_DESCRIPTOR.id, &neutral)
+            .apply_demand(provider, &neutral)
             .map_err(|_| "Provider live worker is unavailable".to_string());
-        let display = self.providers.send_hyperliquid_display_depth(
-            HyperliquidDisplayDepthControl::Subscribe(display_demand),
-        );
+        let display = self
+            .providers
+            .send_display_depth(provider, &display_requests);
         match (raw, display) {
             (Ok(true), Ok(true)) => {
-                self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id)
-                    .demand_dirty = false;
-                self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id).engaged = !empty;
+                self.session_mut(provider).demand_dirty = false;
+                self.session_mut(provider).engaged = !empty;
             }
             // A full channel retries at the explicit control deadline; the
             // worker coalesces to the newest set.
             (Ok(false), _) | (_, Ok(false)) => {}
             (Err(_), _) | (_, Err(_)) => {
-                self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id)
-                    .demand_dirty = false;
+                self.session_mut(provider).demand_dirty = false;
             }
         }
     }
@@ -2459,15 +2442,11 @@ impl Coordinator<'_> {
         self.series
             .retain_trades(|series, _| self.engine.has_subscription(series));
         for provider in retired_trade_providers {
-            if self
-                .providers
-                .descriptor(&provider)
-                .is_some_and(|descriptor| {
-                    descriptor.capabilities.trade_demand_policy
-                        == super::TradeDemandPolicy::Immediate
-                })
+            if let Some(descriptor) = self.providers.descriptor(&provider)
+                && descriptor.capabilities.trade_demand_policy
+                    == super::TradeDemandPolicy::Immediate
             {
-                let _ = self.send_rithmic_demand();
+                let _ = self.send_immediate_demand(descriptor.id);
             }
         }
         let retired_candle_providers = self
@@ -2497,29 +2476,19 @@ impl Coordinator<'_> {
         self.release_idle();
     }
     /// Hands the worker a replacement subscription set the control channel refused.
-    pub(super) fn flush_rithmic_demand(&mut self) {
-        if !self
-            .provider_registry
-            .has_control(super::RITHMIC_DESCRIPTOR.id)
-        {
+    pub(super) fn flush_pending_demand(&mut self, provider: &'static str) {
+        if !self.provider_registry.has_control(provider) {
             return;
         }
-        let Some(neutral) = self
-            .session_mut(super::RITHMIC_DESCRIPTOR.id)
-            .pending
-            .take()
-        else {
+        let Some(neutral) = self.session_mut(provider).pending.take() else {
             return;
         };
-        match self
-            .provider_registry
-            .apply_demand(super::RITHMIC_DESCRIPTOR.id, &neutral)
-        {
+        match self.provider_registry.apply_demand(provider, &neutral) {
             Ok(true) => {
-                self.session_mut(super::RITHMIC_DESCRIPTOR.id).accepted = Some(neutral);
+                self.session_mut(provider).accepted = Some(neutral);
             }
             Ok(false) | Err(_) => {
-                self.session_mut(super::RITHMIC_DESCRIPTOR.id).pending = Some(neutral);
+                self.session_mut(provider).pending = Some(neutral);
             }
         }
     }
@@ -2539,7 +2508,7 @@ impl Coordinator<'_> {
         if let Some(descriptor) = self.providers.descriptor(provider) {
             match descriptor.capabilities.alert_demand_update {
                 super::AlertDemandUpdate::Immediate => {
-                    let _ = self.send_rithmic_demand();
+                    let _ = self.send_immediate_demand(descriptor.id);
                 }
                 super::AlertDemandUpdate::MarkDirty => {
                     self.session_mut(provider).demand_dirty = true;
@@ -3617,6 +3586,7 @@ mod tests {
 
     #[test]
     fn terminal_rithmic_failures_do_not_auto_resubscribe() {
+        use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
         for reason in [
             ProviderInvalidationReason::Authentication,
             ProviderInvalidationReason::AgreementRequired,
@@ -3625,7 +3595,7 @@ mod tests {
             ProviderInvalidationReason::MalformedMessage,
         ] {
             assert!(
-                !super::super::provider_event::rithmic_auto_recovers(Some(reason)),
+                !crate::rithmic_realtime::invalidation_fault(Some(reason)).auto_recovers,
                 "{reason:?}"
             );
         }
@@ -3637,10 +3607,10 @@ mod tests {
             ProviderInvalidationReason::QueueOverflow,
         ] {
             assert!(
-                super::super::provider_event::rithmic_auto_recovers(Some(reason)),
+                crate::rithmic_realtime::invalidation_fault(Some(reason)).auto_recovers,
                 "{reason:?}"
             );
         }
-        assert!(super::super::provider_event::rithmic_auto_recovers(None));
+        assert!(crate::rithmic_realtime::invalidation_fault(None).auto_recovers);
     }
 }

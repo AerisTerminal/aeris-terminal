@@ -851,6 +851,10 @@ fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = [
         "calendar/mod.rs",
         "coordinator.rs",
+        "error.rs",
+        "provider_auth.rs",
+        "provider_event.rs",
+        "provider_session.rs",
         "realtime.rs",
         "runtime.rs",
         "publication.rs",
@@ -1074,6 +1078,10 @@ fn violates_generic_market_provider_boundary(path: &str, source: &str) -> bool {
         "/quotes.rs",
         "/outbox.rs",
         "/coordinator.rs",
+        "/error.rs",
+        "/provider_auth.rs",
+        "/provider_event.rs",
+        "/provider_session.rs",
         "/realtime.rs",
         "/runtime.rs",
         "/publication.rs",
@@ -5306,9 +5314,14 @@ mod tests {
             );
         }
         for path in [
+            "mod.rs",
             "coordinator.rs",
+            "error.rs",
             "history.rs",
             "instrument_selection.rs",
+            "provider_auth.rs",
+            "provider_event.rs",
+            "provider_session.rs",
             "publication.rs",
             "realtime.rs",
             "runtime.rs",
@@ -5319,6 +5332,15 @@ mod tests {
                 assert!(
                     !production.contains(branch),
                     "neutral market-service owner {path} branches on provider identity: {branch}"
+                );
+            }
+            for adapter_crate in [
+                "aeris_rithmic_protocol_adapter",
+                "aeris_hyperliquid_market_adapter",
+            ] {
+                assert!(
+                    !production.contains(adapter_crate),
+                    "neutral market-service owner {path} imports concrete adapter crate: {adapter_crate}"
                 );
             }
         }

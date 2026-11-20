@@ -7,7 +7,7 @@ pub(super) struct Boundary {
     commands: std::sync::mpsc::SyncSender<Command>,
     command_receiver: std::sync::mpsc::Receiver<Command>,
     provider_events: std::sync::mpsc::SyncSender<RithmicRealtimeEvent>,
-    provider_requests: std::sync::mpsc::Receiver<super::super::super::RithmicRealtimeControl>,
+    provider_requests: std::sync::mpsc::Receiver<crate::rithmic_realtime::RithmicRealtimeControl>,
     history: std::sync::mpsc::Receiver<super::super::super::HistoryRequest>,
     series: BarSeriesKey,
     consumer: ConsumerId,
@@ -199,7 +199,7 @@ impl Boundary {
         self.history.try_iter().for_each(drop);
     }
 
-    pub(super) fn provider_requests(&self) -> Vec<super::super::super::RithmicRealtimeControl> {
+    pub(super) fn provider_requests(&self) -> Vec<crate::rithmic_realtime::RithmicRealtimeControl> {
         self.provider_requests.try_iter().collect()
     }
 

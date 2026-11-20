@@ -1652,6 +1652,65 @@ fn unix_nanos_now() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+pub(crate) fn into_wire_provider_event(
+    event: HyperliquidRealtimeEvent,
+) -> crate::market_service::provider_event::WireProviderEvent {
+    use crate::market_service::provider_event::{
+        ProviderCandleSymbol, ProviderDisconnect, ProviderEventKind, ProviderFault,
+        ProviderFaultKind, ProviderTradeBatch, WireProviderEvent,
+    };
+    let generation = match &event {
+        HyperliquidRealtimeEvent::Connecting(g)
+        | HyperliquidRealtimeEvent::Connected(g)
+        | HyperliquidRealtimeEvent::Candle(g, ..)
+        | HyperliquidRealtimeEvent::Trades(g, _)
+        | HyperliquidRealtimeEvent::Quote(g, _)
+        | HyperliquidRealtimeEvent::Depth(g, _)
+        | HyperliquidRealtimeEvent::Heartbeat(g, _)
+        | HyperliquidRealtimeEvent::Recovering(g)
+        | HyperliquidRealtimeEvent::Disconnected(g) => *g,
+    };
+    let transient = ProviderFault {
+        kind: ProviderFaultKind::Transient,
+        auto_recovers: false,
+        detail: "Hyperliquid live session is recovering",
+    };
+    let kind = match event {
+        HyperliquidRealtimeEvent::Connecting(_) => ProviderEventKind::Connecting,
+        HyperliquidRealtimeEvent::Connected(_) => ProviderEventKind::Connected,
+        HyperliquidRealtimeEvent::Heartbeat(_, rtt) => ProviderEventKind::Heartbeat(rtt),
+        HyperliquidRealtimeEvent::Recovering(_) => {
+            ProviderEventKind::recovering_from_fault(transient)
+        }
+        HyperliquidRealtimeEvent::Disconnected(_) => {
+            ProviderEventKind::Disconnected(ProviderDisconnect::from_fault(transient))
+        }
+        HyperliquidRealtimeEvent::Candle(_, coin, interval, candle) => ProviderEventKind::Candle {
+            symbol: ProviderCandleSymbol { coin, interval },
+            bar: aeris_market_data::MarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: candle.open_nanos.div_euclid(1_000_000_000),
+                exchange_timestamp_unix_nanos: candle.open_nanos,
+                open: candle.open,
+                high: candle.high,
+                low: candle.low,
+                close: candle.close,
+                volume: candle.volume,
+            },
+        },
+        HyperliquidRealtimeEvent::Trades(_, trades) => {
+            ProviderEventKind::Trades(ProviderTradeBatch::Many(trades))
+        }
+        HyperliquidRealtimeEvent::Quote(_, quote) => ProviderEventKind::Quote(quote),
+        HyperliquidRealtimeEvent::Depth(_, depth) => ProviderEventKind::Depth(depth),
+    };
+    WireProviderEvent {
+        provider: "hyperliquid",
+        generation,
+        kind,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

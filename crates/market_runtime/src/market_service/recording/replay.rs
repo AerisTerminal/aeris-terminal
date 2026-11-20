@@ -26,9 +26,9 @@ use crate::market_service::{
     ActiveWorkerGuard, Command, FormingBar, HistoryRequest, HistorySnapshot, HistorySource,
     MarketEngine, MarketStream, ProviderCatalogChannel, ProviderCatalogChannels,
     ProviderCatalogCommand, ProviderCatalogEvent, ProviderCoordinatorWake, ProviderDemand,
-    ProviderEvent, ProviderEventKind, ProviderRuntimeRecord, ProviderRuntimeRegistry,
-    ProviderRuntimeSpec, ProviderStartContext, ProviderTradeBatch, REALTIME_CAPACITY,
-    RecordedSourceChannels,
+    ProviderEvent, ProviderEventKind, ProviderRealtimeChannels, ProviderRuntimeRecord,
+    ProviderRuntimeRegistry, ProviderRuntimeSpec, ProviderStartContext, ProviderTradeBatch,
+    REALTIME_CAPACITY,
 };
 use aeris_contracts::InstallProviderInstrument;
 use aeris_market_data::BarPeriod;
@@ -764,9 +764,8 @@ pub(in crate::market_service) fn start_runtime(
         history: started.history,
         cancellation: started.cancellation,
         lifecycle: started.lifecycle,
-        hyperliquid: None,
-        rithmic: None,
-        recorded: Some(RecordedSourceChannels { controls, events }),
+        realtime: Some(ProviderRealtimeChannels::recorded(controls, events)),
+        display_depth: None,
         catalog: ProviderCatalogChannels {
             enabled: true,
             channels: Box::new(ReplayCatalog {

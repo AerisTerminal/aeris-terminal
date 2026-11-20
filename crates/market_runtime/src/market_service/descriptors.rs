@@ -326,7 +326,7 @@ mod startup_tests {
         assert!(super::super::instrument_terms_from_install(&default).is_err());
         let descriptor = InstrumentDescriptor::from_install(
             &default,
-            &super::super::HYPERLIQUID_PRESENTATION,
+            &super::super::providers::hyperliquid::HYPERLIQUID_PRESENTATION,
             true,
         )
         .expect("provisional default descriptor");

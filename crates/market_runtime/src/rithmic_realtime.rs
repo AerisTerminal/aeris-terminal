@@ -2559,6 +2559,103 @@ const fn nonzero(value: usize) -> NonZeroUsize {
     }
 }
 
+pub(crate) const fn invalidation_fault(
+    reason: Option<ProviderInvalidationReason>,
+) -> crate::market_service::provider_event::ProviderFault {
+    use crate::market_service::provider_event::{ProviderFault, ProviderFaultKind};
+    match reason {
+        Some(ProviderInvalidationReason::Transport) => ProviderFault {
+            kind: ProviderFaultKind::Transport,
+            auto_recovers: true,
+            detail: "Rithmic transport connection failed",
+        },
+        Some(ProviderInvalidationReason::Authentication) => ProviderFault {
+            kind: ProviderFaultKind::Authentication,
+            auto_recovers: false,
+            detail: "Rithmic refused the saved login; check the user ID, password and system, and that the account has market data and Aeris enabled",
+        },
+        Some(ProviderInvalidationReason::AgreementRequired) => ProviderFault {
+            kind: ProviderFaultKind::AgreementRequired,
+            auto_recovers: false,
+            detail: "Rithmic account requires an agreement before market data can stream",
+        },
+        Some(ProviderInvalidationReason::UnsupportedSystem) => ProviderFault {
+            kind: ProviderFaultKind::UnsupportedSystem,
+            auto_recovers: false,
+            detail: "The selected Rithmic system is not offered on this server",
+        },
+        Some(ProviderInvalidationReason::SchemaMismatch) => ProviderFault {
+            kind: ProviderFaultKind::SchemaMismatch,
+            auto_recovers: false,
+            detail: "Rithmic protocol schema does not match the installed provider kit",
+        },
+        Some(ProviderInvalidationReason::HeartbeatSilence) => ProviderFault {
+            kind: ProviderFaultKind::HeartbeatSilence,
+            auto_recovers: true,
+            detail: "Rithmic heartbeat response timed out",
+        },
+        Some(ProviderInvalidationReason::MessageSilence) => ProviderFault {
+            kind: ProviderFaultKind::MessageSilence,
+            auto_recovers: true,
+            detail: "Rithmic market-data stream stopped producing messages",
+        },
+        Some(ProviderInvalidationReason::SequenceGap) => ProviderFault {
+            kind: ProviderFaultKind::SequenceGap,
+            auto_recovers: true,
+            detail: "Rithmic market-data sequence continuity was lost",
+        },
+        Some(ProviderInvalidationReason::QueueOverflow) => ProviderFault {
+            kind: ProviderFaultKind::QueueOverflow,
+            auto_recovers: true,
+            detail: "Rithmic callback queue overflowed before market data could be consumed",
+        },
+        Some(ProviderInvalidationReason::MalformedMessage) => ProviderFault {
+            kind: ProviderFaultKind::MalformedMessage,
+            auto_recovers: false,
+            detail: "Rithmic sent market data that failed protocol validation",
+        },
+        None => ProviderFault {
+            kind: ProviderFaultKind::Transient,
+            auto_recovers: true,
+            detail: "Rithmic live session is recovering",
+        },
+    }
+}
+
+pub(crate) fn into_wire_provider_event(
+    event: RithmicRealtimeEvent,
+) -> crate::market_service::provider_event::WireProviderEvent {
+    use crate::market_service::provider_event::{
+        ProviderDisconnect, ProviderEventKind, ProviderTradeBatch, WireProviderEvent,
+    };
+    let generation = event.generation();
+    let kind = match event {
+        RithmicRealtimeEvent::Connecting(_) => ProviderEventKind::Connecting,
+        RithmicRealtimeEvent::Connected(_) => ProviderEventKind::Connected,
+        RithmicRealtimeEvent::Heartbeat(_, rtt) => ProviderEventKind::Heartbeat(rtt),
+        RithmicRealtimeEvent::Failed(_, _error) => ProviderEventKind::Failed(
+            "Rithmic reconnect could not start; check provider configuration".into(),
+        ),
+        RithmicRealtimeEvent::Recovering(_, reason) => {
+            ProviderEventKind::recovering_from_fault(invalidation_fault(reason))
+        }
+        RithmicRealtimeEvent::Disconnected(_, reason) => ProviderEventKind::Disconnected(
+            ProviderDisconnect::from_fault(invalidation_fault(reason)),
+        ),
+        RithmicRealtimeEvent::Trade(_, trade) => {
+            ProviderEventKind::Trades(ProviderTradeBatch::One(trade))
+        }
+        RithmicRealtimeEvent::Quote(_, quote) => ProviderEventKind::Quote(quote),
+        RithmicRealtimeEvent::Depth(_, depth) => ProviderEventKind::Depth(depth),
+        RithmicRealtimeEvent::OrderLevels(_, event) => ProviderEventKind::OrderLevels(event),
+    };
+    WireProviderEvent {
+        provider: "rithmic",
+        generation,
+        kind,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

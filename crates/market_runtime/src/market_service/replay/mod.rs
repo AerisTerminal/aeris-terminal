@@ -392,7 +392,7 @@ fn replay_gap_recovery() {
         .provider_registry
         .epoch("rithmic")
         .unwrap();
-    let wire = crate::market_service::provider_event::ProviderEvent::rithmic(
+    let wire = crate::rithmic_realtime::into_wire_provider_event(
         RithmicRealtimeEvent::Recovering(1, Some(ProviderInvalidationReason::SequenceGap)),
     );
     harness.boundary.coordinator.handle_bound_provider_event(

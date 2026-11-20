@@ -97,7 +97,7 @@ fn characterization_symbol_or_timeframe_change_keeps_provider_session() {
     assert!(
         !initial_requests.is_empty()
             && initial_requests.iter().all(|request| matches!(
-            request, super::super::super::RithmicRealtimeControl::Subscribe(_)
+            request, crate::rithmic_realtime::RithmicRealtimeControl::Subscribe(_)
         )),
         "initial demand does not stop the provider session"
     );
@@ -125,7 +125,7 @@ fn characterization_symbol_or_timeframe_change_keeps_provider_session() {
     assert!(
         !changed_requests.is_empty()
             && changed_requests.iter().all(|request| matches!(
-            request, super::super::super::RithmicRealtimeControl::Subscribe(_)
+            request, crate::rithmic_realtime::RithmicRealtimeControl::Subscribe(_)
         )),
         "changing the series or symbol updates demand without stopping the provider session"
     );

@@ -5,11 +5,10 @@ use super::{
     ClientId, ConsumerId, Coordinator, InstallProviderInstrument, MAXIMUM_CATALOG_FIELD_BYTES,
     MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64, ProviderCatalogCommand, ProviderCatalogEvent,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderGeneration, ProviderHealth,
-    ProviderMarketScan, ProviderMarketScreen, Reply, RithmicCatalogControl, ScanProviderMarkets,
-    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument, SyncSender,
-    TrySendError, authorize_consumer,
+    ProviderMarketScan, ProviderMarketScreen, Reply, ScanProviderMarkets, ScreenProviderMarkets,
+    SearchProviderInstruments, SelectProviderInstrument, SyncSender, TrySendError,
+    authorize_consumer,
 };
-use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent, ScanDefinitionError};
 use aeris_observability::diagnostic;
 
@@ -112,24 +111,9 @@ pub(super) fn valid_catalog_field(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-pub(super) fn try_send_rithmic_catalog(
-    controls: &SyncSender<RithmicCatalogControl>,
-    control: RithmicCatalogControl,
-    provider_id: &str,
-) -> Result<(), String> {
-    controls.try_send(control).map_err(|error| match error {
-        TrySendError::Full(_) => {
-            format!("{provider_id} catalog command capacity is exhausted")
-        }
-        TrySendError::Disconnected(_) => {
-            format!("{provider_id} catalog worker is unavailable")
-        }
-    })
-}
-
-pub(super) fn try_send_hyperliquid_catalog(
-    controls: &SyncSender<HyperliquidCatalogControl>,
-    control: HyperliquidCatalogControl,
+pub(super) fn try_send_catalog_control<C>(
+    controls: &SyncSender<C>,
+    control: C,
     provider_id: &str,
 ) -> Result<(), String> {
     controls.try_send(control).map_err(|error| match error {

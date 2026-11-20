@@ -1,7 +1,7 @@
 //! Attachment of the broker venue relay, which routes the trading owner's broker orders
 //! through the saved Rithmic login on a dedicated worker.
 
-use super::MarketService;
+use super::{MarketService, MarketServiceError};
 use aeris_trading::{
     venue::{VenueCapabilities, VenueEvent},
     venue_outbox::VenueRequestReceiver,
@@ -37,10 +37,13 @@ impl MarketService {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let workers = workers
             .as_mut()
-            .ok_or_else(|| "market engine shutdown is in progress".to_string())?;
+            .ok_or(MarketServiceError::ShutdownInProgress)?;
         let login = &self.runtime.rithmic_login;
         if login.venue_attached.swap(true, Ordering::AcqRel) {
-            return Err("the broker venue is already attached".into());
+            return Err(MarketServiceError::AlreadyAttached(
+                "the broker venue is already attached",
+            )
+            .into());
         }
         let shutdown = Arc::clone(&self.runtime.shutdown);
         let revision = login.revision.clone();

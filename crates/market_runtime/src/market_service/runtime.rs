@@ -1,27 +1,20 @@
 use super::{
-    ActiveWorkerGuard, Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarSeriesKey,
-    COMMAND_CAPACITY, ClientId, Command, ConsumerId, ConsumerIdentity, ConsumerResourceClass,
-    Duration, GenerationId, HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource,
-    HyperliquidChannels, InstallProviderInstrument, Instant, InstrumentStreamKey, LeaseOwner,
-    LiveHyperliquidHistory, LiveRithmicHistory, MarketDataLeaseId, MarketEngine, MarketRuntime,
-    MarketService, MarketServiceProviders, MarketServiceStatus, Mutex, NativeStudyRegistration,
-    Ordering, OwnedCoordinatorChannels, ProviderCatalogChannelImpl, ProviderCatalogChannels,
+    Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COMMAND_CAPACITY, ClientId, Command,
+    ConsumerId, ConsumerIdentity, ConsumerResourceClass, DisplayDepthRequest, Duration,
+    GenerationId, HISTORY_CAPACITY, HistoryRequest, InstallProviderInstrument, Instant,
+    InstrumentStreamKey, LeaseOwner, LiveHyperliquidHistory, LiveRithmicHistory, MarketDataLeaseId,
+    MarketEngine, MarketRuntime, MarketService, MarketServiceError, MarketServiceProviders,
+    MarketServiceStatus, Mutex, NativeStudyRegistration, Ordering, OwnedCoordinatorChannels,
     ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord,
     ProviderEventLane, ProviderRuntimeEvent, ProviderRuntimeLifecycle, ProviderRuntimeRecord,
-    ProviderRuntimeRegistry, ProviderRuntimeSpec, QuoteSubscription, REALTIME_CAPACITY,
-    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, ScanProviderMarkets,
+    ProviderRuntimeRegistry, ProviderRuntimeSpec, QuoteSubscription, Reply, ScanProviderMarkets,
     ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
     StartedProviderRuntime, StreamRequirements, StudyInstanceId, SyncSender, TrySendError,
-    Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc, spawn_coordinator,
-    spawn_history_worker, thread, try_send_hyperliquid_catalog, try_send_rithmic_catalog,
+    Viewport, WorkspaceId, id, mpsc, spawn_coordinator, spawn_history_worker, thread,
     validate_provider_instrument, validate_provider_scan, validate_provider_screen,
     validate_provider_search, validate_provider_selection,
 };
 use crate::ProviderPresentationDescriptor;
-use crate::hyperliquid_display_depth::{
-    HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
-};
-use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_trading::market::{MarketFeedError, QuoteInterest, QuoteInterestSink};
 
@@ -41,101 +34,6 @@ impl QuoteInterestSink for MarketQuoteInterestSink {
         self.0
             .request(|reply| Ok(Command::SetTradingInterest(interest, reply)))
             .map_err(|_| MarketFeedError::Unavailable)
-    }
-}
-
-fn dispatch_rithmic_catalog(
-    controls: &SyncSender<RithmicCatalogControl>,
-    provider: &str,
-    command: ProviderCatalogCommand,
-) -> Result<(), String> {
-    let control = match command {
-        ProviderCatalogCommand::Search(value) => RithmicCatalogControl::Search(value),
-        ProviderCatalogCommand::Select(value) => RithmicCatalogControl::Select(value),
-        ProviderCatalogCommand::Screen(_) => {
-            return Err(format!("{provider} does not provide a market screen"));
-        }
-        ProviderCatalogCommand::Scan(_) => {
-            return Err(format!("{provider} does not provide a market scan"));
-        }
-    };
-    try_send_rithmic_catalog(controls, control, provider)
-}
-
-fn dispatch_hyperliquid_catalog(
-    controls: &SyncSender<HyperliquidCatalogControl>,
-    provider: &str,
-    command: ProviderCatalogCommand,
-) -> Result<(), String> {
-    let control = match command {
-        ProviderCatalogCommand::Search(value) => HyperliquidCatalogControl::Search(value),
-        ProviderCatalogCommand::Select(value) => HyperliquidCatalogControl::Select(value),
-        ProviderCatalogCommand::Screen(value) => HyperliquidCatalogControl::Screen(value),
-        ProviderCatalogCommand::Scan(scan) => {
-            let interval = scan.definition.timeframe;
-            // Every Hyperliquid market trades around the clock.
-            let period = crate::resolve_cadence(
-                interval,
-                &super::HYPERLIQUID_PRESENTATION,
-                aeris_instruments::CalendarSourceKind::AlwaysOpen,
-            )
-            .map_err(|_| format!("{provider} does not offer a {interval} market scan"))?;
-            HyperliquidCatalogControl::Scan { scan, period }
-        }
-    };
-    try_send_hyperliquid_catalog(controls, control, provider)
-}
-
-impl HistorySource for LiveRithmicHistory {
-    fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
-        fetch_rithmic_history(request)
-    }
-}
-
-fn fetch_rithmic_history(request: &HistoryRequest) -> Result<HistorySnapshot, String> {
-    let installed = request
-        .instrument
-        .as_ref()
-        .ok_or_else(|| "Provider instrument is not installed".to_string())?;
-    let snapshot = crate::rithmic_history::fetch(
-        &request.series,
-        request.provider_generation.0.get(),
-        installed,
-        request.req_window(),
-        &request.stop,
-    )?;
-    Ok(HistorySnapshot {
-        price_scale: snapshot.price_scale,
-        quantity_scale: snapshot.quantity_scale,
-        bars: snapshot.bars,
-        forming: snapshot.forming,
-        handoff_boundary_unix_nanos: Some(snapshot.handoff_boundary_unix_nanos),
-        backwards_exhausted: false,
-    })
-}
-
-impl HistorySource for LiveHyperliquidHistory {
-    fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
-        let installed = request
-            .instrument
-            .as_ref()
-            .ok_or_else(|| "Provider instrument is not installed".to_string())?;
-        let snapshot = crate::hyperliquid_history::fetch(
-            &mut self.0,
-            &request.series,
-            request.provider_generation.0.get(),
-            installed,
-            request.req_window(),
-            &request.stop,
-        )?;
-        Ok(HistorySnapshot {
-            price_scale: snapshot.price_scale,
-            quantity_scale: snapshot.quantity_scale,
-            bars: snapshot.bars,
-            forming: snapshot.forming,
-            handoff_boundary_unix_nanos: snapshot.handoff_boundary_unix_nanos,
-            backwards_exhausted: false,
-        })
     }
 }
 
@@ -221,386 +119,6 @@ impl ProviderRuntimeRegistry {
         })
     }
 
-    pub(super) fn start_rithmic_runtime(
-        spec: ProviderRuntimeSpec,
-        completions: &SyncSender<Command>,
-        wake: ProviderCoordinatorWake,
-        engine: &MarketEngine,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        context: &super::ProviderStartContext,
-    ) -> Result<ProviderRuntimeRecord, String> {
-        let enabled = spec.realtime.enabled;
-        let descriptor = spec.descriptor;
-        let started = Self::start_history_runtime(spec, completions, active_workers)?;
-        Self::start_rithmic_record(
-            started,
-            descriptor,
-            enabled,
-            context.rithmic_login.clone(),
-            wake,
-            engine,
-            active_workers,
-        )
-    }
-
-    pub(super) fn start_hyperliquid_runtime(
-        spec: ProviderRuntimeSpec,
-        completions: &SyncSender<Command>,
-        wake: ProviderCoordinatorWake,
-        engine: &MarketEngine,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        _context: &super::ProviderStartContext,
-    ) -> Result<ProviderRuntimeRecord, String> {
-        let enabled = spec.realtime.enabled;
-        let descriptor = spec.descriptor;
-        let started = Self::start_history_runtime(spec, completions, active_workers)?;
-        Self::start_hyperliquid_record(started, descriptor, enabled, wake, engine, active_workers)
-    }
-
-    fn start_rithmic_record(
-        mut started: StartedProviderRuntime,
-        descriptor: super::ProviderDescriptor,
-        enabled: bool,
-        login: RithmicLoginRevision,
-        wake: ProviderCoordinatorWake,
-        engine: &MarketEngine,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-    ) -> Result<ProviderRuntimeRecord, String> {
-        let reconnect_delay = if enabled {
-            match configured_reconnect_delay(engine, descriptor.id) {
-                Ok(delay) => Some(delay),
-                Err(error) => {
-                    started.cancel_and_join();
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
-        let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let catalog_events_tx =
-            super::CatalogPublisher::new(catalog_events_tx, descriptor.id, wake.clone());
-        let (catalog_controls, catalog_controls_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
-        let binding = Arc::new(Mutex::new(
-            super::provider_session::RithmicBinding::default(),
-        ));
-        let (realtime_controls, realtime_controls_rx) =
-            mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
-        if enabled {
-            let worker_cancellation = Arc::clone(&started.cancellation);
-            let worker_lifecycle = Arc::clone(&started.lifecycle);
-            let Some(reconnect_delay) = reconnect_delay else {
-                started.cancel_and_join();
-                return Err("Provider reconnect policy is unavailable".to_string());
-            };
-            let worker_activity = Arc::clone(active_workers);
-            let provider = thread::Builder::new()
-                .name(crate::rithmic_realtime::WORKER_NAME.to_string())
-                .spawn(move || {
-                    let _activity = ActiveWorkerGuard::register(
-                        crate::rithmic_realtime::WORKER_NAME,
-                        worker_activity,
-                    );
-                    crate::rithmic_realtime::run(
-                        &catalog_controls_rx,
-                        &catalog_events_tx,
-                        &realtime_controls_rx,
-                        &realtime_events_tx,
-                        &wake,
-                        reconnect_delay,
-                        &login,
-                    );
-                    if !worker_cancellation.load(Ordering::Acquire) {
-                        worker_lifecycle
-                            .mark_terminal_failure("Provider runtime stopped unexpectedly");
-                    }
-                })
-                .map_err(|error| error.to_string());
-            match provider {
-                Ok(provider) => started.workers.push(provider),
-                Err(error) => {
-                    started.cancel_and_join();
-                    return Err(error);
-                }
-            }
-        }
-        Ok(ProviderRuntimeRecord {
-            descriptor,
-            history: started.history,
-            cancellation: started.cancellation,
-            lifecycle: started.lifecycle,
-            hyperliquid: None,
-            // A history-only runtime has no realtime receiver. Do not
-            // register its intentionally closed control channel as a session.
-            rithmic: enabled.then_some(super::RithmicChannels {
-                controls: realtime_controls,
-                events: realtime_events,
-                binding,
-            }),
-            recorded: None,
-            catalog: ProviderCatalogChannels {
-                enabled,
-                channels: Box::new(ProviderCatalogChannelImpl::new(
-                    catalog_controls,
-                    catalog_events,
-                    dispatch_rithmic_catalog,
-                )),
-            },
-            workers: started.workers,
-        })
-    }
-
-    fn start_hyperliquid_record(
-        mut started: StartedProviderRuntime,
-        descriptor: super::ProviderDescriptor,
-        enabled: bool,
-        wake: ProviderCoordinatorWake,
-        engine: &MarketEngine,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-    ) -> Result<ProviderRuntimeRecord, String> {
-        let reconnect_delay = if enabled {
-            match configured_reconnect_delay(engine, descriptor.id) {
-                Ok(delay) => Some(delay),
-                Err(error) => {
-                    started.cancel_and_join();
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
-        let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
-        // Scan publications share the catalog channel, so its overflow rejects pending scans too.
-        let scan_events_tx =
-            super::CatalogPublisher::new(catalog_events_tx.clone(), descriptor.id, wake.clone());
-        let catalog_events_tx =
-            super::CatalogPublisher::new(catalog_events_tx, descriptor.id, wake.clone());
-        let (catalog_controls, catalog_controls_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let (scan_jobs, scan_jobs_rx) =
-            mpsc::sync_channel(crate::hyperliquid_market_scan::SCAN_JOB_CAPACITY);
-        let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
-        let (realtime_controls, realtime_controls_rx) =
-            mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
-        let (display_events_tx, display_events) = mpsc::sync_channel(REALTIME_CAPACITY);
-        let (display_controls, display_controls_rx) =
-            mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
-        // One generation counter shared by the catalog thread (install
-        // stamping) and the realtime thread (socket sessions). The realtime
-        // thread owns it: every connection publishes its generation here.
-        let ws_generation = Arc::new(AtomicU64::new(1));
-        if enabled {
-            let Some(reconnect_delay) = reconnect_delay else {
-                started.cancel_and_join();
-                return Err("Provider reconnect policy is unavailable".to_string());
-            };
-            if let Err(error) = Self::spawn_hyperliquid_scan(
-                &mut started,
-                active_workers,
-                scan_jobs_rx,
-                scan_events_tx,
-            ) {
-                started.cancel_and_join();
-                return Err(error.to_string());
-            }
-            if let Err(error) = Self::spawn_hyperliquid_catalog(
-                &mut started,
-                active_workers,
-                catalog_controls_rx,
-                catalog_events_tx,
-                scan_jobs,
-                Arc::clone(&ws_generation),
-            ) {
-                started.cancel_and_join();
-                return Err(error);
-            }
-            if let Err(error) = Self::spawn_hyperliquid_provider(
-                &mut started,
-                active_workers,
-                realtime_controls_rx,
-                realtime_events_tx,
-                ws_generation,
-                wake.clone(),
-            ) {
-                started.cancel_and_join();
-                return Err(error);
-            }
-            if let Err(error) = Self::spawn_hyperliquid_display_depth(
-                &mut started,
-                active_workers,
-                display_controls_rx,
-                display_events_tx,
-                wake,
-                reconnect_delay,
-            ) {
-                started.cancel_and_join();
-                return Err(error);
-            }
-        }
-        Ok(ProviderRuntimeRecord {
-            descriptor,
-            history: started.history,
-            cancellation: started.cancellation,
-            lifecycle: started.lifecycle,
-            hyperliquid: enabled.then_some(HyperliquidChannels {
-                controls: realtime_controls,
-                events: realtime_events,
-                display_controls,
-                display_events,
-            }),
-            rithmic: None,
-            recorded: None,
-            catalog: ProviderCatalogChannels {
-                enabled,
-                channels: Box::new(ProviderCatalogChannelImpl::new(
-                    catalog_controls,
-                    catalog_events,
-                    dispatch_hyperliquid_catalog,
-                )),
-            },
-            workers: started.workers,
-        })
-    }
-
-    fn spawn_hyperliquid_catalog(
-        started: &mut StartedProviderRuntime,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        controls: mpsc::Receiver<crate::hyperliquid_realtime::HyperliquidCatalogControl>,
-        events: super::CatalogPublisher<crate::hyperliquid_realtime::HyperliquidCatalogEvent>,
-        scan_jobs: mpsc::SyncSender<crate::hyperliquid_market_scan::HyperliquidScanJob>,
-        ws_generation: Arc<AtomicU64>,
-    ) -> Result<(), String> {
-        let cancellation = Arc::clone(&started.cancellation);
-        let lifecycle = Arc::clone(&started.lifecycle);
-        let activity = Arc::clone(active_workers);
-        let worker = thread::Builder::new()
-            .name(crate::hyperliquid_realtime::CATALOG_WORKER_NAME.to_string())
-            .spawn(move || {
-                let _activity = ActiveWorkerGuard::register(
-                    crate::hyperliquid_realtime::CATALOG_WORKER_NAME,
-                    activity,
-                );
-                crate::hyperliquid_realtime::run_catalog(
-                    &controls,
-                    &events,
-                    &scan_jobs,
-                    &ws_generation,
-                    &cancellation,
-                    aeris_hyperliquid_market_adapter::HyperliquidHttpConfig::default(),
-                );
-                if !cancellation.load(Ordering::Acquire) {
-                    lifecycle
-                        .mark_terminal_failure("Provider catalog runtime stopped unexpectedly");
-                }
-            })
-            .map_err(|error| error.to_string())?;
-        started.workers.push(worker);
-        Ok(())
-    }
-
-    fn spawn_hyperliquid_scan(
-        started: &mut StartedProviderRuntime,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        jobs: mpsc::Receiver<crate::hyperliquid_market_scan::HyperliquidScanJob>,
-        events: super::CatalogPublisher<crate::hyperliquid_realtime::HyperliquidCatalogEvent>,
-    ) -> std::io::Result<()> {
-        let cancellation = Arc::clone(&started.cancellation);
-        let lifecycle = Arc::clone(&started.lifecycle);
-        let activity = Arc::clone(active_workers);
-        let worker = thread::Builder::new()
-            .name(crate::hyperliquid_market_scan::SCAN_WORKER_NAME.to_string())
-            .spawn(move || {
-                let _activity = ActiveWorkerGuard::register(
-                    crate::hyperliquid_market_scan::SCAN_WORKER_NAME,
-                    activity,
-                );
-                let mut client = aeris_hyperliquid_market_adapter::HyperliquidHttpClient::default();
-                crate::hyperliquid_market_scan::run_scan(
-                    &jobs,
-                    &events,
-                    &cancellation,
-                    &super::clock::SystemClock,
-                    |request, stop| {
-                        crate::hyperliquid_market_scan::fetch_candles(&mut client, request, stop)
-                    },
-                );
-                if !cancellation.load(Ordering::Acquire) {
-                    lifecycle.mark_terminal_failure("Provider scan runtime stopped unexpectedly");
-                }
-            })?;
-        started.workers.push(worker);
-        Ok(())
-    }
-
-    fn spawn_hyperliquid_provider(
-        started: &mut StartedProviderRuntime,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        controls: mpsc::Receiver<crate::hyperliquid_realtime::HyperliquidRealtimeControl>,
-        events: mpsc::SyncSender<
-            aeris_market_engine::fence::Fenced<
-                aeris_market_engine::fence::ProviderTag,
-                crate::hyperliquid_realtime::HyperliquidRealtimeEvent,
-            >,
-        >,
-        ws_generation: Arc<AtomicU64>,
-        wake: ProviderCoordinatorWake,
-    ) -> Result<(), String> {
-        let cancellation = Arc::clone(&started.cancellation);
-        let lifecycle = Arc::clone(&started.lifecycle);
-        let activity = Arc::clone(active_workers);
-        let worker = thread::Builder::new()
-            .name(crate::hyperliquid_realtime::PROVIDER_WORKER_NAME.to_string())
-            .spawn(move || {
-                let _activity = ActiveWorkerGuard::register(
-                    crate::hyperliquid_realtime::PROVIDER_WORKER_NAME,
-                    activity,
-                );
-                crate::hyperliquid_realtime::run(
-                    &controls,
-                    &events,
-                    &cancellation,
-                    &ws_generation,
-                    &wake,
-                );
-                if !cancellation.load(Ordering::Acquire) {
-                    lifecycle.mark_terminal_failure("Provider runtime stopped unexpectedly");
-                }
-            })
-            .map_err(|error| error.to_string())?;
-        started.workers.push(worker);
-        Ok(())
-    }
-
-    fn spawn_hyperliquid_display_depth(
-        started: &mut StartedProviderRuntime,
-        active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        controls: mpsc::Receiver<HyperliquidDisplayDepthControl>,
-        events: mpsc::SyncSender<HyperliquidDisplayDepthEvent>,
-        wake: ProviderCoordinatorWake,
-        reconnect_delay: Duration,
-    ) -> Result<(), String> {
-        let cancellation = Arc::clone(&started.cancellation);
-        let activity = Arc::clone(active_workers);
-        let worker = thread::Builder::new()
-            .name(crate::hyperliquid_display_depth::WORKER_NAME.to_string())
-            .spawn(move || {
-                let _activity = ActiveWorkerGuard::register(
-                    crate::hyperliquid_display_depth::WORKER_NAME,
-                    activity,
-                );
-                crate::hyperliquid_display_depth::run(
-                    &controls,
-                    &events,
-                    &cancellation,
-                    &wake,
-                    reconnect_delay,
-                );
-            })
-            .map_err(|error| error.to_string())?;
-        started.workers.push(worker);
-        Ok(())
-    }
-
     pub(super) fn dispatch(&self) -> ProviderDispatch<'_> {
         let records: BTreeMap<_, _> = self
             .records
@@ -616,9 +134,8 @@ impl ProviderRuntimeRegistry {
                         descriptor: record.descriptor,
                         history: &record.history,
                         lifecycle: Some(&record.lifecycle),
-                        hyperliquid: record.hyperliquid.as_ref(),
-                        rithmic: record.rithmic.as_ref(),
-                        recorded: record.recorded.as_ref(),
+                        realtime: record.realtime.as_ref(),
+                        display_depth: record.display_depth.as_ref(),
                         catalog,
                     },
                 )
@@ -629,14 +146,13 @@ impl ProviderRuntimeRegistry {
             let Some(record) = records.get(provider_id) else {
                 continue;
             };
-            if record.hyperliquid.is_some() || record.rithmic.is_some() || record.recorded.is_some()
-            {
+            if record.realtime.is_some() {
                 lanes.push(ProviderEventLane::Realtime(provider_id));
             }
             if record.catalog.is_some() {
                 lanes.push(ProviderEventLane::Catalog(provider_id));
             }
-            if record.hyperliquid.is_some() {
+            if record.display_depth.is_some() {
                 lanes.push(ProviderEventLane::DisplayDepth(provider_id));
             }
         }
@@ -656,12 +172,14 @@ impl ProviderRuntimeRegistry {
         for (_, record) in records {
             let ProviderRuntimeRecord {
                 history,
-                hyperliquid: _,
-                rithmic: _,
+                realtime,
+                display_depth,
                 catalog,
                 workers,
                 ..
             } = record;
+            drop(realtime);
+            drop(display_depth);
             drop(history);
             drop(catalog);
             for worker in workers {
@@ -741,10 +259,10 @@ impl ProviderDispatch<'_> {
             .and_then(ProviderRuntimeLifecycle::detail)
     }
 
-    pub(super) fn rithmic_realtime_enabled(&self) -> bool {
+    pub(super) fn realtime_enabled(&self, provider_id: &str) -> bool {
         self.records
-            .get(super::RITHMIC_DESCRIPTOR.id)
-            .is_some_and(|record| record.rithmic.is_some())
+            .get(provider_id)
+            .is_some_and(|record| record.realtime.is_some())
     }
 
     pub(super) fn observe_generation(
@@ -784,43 +302,9 @@ impl ProviderDispatch<'_> {
             ProviderEventLane::Realtime(provider_id) => self
                 .records
                 .get(provider_id)?
-                .rithmic
-                .and_then(|channels| {
-                    channels
-                        .binding
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take(&channels.events)
-                })
-                .map(ProviderRuntimeEvent::BoundRealtime)
-                .or_else(|| {
-                    let bound = self
-                        .records
-                        .get(provider_id)?
-                        .hyperliquid?
-                        .events
-                        .try_recv()
-                        .ok()?;
-                    let epoch = bound.epoch;
-                    let wire = super::ProviderEvent::hyperliquid(bound.value);
-                    (wire.generation == epoch.get().get()).then_some(
-                        ProviderRuntimeEvent::BoundRealtime(super::ProviderEvent {
-                            provider: wire.provider,
-                            generation: epoch,
-                            wire_generation: wire.generation,
-                            kind: wire.kind,
-                        }),
-                    )
-                })
-                .or_else(|| {
-                    self.records
-                        .get(provider_id)?
-                        .recorded?
-                        .events
-                        .try_recv()
-                        .ok()
-                        .map(ProviderRuntimeEvent::BoundRealtime)
-                }),
+                .realtime?
+                .take_event()
+                .map(ProviderRuntimeEvent::BoundRealtime),
             ProviderEventLane::Catalog(provider_id) => self
                 .records
                 .get(provider_id)?
@@ -830,11 +314,9 @@ impl ProviderDispatch<'_> {
             ProviderEventLane::DisplayDepth(provider_id) => self
                 .records
                 .get(provider_id)?
-                .hyperliquid?
-                .display_events
-                .try_recv()
-                .ok()
-                .map(|event| ProviderRuntimeEvent::DisplayDepth(provider_id, event.into())),
+                .display_depth?
+                .take_event()
+                .map(|event| ProviderRuntimeEvent::DisplayDepth(provider_id, event)),
         }?;
         self.observe_event(&event);
         Some(event)
@@ -876,26 +358,20 @@ impl ProviderDispatch<'_> {
             .send(provider_id, command)
     }
 
-    pub(super) fn send_hyperliquid_display_depth(
+    pub(super) fn send_display_depth(
         &self,
-        control: HyperliquidDisplayDepthControl,
+        provider_id: &str,
+        requests: &[DisplayDepthRequest],
     ) -> Result<bool, String> {
-        let Some(controls) = self
+        let Some(display_depth) = self
             .records
-            .get(super::HYPERLIQUID_DESCRIPTOR.id)
+            .get(provider_id)
             .ok_or_else(|| "Provider display-depth worker is unavailable".to_string())?
-            .hyperliquid
-            .map(|channel| &channel.display_controls)
+            .display_depth
         else {
             return Ok(false);
         };
-        match controls.try_send(control) {
-            Ok(()) => Ok(true),
-            Err(TrySendError::Full(_)) => Ok(false),
-            Err(TrySendError::Disconnected(_)) => {
-                Err("Provider display-depth worker is unavailable".to_string())
-            }
-        }
+        display_depth.send_demand(requests)
     }
 }
 
@@ -1083,13 +559,20 @@ impl MarketService {
         let MarketServiceProviders {
             presentations: provider_presentations,
         } = providers;
+        let rithmic_login = Arc::new(super::rithmic_login::RithmicLogin::new(rithmic_login));
+        let mut provider_auth = super::provider_auth::ProviderAuthRegistry::default();
+        provider_auth.register(
+            super::RITHMIC_DESCRIPTOR.id,
+            Arc::clone(&rithmic_login) as Arc<dyn super::provider_auth::ProviderAuthAdapter>,
+        );
         Self {
             commands,
             runtime: Arc::new(MarketRuntime {
                 shutdown,
                 shutdown_wake,
                 provider_presentations,
-                rithmic_login: super::rithmic_login::RithmicLogin::new(rithmic_login),
+                provider_auth,
+                rithmic_login,
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
                 quote_releases,
@@ -1118,10 +601,10 @@ impl MarketService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
-            .ok_or_else(|| "market engine shutdown is already in progress".to_string())?;
+            .ok_or(MarketServiceError::ShutdownInProgress)?;
         let deadline = Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| "market engine shutdown deadline overflowed".to_string())?;
+            .ok_or(MarketServiceError::ShutdownDeadlineOverflow)?;
         let mut panicked = Vec::new();
         loop {
             let mut index = 0;
@@ -1140,10 +623,7 @@ impl MarketService {
                 return if panicked.is_empty() {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "market engine workers panicked during shutdown: {}",
-                        panicked.join(", ")
-                    ))
+                    Err(MarketServiceError::ShutdownWorkersPanicked(panicked.join(", ")).into())
                 };
             }
             let now = Instant::now();
@@ -1162,9 +642,7 @@ impl MarketService {
                         .cloned(),
                 );
                 let pending = pending.into_iter().collect::<Vec<_>>().join(", ");
-                return Err(format!(
-                    "market engine shutdown deadline expired with active workers: {pending}"
-                ));
+                return Err(MarketServiceError::ShutdownTimedOut(pending).into());
             }
             thread::sleep(Duration::from_millis(5).min(deadline.duration_since(now)));
         }
@@ -1735,13 +1213,11 @@ impl MarketService {
             match self.commands.try_send(command) {
                 Ok(()) => break,
                 Err(TrySendError::Disconnected(_)) => {
-                    return Err("market engine coordinator is unavailable".to_string());
+                    return Err(MarketServiceError::CoordinatorUnavailable.into());
                 }
                 Err(TrySendError::Full(returned)) => {
                     if Instant::now() >= deadline {
-                        return Err(
-                            "market coordinator is busy; request was not submitted".to_string()
-                        );
+                        return Err(MarketServiceError::CoordinatorBusy.into());
                     }
                     command = returned;
                     thread::sleep(Duration::from_millis(1));
@@ -1751,14 +1227,14 @@ impl MarketService {
         match reply_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("market engine coordinator stopped before replying".to_string())
+                Err(MarketServiceError::CoordinatorStopped.into())
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if state.cancel() {
-                    Err("market coordinator deadline expired; request was cancelled before execution".to_string())
+                    Err(MarketServiceError::DeadlineCancelled.into())
                 } else {
                     // Never automatically retry a mutation whose execution has started.
-                    Err("market coordinator deadline expired after execution started; outcome is unknown".to_string())
+                    Err(MarketServiceError::DeadlineUnknown.into())
                 }
             }
         }
@@ -1767,8 +1243,16 @@ impl MarketService {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ProviderCatalogChannel;
+    use super::super::{
+        HistorySnapshot, HistorySource, ProviderCatalogChannel, ProviderCatalogChannelImpl,
+        providers::{
+            hyperliquid::dispatch_catalog as dispatch_hyperliquid_catalog,
+            rithmic::dispatch_catalog as dispatch_rithmic_catalog,
+        },
+    };
     use super::*;
+    use crate::hyperliquid_realtime::HyperliquidCatalogControl;
+    use crate::rithmic_realtime::RithmicCatalogControl;
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
         StudyExecutionContext, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
