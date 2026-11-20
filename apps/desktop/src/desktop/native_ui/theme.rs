@@ -21,9 +21,13 @@ pub(crate) struct InputAppearance {
 
 pub(crate) fn input_appearance(theme: &AerisTheme) -> InputAppearance {
     let colors = &theme.colors;
+    let hover_fill = match theme.mode {
+        ThemeMode::Light => colors.hover_bg,
+        ThemeMode::Dark => colors.hover_bg_secondary,
+    };
     InputAppearance {
         fill: field_surface(theme),
-        hover_fill: colors.hover_bg,
+        hover_fill,
         border: field_border(theme),
         focus_ring: colors.ring_primary,
         invalid_border: colors.danger,
@@ -282,7 +286,13 @@ mod tests {
                     ThemeMode::Dark => theme.colors.surface_secondary,
                 }
             );
-            assert_eq!(field.hover_fill, theme.colors.hover_bg);
+            assert_eq!(
+                field.hover_fill,
+                match theme.mode {
+                    ThemeMode::Light => theme.colors.hover_bg,
+                    ThemeMode::Dark => theme.colors.hover_bg_secondary,
+                }
+            );
             assert_eq!(
                 field.border,
                 match theme.mode {

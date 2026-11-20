@@ -2104,7 +2104,7 @@ fn market_row(ui: Page<'_>, index: usize, entry: InstrumentMenuEntry) -> Statefu
         .rounded(radius(1.0))
         .when(selectable, |row| {
             row.cursor_pointer()
-                .hover(|style| style.bg(gpui_color(colors.hover_bg)))
+                .hover(|style| style.bg(gpui_color(colors.hover_bg_secondary)))
                 .on_click(move |_, _, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
                         terminal.activate_workflow_market(&action, terminal_cx);

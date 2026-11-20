@@ -116,7 +116,7 @@ enum TabSurface {
         selected: ThemeColor,
     },
     /// A full-width section in a [`TabList::sidebar`].
-    Sidebar,
+    Sidebar { secondary: bool },
 }
 
 /// Theme System tab colors for one selection state. Unselected tabs keep a transparent
@@ -151,12 +151,18 @@ fn segmented_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColor
     }
 }
 
-/// Sidebar sections rest without a fill, take `hover-bg` on hover and stay on `active-bg`
-/// while selected.
-fn sidebar_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColors {
+/// Sidebar sections rest without a fill, take `hover-bg` (`hover-bg-secondary` on floating
+/// layers) on hover and stay on `active-bg` (`active-bg-secondary` on floating layers) while
+/// selected.
+fn sidebar_tab_colors(theme: &AerisTheme, selected: bool, secondary: bool) -> SegmentedTabColors {
     let colors = theme.colors;
+    let active_fill = if secondary {
+        colors.active_bg_secondary
+    } else {
+        colors.active_bg
+    };
     SegmentedTabColors {
-        fill: selected.then_some(colors.active_bg),
+        fill: selected.then_some(active_fill),
         border: None,
         text: if selected {
             colors.text_default
@@ -205,9 +211,16 @@ impl Tab {
         self
     }
 
-    /// Renders a section of a [`TabList::sidebar`].
+    /// Renders a section of a [`TabList::sidebar`] on `--surface`.
     pub(crate) const fn sidebar(mut self) -> Self {
-        self.surface = TabSurface::Sidebar;
+        self.surface = TabSurface::Sidebar { secondary: false };
+        self
+    }
+
+    /// Renders a section of a [`TabList::sidebar`] inside a floating `--surface-secondary` layer
+    /// (such as Chart Settings or Accounts & Connections).
+    pub(crate) const fn sidebar_on_secondary(mut self) -> Self {
+        self.surface = TabSurface::Sidebar { secondary: true };
         self
     }
 
@@ -254,7 +267,7 @@ impl RenderOnce for Tab {
         let border_width = platform_border_width(&self.theme);
         let radius = match self.surface {
             TabSurface::Segmented => px(0.0),
-            TabSurface::Sidebar => sidebar_tab_radius(),
+            TabSurface::Sidebar { .. } => sidebar_tab_radius(),
             TabSurface::Chrome { .. } => tab_radius(),
         };
         let mut tab = match self.surface {
@@ -287,8 +300,13 @@ impl RenderOnce for Tab {
                     .active(move |tab| tab.text_color(gpui_color(state.active_text)))
                     .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary)))
             }
-            TabSurface::Sidebar => {
-                let state = sidebar_tab_colors(&self.theme, selected);
+            TabSurface::Sidebar { secondary } => {
+                let state = sidebar_tab_colors(&self.theme, selected, secondary);
+                let hover_fill = if secondary {
+                    colors.hover_bg_secondary
+                } else {
+                    colors.hover_bg
+                };
                 // The base button centers its content; section labels read from the leading edge.
                 tab.w_full()
                     .flex()
@@ -303,7 +321,7 @@ impl RenderOnce for Tab {
                     .text_color(gpui_color(state.text))
                     .when(!selected, |tab| {
                         tab.hover(move |tab| {
-                            tab.bg(gpui_color(colors.hover_bg))
+                            tab.bg(gpui_color(hover_fill))
                                 .text_color(gpui_color(state.hover_text))
                         })
                     })
@@ -355,7 +373,7 @@ mod tests {
     #[test]
     fn shared_tabs_use_the_platform_radius_tokens() {
         assert_eq!(tab_radius(), px(999.0));
-        assert_eq!(sidebar_tab_radius(), px(8.0));
+        assert_eq!(sidebar_tab_radius(), px(6.0));
     }
 
     #[test]
@@ -378,14 +396,18 @@ mod tests {
 
     #[test]
     fn sidebar_sections_fill_only_while_selected() {
-        let theme = AerisTheme::light();
-        let colors = theme.colors;
-        let resting = sidebar_tab_colors(&theme, false);
-        assert_eq!(resting.fill, None);
-        assert_eq!(resting.text, colors.text_secondary);
-        let selected = sidebar_tab_colors(&theme, true);
-        assert_eq!(selected.fill, Some(colors.active_bg));
-        assert_eq!(selected.text, colors.text_default);
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let colors = theme.colors;
+            let resting = sidebar_tab_colors(&theme, false, false);
+            assert_eq!(resting.fill, None);
+            assert_eq!(resting.text, colors.text_secondary);
+            let selected = sidebar_tab_colors(&theme, true, false);
+            assert_eq!(selected.fill, Some(colors.active_bg));
+            assert_eq!(selected.text, colors.text_default);
+            let selected_secondary = sidebar_tab_colors(&theme, true, true);
+            assert_eq!(selected_secondary.fill, Some(colors.active_bg_secondary));
+            assert_eq!(selected_secondary.text, colors.text_default);
+        }
     }
 
     #[test]

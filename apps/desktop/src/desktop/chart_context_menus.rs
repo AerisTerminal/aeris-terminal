@@ -1253,7 +1253,7 @@ fn chart_settings_sidebar(
     .children(ChartSettingsSection::ALL.into_iter().map(|section| {
         let terminal = terminal.clone();
         Tab::new(("chart_settings_section", section as usize), theme)
-            .sidebar()
+            .sidebar_on_secondary()
             .selected(selected == section)
             .gap_2()
             .on_click(move |_, _, cx| {

@@ -279,7 +279,7 @@ fn panel_sidebar(
         .children(AccountsTab::ALL.into_iter().map(|tab| {
             let select = app.clone();
             Tab::new(("accounts_panel_tab", tab as usize), theme)
-                .sidebar()
+                .sidebar_on_secondary()
                 .selected(selected == tab)
                 .gap_2()
                 .on_click(move |_, window, cx| {

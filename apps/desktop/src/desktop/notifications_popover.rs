@@ -126,6 +126,7 @@ fn notifications_header(
             header.child(
                 Button::new("notifications_clear", theme)
                     .variant(ButtonVariant::Ghost)
+                    .on_secondary_surface()
                     .button_size(ButtonSize::Sm)
                     .label(tr!(panels::NOTIFICATIONS_CLEAR))
                     .aria_label(tr!(panels::NOTIFICATIONS_CLEAR_ARIA))

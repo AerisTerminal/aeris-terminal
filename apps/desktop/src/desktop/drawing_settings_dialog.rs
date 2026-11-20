@@ -1758,6 +1758,7 @@ fn levels_editor(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> AnyElemen
             div().flex().child(
                 Button::new(("drawing_level_add", slot), theme)
                     .variant(ButtonVariant::Ghost)
+                    .on_secondary_surface()
                     .button_size(ButtonSize::Sm)
                     .icon(Icon::new(HugeIcon::Add.path()))
                     .label(tr!(drawing::ADD_LEVEL))

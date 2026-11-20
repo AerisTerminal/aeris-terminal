@@ -1076,6 +1076,7 @@ fn layout_card_body(
     let colors = theme.colors;
     Button::new(id, theme)
         .variant(ButtonVariant::Ghost)
+        .on_secondary_surface()
         .flex_1()
         .min_w_0()
         .h_auto()
