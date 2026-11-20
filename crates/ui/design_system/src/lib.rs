@@ -198,37 +198,20 @@ impl ThemeMode {
     }
 }
 
-/// A named platform palette. High Contrast (`Aeris`) is the `:root`/`.dark` default; every other
-/// preset is a `[data-theme="…"]` block in `platform.css` with light and dark modes.
+/// A named platform palette. High Contrast (`Aeris`) is the `:root`/`.dark` default; `Normal`
+/// is the `[data-theme="normal"]` preset with light and dark modes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ThemePreset {
     #[default]
     Aeris,
-    TokyoNight,
-    Catppuccin,
-    Github,
-    One,
-    Dracula,
-    Solarized,
-    Gruvbox,
-    Dark,
+    Normal,
 }
 
 const _: () = assert!(ThemePreset::ALL.len() == PRESET_COUNT + 1);
 
 impl ThemePreset {
     /// Every preset in picker order, High Contrast (default) first.
-    pub const ALL: [Self; 9] = [
-        Self::Aeris,
-        Self::TokyoNight,
-        Self::Catppuccin,
-        Self::Github,
-        Self::One,
-        Self::Dracula,
-        Self::Solarized,
-        Self::Gruvbox,
-        Self::Dark,
-    ];
+    pub const ALL: [Self; 2] = [Self::Aeris, Self::Normal];
 
     /// The stable identifier: the `data-theme` attribute value, or `aeris` for the default.
     #[must_use]
@@ -244,14 +227,7 @@ impl ThemePreset {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Aeris => "High Contrast",
-            Self::TokyoNight => "Tokyo Night",
-            Self::Catppuccin => "Catppuccin",
-            Self::Github => "GitHub",
-            Self::One => "One",
-            Self::Dracula => "Dracula",
-            Self::Solarized => "Solarized",
-            Self::Gruvbox => "Gruvbox",
-            Self::Dark => "Dark",
+            Self::Normal => "Normal",
         }
     }
 
@@ -265,14 +241,7 @@ impl ThemePreset {
     const fn generated_index(self) -> Option<usize> {
         match self {
             Self::Aeris => None,
-            Self::TokyoNight => Some(0),
-            Self::Catppuccin => Some(1),
-            Self::Github => Some(2),
-            Self::One => Some(3),
-            Self::Dracula => Some(4),
-            Self::Solarized => Some(5),
-            Self::Gruvbox => Some(6),
-            Self::Dark => Some(7),
+            Self::Normal => Some(0),
         }
     }
 }
@@ -607,9 +576,6 @@ impl Default for AerisTheme {
 pub enum RadiusToken {
     Sm,
     Default,
-    Medium,
-    /// `--radius-compact`: compact controls such as small and default buttons.
-    Compact,
     Full,
 }
 
@@ -620,8 +586,6 @@ impl RadiusToken {
         match self {
             Self::Sm => "radius-small",
             Self::Default => "radius-default",
-            Self::Medium => "radius-medium",
-            Self::Compact => "radius-compact",
             Self::Full => "radius-large",
         }
     }
@@ -638,8 +602,6 @@ impl RadiusToken {
         match self {
             Self::Sm => RADIUS_SMALL,
             Self::Default => RADIUS_DEFAULT,
-            Self::Medium => RADIUS_MEDIUM,
-            Self::Compact => RADIUS_COMPACT,
             Self::Full => RADIUS_LARGE,
         }
     }
@@ -678,10 +640,10 @@ mod tests {
             light.surface_secondary,
             ThemeColor::from_rgb8(250, 250, 250)
         );
-        assert_eq!(light.border, ThemeColor::from_rgba8(10, 10, 10, 51));
+        assert_eq!(light.border, ThemeColor::from_rgb8(0xce, 0xce, 0xce));
         assert_eq!(
             light.border_secondary,
-            ThemeColor::from_rgba8(10, 10, 10, 51)
+            ThemeColor::from_rgb8(0xce, 0xce, 0xce)
         );
         assert_eq!(
             light.danger_foreground,
@@ -693,16 +655,13 @@ mod tests {
         assert_eq!(dark.border_secondary, ThemeColor::from_rgb8(64, 64, 64));
         assert_eq!(light.text_default, ThemeColor::from_rgb8(10, 10, 10));
         assert_eq!(dark.text_default, ThemeColor::from_rgb8(193, 193, 193));
-        assert_eq!(dark.text_muted, ThemeColor::from_rgba8(250, 250, 250, 89));
+        assert_eq!(dark.text_muted, ThemeColor::from_rgb8(0x57, 0x57, 0x57));
         assert_eq!(
             light.text_secondary,
-            ThemeColor::from_rgba8(10, 10, 10, 148)
+            ThemeColor::from_rgb8(0x71, 0x71, 0x71)
         );
-        assert_eq!(light.text_muted, ThemeColor::from_rgba8(10, 10, 10, 64));
-        assert_eq!(
-            dark.text_secondary,
-            ThemeColor::from_rgba8(250, 250, 250, 140)
-        );
+        assert_eq!(light.text_muted, ThemeColor::from_rgb8(0xc2, 0xc2, 0xc2));
+        assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(0x89, 0x89, 0x89));
         assert_eq!(light.primary, ThemeColor::from_rgb8(0, 110, 221));
         assert_eq!(dark.primary, light.primary);
         assert_eq!(light.warning, ThemeColor::from_rgb8(255, 105, 0));
@@ -725,19 +684,19 @@ mod tests {
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
-        assert_eq!(token_source(&light_tokens, "border"), "#0a0a0a33");
+        assert_eq!(token_source(&light_tokens, "border"), "#cecece");
         assert_eq!(token_source(&dark_tokens, "surface"), "#000000");
-        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa1f");
-        assert_eq!(token_source(&light_tokens, "text-muted"), "#0a0a0a40");
-        assert_eq!(token_source(&light_tokens, "text-secondary"), "#0a0a0a94");
-        assert_eq!(token_source(&dark_tokens, "text-secondary"), "#fafafa8c");
+        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#1e1e1e");
+        assert_eq!(token_source(&light_tokens, "text-muted"), "#c2c2c2");
+        assert_eq!(token_source(&light_tokens, "text-secondary"), "#717171");
+        assert_eq!(token_source(&dark_tokens, "text-secondary"), "#898989");
         assert_eq!(token_source(&dark_tokens, "danger"), "#f7525f");
         assert_eq!(token_source(&dark_tokens, "warning"), "#ff6900");
         assert_eq!(token_source(&dark_tokens, "positive"), "#089981");
         assert_eq!(token_source(&light_tokens, "negative"), "#f7525f");
         assert_eq!(token_source(&dark_tokens, "primary"), "#006EDD");
-        assert_eq!(token_source(&light_tokens, "button-fill"), "#0a0a0af2");
-        assert_eq!(token_source(&dark_tokens, "button-fill"), "#fafafad9");
+        assert_eq!(token_source(&light_tokens, "button-fill"), "#161616");
+        assert_eq!(token_source(&dark_tokens, "button-fill"), "#d5d5d5");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
         for tokens in [&light_tokens, &dark_tokens] {
             assert_eq!(token_source(tokens, "bullish"), "#0b9981");
@@ -756,13 +715,29 @@ mod tests {
     fn interaction_fills_composite_to_opaque_neutral_grays() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
-        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(10, 10, 10, 20));
-        assert_eq!(light.active_bg, ThemeColor::from_rgba8(10, 10, 10, 31));
-        assert_eq!(dark.hover_bg, ThemeColor::from_rgba8(250, 250, 250, 31));
-        assert_eq!(dark.active_bg, ThemeColor::from_rgba8(250, 250, 250, 38));
-        // The pressed fill reads a step above hover in both modes.
-        assert!(light.active_bg.alpha() > light.hover_bg.alpha());
-        assert!(dark.active_bg.alpha() > dark.hover_bg.alpha());
+        assert_eq!(light.hover_bg, ThemeColor::from_rgb8(0xec, 0xec, 0xec));
+        assert_eq!(light.active_bg, ThemeColor::from_rgb8(0xe1, 0xe1, 0xe1));
+        assert_eq!(
+            light.hover_bg_secondary,
+            ThemeColor::from_rgb8(0xe7, 0xe7, 0xe7)
+        );
+        assert_eq!(
+            light.active_bg_secondary,
+            ThemeColor::from_rgb8(0xdc, 0xdc, 0xdc)
+        );
+        assert_eq!(dark.hover_bg, ThemeColor::from_rgb8(0x1e, 0x1e, 0x1e));
+        assert_eq!(dark.active_bg, ThemeColor::from_rgb8(0x25, 0x25, 0x25));
+        assert_eq!(
+            dark.hover_bg_secondary,
+            ThemeColor::from_rgb8(0x3d, 0x3d, 0x3e)
+        );
+        assert_eq!(
+            dark.active_bg_secondary,
+            ThemeColor::from_rgb8(0x43, 0x43, 0x44)
+        );
+        // The pressed fill reads a step stronger than hover in both modes.
+        assert!(light.active_bg.red() < light.hover_bg.red());
+        assert!(dark.active_bg.red() > dark.hover_bg.red());
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
         assert!(hover_saturation.abs() < f32::EPSILON);
 
@@ -786,17 +761,17 @@ mod tests {
 
     #[test]
     fn compositing_over_a_translucent_tint_keeps_its_transparency() {
-        let dark = AerisTheme::dark().colors;
-        let tinted = dark.hover_bg.over(dark.disabled_bg);
+        let first = ThemeColor::from_rgba8(250, 250, 250, 31);
+        let second = ThemeColor::from_rgba8(250, 250, 250, 13);
+        let tinted = first.over(second);
         assert!(tinted.alpha() < 1.0);
-        assert!(tinted.alpha() > dark.hover_bg.alpha());
+        assert!(tinted.alpha() > first.alpha());
 
+        let dark = AerisTheme::dark().colors;
         let secondary = dark.surface_secondary;
         assert!((secondary.alpha() - 1.0).abs() < f32::EPSILON);
         let hover = dark.hover_bg.over(secondary);
         assert!((hover.alpha() - 1.0).abs() < f32::EPSILON);
-        // A hover over the dark secondary surface stays a subtle lift, never a near-white fill.
-        assert!(hover.red() > secondary.red());
         assert!(hover.red() < 0.3);
     }
 
@@ -805,23 +780,23 @@ mod tests {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
 
-        assert_eq!(light.button_fill, ThemeColor::from_rgba8(10, 10, 10, 242));
-        assert_eq!(dark.button_fill, ThemeColor::from_rgba8(250, 250, 250, 217));
+        assert_eq!(light.button_fill, ThemeColor::from_rgb8(0x16, 0x16, 0x16));
+        assert_eq!(dark.button_fill, ThemeColor::from_rgb8(0xd5, 0xd5, 0xd5));
         assert_eq!(
             dark.button_fill_hover,
-            ThemeColor::from_rgba8(250, 250, 250, 195)
+            ThemeColor::from_rgb8(0xbf, 0xbf, 0xbf)
         );
         assert_eq!(
             dark.button_fill_active,
-            ThemeColor::from_rgba8(250, 250, 250, 173)
+            ThemeColor::from_rgb8(0xaa, 0xaa, 0xaa)
         );
         assert_eq!(
             light.button_fill_foreground,
-            ThemeColor::from_rgba8(250, 250, 250, 242)
+            ThemeColor::from_rgb8(0xee, 0xee, 0xee)
         );
         assert_eq!(
             dark.button_fill_foreground,
-            ThemeColor::from_rgba8(10, 10, 10, 217)
+            ThemeColor::from_rgb8(0x28, 0x28, 0x28)
         );
     }
 
@@ -1014,9 +989,7 @@ mod tests {
     #[test]
     fn radius_tokens_match_the_platform_contract() {
         assert_eq!(RadiusToken::Sm.logical_pixels(), 4);
-        assert_eq!(RadiusToken::Default.logical_pixels(), 8);
-        assert_eq!(RadiusToken::Medium.logical_pixels(), 14);
-        assert_eq!(RadiusToken::Compact.logical_pixels(), 6);
+        assert_eq!(RadiusToken::Default.logical_pixels(), 6);
         assert_eq!(RadiusToken::Full.logical_pixels(), 999);
         assert_eq!(RadiusToken::Sm.css_custom_property(), "--radius-small");
         assert_eq!(
@@ -1024,11 +997,6 @@ mod tests {
             "--radius-default"
         );
         assert_eq!(RadiusToken::Full.css_custom_property(), "--radius-large");
-        assert_eq!(RadiusToken::Medium.css_custom_property(), "--radius-medium");
-        assert_eq!(
-            RadiusToken::Compact.css_custom_property(),
-            "--radius-compact"
-        );
     }
 
     #[test]
@@ -1044,20 +1012,7 @@ mod tests {
 
     #[test]
     fn presets_follow_the_stylesheet_and_keep_their_mode() {
-        assert_eq!(
-            ThemePreset::ALL.map(ThemePreset::id),
-            [
-                "aeris",
-                "tokyo-night",
-                "catppuccin",
-                "github",
-                "one",
-                "dracula",
-                "solarized",
-                "gruvbox",
-                "dark"
-            ]
-        );
+        assert_eq!(ThemePreset::ALL.map(ThemePreset::id), ["aeris", "normal"]);
         for preset in ThemePreset::ALL {
             assert_eq!(ThemePreset::from_id(preset.id()), Some(preset));
             let light = AerisTheme::resolve(preset, ThemeMode::Light);
@@ -1066,11 +1021,7 @@ mod tests {
             assert_ne!(light.colors.surface, dark.colors.surface);
             assert_eq!(light.dimensions, AerisTheme::light().dimensions);
             if preset != ThemePreset::Aeris {
-                if preset == ThemePreset::Dark {
-                    assert_eq!(light.colors, AerisTheme::light().colors);
-                } else {
-                    assert_ne!(light.colors, AerisTheme::light().colors);
-                }
+                assert_ne!(light.colors, AerisTheme::light().colors);
                 assert_ne!(dark.colors, AerisTheme::dark().colors);
             }
         }
@@ -1091,33 +1042,35 @@ mod tests {
             token_source(&initial.color_tokens(), "border-secondary"),
             "#404040"
         );
-        let near_black = AerisTheme::resolve(ThemePreset::Dark, ThemeMode::Dark);
+        let normal_light = AerisTheme::resolve(ThemePreset::Normal, ThemeMode::Light);
         assert_eq!(
-            near_black.colors.surface,
+            normal_light.colors.border,
+            ThemeColor::from_rgb8(0xd9, 0xd9, 0xd9)
+        );
+        assert_eq!(
+            normal_light.colors.hover_bg,
+            ThemeColor::from_rgb8(0xf2, 0xf2, 0xf2)
+        );
+        let normal_dark = AerisTheme::resolve(ThemePreset::Normal, ThemeMode::Dark);
+        assert_eq!(
+            normal_dark.colors.surface,
             ThemeColor::from_rgb8(0x0a, 0x0a, 0x0a)
         );
         assert_eq!(
-            near_black.colors.surface_secondary,
+            normal_dark.colors.surface_secondary,
             ThemeColor::from_rgb8(0x29, 0x29, 0x29)
         );
         assert_eq!(
-            near_black.colors.border,
+            normal_dark.colors.border,
             ThemeColor::from_rgb8(0x40, 0x40, 0x40)
         );
         assert_eq!(
-            near_black.colors.border_secondary,
+            normal_dark.colors.border_secondary,
             ThemeColor::from_rgb8(0x4c, 0x4c, 0x4c)
         );
-        let tokyo = AerisTheme::resolve(ThemePreset::TokyoNight, ThemeMode::Dark);
         assert_eq!(
-            tokyo.colors.surface,
-            ThemeColor::from_rgb8(0x1a, 0x1b, 0x26)
-        );
-        assert_eq!(token_source(&tokyo.color_tokens(), "surface"), "#1a1b26");
-        // Preset sources keep their own aliases rather than the default palette's literals.
-        assert_eq!(
-            token_source(&tokyo.color_tokens(), "book-ask-fill"),
-            "color-mix(in srgb, var(--sell) 35%, var(--surface))"
+            token_source(&normal_dark.color_tokens(), "surface"),
+            "#0a0a0a"
         );
     }
 
@@ -1261,14 +1214,10 @@ mod tests {
         assert!(!css.contains("border-color: var(--primary);"));
         assert!(!css.contains("transform: scale("));
         assert!(css.contains("/* Chart */"));
-        assert!(css.contains("--bullish: var(--positive);"));
-        assert!(css.contains("--bearish: var(--negative);"));
-        assert!(
-            css.contains("--buy-bubble: color-mix(in srgb, var(--positive) 35%, transparent);")
-        );
-        assert!(
-            css.contains("--sell-bubble: color-mix(in srgb, var(--negative) 35%, transparent);")
-        );
+        assert!(css.contains("--bullish: #0b9981;"));
+        assert!(css.contains("--bearish: #f23645;"));
+        assert!(css.contains("--buy-bubble: color-mix(in srgb, #0b9981 35%, transparent);"));
+        assert!(css.contains("--sell-bubble: color-mix(in srgb, #f23645 35%, transparent);"));
         assert_eq!(platform_font_family(), "Inter");
         assert_eq!(platform_font_stack(), "\"Inter\", sans-serif");
         assert_eq!(platform_numeric_font_family(), "Manrope");

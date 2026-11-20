@@ -376,7 +376,7 @@ pub(super) fn chrome_overlay_panel(
     animation_origin: PopupAnimationOrigin,
 ) -> impl IntoElement {
     let enter_offset = animation_origin.enter_offset();
-    let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
+    let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
     let frameless = style.surface == ChromeOverlaySurface::Frameless;
     div()
         .id("chrome_overlay_panel")

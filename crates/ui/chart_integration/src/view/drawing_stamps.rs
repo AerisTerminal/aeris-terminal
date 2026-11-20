@@ -198,7 +198,7 @@ mod tests {
         for platform in [
             AerisTheme::light(),
             AerisTheme::dark(),
-            AerisTheme::resolve(ThemePreset::Gruvbox, ThemeMode::Dark),
+            AerisTheme::resolve(ThemePreset::Normal, ThemeMode::Dark),
         ] {
             let rasters = stamp_rasters(&platform);
             assert_eq!(rasters.len(), ChartDrawingStamp::ALL.len());

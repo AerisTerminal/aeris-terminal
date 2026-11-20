@@ -23,6 +23,8 @@ macro_rules! platform_color_registry {
             text_warning => "text-warning",
             hover_bg => "hover-bg",
             active_bg => "active-bg",
+            hover_bg_secondary => "hover-bg-secondary",
+            active_bg_secondary => "active-bg-secondary",
             disabled_bg => "disabled-bg",
             positive => "positive",
             positive_subtle => "positive-subtle",

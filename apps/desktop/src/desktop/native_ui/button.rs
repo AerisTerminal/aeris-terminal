@@ -135,8 +135,7 @@ impl ButtonSize {
 
     const fn radius(self) -> RadiusToken {
         match self {
-            Self::Sm | Self::Default => RadiusToken::Compact,
-            Self::Lg => RadiusToken::Default,
+            Self::Sm | Self::Default | Self::Lg => RadiusToken::Default,
         }
     }
 }
@@ -185,15 +184,13 @@ fn button_appearance(
             colors.primary_disabled,
             colors.primary_disabled_foreground,
         ),
-        // The web lays `hover-bg`/`active-bg` over the fill as a background image; compositing
-        // the tokens here paints the same colour over any surface.
         ButtonVariant::Secondary => ButtonAppearance {
             border: Some(colors.border_secondary),
             ..ramp(
                 colors.surface_secondary,
                 colors.text_default,
-                colors.hover_bg.over(colors.surface_secondary),
-                colors.active_bg.over(colors.surface_secondary),
+                colors.hover_bg_secondary,
+                colors.active_bg_secondary,
                 colors.disabled_bg,
                 colors.text_muted,
             )
@@ -998,8 +995,8 @@ mod tests {
         assert_eq!(
             geometry,
             [
-                (24.0, 8.0, RadiusToken::Compact),
-                (28.0, 10.0, RadiusToken::Compact),
+                (24.0, 8.0, RadiusToken::Default),
+                (28.0, 10.0, RadiusToken::Default),
                 (32.0, 12.0, RadiusToken::Default),
             ]
         );
@@ -1234,11 +1231,8 @@ mod tests {
             assert_eq!(secondary.foreground, c.text_default);
             assert!(!secondary.border_rests_only);
             // hover/active lay hover-bg/active-bg over the fill
-            assert_eq!(secondary.hover_fill, c.hover_bg.over(c.surface_secondary));
-            assert_eq!(
-                secondary.selected_fill,
-                c.active_bg.over(c.surface_secondary)
-            );
+            assert_eq!(secondary.hover_fill, c.hover_bg_secondary);
+            assert_eq!(secondary.selected_fill, c.active_bg_secondary);
             let mut open = ButtonFlags::default();
             open.set(ButtonFlags::OPEN, true);
             assert_eq!(

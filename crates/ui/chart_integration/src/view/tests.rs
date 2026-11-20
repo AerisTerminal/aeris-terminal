@@ -2322,7 +2322,7 @@ fn chart_legend_text_colors_project_platform_chrome() {
     for platform in [
         AerisTheme::light(),
         AerisTheme::dark(),
-        AerisTheme::resolve(ThemePreset::Catppuccin, ThemeMode::Light),
+        AerisTheme::resolve(ThemePreset::Normal, ThemeMode::Light),
     ] {
         let palette = legend_palette(&platform);
         let colors = platform.colors;
@@ -6860,15 +6860,15 @@ fn bars_report_their_span_in_the_largest_whole_drawing_interval_unit() {
 
 #[test]
 fn a_platform_preset_paints_its_palette_and_keeps_theme_provenance() {
-    let dracula = AerisTheme::resolve(ThemePreset::Dracula, ThemeMode::Dark);
+    let normal = AerisTheme::resolve(ThemePreset::Normal, ThemeMode::Dark);
     let mut chart = AerisChartView::empty_with_theme(AerisTheme::dark());
     let aeris = chart.appearance_settings();
     let mut custom = aeris.clone();
     custom.grid_color = custom_color("#334155");
     assert!(chart.set_appearance_settings(&custom));
 
-    chart.set_theme(dracula);
-    let palette = PresetPalette::for_platform(&dracula);
+    chart.set_theme(normal);
+    let palette = PresetPalette::for_platform(&normal);
     let options = chart.engine.options.get();
     assert_eq!(
         options.layout.background.color,
@@ -6957,10 +6957,7 @@ fn axis_colors_survive_theme_switches_and_canvas_edits_until_reset() {
     canvas.text_color = custom_color("#ABCDEF");
     assert!(chart.set_canvas_appearance_settings(&canvas));
     assert_axis_painted(&chart);
-    chart.set_theme(AerisTheme::resolve(
-        ThemePreset::Solarized,
-        ThemeMode::Light,
-    ));
+    chart.set_theme(AerisTheme::resolve(ThemePreset::Normal, ThemeMode::Light));
     assert_axis_painted(&chart);
     assert_eq!(chart.axis_appearance(), axis);
 

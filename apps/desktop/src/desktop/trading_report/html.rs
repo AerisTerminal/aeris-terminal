@@ -695,7 +695,7 @@ fn stylesheet(theme: &AerisTheme) -> Result<String, fmt::Error> {
         colors.border_subtle.css_hex()
     );
     let radius = RadiusToken::Default.logical_pixels();
-    let small_radius = RadiusToken::Compact.logical_pixels();
+    let small_radius = RadiusToken::Default.logical_pixels();
     let faces = font_faces()?;
     Ok(format!(
         "{faces}:root {{ color-scheme: {scheme}; print-color-adjust: exact; -webkit-print-color-adjust: exact; }}

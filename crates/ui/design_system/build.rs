@@ -23,9 +23,7 @@ platform_color_registry!(color_identifiers);
 const PRESET_INVARIANT_TOKENS: &[&str] = &[
     "border-width",
     "radius-small",
-    "radius-compact",
     "radius-default",
-    "radius-medium",
     "radius-large",
 ];
 
@@ -120,18 +118,8 @@ pub const PLATFORM_COLOR_COUNT: usize = {};",
     )?;
     emit_pixel_u16(
         &mut output,
-        "RADIUS_MEDIUM",
-        &resolve(&root, "radius-medium")?,
-    )?;
-    emit_pixel_u16(
-        &mut output,
         "RADIUS_LARGE",
         &resolve(&root, "radius-large")?,
-    )?;
-    emit_pixel_u16(
-        &mut output,
-        "RADIUS_COMPACT",
-        &resolve(&root, "radius-compact")?,
     )?;
     emit_pixel_u16(
         &mut output,

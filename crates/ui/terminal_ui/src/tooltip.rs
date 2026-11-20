@@ -93,7 +93,7 @@ impl TooltipPlacement {
     /// Where the tail meets the body edge facing the trigger: in line with the trigger's
     /// centre, but clear of the rounded corners when the window snap moved the body.
     fn tail_base(self, body: Bounds<Pixels>, trigger: Bounds<Pixels>) -> Point<Pixels> {
-        let inset = f32::from(RadiusToken::Compact.logical_pixels()) + TOOLTIP_TAIL_HALF_WIDTH;
+        let inset = f32::from(RadiusToken::Default.logical_pixels()) + TOOLTIP_TAIL_HALF_WIDTH;
         let along = |target: Pixels, start: Pixels, end: Pixels| {
             let (target, start, end) = (f32::from(target), f32::from(start), f32::from(end));
             px(if end - start < inset * 2.0 {
@@ -238,7 +238,7 @@ impl TooltipSpec {
         let colors = self.theme.colors;
         let edge = px(self.theme.dimensions.border_width);
         let base = div()
-            .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
             .border(edge)
             .border_color(gpui_color(colors.border_secondary))
             .bg(gpui_color(colors.surface_secondary))

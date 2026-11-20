@@ -1128,7 +1128,7 @@ pub(super) fn clamp_floating_toolbar_origin(
 }
 
 fn floating_toolbar_radius() -> Pixels {
-    px(f32::from(RadiusToken::Compact.logical_pixels()))
+    px(f32::from(RadiusToken::Default.logical_pixels()))
 }
 
 /// The panel of a floating toolbar at `origin`. It keeps presses to itself so the chart under

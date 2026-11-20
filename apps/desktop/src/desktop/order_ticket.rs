@@ -474,7 +474,7 @@ fn field_frame(theme: &AerisTheme) -> Div {
         .gap_2()
         .border(platform_border_width(theme))
         .border_color(gpui_color(field_border(theme)))
-        .rounded(radius(RadiusToken::Compact))
+        .rounded(radius(RadiusToken::Default))
         .bg(gpui_color(colors.surface_secondary))
 }
 

@@ -35,10 +35,10 @@ const PRESET_SWATCH_INSET: f32 = 2.0;
 /// Presets lay out two per row.
 const PRESET_ROWS: usize = ThemePreset::ALL.len().div_ceil(2);
 const _: () = assert!(
-    PRESET_ROWS == 5,
-    "PRESET_GRID_HEIGHT assumes five preset rows"
+    PRESET_ROWS == 1,
+    "PRESET_GRID_HEIGHT assumes one preset row"
 );
-const PRESET_GRID_HEIGHT: f32 = 5.0 * PRESET_CHIP_HEIGHT + 4.0 * PRESET_CHIP_GAP;
+const PRESET_GRID_HEIGHT: f32 = PRESET_CHIP_HEIGHT;
 const THEME_SECTION_HEIGHT: f32 =
     SETTING_ROW_HEIGHT + PRESET_GRID_HEIGHT + PRESET_GRID_BOTTOM_PADDING;
 const WINDOW_SECTION_HEIGHT: f32 = 2.0 * SETTING_ROW_HEIGHT;
@@ -769,14 +769,7 @@ fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
 const fn preset_chip_id(preset: ThemePreset) -> &'static str {
     match preset {
         ThemePreset::Aeris => "platform_menu_preset_aeris",
-        ThemePreset::TokyoNight => "platform_menu_preset_tokyo_night",
-        ThemePreset::Catppuccin => "platform_menu_preset_catppuccin",
-        ThemePreset::Github => "platform_menu_preset_github",
-        ThemePreset::One => "platform_menu_preset_one",
-        ThemePreset::Dracula => "platform_menu_preset_dracula",
-        ThemePreset::Solarized => "platform_menu_preset_solarized",
-        ThemePreset::Gruvbox => "platform_menu_preset_gruvbox",
-        ThemePreset::Dark => "platform_menu_preset_dark",
+        ThemePreset::Normal => "platform_menu_preset_normal",
     }
 }
 
@@ -806,9 +799,11 @@ fn preset_chip(preset: ThemePreset, theme: &AerisTheme, on_select: ThemeSelect) 
                 .gap_2()
                 .px_2()
                 .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .when(selected, |chip| chip.bg(gpui_color(colors.active_bg)))
+                .when(selected, |chip| {
+                    chip.bg(gpui_color(colors.active_bg_secondary))
+                })
                 .when(!selected, |chip| {
-                    chip.group_hover(id, |style| style.bg(gpui_color(colors.hover_bg)))
+                    chip.group_hover(id, |style| style.bg(gpui_color(colors.hover_bg_secondary)))
                 })
                 .child(
                     div()

@@ -405,12 +405,17 @@ impl MenuRow {
             None => (ink.label, ink.icon),
         };
         let hover_ink = ink.hover.filter(|_| enabled && !highlighted);
+        let (hover_token, active_token) = if self.resting_fill == colors.surface_secondary {
+            (colors.hover_bg_secondary, colors.active_bg_secondary)
+        } else {
+            (colors.hover_bg, colors.active_bg)
+        };
         let highlighted_fill = match self.kind {
-            RowKind::Compact => colors.hover_bg,
-            RowKind::SearchResult => colors.active_bg,
+            RowKind::Compact => hover_token,
+            RowKind::SearchResult => active_token,
         }
         .over(self.resting_fill);
-        let hover_fill = colors.hover_bg.over(self.resting_fill);
+        let hover_fill = hover_token.over(self.resting_fill);
         let (height, horizontal_padding) = row_geometry(self.kind, self.scale);
         MenuRowPresentation {
             enabled,
@@ -730,7 +735,7 @@ impl RenderOnce for MenuPanel {
                 body.flex_1().min_h_0().overflow_y_scroll()
             })
             .when_some(self.scroll, |body, scroll| body.track_scroll(&scroll));
-        let radius = px(f32::from(RadiusToken::Compact.logical_pixels()));
+        let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
         let frame = div().id(self.id.clone()).occlude().flex().flex_col();
         let panel = popover_surface(frame, &self.theme, radius)
             .font_family(platform_font_family())
@@ -947,7 +952,7 @@ mod tests {
     fn panel_inset_keeps_square_row_corners_inside_the_rounded_border() {
         // A row corner at (inset, inset) from the panel's inner edge must lie inside the corner
         // circle of the inner radius, whatever row is highlighted or scrolled to the edge.
-        let inner_radius = f32::from(RadiusToken::Compact.logical_pixels())
+        let inner_radius = f32::from(RadiusToken::Default.logical_pixels())
             - AerisTheme::light().dimensions.border_width;
         let inset = PANEL_INSET.0 * ROOT_REM_PX;
         let offset = inner_radius - inset;

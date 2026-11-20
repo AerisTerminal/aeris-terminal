@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn a_preset_pins_only_theme_following_colors_to_its_tokens() {
-        let theme = AerisTheme::resolve(ThemePreset::Dracula, ThemeMode::Dark);
+        let theme = AerisTheme::resolve(ThemePreset::Normal, ThemeMode::Dark);
         let palette = PresetPalette::for_platform(&theme);
         assert_eq!(palette.defaults().background, css(theme.colors.surface));
         assert_eq!(palette.defaults().bullish, css(theme.colors.bullish));
