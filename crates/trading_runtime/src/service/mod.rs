@@ -89,9 +89,11 @@ pub(crate) enum Command {
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
     AttachVenue(
+        crate::venue::BrokerVenueKey,
         aeris_trading::venue::VenueCapabilities,
         Reply<(u64, aeris_trading::venue_outbox::VenueRequestReceiver)>,
     ),
+    AttachedVenues(Reply<Vec<(crate::venue::BrokerVenueKey, u64)>>),
     DrainVenueEvents,
     #[cfg(test)]
     BlockOwnerForTest(SyncSender<()>, Arc<std::sync::Barrier>),

@@ -361,7 +361,7 @@ impl TradingCore {
         self.broker_sync
             .failed_since_snapshot
             .retain(|(_, failed)| failed != instrument_id);
-        if self.venue_outbound.is_none() {
+        if !self.broker_venues.is_default_broker_attached() {
             return;
         }
         let requests = self

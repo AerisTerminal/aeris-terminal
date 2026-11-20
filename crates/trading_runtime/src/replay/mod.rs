@@ -2029,7 +2029,11 @@ fn settle_replay_reconcile(harness: &mut ReplayHarness, generation: u64) {
 }
 
 fn attach_venue(reply: Reply<(u64, aeris_trading::venue_outbox::VenueRequestReceiver)>) -> Command {
-    Command::AttachVenue(super::VENUE_CAPABILITIES, reply)
+    Command::AttachVenue(
+        crate::venue::BrokerVenueKey::default_broker(),
+        super::VENUE_CAPABILITIES,
+        reply,
+    )
 }
 
 fn assert_failed_venue_commit(harness: &mut ReplayHarness, event: &crate::venue::VenueEvent) {

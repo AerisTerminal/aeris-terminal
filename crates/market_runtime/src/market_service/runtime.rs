@@ -573,6 +573,7 @@ impl MarketService {
                 provider_presentations,
                 provider_auth,
                 rithmic_login,
+                attached_broker_venues: Mutex::new(BTreeSet::new()),
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
                 quote_releases,

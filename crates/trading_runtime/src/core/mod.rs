@@ -97,7 +97,7 @@ pub use crate::workflow::{
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
 use aeris_trading::venue::{BROKER_VENUE_ID, BracketSide, VenueCapabilities};
-use aeris_trading::venue_outbox::{VenueRequestReceiver, VenueRequestSender};
+use aeris_trading::venue_outbox::VenueRequestReceiver;
 use aeris_trading::{
     AccountEnvironment, AccountPnl, ClientOrderId, EquitySample, FeeSchedule, Fill, FillId,
     FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, OrderEventId,
@@ -746,9 +746,7 @@ pub(crate) struct TradingCore {
     /// Recovery fence for pre-start quotes; each order owns its durable acceptance floor.
     recovery_quote_floor: i64,
     execution: ExecutionPolicy,
-    venue_outbound: Option<VenueRequestSender>,
-    /// What the attached venue declared it supports.
-    venue_capabilities: Option<VenueCapabilities>,
+    broker_venues: venue::BrokerVenueRegistry,
     venue_inbox: Weak<VenueInbox>,
     venue_ingestion: u64,
     /// Broker accounts the current venue generation has announced; the rest are not
@@ -1120,7 +1118,33 @@ impl TradingService {
         &self,
         capabilities: VenueCapabilities,
     ) -> Result<(u64, VenueRequestReceiver), String> {
-        self.request(|reply| Command::AttachVenue(capabilities, reply))
+        self.request(|reply| {
+            Command::AttachVenue(venue::BrokerVenueKey::default_broker(), capabilities, reply)
+        })
+    }
+
+    /// Attaches one named broker venue connection inside the bounded multi-venue registry.
+    ///
+    /// # Errors
+    /// Returns an error for invalid capabilities, capacity overflow, or when the owner is unavailable.
+    pub fn attach_broker_venue_for(
+        &self,
+        key: venue::BrokerVenueKey,
+        capabilities: VenueCapabilities,
+    ) -> Result<(u64, VenueRequestReceiver), aeris_trading::venue::VenueLinkError> {
+        self.request(|reply| Command::AttachVenue(key, capabilities, reply))
+            .map_err(aeris_trading::venue::VenueLinkError)
+    }
+
+    /// Returns the currently attached `(key, generation)` entries in the multi-venue registry.
+    ///
+    /// # Errors
+    /// Returns an error when the owner is unavailable.
+    pub fn attached_broker_venues(
+        &self,
+    ) -> Result<Vec<(venue::BrokerVenueKey, u64)>, aeris_trading::venue::VenueLinkError> {
+        self.request(Command::AttachedVenues)
+            .map_err(aeris_trading::venue::VenueLinkError)
     }
 
     /// Returns the shared bounded event inbox for the broker reader.
@@ -1547,8 +1571,7 @@ impl TradingCore {
             observation_cursors: BTreeMap::new(),
             recovery_quote_floor,
             execution,
-            venue_outbound: None,
-            venue_capabilities: None,
+            broker_venues: venue::BrokerVenueRegistry::default(),
             venue_inbox,
             venue_ingestion: 0,
             connected_broker_accounts: BTreeSet::new(),
@@ -1827,9 +1850,8 @@ impl TradingCore {
             Command::Export(directory, reply) => {
                 let _ = reply.send(self.store.export(&directory));
             }
-            Command::AttachVenue(capabilities, reply) => {
-                respond(&reply, self.attach_venue(capabilities));
-            }
+            Command::AttachVenue(key, cap, reply) => respond(&reply, self.attach_venue(key, cap)),
+            Command::AttachedVenues(reply) => respond(&reply, Ok(self.broker_venues.entries())),
             Command::DrainVenueEvents => self.drain_venue_events(),
             #[cfg(test)]
             Command::BlockOwnerForTest(ready, barrier) => {

@@ -235,6 +235,7 @@ struct MarketRuntime {
     provider_presentations: Vec<ProviderPresentationDescriptor>,
     provider_auth: provider_auth::ProviderAuthRegistry,
     rithmic_login: Arc<providers::rithmic::RithmicLogin>,
+    attached_broker_venues: Mutex<BTreeSet<(String, String)>>,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
     quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,

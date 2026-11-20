@@ -83,10 +83,10 @@ apps/desktop (Composition Root — registers concrete adapters into MarketServic
 ### Phase 3 — Multi-Venue Broker Registry & `ConnectionId` Separation
 *Goal: Unlock simultaneous Aeris-managed CME data + user prop-firm Rithmic logins + multiple broker venues (Tradovate, IBKR, Hyperliquid execution, etc.).*
 
-- [ ] **3.1 Move broker venue ownership to `trading_runtime` (`BrokerVenueRegistry`):** Replace `MarketService::attach_broker_venue` (single `venue_attached: AtomicBool`) with a bounded multi-venue registry on `TradingService` keyed by `VenueId` / `ConnectionId`.
-- [~] **3.2 Decouple `ConnectionId` from `ProviderId`:** Introduce `ConnectionId` + `CredentialSource` (`Public`, `UserVault { key }`, `ManagedAeris { entitlement_id }`) so one provider adapter (e.g. Rithmic) can host multiple independent connections (e.g. Aeris-managed CME data feed alongside one or more user prop-firm accounts).
+- [x] **3.1 Move broker venue ownership to `trading_runtime` (`BrokerVenueRegistry`):** Replace `MarketService::attach_broker_venue` (single `venue_attached: AtomicBool`) with a bounded multi-venue registry on `TradingService` keyed by `VenueId` / `ConnectionId`.
+- [x] **3.2 Decouple `ConnectionId` from `ProviderId`:** Introduce `ConnectionId` + `CredentialSource` (`Public`, `UserVault { key }`, `ManagedAeris { entitlement_id }`) so one provider adapter (e.g. Rithmic) can host multiple independent connections (e.g. Aeris-managed CME data feed alongside one or more user prop-firm accounts).
 - [x] **3.3 In-app R|Protocol agreement hook (`ProviderAuthPlugin`):** Expose a clean adapter-neutral `PendingAgreement` / `accept_agreement` flow so managed CME subscribers can sign CME Market Data Agreements inside Aeris Terminal without installing R|Trader Pro.
-- [ ] **3.4 Migration & compatibility tests:** Verify existing persisted workspaces and legacy single-login Rithmic vault entries migrate transparently to the default `ConnectionId`.
+- [x] **3.4 Migration & compatibility tests:** Verify existing persisted workspaces and legacy single-login Rithmic vault entries migrate transparently to the default `ConnectionId`.
 
 ### Phase 4 — Decompose `market_runtime` Monoliths (`coordinator.rs` & `study.rs`)
 *Goal: Break the 10,792-line `coordinator.rs` into small, testable, single-responsibility domain owners.*

@@ -2,7 +2,12 @@
 //! types are the provider-neutral contract in `aeris_trading::venue`.
 
 use crate::Command;
+pub mod registry;
 pub use aeris_trading::venue::{VenueEvent, VenueRequest, VenueUpdate};
+pub(crate) use registry::BrokerVenueRegistry;
+pub use registry::{
+    BrokerVenueKey, DEFAULT_VENUE_CONNECTION_ID, MAXIMUM_BROKER_VENUES, VenueRegistryError,
+};
 use std::{
     collections::VecDeque,
     sync::{

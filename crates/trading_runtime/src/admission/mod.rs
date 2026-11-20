@@ -456,6 +456,7 @@ impl TradingCore {
 
     pub(super) fn attach_venue(
         &mut self,
+        key: venue::BrokerVenueKey,
         capabilities: VenueCapabilities,
     ) -> Result<(u64, VenueRequestReceiver), String> {
         capabilities.validate().map_err(|error| error.to_string())?;
@@ -466,13 +467,16 @@ impl TradingCore {
             .ok_or("broker venue generation is exhausted")?;
         let (outbound, receiver) =
             aeris_trading::venue_outbox::bounded_venue_requests(venue::OUTBOUND_CAPACITY);
-        // Every attach starts with a reconcile of each broker account, so state left
-        // by a restart or a dropped session is settled against the broker first.
+        // Every attach starts with a reconcile of each broker account belonging to this
+        // venue, so state left by a restart or dropped session settles against the broker first.
         let reconciles = self
             .state
             .accounts
             .values()
-            .filter(|account| VenueRoute::from_account(account) == Ok(VenueRoute::Broker))
+            .filter(|account| {
+                account.venue_id == key.venue_id
+                    && VenueRoute::from_account(account) == Ok(VenueRoute::Broker)
+            })
             .filter_map(|account| self.reconcile_request(account))
             .collect::<Vec<_>>();
         for request in reconciles {
@@ -481,8 +485,9 @@ impl TradingCore {
                 .map_err(|_| "broker venue reconcile requests exceed the outbound queue")?;
         }
         self.store.set_venue_generation(generation)?;
-        self.venue_outbound = Some(outbound);
-        self.venue_capabilities = Some(capabilities);
+        self.broker_venues
+            .attach(key, generation, outbound, capabilities)
+            .map_err(|error| error.to_string())?;
         self.state.venue_generation = generation;
         self.venue_ingestion = 0;
         self.connected_broker_accounts.clear();
@@ -504,7 +509,8 @@ impl TradingCore {
         match route {
             VenueRoute::Simulated => None,
             VenueRoute::Broker => self
-                .venue_capabilities
+                .broker_venues
+                .capabilities_for_venue(aeris_trading::venue::BROKER_VENUE_ID)
                 .map(|capabilities| capabilities.client_order_id_limit),
         }
     }

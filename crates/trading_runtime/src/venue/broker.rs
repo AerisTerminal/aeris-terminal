@@ -129,7 +129,9 @@ impl TradingCore {
         self.connected_broker_accounts.insert(account.id.clone());
         self.register_account(account)?;
         match reconcile {
-            Some(request) if self.venue_outbound.is_some() => self.send_venue_request(request),
+            Some(request) if self.broker_venues.is_default_broker_attached() => {
+                self.send_venue_request(request)
+            }
             _ => Ok(()),
         }
     }
@@ -155,7 +157,8 @@ impl TradingCore {
         template: &BracketStrategyTemplate,
     ) -> Result<Order, String> {
         let held_levels = self
-            .venue_capabilities
+            .broker_venues
+            .capabilities_for_venue(BROKER_VENUE_ID)
             .map_or(0, |capabilities| capabilities.bracket_levels);
         if held_levels == 0 {
             return Err("the broker venue holds no server-side brackets".into());
@@ -209,7 +212,7 @@ impl TradingCore {
         command: &PlaceOrder,
         bracket: Option<ServerBracket>,
     ) -> Result<Order, String> {
-        if self.venue_outbound.is_none() {
+        if !self.broker_venues.is_default_broker_attached() {
             return Err(BROKER_VENUE_UNAVAILABLE.into());
         }
         self.require_broker_ready(&command.account_id)?;
@@ -296,8 +299,7 @@ impl TradingCore {
             event.validate().map_err(|error| error.to_string())?;
         }
         let outbound = self
-            .venue_outbound
-            .clone()
+            .default_broker_outbound()
             .ok_or(BROKER_VENUE_UNAVAILABLE)?;
         let reservation = outbound
             .try_reserve(request)
@@ -461,10 +463,16 @@ impl TradingCore {
         })
     }
 
+    fn default_broker_outbound(&self) -> Option<aeris_trading::venue_outbox::VenueRequestSender> {
+        self.broker_venues
+            .outbound_for_venue(BROKER_VENUE_ID)
+            .cloned()
+    }
+
     pub(super) fn send_venue_request(&self, request: VenueRequest) -> Result<(), String> {
         request.validate().map_err(|error| error.to_string())?;
-        self.venue_outbound
-            .as_ref()
+        self.broker_venues
+            .outbound_for_venue(BROKER_VENUE_ID)
             .ok_or(BROKER_VENUE_UNAVAILABLE)?
             .try_send(request)
             .map_err(|error| outbound_error(&error))
@@ -484,7 +492,7 @@ impl TradingCore {
         let mut incomplete = match instrument_id {
             // Without an attached venue nothing can be asked, and only orders the owner
             // knows of are worth reporting as left working.
-            None if self.venue_outbound.is_none()
+            None if !self.broker_venues.is_default_broker_attached()
                 && self.state.orders.open_for_account(account_id).is_empty() =>
             {
                 None
@@ -1495,8 +1503,7 @@ impl TradingCore {
         updated.validate().map_err(|error| error.to_string())?;
         request.validate().map_err(|error| error.to_string())?;
         let outbound = self
-            .venue_outbound
-            .clone()
+            .default_broker_outbound()
             .ok_or(BROKER_VENUE_UNAVAILABLE)?;
         if self.state.orders.get(&updated.id).is_none() {
             return Err("broker order is not registered".into());

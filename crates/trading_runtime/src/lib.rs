@@ -43,6 +43,9 @@ pub(crate) use std::{
     sync::{Arc, Mutex, Weak, atomic::AtomicBool, mpsc},
     time::Duration,
 };
+pub use venue::{
+    BrokerVenueKey, DEFAULT_VENUE_CONNECTION_ID, MAXIMUM_BROKER_VENUES, VenueRegistryError,
+};
 
 #[cfg(test)]
 mod tests;
