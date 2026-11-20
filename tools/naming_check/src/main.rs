@@ -32,6 +32,10 @@ const MARKDOWN_FILES: &[(&str, &str)] = &[
     ("themes.md", "the palette source of the theme presets"),
     ("RELEASES.md", "the release record"),
     (
+        "refactor.md",
+        "the active architectural refactoring roadmap and tracked execution checklist",
+    ),
+    (
         "apps/desktop/assets/aeris_assets/USAGE.md",
         "brand asset usage rules kept beside the assets",
     ),
