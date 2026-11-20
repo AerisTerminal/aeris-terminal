@@ -3,32 +3,8 @@ use super::{
     lifecycle::RecoveryReason,
 };
 use aeris_market_engine::fence::{Epoch, ProviderTag};
+pub(crate) use aeris_provider_spi::{ProviderFault, ProviderFaultKind};
 use std::collections::BTreeMap;
-
-/// Canonical provider fault classification produced by adapters so the market
-/// runtime never matches provider-specific wire invalidation enums.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProviderFaultKind {
-    Transport,
-    Authentication,
-    AgreementRequired,
-    UnsupportedSystem,
-    SchemaMismatch,
-    HeartbeatSilence,
-    MessageSilence,
-    SequenceGap,
-    QueueOverflow,
-    MalformedMessage,
-    Transient,
-}
-
-/// Normalized provider fault carrying recovery policy and user-safe detail.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ProviderFault {
-    pub(crate) kind: ProviderFaultKind,
-    pub(crate) auto_recovers: bool,
-    pub(crate) detail: &'static str,
-}
 
 pub(super) struct ProviderEvent {
     pub(super) provider: &'static str,

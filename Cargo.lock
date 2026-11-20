@@ -297,6 +297,7 @@ version = "1.11.1"
 dependencies = [
  "aeris_market_data",
  "aeris_platform_runtime",
+ "aeris_provider_spi",
  "serde",
  "serde_json",
  "ureq",
@@ -341,6 +342,7 @@ dependencies = [
  "aeris_observability",
  "aeris_platform_runtime",
  "aeris_provider_history",
+ "aeris_provider_spi",
  "aeris_rithmic_protocol_adapter",
  "aeris_trading",
  "chrono",
@@ -411,6 +413,16 @@ name = "aeris_provider_history"
 version = "1.11.1"
 
 [[package]]
+name = "aeris_provider_spi"
+version = "1.11.1"
+dependencies = [
+ "aeris_instruments",
+ "aeris_market_data",
+ "aeris_provider_history",
+ "serde",
+]
+
+[[package]]
 name = "aeris_release_lifecycle"
 version = "1.11.1"
 dependencies = [
@@ -451,6 +463,7 @@ dependencies = [
  "aeris_observability",
  "aeris_platform_runtime",
  "aeris_provider_history",
+ "aeris_provider_spi",
  "aeris_trading",
  "chrono",
  "prost",

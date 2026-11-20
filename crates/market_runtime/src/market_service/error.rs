@@ -1,42 +1,7 @@
 //! Typed internal errors for market-runtime service, auth, and venue seams.
 
+pub use aeris_provider_spi::ProviderAuthError;
 use std::fmt;
-
-/// Typed errors produced by provider authentication and credential storage adapters.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProviderAuthError {
-    UnsupportedProvider,
-    NoSavedCredentials,
-    Unavailable(&'static str),
-    InvalidFields(&'static str),
-    UnknownServer,
-    InProgress(&'static str),
-    VaultUnavailable(&'static str),
-    Rejected(String),
-}
-
-impl fmt::Display for ProviderAuthError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnsupportedProvider => f.write_str("Unsupported provider"),
-            Self::NoSavedCredentials => f.write_str("This provider does not use saved credentials"),
-            Self::Unavailable(detail)
-            | Self::InvalidFields(detail)
-            | Self::InProgress(detail)
-            | Self::VaultUnavailable(detail) => f.write_str(detail),
-            Self::UnknownServer => f.write_str("Unknown provider server"),
-            Self::Rejected(detail) => f.write_str(detail),
-        }
-    }
-}
-
-impl std::error::Error for ProviderAuthError {}
-
-impl From<ProviderAuthError> for String {
-    fn from(error: ProviderAuthError) -> Self {
-        error.to_string()
-    }
-}
 
 /// Typed errors for internal coordinator dispatch, shutdown, and venue attachment seams.
 #[derive(Clone, Debug, Eq, PartialEq)]

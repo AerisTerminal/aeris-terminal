@@ -559,7 +559,7 @@ impl MarketService {
         let MarketServiceProviders {
             presentations: provider_presentations,
         } = providers;
-        let rithmic_login = Arc::new(super::rithmic_login::RithmicLogin::new(rithmic_login));
+        let rithmic_login = Arc::new(super::providers::rithmic::RithmicLogin::new(rithmic_login));
         let mut provider_auth = super::provider_auth::ProviderAuthRegistry::default();
         provider_auth.register(
             super::RITHMIC_DESCRIPTOR.id,

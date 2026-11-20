@@ -234,7 +234,7 @@ struct MarketRuntime {
     shutdown_wake: SyncSender<Command>,
     provider_presentations: Vec<ProviderPresentationDescriptor>,
     provider_auth: provider_auth::ProviderAuthRegistry,
-    rithmic_login: Arc<rithmic_login::RithmicLogin>,
+    rithmic_login: Arc<providers::rithmic::RithmicLogin>,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
     quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
@@ -523,11 +523,7 @@ const EMPTY_CURRENT_HISTORY_DETAIL: &str =
 const EMPTY_CURRENT_HISTORY_RETAINED_DETAIL: &str =
     "No current market history is available yet; showing retained history until live trades arrive";
 
-#[derive(Clone, Copy)]
-pub(crate) struct HistoryFetchWindow {
-    pub(crate) maximum_bars: usize,
-    pub(crate) range: Option<HistoryRange>,
-}
+pub(crate) use aeris_provider_spi::HistoryFetchWindow;
 
 impl HistoryRequest {
     const fn req_window(&self) -> HistoryFetchWindow {
@@ -1447,10 +1443,9 @@ impl ProviderRuntimeEvent {
 
 mod broker_venue;
 pub mod calendar;
-mod rithmic_login;
 pub use broker_venue::BrokerVenueLink;
+pub use providers::rithmic::{RithmicLoginSummary, RithmicServer};
 mod runtime;
-pub use rithmic_login::{RithmicLoginSummary, RithmicServer};
 use runtime::join_runtime_workers;
 
 mod command_fences;

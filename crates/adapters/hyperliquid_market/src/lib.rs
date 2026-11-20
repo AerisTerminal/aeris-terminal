@@ -21,6 +21,7 @@ mod endpoints;
 mod http;
 mod identity;
 mod meta;
+pub mod screen;
 mod statistics;
 mod trades;
 mod ws;

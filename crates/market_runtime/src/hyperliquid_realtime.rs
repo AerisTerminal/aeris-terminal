@@ -39,9 +39,9 @@ use aeris_market_engine::fence::{Fenced, ProviderTag};
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
 use crate::hyperliquid_market_scan::HyperliquidScanJob;
-use crate::hyperliquid_market_screen::{RetainedMarketStatistics, instrument_summary};
 use crate::market_service::provider_session::ProviderEventSink;
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
+use aeris_hyperliquid_market_adapter::screen::{RetainedMarketStatistics, instrument_summary};
 
 pub(crate) const CATALOG_WORKER_NAME: &str = "aeris-hyperliquid-catalog";
 pub(crate) const PROVIDER_WORKER_NAME: &str = "aeris-hyperliquid-provider";

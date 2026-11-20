@@ -73,8 +73,8 @@ apps/desktop (Composition Root — registers concrete adapters into MarketServic
 ### Phase 2 — Extract Concrete Providers Out of `market_runtime` Into Adapter Crates
 *Goal: Make `crates/market_runtime` genuinely provider-neutral with zero adapter crate dependencies.*
 
-- [ ] **2.1 Move Hyperliquid runtime workers into `crates/adapters/hyperliquid_market`:** Relocate `hyperliquid_realtime.rs`, `hyperliquid_history.rs`, `hyperliquid_display_depth.rs`, `hyperliquid_market_scan.rs`, `hyperliquid_market_screen.rs`, and Hyperliquid presentation/descriptor builders behind `MarketProviderPlugin`.
-- [ ] **2.2 Move Rithmic runtime workers & login into `crates/adapters/rithmic_protocol`:** Relocate `rithmic_realtime.rs`, `rithmic_history.rs`, `rithmic_login.rs`, and Rithmic presentation/descriptor builders behind `MarketProviderPlugin` + `ProviderAuthPlugin`.
+- [~] **2.1 Move Hyperliquid runtime workers into `crates/adapters/hyperliquid_market`:** Relocate `hyperliquid_realtime.rs`, `hyperliquid_history.rs`, `hyperliquid_display_depth.rs`, `hyperliquid_market_scan.rs`, `hyperliquid_market_screen.rs`, and Hyperliquid presentation/descriptor builders behind `MarketProviderPlugin`.
+- [~] **2.2 Move Rithmic runtime workers & login into `crates/adapters/rithmic_protocol`:** Relocate `rithmic_realtime.rs`, `rithmic_history.rs`, `rithmic_login.rs`, and Rithmic presentation/descriptor builders behind `MarketProviderPlugin` + `ProviderAuthPlugin`.
 - [x] **2.3 Move `rithmic_venue/` out of `market_runtime` into `crates/adapters/rithmic_protocol`:** Remove `aeris_trading` broker-venue coupling from `crates/market_runtime`.
 - [ ] **2.4 Composition-root registration:** Register built-in adapter plugins (`HyperliquidPlugin`, `RithmicPlugin`, `RecordingReplayPlugin`) explicitly at the application composition root (`DesktopServices` / `MarketService::builder().register_provider(...)`).
 - [ ] **2.5 Remove adapter dependencies from `crates/market_runtime/Cargo.toml`:** Delete `aeris_hyperliquid_market_adapter` and `aeris_rithmic_protocol_adapter` from `market_runtime` dependencies, and add a `naming_check` rule ensuring `market_runtime` never re-acquires a concrete adapter dependency.
@@ -84,8 +84,8 @@ apps/desktop (Composition Root — registers concrete adapters into MarketServic
 *Goal: Unlock simultaneous Aeris-managed CME data + user prop-firm Rithmic logins + multiple broker venues (Tradovate, IBKR, Hyperliquid execution, etc.).*
 
 - [ ] **3.1 Move broker venue ownership to `trading_runtime` (`BrokerVenueRegistry`):** Replace `MarketService::attach_broker_venue` (single `venue_attached: AtomicBool`) with a bounded multi-venue registry on `TradingService` keyed by `VenueId` / `ConnectionId`.
-- [ ] **3.2 Decouple `ConnectionId` from `ProviderId`:** Introduce `ConnectionId` + `CredentialSource` (`Public`, `UserVault { key }`, `ManagedAeris { entitlement_id }`) so one provider adapter (e.g. Rithmic) can host multiple independent connections (e.g. Aeris-managed CME data feed alongside one or more user prop-firm accounts).
-- [ ] **3.3 In-app R|Protocol agreement hook (`ProviderAuthPlugin`):** Expose a clean adapter-neutral `PendingAgreement` / `accept_agreement` flow so managed CME subscribers can sign CME Market Data Agreements inside Aeris Terminal without installing R|Trader Pro.
+- [~] **3.2 Decouple `ConnectionId` from `ProviderId`:** Introduce `ConnectionId` + `CredentialSource` (`Public`, `UserVault { key }`, `ManagedAeris { entitlement_id }`) so one provider adapter (e.g. Rithmic) can host multiple independent connections (e.g. Aeris-managed CME data feed alongside one or more user prop-firm accounts).
+- [x] **3.3 In-app R|Protocol agreement hook (`ProviderAuthPlugin`):** Expose a clean adapter-neutral `PendingAgreement` / `accept_agreement` flow so managed CME subscribers can sign CME Market Data Agreements inside Aeris Terminal without installing R|Trader Pro.
 - [ ] **3.4 Migration & compatibility tests:** Verify existing persisted workspaces and legacy single-login Rithmic vault entries migrate transparently to the default `ConnectionId`.
 
 ### Phase 4 — Decompose `market_runtime` Monoliths (`coordinator.rs` & `study.rs`)

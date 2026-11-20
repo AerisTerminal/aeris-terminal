@@ -11,11 +11,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{ProviderInstrumentKind, ProviderInstrumentSummary, ProviderMarketStatistics};
-use aeris_hyperliquid_market_adapter::{
+use crate::{
     FUNDING_INTERVAL_SECONDS, FUNDING_RATE_SCALE, HyperliquidCatalog, HyperliquidHttpConfig,
     HyperliquidInstrument, HyperliquidMarketKind, HyperliquidMarketStatistics,
     NORMALIZED_PRICE_SCALE, STATISTICS_NOTIONAL_SCALE, fetch_market_statistics,
+};
+use aeris_provider_spi::{
+    ProviderInstrumentKind, ProviderInstrumentSummary, ProviderMarketStatistics,
 };
 
 /// Oldest retained statistics a screen request is answered with before refetching.
@@ -23,7 +25,7 @@ const STATISTICS_MAXIMUM_AGE: Duration = Duration::from_secs(3);
 
 /// Last successfully fetched statistics.
 #[derive(Default)]
-pub(crate) struct RetainedMarketStatistics {
+pub struct RetainedMarketStatistics {
     fetched: Option<FetchedStatistics>,
 }
 
@@ -37,11 +39,10 @@ impl RetainedMarketStatistics {
     /// Refetches when the retained statistics are missing or older than the bounded age.
     /// A failed refresh keeps serving the previous statistics, whose capture time tells the
     /// consumer how old they are; it only fails when nothing was ever fetched.
-    pub(crate) fn refresh(
-        &mut self,
-        config: HyperliquidHttpConfig,
-        now: Instant,
-    ) -> Result<(), String> {
+    ///
+    /// # Errors
+    /// Returns an error only when no statistics were ever fetched and the HTTP request fails.
+    pub fn refresh(&mut self, config: HyperliquidHttpConfig, now: Instant) -> Result<(), String> {
         if self.fetched.as_ref().is_some_and(|fetched| {
             now.saturating_duration_since(fetched.at) < STATISTICS_MAXIMUM_AGE
         }) {
@@ -62,7 +63,8 @@ impl RetainedMarketStatistics {
     }
 
     /// Capture time and screen rows, or `None` before the first successful fetch.
-    pub(crate) fn screen(
+    #[must_use]
+    pub fn screen(
         &self,
         catalog: &HyperliquidCatalog,
         maximum_results: usize,
@@ -76,7 +78,8 @@ impl RetainedMarketStatistics {
 }
 
 /// Joins catalog identity with statistics, most traded first, bounded to `maximum_results`.
-pub(crate) fn screen_rows(
+#[must_use]
+pub fn screen_rows(
     catalog: &HyperliquidCatalog,
     statistics: &BTreeMap<String, HyperliquidMarketStatistics>,
     maximum_results: usize,
@@ -113,7 +116,8 @@ pub(crate) fn screen_rows(
 }
 
 /// Provider-neutral search/screen presentation for one catalog instrument.
-pub(crate) fn instrument_summary(instrument: &HyperliquidInstrument) -> ProviderInstrumentSummary {
+#[must_use]
+pub fn instrument_summary(instrument: &HyperliquidInstrument) -> ProviderInstrumentSummary {
     ProviderInstrumentSummary {
         kind: ProviderInstrumentKind::Instrument,
         symbol: instrument.wire_coin.clone(),
@@ -145,21 +149,19 @@ mod tests {
     use serde_json::json;
 
     fn catalog() -> HyperliquidCatalog {
-        aeris_hyperliquid_market_adapter::decode_catalog(
-            &aeris_hyperliquid_market_adapter::RawMetaBundle {
-                core_perp_meta: json!({"universe": [
-                    {"name": "BTC", "szDecimals": 5},
-                    {"name": "ETH", "szDecimals": 4},
-                    {"name": "DOGE", "szDecimals": 0},
-                ]}),
-                spot_meta: json!({
-                    "universe": [],
-                    "tokens": [{"name": "USDC", "szDecimals": 8, "index": 0}],
-                }),
-                perp_dexs: json!([null]),
-                builder_metas: Vec::new(),
-            },
-        )
+        crate::decode_catalog(&crate::RawMetaBundle {
+            core_perp_meta: json!({"universe": [
+                {"name": "BTC", "szDecimals": 5},
+                {"name": "ETH", "szDecimals": 4},
+                {"name": "DOGE", "szDecimals": 0},
+            ]}),
+            spot_meta: json!({
+                "universe": [],
+                "tokens": [{"name": "USDC", "szDecimals": 8, "index": 0}],
+            }),
+            perp_dexs: json!([null]),
+            builder_metas: Vec::new(),
+        })
         .expect("catalog")
     }
 

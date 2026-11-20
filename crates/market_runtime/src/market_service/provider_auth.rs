@@ -5,42 +5,15 @@
 //! sign-in, saved-login lookup, and logout without branching on concrete
 //! provider identities.
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::{collections::BTreeMap, sync::Arc};
+
+pub(super) use aeris_provider_spi::ProviderAuthAdapter;
 
 use super::{
     MarketService,
-    descriptors::{LoginFieldValue, ProviderLoginServer, SavedProviderLogin},
+    descriptors::{LoginFieldValue, PendingAgreement, ProviderLoginServer, SavedProviderLogin},
     error::ProviderAuthError,
 };
-
-/// Provider-owned authentication and credential lifecycle seam.
-pub(super) trait ProviderAuthAdapter: Send + Sync {
-    /// Non-secret connection servers published by the provider.
-    fn servers(&self) -> Vec<ProviderLoginServer>;
-
-    /// Discovers selectable systems or environments at one server without credentials.
-    fn discover_servers(
-        &self,
-        server_id: &str,
-        stop: Arc<AtomicBool>,
-    ) -> Result<Vec<String>, ProviderAuthError>;
-
-    /// Loads non-secret metadata for the saved login, if any.
-    fn saved_login(&self) -> Result<Option<SavedProviderLogin>, ProviderAuthError>;
-
-    /// Verifies submitted credentials with the provider and persists only an accepted login.
-    fn sign_in(
-        &self,
-        fields: &[LoginFieldValue<'_>],
-        stop: Arc<AtomicBool>,
-    ) -> Result<(), ProviderAuthError>;
-
-    /// Deletes the saved login and notifies active workers so retired sessions close.
-    fn forget_login(&self) -> Result<(), ProviderAuthError>;
-}
 
 /// Runtime-owned map of credentialed providers keyed by provider ID.
 #[derive(Default)]
@@ -138,11 +111,38 @@ impl MarketService {
         let adapter = self.runtime.provider_auth.adapter(provider_id)?;
         adapter.forget_login().map_err(String::from)
     }
+
+    /// Queries agreements that must be accepted before live data or execution is enabled
+    /// for one provider. Run off the UI thread.
+    ///
+    /// # Errors
+    /// Rejects unsupported providers or reports query failures.
+    pub fn pending_provider_agreements(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<PendingAgreement>, ProviderAuthError> {
+        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        adapter.pending_agreements(Arc::clone(&self.runtime.shutdown))
+    }
+
+    /// Records explicit acceptance of one pending provider agreement. Run off the UI thread.
+    ///
+    /// # Errors
+    /// Rejects unsupported providers or reports refusal/transport failures.
+    pub fn accept_provider_agreement(
+        &self,
+        provider_id: &str,
+        agreement_id: &str,
+    ) -> Result<(), ProviderAuthError> {
+        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        adapter.accept_agreement(agreement_id, Arc::clone(&self.runtime.shutdown))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     struct DummyAuth;
 

@@ -4,21 +4,17 @@
 //! The vault is the only credential boundary. Callers hand the user ID and
 //! password over once to be signed in and saved; nothing here returns them again.
 
-use super::{
-    descriptors::{
-        LoginField, LoginFieldKind, LoginFieldValue, LoginSchema, ProviderLoginServer,
-        SavedProviderLogin,
-    },
-    error::ProviderAuthError,
-    provider_auth::ProviderAuthAdapter,
-};
-use crate::rithmic_realtime::RithmicLoginRevision;
-use aeris_observability::diagnostic;
-use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
-use aeris_rithmic_protocol_adapter::{
+use crate::{
     MAXIMUM_RITHMIC_SYSTEM_NAME_BYTES, RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY,
     RITHMIC_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes, RithmicCredentialError,
-    RithmicCredentials, RithmicGateway, RithmicSession, RithmicSessionError, RithmicSessionLimits,
+    RithmicCredentials, RithmicGateway, RithmicLoginRevision, RithmicSession, RithmicSessionError,
+    RithmicSessionLimits,
+};
+use aeris_observability::diagnostic;
+use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
+use aeris_provider_spi::{
+    LoginField, LoginFieldKind, LoginFieldValue, LoginSchema, ProviderAuthAdapter,
+    ProviderAuthError, ProviderLoginServer, SavedProviderLogin,
 };
 use std::sync::{
     Arc,
@@ -29,7 +25,7 @@ use zeroize::Zeroizing;
 /// Most systems one discovery answer may list for selection.
 const MAXIMUM_DISCOVERED_SYSTEMS: usize = 64;
 
-pub(super) const LOGIN_SCHEMA: LoginSchema = LoginSchema {
+pub const LOGIN_SCHEMA: LoginSchema = LoginSchema {
     fields: &[
         LoginField {
             id: "server",
@@ -92,16 +88,17 @@ pub struct RithmicLoginSummary {
     pub system_name: String,
 }
 
-pub(super) struct RithmicLogin {
-    pub(super) revision: RithmicLoginRevision,
+pub struct RithmicLogin {
+    pub revision: RithmicLoginRevision,
     discovering: AtomicBool,
     signing_in: AtomicBool,
     /// Whether the broker venue relay has started; it may start once.
-    pub(super) venue_attached: AtomicBool,
+    pub venue_attached: AtomicBool,
 }
 
 impl RithmicLogin {
-    pub(super) const fn new(revision: RithmicLoginRevision) -> Self {
+    #[must_use]
+    pub const fn new(revision: RithmicLoginRevision) -> Self {
         Self {
             revision,
             discovering: AtomicBool::new(false),
@@ -431,11 +428,6 @@ mod tests {
                 value: "fixture-password",
             },
         ];
-        let mut registry = super::super::provider_auth::ProviderAuthRegistry::default();
-        registry.register(
-            super::super::RITHMIC_DESCRIPTOR.id,
-            Arc::new(RithmicLogin::new(RithmicLoginRevision::default())),
-        );
         sign_in_with_vault(&fields, &vault, |_| Ok(())).unwrap();
         assert_eq!(vault.0.lock().unwrap().len(), 2);
         assert_eq!(

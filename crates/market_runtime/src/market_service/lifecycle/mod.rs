@@ -21,11 +21,7 @@ use super::{
 pub(super) use crate::SeriesPresentationStatus as PresentationStatus;
 
 /// The sole in-flight candle for the selected series. Completed bars belong to `MarketEngine`.
-#[derive(Clone, Copy)]
-pub(crate) struct FormingBar {
-    pub(crate) bar: MarketBar,
-    pub(crate) trades: Option<u32>,
-}
+pub(crate) use aeris_provider_spi::FormingBar;
 
 enum LifecycleModel {
     TradeHandoff(Box<TradeModel>),

@@ -21,6 +21,7 @@ mod endpoint;
 mod history;
 mod history_adapter;
 mod instrument_id;
+pub mod login;
 mod market;
 mod network;
 mod order_plant;
@@ -65,6 +66,9 @@ pub use history_adapter::{
     decode_rithmic_history_bar, rithmic_chart_aggregation,
 };
 pub use instrument_id::{legacy_display_label, parse_rithmic_instrument_id, rithmic_instrument_id};
+pub use login::{
+    LOGIN_SCHEMA as RITHMIC_LOGIN_SCHEMA, RithmicLogin, RithmicLoginSummary, RithmicServer,
+};
 pub use market::{
     DecodedMarketMessage, DepthByOrderEndEvent, DepthByOrderMutation, DepthByOrderMutationKind,
     DepthByOrderSide, DepthByOrderSnapshotLevel, DepthByOrderSnapshotMessage,

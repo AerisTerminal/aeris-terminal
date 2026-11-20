@@ -17,6 +17,7 @@ aeris_market_engine = { path = "../market_engine" }
 aeris_observability = { path = "../observability" }
 aeris_platform_runtime = { path = "../platform_runtime" }
 aeris_provider_history = { path = "../provider_history" }
+aeris_provider_spi = { path = "../provider_spi" }
 aeris_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
 aeris_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
 aeris_instruments = { path = "../domain/instruments" }

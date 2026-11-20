@@ -2598,7 +2598,7 @@ mod tests {
             | "aeris_platform_sys"
             | "aeris_provider_history"
             | "gpui-base" => CrateLayer::Leaf,
-            "aeris_trading" => CrateLayer::Domain,
+            "aeris_provider_spi" | "aeris_trading" => CrateLayer::Domain,
             "aeris_observability" | "aeris_platform_runtime" | "aeris_release_lifecycle" => {
                 CrateLayer::Platform
             }
@@ -4828,6 +4828,11 @@ mod tests {
             "provider history adapter boundary",
         ),
         (
+            "crates/provider_spi/src/auth.rs",
+            1,
+            "provider-neutral authentication, credential lifecycle, and agreement acceptance SPI",
+        ),
+        (
             "crates/trading_runtime/src/clock.rs",
             1,
             "injectable wall and monotonic time for the trading owner",
@@ -6269,7 +6274,7 @@ jobs:
         let readers = [
             "crates/market_runtime/src/rithmic_realtime.rs",
             "crates/market_runtime/src/rithmic_history.rs",
-            "crates/market_runtime/src/market_service/rithmic_login.rs",
+            "crates/adapters/rithmic_protocol/src/login.rs",
             "crates/adapters/rithmic_protocol/src/venue/mod.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
             "crates/adapters/rithmic_protocol/src/bin/provision_rithmic_test.rs",

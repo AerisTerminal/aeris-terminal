@@ -21,50 +21,10 @@ pub enum ConnectMethod {
     Local,
 }
 
-/// What a login field asks for; surfaces choose its control and wording from it.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum LoginFieldKind {
-    /// One of the provider's published login servers.
-    Server,
-    /// A system discovered on the chosen server.
-    System,
-    UserId,
-    Password,
-}
-
-/// Static, non-secret login fields supplied by provider registration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LoginField {
-    pub id: &'static str,
-    pub kind: LoginFieldKind,
-    pub secret: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LoginSchema {
-    pub fields: &'static [LoginField],
-    pub discover_servers: bool,
-}
-
-/// A submitted value may contain a password; never derive Debug.
-pub struct LoginFieldValue<'a> {
-    pub id: &'static str,
-    pub value: &'a str,
-}
-
-/// Non-secret saved login details safe to display.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SavedProviderLogin {
-    pub server_id: String,
-    pub server_label: String,
-    pub system_name: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProviderLoginServer {
-    pub id: &'static str,
-    pub label: &'static str,
-}
+pub use aeris_provider_spi::auth::{
+    LoginField, LoginFieldKind, LoginFieldValue, LoginSchema, PendingAgreement,
+    ProviderLoginServer, SavedProviderLogin,
+};
 
 /// Published provider identity and catalog affordances.
 #[derive(Clone, Debug, Eq, PartialEq)]

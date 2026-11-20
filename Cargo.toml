@@ -21,6 +21,7 @@ members = [
     "crates/platform_runtime",
     "crates/release_lifecycle",
     "crates/provider_history",
+    "crates/provider_spi",
     "crates/ui/chart_integration",
     "crates/ui/design_system",
     "crates/ui/terminal_ui",

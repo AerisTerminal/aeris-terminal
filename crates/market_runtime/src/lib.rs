@@ -13,7 +13,6 @@ pub mod fence {
 mod hyperliquid_display_depth;
 mod hyperliquid_history;
 mod hyperliquid_market_scan;
-mod hyperliquid_market_screen;
 mod hyperliquid_realtime;
 pub mod market_service;
 mod provider_presentation;
@@ -23,6 +22,10 @@ mod scan;
 mod status;
 pub mod study;
 
+pub use aeris_provider_spi::{
+    ConnectionDescriptor, ConnectionId, ConnectionIdError, CredentialSource, DEFAULT_CONNECTION_ID,
+    PendingAgreement,
+};
 pub use cadence::{
     CadenceError, legacy_interval, legacy_series_period, persisted_interval, resolve_cadence,
     resolve_series_key,

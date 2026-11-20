@@ -17,7 +17,10 @@ use aeris_market_engine::{
     StreamRequirements,
     fence::{Epoch, ProviderTag},
 };
-use aeris_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
+pub(in super::super) use aeris_rithmic_protocol_adapter::{
+    RITHMIC_LOGIN_SCHEMA, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicLogin,
+};
+pub use aeris_rithmic_protocol_adapter::{RithmicLoginSummary, RithmicServer};
 
 use crate::{
     ProviderCatalogSymbol, ProviderPresentationDescriptor,
@@ -38,7 +41,7 @@ use super::super::{
     ProviderStartContext, QuoteCapability, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY,
     StartedProviderRuntime, TradeDemandPolicy, calendar, configured_reconnect_delay,
     provider_session::{ProviderEventSink, ProviderSession, ProviderSessionError, try_control},
-    reconnect, rithmic_login, try_send_catalog_control,
+    reconnect, try_send_catalog_control,
 };
 
 pub(in super::super) const RITHMIC_PRESENTATION: ProviderPresentationDescriptor =
@@ -79,7 +82,7 @@ pub(in super::super) const RITHMIC_PRESENTATION: ProviderPresentationDescriptor 
 pub(in super::super) const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "rithmic",
     presentation: &RITHMIC_PRESENTATION,
-    login_schema: Some(&rithmic_login::LOGIN_SCHEMA),
+    login_schema: Some(&RITHMIC_LOGIN_SCHEMA),
     capabilities: ProviderCapabilities {
         account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
         engine: EngineProviderCapabilities {
