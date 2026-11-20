@@ -1151,6 +1151,7 @@ fn workspace_add_button(
 ) -> Button {
     Button::new("add_workspace", theme)
         .variant(ButtonVariant::Ghost)
+        .on_secondary_surface()
         .button_size(ButtonSize::Sm)
         .round()
         .icon(header_icon(HugeIcon::Add))

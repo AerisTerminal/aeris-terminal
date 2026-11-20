@@ -376,7 +376,7 @@ fn workspace_caption_control(
         close,
     } = spec;
     let colors = theme.colors;
-    let hover_fill = colors.hover_bg.over(title_bar_fill(theme));
+    let hover_fill = colors.hover_bg_secondary;
     let focus_border = platform_border_width(theme);
     let control = div()
         .id(id)

@@ -34,6 +34,7 @@ pub(super) fn app_navigation_button(
         tr!(panels::APP_NAVIGATION_SWITCH),
         Button::new("app_navigation", theme)
             .variant(ButtonVariant::Ghost)
+            .on_secondary_surface()
             .button_size(ButtonSize::Lg)
             .aria_label(tr!(panels::APP_NAVIGATION_PAGE, label = current.label()))
             .icon(header_icon(current.icon()))

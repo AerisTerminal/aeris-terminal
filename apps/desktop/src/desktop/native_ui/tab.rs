@@ -322,8 +322,13 @@ impl RenderOnce for Tab {
                     colors.text_secondary
                 }))
                 .when(!selected, |tab| {
+                    let hover_fill = if resting == colors.surface_secondary {
+                        colors.hover_bg_secondary
+                    } else {
+                        colors.hover_bg.over(resting)
+                    };
                     tab.hover(move |tab| {
-                        tab.bg(gpui_color(colors.hover_bg.over(resting)))
+                        tab.bg(gpui_color(hover_fill))
                             .text_color(gpui_color(colors.text_default))
                     })
                 })

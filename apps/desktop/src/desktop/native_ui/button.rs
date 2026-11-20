@@ -322,6 +322,7 @@ impl ButtonFlags {
     const TEXT_TOGGLE: u16 = 1 << 9;
     const TABULAR_NUMERALS: u16 = 1 << 10;
     const SHARES_CONTAINER_HOVER: u16 = 1 << 11;
+    const ON_SECONDARY_SURFACE: u16 = 1 << 12;
 
     const fn has(self, flag: u16) -> bool {
         self.0 & flag != 0
@@ -556,6 +557,14 @@ impl Button {
         self
     }
 
+    /// Marks a transparent/outlined button sitting on `--surface-secondary` (such as the title
+    /// bar, menus, dialogs, or popovers) so hover and selected fills use `--hover-bg-secondary`
+    /// and `--active-bg-secondary` instead of the `--surface`-flattened fills.
+    pub(crate) fn on_secondary_surface(mut self) -> Self {
+        self.flags.set(ButtonFlags::ON_SECONDARY_SURFACE, true);
+        self
+    }
+
     /// A trigger whose menu is open: drawn with the selected fill until the menu closes.
     pub(crate) fn open(mut self, open: bool) -> Self {
         self.flags.set(ButtonFlags::OPEN, open);
@@ -616,11 +625,18 @@ impl Button {
     }
 
     fn appearance(&self) -> ButtonAppearance {
-        let appearance = button_appearance(
+        let mut appearance = button_appearance(
             &self.theme,
             self.variant,
             self.flags.has(ButtonFlags::DANGER_ON_HOVER),
         );
+        if self.flags.has(ButtonFlags::ON_SECONDARY_SURFACE)
+            && !self.flags.has(ButtonFlags::DANGER_ON_HOVER)
+            && matches!(self.variant, ButtonVariant::Ghost | ButtonVariant::Outline)
+        {
+            appearance.hover_fill = self.theme.colors.hover_bg_secondary;
+            appearance.selected_fill = self.theme.colors.active_bg_secondary;
+        }
         if self.flags.has(ButtonFlags::TEXT_TOGGLE) {
             text_toggle_appearance(appearance, &self.theme)
         } else {

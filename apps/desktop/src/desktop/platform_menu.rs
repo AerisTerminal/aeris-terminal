@@ -95,6 +95,7 @@ pub(super) fn account_avatar_button(
         tooltip,
         Button::new("account_avatar", theme)
             .variant(ButtonVariant::Ghost)
+            .on_secondary_surface()
             .button_size(ButtonSize::Lg)
             .aria_label(tr!(shell::PROFILE_MENU))
             .on_click(move |event, _, cx| {

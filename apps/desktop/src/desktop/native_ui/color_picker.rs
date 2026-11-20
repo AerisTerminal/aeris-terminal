@@ -579,7 +579,7 @@ fn recommended_colors(current: &str, picking: &Picking, theme: &AerisTheme) -> i
                     gpui::transparent_black()
                 })
                 .cursor_pointer()
-                .hover(|swatch| swatch.bg(gpui_color(theme.colors.hover_bg)))
+                .hover(|swatch| swatch.bg(gpui_color(theme.colors.hover_bg_secondary)))
                 .on_click(move |_, window, cx| {
                     emit_hex_selection(value.clone(), &input, handler.as_ref(), window, cx);
                 })
