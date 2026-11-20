@@ -535,23 +535,37 @@ impl HistoryRequest {
     }
 }
 
-struct HistorySnapshot {
-    price_scale: u8,
-    quantity_scale: u8,
-    /// Buckets the provider has closed. Only these are persisted and installed
-    /// as canonical history.
-    bars: Vec<MarketBar>,
-    /// The period that was still open when the provider served this page.
-    ///
-    /// It is deliberately kept out of `bars`: history is a record of closed
-    /// periods, and a half-built candle written into it stays wrong until the
-    /// period ends. The live handoff seeds it as the in-flight bar instead,
-    /// which is what gives a fresh chart the OHLCV that accrued before the
-    /// trader selected it.
-    forming: Option<FormingBar>,
-    handoff_boundary_unix_nanos: Option<i64>,
-    /// The provider cannot serve any earlier candles for this series.
-    backwards_exhausted: bool,
+type HistorySnapshot = aeris_provider_spi::ProviderHistorySnapshot;
+
+fn history_instrument_from_install(
+    installed: &InstallProviderInstrument,
+) -> aeris_provider_spi::HistoryInstrument {
+    aeris_provider_spi::HistoryInstrument {
+        provider: installed.provider.clone(),
+        session_generation: installed.session_generation,
+        instrument_id: installed.instrument_id.clone(),
+        provider_symbol: installed.provider_symbol.clone(),
+        display_symbol: installed.display_symbol.clone(),
+        venue_id: installed.venue_id.clone(),
+        entitlement_id: installed.entitlement_id.clone(),
+        price_scale: installed.price_scale,
+        quantity_scale: installed.quantity_scale,
+        price_increment: installed.price_increment,
+        contract: installed.contract_metadata.as_deref().map(|metadata| {
+            aeris_provider_spi::HistoryContractMetadata {
+                point_value: metadata
+                    .point_value
+                    .zip(metadata.point_value_scale)
+                    .and_then(|(value, scale)| {
+                        u8::try_from(scale).ok().map(|scale| (value, scale))
+                    }),
+                currency: metadata.currency.clone(),
+                expiration_date: metadata.contract_expiry.clone(),
+                first_notice_date: metadata.first_notice_date.clone(),
+                last_trade_date: metadata.last_trade_date.clone(),
+            }
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

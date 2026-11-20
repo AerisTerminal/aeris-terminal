@@ -18,6 +18,7 @@ mod candles;
 mod context;
 mod decimal;
 mod endpoints;
+pub mod history;
 mod http;
 mod identity;
 mod meta;

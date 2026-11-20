@@ -423,8 +423,10 @@ impl ScanBarCache {
             Refresh::Reuse => None,
             Refresh::Full => {
                 let (start_millis, end_millis) =
-                    crate::hyperliquid_history::history_window(period, depth, now_millis)
-                        .map_err(|_| SeriesError::Unavailable)?;
+                    aeris_hyperliquid_market_adapter::history::history_window(
+                        period, depth, now_millis,
+                    )
+                    .map_err(|_| SeriesError::Unavailable)?;
                 Some(fetch_page(
                     wire_coin,
                     period,
@@ -765,7 +767,7 @@ mod tests {
         );
         for (fetched_before, request) in (0_i64..).zip(&requests) {
             // Each scripted fetch advances the clock, so every window ends at its own now.
-            let (start, end) = crate::hyperliquid_history::history_window(
+            let (start, end) = aeris_hyperliquid_market_adapter::history::history_window(
                 DAY,
                 close_above_100().history_bars(),
                 NOW_MILLIS + fetched_before * 600,
@@ -1068,7 +1070,8 @@ mod tests {
             offered += 1;
             assert!(shortest_bar_millis(period).is_some(), "{interval}");
             assert!(
-                crate::hyperliquid_history::history_window(period, 300, NOW_MILLIS).is_ok(),
+                aeris_hyperliquid_market_adapter::history::history_window(period, 300, NOW_MILLIS)
+                    .is_ok(),
                 "{interval}"
             );
         }

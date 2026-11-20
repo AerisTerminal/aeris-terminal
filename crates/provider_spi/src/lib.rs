@@ -27,7 +27,10 @@ pub use connection::{
     ConnectionDescriptor, ConnectionId, ConnectionIdError, CredentialSource, DEFAULT_CONNECTION_ID,
 };
 pub use fault::{ProviderFault, ProviderFaultKind};
-pub use history::{FormingBar, HistoryFetchWindow, ProviderHistorySnapshot};
+pub use history::{
+    FormingBar, HistoryContractMetadata, HistoryFetchWindow, HistoryInstrument,
+    ProviderHistorySnapshot,
+};
 pub use presentation::{
     ProviderAttribution, ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence,
     ProviderFeedLevel, ProviderPresentationDescriptor,

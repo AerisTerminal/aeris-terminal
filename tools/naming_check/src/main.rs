@@ -6273,7 +6273,7 @@ jobs:
         // arguments, CI or source.
         let readers = [
             "crates/market_runtime/src/rithmic_realtime.rs",
-            "crates/market_runtime/src/rithmic_history.rs",
+            "crates/adapters/rithmic_protocol/src/history_fetch.rs",
             "crates/adapters/rithmic_protocol/src/login.rs",
             "crates/adapters/rithmic_protocol/src/venue/mod.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
@@ -6343,7 +6343,7 @@ jobs:
             "crates/adapters/rithmic_protocol/src/session_tests.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
             "crates/market_runtime/src/rithmic_realtime.rs",
-            "crates/market_runtime/src/rithmic_history.rs",
+            "crates/adapters/rithmic_protocol/src/history_fetch.rs",
             "crates/adapters/rithmic_protocol/src/venue/mod.rs",
         ] {
             let source = manifest(relative);

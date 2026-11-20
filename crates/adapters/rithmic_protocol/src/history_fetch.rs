@@ -9,21 +9,21 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use aeris_contracts::InstallProviderInstrument;
+use crate::{
+    InstrumentContractMetadata, InstrumentDescriptor, RITHMIC_APPLICATION_NAME,
+    RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
+    RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSession,
+    RithmicSessionLimits, collect_rithmic_chart_history, collect_rithmic_session_history,
+    collect_rithmic_trade_history, rithmic_chart_aggregation,
+};
 use aeris_market_data::{
     BarPeriod, BarSeriesKey, ChartAggregation, ChartInterval, MarketBar, RithmicChartAggregation,
     RithmicDailyAggregation,
 };
 use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
 use aeris_provider_history::HistoryRange;
-
-use crate::market_service::{FormingBar, HistoryFetchWindow};
-use aeris_rithmic_protocol_adapter::{
-    InstrumentContractMetadata, InstrumentDescriptor, RITHMIC_APPLICATION_NAME,
-    RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
-    RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSession,
-    RithmicSessionLimits, collect_rithmic_chart_history, collect_rithmic_session_history,
-    collect_rithmic_trade_history, rithmic_chart_aggregation,
+use aeris_provider_spi::{
+    FormingBar, HistoryFetchWindow, HistoryInstrument, ProviderHistorySnapshot,
 };
 use zeroize::Zeroize;
 
@@ -34,16 +34,6 @@ const MAXIMUM_NON_TRADING_GAP_SECONDS: u64 = 4 * 24 * 60 * 60;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 /// Upper bound on the one-trade replay that rebuilds an open tick bundle.
 const MAXIMUM_FORMING_TRADES: usize = 1_000;
-
-pub(super) struct Snapshot {
-    pub(super) price_scale: u8,
-    pub(super) quantity_scale: u8,
-    /// Periods the provider has closed. Only these become canonical history.
-    pub(super) bars: Vec<MarketBar>,
-    /// The period that was still open when the replay ran.
-    pub(super) forming: Option<FormingBar>,
-    pub(super) handoff_boundary_unix_nanos: i64,
-}
 
 /// How the trailing open period is separated from closed history.
 #[derive(Clone, Copy)]
@@ -58,13 +48,18 @@ enum FormingPlan {
     Closed,
 }
 
-pub(super) fn fetch(
+/// Fetches one bounded Rithmic history replay page for a demanded series.
+///
+/// # Errors
+/// Returns an error for inconsistent identity, unsupported intervals, missing
+/// vault credentials, transport failure, or cancellation.
+pub fn fetch(
     series: &BarSeriesKey,
     provider_generation: u64,
-    installed: &InstallProviderInstrument,
+    installed: &HistoryInstrument,
     window: HistoryFetchWindow,
     stop: &Arc<AtomicBool>,
-) -> Result<Snapshot, String> {
+) -> Result<ProviderHistorySnapshot, String> {
     if stop.load(Ordering::Acquire) {
         return Err("Rithmic history request was cancelled".to_string());
     }
@@ -95,12 +90,13 @@ pub(super) fn fetch(
     );
     transport.close().map_err(|error| error.to_string())?;
     let (bars, forming, handoff_boundary_unix_nanos) = collected?;
-    Ok(Snapshot {
+    Ok(ProviderHistorySnapshot {
         price_scale: instrument.descriptor.price_scale,
         quantity_scale: instrument.descriptor.quantity_scale,
         bars,
         forming,
-        handoff_boundary_unix_nanos,
+        handoff_boundary_unix_nanos: Some(handoff_boundary_unix_nanos),
+        backwards_exhausted: false,
     })
 }
 
@@ -111,7 +107,7 @@ fn bounded_visible_bars(requested: usize) -> usize {
 fn validate_history_identity(
     series: &BarSeriesKey,
     provider_generation: u64,
-    installed: &InstallProviderInstrument,
+    installed: &HistoryInstrument,
 ) -> Result<(), String> {
     // Instrument metadata is retained across provider reconnects. Its install
     // generation records when that metadata was resolved; the HistoryRequest's
@@ -359,9 +355,7 @@ fn forming_tick_bundle(
     }))
 }
 
-fn provider_instrument(
-    installed: &InstallProviderInstrument,
-) -> Result<RithmicProviderInstrument, String> {
+fn provider_instrument(installed: &HistoryInstrument) -> Result<RithmicProviderInstrument, String> {
     Ok(RithmicProviderInstrument {
         descriptor: InstrumentDescriptor {
             instrument_id: installed.instrument_id.clone(),
@@ -373,16 +367,11 @@ fn provider_instrument(
             quantity_scale: u8::try_from(installed.quantity_scale)
                 .map_err(|_| "Rithmic quantity scale is invalid".to_string())?,
             price_increment: installed.price_increment,
-            contract: installed.contract_metadata.as_deref().map(|metadata| {
+            contract: installed.contract.as_ref().map(|metadata| {
                 Box::new(InstrumentContractMetadata {
-                    point_value: metadata
-                        .point_value
-                        .zip(metadata.point_value_scale)
-                        .and_then(|(value, scale)| {
-                            u8::try_from(scale).ok().map(|scale| (value, scale))
-                        }),
+                    point_value: metadata.point_value,
                     currency: metadata.currency.clone(),
-                    expiration_date: metadata.contract_expiry.clone(),
+                    expiration_date: metadata.expiration_date.clone(),
                     first_notice_date: metadata.first_notice_date.clone(),
                     last_trade_date: metadata.last_trade_date.clone(),
                 })
@@ -396,9 +385,7 @@ fn provider_instrument(
     })
 }
 
-fn connect(
-    stop: Arc<AtomicBool>,
-) -> Result<aeris_rithmic_protocol_adapter::RithmicHistoryConnection, String> {
+fn connect(stop: Arc<AtomicBool>) -> Result<crate::RithmicHistoryConnection, String> {
     let vault = NativeCredentialVault::new(RITHMIC_VAULT_SERVICE)
         .map_err(|_| "native credential vault unavailable".to_string())?;
     let mut stored = vault
@@ -594,7 +581,11 @@ fn history_range(start_seconds: u64, end_seconds: u64) -> Result<HistoryRange, S
     })
 }
 
-pub(super) fn chart_interval(period: BarPeriod) -> Result<ChartInterval, String> {
+/// Maps a runtime [`BarPeriod`] to the corresponding Rithmic chart interval.
+///
+/// # Errors
+/// Returns an error when Rithmic does not serve history for `period`.
+pub fn chart_interval(period: BarPeriod) -> Result<ChartInterval, String> {
     match period {
         BarPeriod::Tick { trades: 100 } => Ok(ChartInterval::Tick100),
         BarPeriod::Time { seconds: 1 } => Ok(ChartInterval::Second1),
@@ -638,12 +629,11 @@ mod tests {
         }
     }
 
-    fn installed(session_generation: u64) -> InstallProviderInstrument {
+    fn installed(session_generation: u64) -> HistoryInstrument {
         let series = series();
-        InstallProviderInstrument {
+        HistoryInstrument {
             provider: series.provider_id,
             session_generation,
-            selection_generation: 1,
             instrument_id: series.instrument_id,
             provider_symbol: "MNQU6".to_string(),
             display_symbol: "MNQ Sep 2026".to_string(),
@@ -652,7 +642,7 @@ mod tests {
             quantity_scale: 0,
             entitlement_id: series.entitlement_id,
             price_increment: Some(25),
-            ..Default::default()
+            contract: None,
         }
     }
 

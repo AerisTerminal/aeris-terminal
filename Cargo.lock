@@ -297,6 +297,7 @@ version = "1.11.1"
 dependencies = [
  "aeris_market_data",
  "aeris_platform_runtime",
+ "aeris_provider_history",
  "aeris_provider_spi",
  "serde",
  "serde_json",

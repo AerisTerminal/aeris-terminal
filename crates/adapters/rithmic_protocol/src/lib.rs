@@ -20,6 +20,7 @@ mod decimal;
 mod endpoint;
 mod history;
 mod history_adapter;
+pub mod history_fetch;
 mod instrument_id;
 pub mod login;
 mod market;

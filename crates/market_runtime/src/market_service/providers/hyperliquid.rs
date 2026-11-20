@@ -132,22 +132,15 @@ impl HistorySource for LiveHyperliquidHistory {
             .instrument
             .as_ref()
             .ok_or_else(|| "Provider instrument is not installed".to_string())?;
-        let snapshot = crate::hyperliquid_history::fetch(
+        let instrument = super::super::history_instrument_from_install(installed);
+        aeris_hyperliquid_market_adapter::history::fetch(
             &mut self.0,
             &request.series,
             request.provider_generation.0.get(),
-            installed,
+            &instrument,
             request.req_window(),
             &request.stop,
-        )?;
-        Ok(HistorySnapshot {
-            price_scale: snapshot.price_scale,
-            quantity_scale: snapshot.quantity_scale,
-            bars: snapshot.bars,
-            forming: snapshot.forming,
-            handoff_boundary_unix_nanos: snapshot.handoff_boundary_unix_nanos,
-            backwards_exhausted: false,
-        })
+        )
     }
 }
 

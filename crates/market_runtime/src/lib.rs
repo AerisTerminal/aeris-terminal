@@ -11,12 +11,10 @@ pub mod fence {
     pub use aeris_market_engine::fence::{ConsumerTag, EpochSequence, Fenced};
 }
 mod hyperliquid_display_depth;
-mod hyperliquid_history;
 mod hyperliquid_market_scan;
 mod hyperliquid_realtime;
 pub mod market_service;
 mod provider_presentation;
-mod rithmic_history;
 mod rithmic_realtime;
 mod scan;
 mod status;

@@ -17,6 +17,33 @@ pub struct HistoryFetchWindow {
     pub range: Option<HistoryRange>,
 }
 
+/// Non-wire contract metadata needed by a provider history fetcher.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HistoryContractMetadata {
+    pub point_value: Option<(i64, u8)>,
+    pub currency: Option<String>,
+    pub expiration_date: Option<String>,
+    pub first_notice_date: Option<String>,
+    pub last_trade_date: Option<String>,
+}
+
+/// Provider-neutral installed instrument projection passed to history fetchers so
+/// adapters never depend on the workspace persistence schema (`aeris_contracts`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HistoryInstrument {
+    pub provider: String,
+    pub session_generation: u64,
+    pub instrument_id: String,
+    pub provider_symbol: String,
+    pub display_symbol: String,
+    pub venue_id: String,
+    pub entitlement_id: String,
+    pub price_scale: u32,
+    pub quantity_scale: u32,
+    pub price_increment: Option<i64>,
+    pub contract: Option<HistoryContractMetadata>,
+}
+
 /// Canonical bar page returned by a provider history fetcher.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderHistorySnapshot {

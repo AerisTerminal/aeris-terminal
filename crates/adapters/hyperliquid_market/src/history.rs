@@ -13,28 +13,18 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use aeris_contracts::InstallProviderInstrument;
-use aeris_hyperliquid_market_adapter::{
-    CandleSnapshotRequest, HyperliquidHttpConfig, HyperliquidRequestPriority,
-    NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE, hyperliquid_interval_for_period,
+use crate::{
+    CandleSnapshotRequest, HyperliquidCandlePage, HyperliquidHttpClient, HyperliquidHttpConfig,
+    HyperliquidRequestPriority, MAXIMUM_HYPERLIQUID_CANDLES, NORMALIZED_PRICE_SCALE,
+    NORMALIZED_QUANTITY_SCALE, hyperliquid_interval_for_period,
 };
 use aeris_market_data::{BarPeriod, BarSeriesKey};
 use aeris_provider_history::HistoryRange;
-
-use crate::market_service::{FormingBar, HistoryFetchWindow};
+use aeris_provider_spi::{
+    FormingBar, HistoryFetchWindow, HistoryInstrument, ProviderHistorySnapshot,
+};
 
 const NANOS_PER_MILLI: i64 = 1_000_000;
-
-pub(super) struct Snapshot {
-    pub(super) price_scale: u8,
-    pub(super) quantity_scale: u8,
-    /// Periods the provider has closed. Only these become canonical history.
-    pub(super) bars: Vec<aeris_market_data::MarketBar>,
-    /// The period that was still open when the page was served.
-    pub(super) forming: Option<FormingBar>,
-    /// Absent only for a confirmed-empty older-history range.
-    pub(super) handoff_boundary_unix_nanos: Option<i64>,
-}
 
 /// Fetches one bounded candle page for a demanded Hyperliquid series.
 ///
@@ -47,14 +37,14 @@ pub(super) struct Snapshot {
 ///
 /// Returns an error for inconsistent identity, unsupported intervals,
 /// transport or decode failure, an empty initial page, or cancellation.
-pub(super) fn fetch(
-    client: &mut aeris_hyperliquid_market_adapter::HyperliquidHttpClient,
+pub fn fetch(
+    client: &mut HyperliquidHttpClient,
     series: &BarSeriesKey,
     _provider_generation: u64,
-    installed: &InstallProviderInstrument,
+    installed: &HistoryInstrument,
     window: HistoryFetchWindow,
     stop: &Arc<AtomicBool>,
-) -> Result<Snapshot, String> {
+) -> Result<ProviderHistorySnapshot, String> {
     if stop.load(Ordering::Acquire) {
         return Err("Hyperliquid history request was cancelled".to_string());
     }
@@ -72,10 +62,7 @@ pub(super) fn fetch(
     // Fails explicitly for intervals with no native Hyperliquid candle
     // (notably tick periods) instead of reinterpreting the demand.
     hyperliquid_interval_for_period(series.period)?;
-    let maximum_bars = window.maximum_bars.clamp(
-        1,
-        aeris_hyperliquid_market_adapter::MAXIMUM_HYPERLIQUID_CANDLES,
-    );
+    let maximum_bars = window.maximum_bars.clamp(1, MAXIMUM_HYPERLIQUID_CANDLES);
     let now_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is invalid".to_string())?
@@ -109,9 +96,9 @@ pub(super) fn fetch(
 
 /// Converts one decoded candle page into a canonical history snapshot.
 fn snapshot_from_page(
-    page: aeris_hyperliquid_market_adapter::HyperliquidCandlePage,
+    page: HyperliquidCandlePage,
     ranged: bool,
-) -> Result<Snapshot, String> {
+) -> Result<ProviderHistorySnapshot, String> {
     let price_scale = u8::try_from(NORMALIZED_PRICE_SCALE)
         .map_err(|_| "Hyperliquid price scale is invalid".to_string())?;
     let quantity_scale = u8::try_from(NORMALIZED_QUANTITY_SCALE)
@@ -121,12 +108,13 @@ fn snapshot_from_page(
         // provider's most-recent-candle limit. Neither changes on retry, so it
         // is a confirmed-empty range; only an empty initial page is a failure.
         if ranged {
-            return Ok(Snapshot {
+            return Ok(ProviderHistorySnapshot {
                 price_scale,
                 quantity_scale,
                 bars: Vec::new(),
                 forming: None,
                 handoff_boundary_unix_nanos: None,
+                backwards_exhausted: false,
             });
         }
         return Err("Hyperliquid returned no historical bars".to_string());
@@ -135,12 +123,13 @@ fn snapshot_from_page(
         .handoff_close_millis
         .and_then(|millis| millis.checked_mul(NANOS_PER_MILLI))
         .ok_or_else(|| "Hyperliquid history handoff is missing".to_string())?;
-    Ok(Snapshot {
+    Ok(ProviderHistorySnapshot {
         price_scale,
         quantity_scale,
         bars: page.bars,
         forming: page.forming.map(|bar| FormingBar { bar, trades: None }),
         handoff_boundary_unix_nanos: Some(handoff_boundary_unix_nanos),
+        backwards_exhausted: false,
     })
 }
 
@@ -172,7 +161,10 @@ fn history_window_for_range(
 ///
 /// The span is window sizing only: the provider returns what it has (at most
 /// the latest 5,000 candles) and the decoder splits closed from forming.
-pub(crate) fn history_window(
+///
+/// # Errors
+/// Returns an error for unsupported periods or arithmetic overflow/underflow.
+pub fn history_window(
     period: BarPeriod,
     maximum_bars: usize,
     now_millis: i64,
@@ -215,7 +207,7 @@ mod tests {
 
     #[test]
     fn empty_older_range_is_confirmed_empty_but_empty_initial_page_fails() {
-        let empty = || aeris_hyperliquid_market_adapter::HyperliquidCandlePage {
+        let empty = || HyperliquidCandlePage {
             bars: Vec::new(),
             forming: None,
             handoff_close_millis: None,
