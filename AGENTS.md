@@ -72,6 +72,20 @@ violations and missing verification explicitly, and never describe them as satis
 
 - `MarketEngine` is the single market-demand owner inside `market_runtime`. Provider sessions are
   created and owned only by that in-process runtime; never create a session/runtime per chart or UI surface.
+- Provider-neutral Service Provider Interface (SPI) contracts live in `aeris_provider_spi`
+  (`ProviderAuthAdapter`, `PendingAgreement`, `ConnectionId`, `CredentialSource`,
+  `ResolvedProviderInstrument`, `HistoryInstrument`, `ProviderFault`, and presentation descriptors)
+  and depend only on leaf domain crates, never on `aeris_contracts`, `market_runtime`, or
+  `trading_runtime`. `MarketService::builder()` (`MarketServiceBuilder`) registers market providers,
+  `ProviderAuthAdapter`s (`ProviderAuthRegistry`), and `BrokerVenueRunner`s
+  (`BrokerVenueRunnerRegistry`); core `market_service/` modules (`broker_venue.rs`, `calendar/mod.rs`,
+  `coordinator.rs`, `coordinator/*`, `error.rs`, `history.rs`, `order_book.rs`, `provider_auth.rs`,
+  `realtime.rs`) stay provider-neutral and are enforced by `tools/naming_check`.
+- `BrokerVenueRegistry` in `trading_runtime` owns bounded multi-venue broker attachments keyed by
+  `(VenueId, ConnectionId)` (`attach_broker_venue_for`); `aeris_trading::venue` owns the neutral
+  `VenueSession` / `BrokerVenueLink` contract, and concrete venue drivers live inside their
+  respective adapter crates (e.g. `crates/adapters/rithmic_protocol/src/venue/`). Legacy single-login
+  vault entries migrate transparently to `DEFAULT_CONNECTION_ID`.
 - Instrument quote interests and series interests share `MarketEngine`'s one bounded
   `DataLeaseRegistry`; do not add a second market-demand owner for trading or alerts.
   Provider-neutral feed contracts live in `aeris_trading::market` and depend only on

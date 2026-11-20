@@ -657,42 +657,20 @@ impl Coordinator<'_> {
     ) -> Result<ProviderGeneration, String> {
         self.providers
             .validate_period(&series.provider_id, series.period)?;
-        if self.provider_uses_candles(&series.provider_id) {
-            if series.definition_version != 1 {
-                return Err("unsupported Provider engine series definition".to_string());
-            }
-            let installed = self.candle_instrument(series)?;
-            if installed.entitlement_id != series.entitlement_id {
-                return Err("Provider series entitlement is inconsistent".to_string());
-            }
-            return self
-                .engine
-                .provider_status(&series.provider_id)
-                .and_then(|status| status.generation)
-                .ok_or_else(|| "Provider engine session is unavailable".to_string());
-        }
         if series.definition_version != 1 {
-            return Err("unsupported Rithmic engine series definition".to_string());
+            return Err("unsupported Provider engine series definition".to_string());
         }
-        let installed = self.rithmic_instrument(series)?;
+        let installed = self.installed_instrument(series)?;
         if installed.entitlement_id != series.entitlement_id {
-            return Err("Rithmic series entitlement is inconsistent".to_string());
+            return Err("Provider series entitlement is inconsistent".to_string());
         }
         self.engine
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation)
-            .ok_or_else(|| "Rithmic engine session is unavailable".to_string())
-    }
-    pub(super) fn rithmic_instrument(
-        &self,
-        series: &BarSeriesKey,
-    ) -> Result<&InstallProviderInstrument, String> {
-        self.catalog
-            .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-            .ok_or_else(|| "Rithmic instrument is not installed".to_string())
+            .ok_or_else(|| "Provider engine session is unavailable".to_string())
     }
 
-    pub(super) fn candle_instrument(
+    pub(super) fn installed_instrument(
         &self,
         series: &BarSeriesKey,
     ) -> Result<&InstallProviderInstrument, String> {

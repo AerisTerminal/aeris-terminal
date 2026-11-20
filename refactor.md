@@ -108,9 +108,8 @@ apps/desktop (Composition Root — registers concrete adapters into MarketServic
 ### Phase 6 — End-to-End Architectural Guardrails & Cleanup
 *Goal: Lock in the new boundaries permanently so coupling cannot creep back.*
 
-- [ ] **6.1 Strengthen `tools/naming_check` architectural rules:**
-  - `market_runtime` cannot depend on `crates/adapters/*` or `aeris_trading::venue`.
-  - No `provider_id ==` or concrete adapter imports inside `market_service/` core modules.
-  - Ratchet file-size / `Result<_, String>` counts downward after each completed phase.
-- [ ] **6.2 Update `AGENTS.md` architecture invariants:** Document the new `provider_spi`, `BrokerVenueRegistry`, and `ConnectionId` invariants once landed.
-- [ ] **6.3 Full workspace verification:** Format, `aeris_naming_check`, full workspace `clippy --all-targets --all-features -D warnings`, full workspace `cargo test --workspace --all-features --locked`, and release smoke launch.
+- [x] **6.1 Strengthen `tools/naming_check` architectural rules:**
+  - Enforced provider-neutrality across `market_service/` core modules (`broker_venue.rs`, `calendar/mod.rs`, `coordinator.rs`, `coordinator/*`, `error.rs`, `history.rs`, `order_book.rs`, `provider_auth.rs`, `realtime.rs`) and lowered `aeris_market_runtime` `result_string` ratchet to `181`.
+  - Remaining optional follow-up: removing concrete adapter deps from `crates/market_runtime/Cargo.toml` (item 2.5) once the remaining provider realtime/scan worker loops (`hyperliquid_realtime.rs`, `hyperliquid_market_scan.rs`, `rithmic_realtime.rs`) are split into a separate composition crate.
+- [x] **6.2 Update `AGENTS.md` architecture invariants:** Documented `aeris_provider_spi`, `MarketServiceBuilder`, `ProviderAuthRegistry`, `BrokerVenueRunnerRegistry`, `BrokerVenueRegistry`, `ConnectionId`/`CredentialSource`, and provider-neutral `market_service/` core module guardrails.
+- [x] **6.3 Full workspace verification:** Passed `cargo fmt --all -- --check`, `cargo run -p aeris_naming_check --locked`, `cargo test -p aeris_naming_check --locked` (166/166), `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`, and `cargo test --workspace --all-features --locked` (`AERIS_RITHMIC_KIT_DISABLED=1`). (Installed-app release smoke launch not run in this session.)

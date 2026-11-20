@@ -835,7 +835,7 @@ impl Coordinator<'_> {
                 }
                 if !self.series.candle_contains_key(series) {
                     let generation = self.provider_generation_for_series(series)?;
-                    let instrument = self.candle_instrument(series)?.clone();
+                    let instrument = self.installed_instrument(series)?.clone();
                     let interval = descriptor
                         .capabilities
                         .candle_wire_interval
