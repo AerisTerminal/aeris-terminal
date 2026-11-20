@@ -2,11 +2,14 @@
 //! in flight. A deadline opens the circuit until the abandoned calculation
 //! finishes: no replacement worker or queued backlog is created, and a late
 //! result cannot commit state or publications.
+use aeris_market_data::{OrderBook, TopOfBookQuote};
+use std::collections::VecDeque;
+
 use super::{
-    AssertUnwindSafe, NativeStudyCalculate, NativeStudyCalculation, NativeStudyState, OrderBook,
+    AssertUnwindSafe, NativeStudyCalculate, NativeStudyCalculation, NativeStudyState,
     ResolvedStudyInput, StudyDepthView, StudyDirtyRange, StudyExecutionContext,
     StudyLiveMarketData, StudyOutputBuffer, StudyOutputTimeline, StudyQuoteView, StudySettings,
-    StudyTradeWindow, TopOfBookQuote, VecDeque, bounded_execution_detail, catch_unwind,
+    StudyTradeWindow, bounded_execution_detail, catch_unwind,
 };
 use crate::RetainedMarketTrade;
 use std::{

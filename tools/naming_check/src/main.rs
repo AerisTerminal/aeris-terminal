@@ -6348,6 +6348,9 @@ jobs:
     fn rithmic_application_name_has_one_canonical_source() {
         for relative in [
             "crates/adapters/rithmic_protocol/src/provider_session.rs",
+            "crates/adapters/rithmic_protocol/src/provider_session/callbacks.rs",
+            "crates/adapters/rithmic_protocol/src/provider_session/catalog.rs",
+            "crates/adapters/rithmic_protocol/src/provider_session/retry.rs",
             "crates/adapters/rithmic_protocol/src/protocol.rs",
             "crates/adapters/rithmic_protocol/src/session_tests.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
