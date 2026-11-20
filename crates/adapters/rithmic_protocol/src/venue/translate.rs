@@ -1,13 +1,13 @@
 //! Exact translation between the provider-neutral venue contract and Rithmic order- and
 //! P&L-plant values. A value that would need rounding is refused, never approximated.
 
-use aeris_instruments::InstrumentId;
-use aeris_rithmic_protocol_adapter::{
+use crate::{
     ProviderTimestamp, RithmicBracketLevel, RithmicDecimal, RithmicExchangeNotifyType,
     RithmicExchangeOrderNotification, RithmicGateway, RithmicInstrumentPnl, RithmicOrderDetails,
     RithmicOrderDuration, RithmicOrderNotification, RithmicOrderNotifyType, RithmicOrderSide,
     RithmicOrderType, RithmicReportedPriceType, RithmicReportedSide, rithmic_instrument_id,
 };
+use aeris_instruments::InstrumentId;
 use aeris_trading::{
     AccountEnvironment, FixedPoint, OrderSide, OrderType, TimeInForce,
     venue::{
@@ -300,9 +300,7 @@ pub(super) fn money(value: RithmicDecimal) -> Option<FixedPoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeris_rithmic_protocol_adapter::{
-        RithmicAccountRef, RithmicFill, RithmicPositionQuantities,
-    };
+    use crate::{RithmicAccountRef, RithmicFill, RithmicPositionQuantities};
 
     fn decimal(units: i64, scale: u8) -> RithmicDecimal {
         RithmicDecimal::try_new(units, scale).expect("decimal")

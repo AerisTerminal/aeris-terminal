@@ -1,6 +1,26 @@
 use crate::{RithmicCredentials, RithmicGateway};
 use core::fmt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use zeroize::Zeroize;
+
+/// Monotonic counter advanced whenever the saved Rithmic login changes so
+/// market-data and broker-venue workers promptly retire stale sessions.
+#[derive(Clone, Debug, Default)]
+pub struct RithmicLoginRevision(Arc<AtomicU64>);
+
+impl RithmicLoginRevision {
+    pub fn advance(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[must_use]
+    pub fn current(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 const CREDENTIAL_VERSION: u8 = 2;
 /// Version, gateway code, then big-endian system, user and password lengths.

@@ -13,14 +13,14 @@ use super::{
     session::{Session, SessionEnd, lost},
     translate,
 };
-use aeris_instruments::InstrumentId;
-use aeris_observability::diagnostic;
-use aeris_rithmic_protocol_adapter::{
+use crate::{
     BracketLevelUpdateRequest, BracketOrderRequest, CancelAllOrdersRequest, CancelOrderRequest,
     ExecutionReplayRequest, ExitPositionRequest, ModifyOrderRequest, NewOrderRequest,
     RetryDisposition, RithmicAccount, RithmicBracketLevel, RithmicOrderPlacement, RithmicOrderType,
     RithmicRequestKind, RithmicSessionError, RithmicTradeRoute, parse_rithmic_instrument_id,
 };
+use aeris_instruments::InstrumentId;
+use aeris_observability::diagnostic;
 use aeris_trading::{
     ClientOrderId,
     venue::{
@@ -848,7 +848,7 @@ mod tests {
         RithmicAccount {
             fcm_id: "fcm".into(),
             ib_id: "ib".into(),
-            account_id: aeris_rithmic_protocol_adapter::RithmicAccountRef::new("account-1"),
+            account_id: crate::RithmicAccountRef::new("account-1"),
             account_name: None,
             currency: Some("USD".into()),
         }

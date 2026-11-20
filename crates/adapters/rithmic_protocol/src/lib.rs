@@ -34,6 +34,7 @@ mod session;
 mod session_contract;
 #[cfg(test)]
 mod session_tests;
+pub mod venue;
 
 pub use catalog::{
     DecodedCatalogMessage, InstrumentReference, ProductCodeResult, SymbolSearchResult,
@@ -46,6 +47,7 @@ pub use collectors::{
 pub use credentials::{
     MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_CREDENTIAL_FIELD_BYTES,
     MAXIMUM_RITHMIC_SYSTEM_NAME_BYTES, RithmicCredentialBytes, RithmicCredentialError,
+    RithmicLoginRevision,
 };
 pub use decimal::{MAXIMUM_RITHMIC_DECIMAL_SCALE, RithmicDecimal};
 pub use endpoint::{RetryDisposition, RithmicGateway, RithmicSessionError, RithmicSessionLimits};

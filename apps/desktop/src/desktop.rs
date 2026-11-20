@@ -6092,8 +6092,10 @@ fn attach_broker_venue(
     let owner = trading.clone();
     let inbox = trading.broker_venue_inbox();
     market.attach_broker_venue(aeris_market_runtime::BrokerVenueLink {
-        attach: Box::new(move |capabilities| owner.attach_broker_venue(capabilities)),
-        events: Box::new(move |event| inbox.push(event)),
+        attach: Box::new(move |capabilities| {
+            owner.attach_broker_venue(capabilities).map_err(Into::into)
+        }),
+        events: Box::new(move |event| inbox.push(event).map_err(Into::into)),
     })
 }
 

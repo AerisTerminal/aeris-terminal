@@ -4,9 +4,7 @@
 //! state against a partial view.
 
 use super::translate;
-use aeris_rithmic_protocol_adapter::{
-    RithmicInstrumentPnl, RithmicOrderDetails, RithmicRequestOutcome,
-};
+use crate::{RithmicInstrumentPnl, RithmicOrderDetails, RithmicRequestOutcome};
 use aeris_trading::venue::{BrokerOrder, VenuePosition, VenueSnapshot};
 use std::{collections::BTreeMap, time::Instant};
 
@@ -175,7 +173,7 @@ impl Reconcile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeris_rithmic_protocol_adapter::{
+    use crate::{
         RithmicAccountRef, RithmicDecimal, RithmicPositionQuantities, RithmicReportedPriceType,
         RithmicReportedSide,
     };

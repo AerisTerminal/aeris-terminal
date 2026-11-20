@@ -1,27 +1,12 @@
-//! Attachment of the broker venue relay, which routes the trading owner's broker orders
-//! through the saved Rithmic login on a dedicated worker.
+//! Attachment of broker venue relays, routing the trading owner's broker orders
+//! through registered broker adapters on dedicated bounded workers.
 
 use super::{MarketService, MarketServiceError};
-use aeris_trading::{
-    venue::{VenueCapabilities, VenueEvent},
-    venue_outbox::VenueRequestReceiver,
-};
+pub use aeris_trading::venue::BrokerVenueLink;
 use std::{
     sync::{Arc, atomic::Ordering},
     thread,
 };
-
-/// One venue session generation and the receiver of its requests.
-pub type VenueSession = Result<(u64, VenueRequestReceiver), String>;
-
-/// The trading owner's two ends of a broker venue. `attach` starts one venue session
-/// generation with the venue's capabilities and returns its request receiver; the relay
-/// calls it again after every reconnect so the owner reconciles each account under the
-/// new session. `events` delivers the venue's reports to the owner's bounded inbox.
-pub struct BrokerVenueLink {
-    pub attach: Box<dyn FnMut(VenueCapabilities) -> VenueSession + Send + 'static>,
-    pub events: Box<dyn Fn(VenueEvent) -> Result<(), String> + Send + 'static>,
-}
 
 impl MarketService {
     /// Starts the broker venue relay on its own worker. It signs in with the saved
@@ -49,7 +34,7 @@ impl MarketService {
         let revision = login.revision.clone();
         match thread::Builder::new()
             .name("aeris-broker-venue".into())
-            .spawn(move || crate::rithmic_venue::run(link, &shutdown, &revision))
+            .spawn(move || aeris_rithmic_protocol_adapter::venue::run(link, &shutdown, &revision))
         {
             Ok(worker) => {
                 workers.push(worker);

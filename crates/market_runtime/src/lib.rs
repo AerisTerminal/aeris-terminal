@@ -19,7 +19,6 @@ pub mod market_service;
 mod provider_presentation;
 mod rithmic_history;
 mod rithmic_realtime;
-mod rithmic_venue;
 mod scan;
 mod status;
 pub mod study;

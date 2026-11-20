@@ -6270,7 +6270,7 @@ jobs:
             "crates/market_runtime/src/rithmic_realtime.rs",
             "crates/market_runtime/src/rithmic_history.rs",
             "crates/market_runtime/src/market_service/rithmic_login.rs",
-            "crates/market_runtime/src/rithmic_venue/mod.rs",
+            "crates/adapters/rithmic_protocol/src/venue/mod.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
             "crates/adapters/rithmic_protocol/src/bin/provision_rithmic_test.rs",
         ];
@@ -6339,7 +6339,7 @@ jobs:
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
             "crates/market_runtime/src/rithmic_realtime.rs",
             "crates/market_runtime/src/rithmic_history.rs",
-            "crates/market_runtime/src/rithmic_venue/mod.rs",
+            "crates/adapters/rithmic_protocol/src/venue/mod.rs",
         ] {
             let source = manifest(relative);
             assert!(

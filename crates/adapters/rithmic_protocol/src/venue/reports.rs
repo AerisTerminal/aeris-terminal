@@ -7,12 +7,12 @@ use super::{
     session::{MAXIMUM_ROUTES, Session, SessionEnd},
     translate,
 };
-use aeris_observability::diagnostic;
-use aeris_rithmic_protocol_adapter::{
+use crate::{
     DecodedOrderMessage, DecodedPnlMessage, RithmicAccountPnl, RithmicExchangeOrderNotification,
     RithmicInstrumentPnl, RithmicOrderNotification, RithmicRequestKind, RithmicRequestOutcome,
     RithmicTradeRoute,
 };
+use aeris_observability::diagnostic;
 use aeris_trading::venue::{BrokerOrder, BrokerOrderState, VenueOperation, VenueUpdate};
 
 /// The broker's reason for refusing a request, or `None` when it did not refuse.

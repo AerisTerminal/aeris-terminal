@@ -5,11 +5,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     mem,
     num::NonZeroUsize,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
-    },
+    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     thread,
     time::{Duration, Instant},
 };
@@ -148,18 +144,7 @@ type Runtime = RithmicProviderRuntime<NativeCredentialVault, RithmicProviderDriv
 /// under an older login, so the next connection reads the vault again. A
 /// counter rather than a queued control coalesces repeated saves and can never
 /// be dropped by a full control queue.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RithmicLoginRevision(Arc<AtomicU64>);
-
-impl RithmicLoginRevision {
-    pub(crate) fn advance(&self) {
-        self.0.fetch_add(1, Ordering::AcqRel);
-    }
-
-    pub(crate) fn current(&self) -> u64 {
-        self.0.load(Ordering::Acquire)
-    }
-}
+pub(crate) use aeris_rithmic_protocol_adapter::RithmicLoginRevision;
 
 #[derive(Clone, Copy)]
 struct ProviderChannels<'a> {

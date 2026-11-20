@@ -451,6 +451,7 @@ dependencies = [
  "aeris_observability",
  "aeris_platform_runtime",
  "aeris_provider_history",
+ "aeris_trading",
  "chrono",
  "prost",
  "prost-build",

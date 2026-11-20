@@ -1,10 +1,10 @@
 //! One relay session: login on the order and P&L plants, account and route setup,
 //! attachment as a venue session generation, then the request and report loop.
 
-use super::{application, reconcile::Reconcile, requests::Pending, saved_login, translate};
-use crate::market_service::{BrokerVenueLink, clock::Clock};
-use aeris_observability::diagnostic;
-use aeris_rithmic_protocol_adapter::{
+use super::{
+    VenueClock, application, reconcile::Reconcile, requests::Pending, saved_login, translate,
+};
+use crate::{
     AccountListRequest, DecodedControlMessage, DecodedOrderMessage, DecodedPnlMessage,
     MAXIMUM_BRACKET_LEVELS, MAXIMUM_TRACKED_RITHMIC_ACCOUNTS, PnlPositionUpdatesRequest,
     RetryDisposition, RithmicAccount, RithmicLoginInfo, RithmicOrderConnection,
@@ -12,9 +12,13 @@ use aeris_rithmic_protocol_adapter::{
     RithmicSession, RithmicSessionError, RithmicSessionLimits, RithmicTradeRoute, RithmicUserType,
     SubscriptionAction, TradeRoutesRequest,
 };
+use aeris_observability::diagnostic;
 use aeris_trading::{
     AccountEnvironment,
-    venue::{ObservedAccount, VenueCapabilities, VenueEvent, VenueRequest, VenueUpdate},
+    venue::{
+        BrokerVenueLink, ObservedAccount, VenueCapabilities, VenueEvent, VenueLinkError,
+        VenueRequest, VenueUpdate,
+    },
     venue_outbox::VenueRequestReceiver,
 };
 use std::{
@@ -65,7 +69,7 @@ pub(super) fn lost(step: &'static str) -> impl FnOnce(RithmicSessionError) -> Se
 }
 
 pub(super) struct Context<'a> {
-    pub(super) clock: &'a dyn Clock,
+    pub(super) clock: VenueClock,
     shutdown: &'a AtomicBool,
     login_changed: &'a dyn Fn() -> bool,
 }
@@ -143,7 +147,7 @@ impl Plants {
     fn read_order(
         &mut self,
         wait: Duration,
-        clock: &dyn Clock,
+        clock: VenueClock,
     ) -> Result<Read<DecodedOrderMessage>, SessionEnd> {
         let read = self.orders.read_next_until(clock.monotonic() + wait);
         if read.is_ok() {
@@ -160,7 +164,7 @@ impl Plants {
     fn read_pnl(
         &mut self,
         wait: Duration,
-        clock: &dyn Clock,
+        clock: VenueClock,
     ) -> Result<Read<DecodedPnlMessage>, SessionEnd> {
         let read = self.pnl.read_next_until(clock.monotonic() + wait);
         if read.is_ok() {
@@ -250,7 +254,7 @@ fn control_message<T>(control: &DecodedControlMessage, plant: &str) -> Result<Re
 pub(super) fn run(
     link: &mut BrokerVenueLink,
     shutdown: &Arc<AtomicBool>,
-    clock: &dyn Clock,
+    clock: VenueClock,
     login_changed: &dyn Fn() -> bool,
 ) -> SessionEnd {
     let context = Context {
@@ -464,12 +468,9 @@ fn list_routes(
     Ok(routes)
 }
 
-fn finished(
-    outcome: &aeris_rithmic_protocol_adapter::RithmicRequestOutcome,
-    step: &str,
-) -> Result<(), String> {
+fn finished(outcome: &crate::RithmicRequestOutcome, step: &str) -> Result<(), String> {
     match outcome {
-        aeris_rithmic_protocol_adapter::RithmicRequestOutcome::Rejected { .. } => {
+        crate::RithmicRequestOutcome::Rejected { .. } => {
             Err(format!("Rithmic refused {step}: {outcome:?}"))
         }
         _ => Ok(()),
@@ -535,7 +536,7 @@ fn subscribe(
 pub(super) struct Session<'a> {
     pub(super) plants: &'a mut Plants,
     pub(super) context: &'a Context<'a>,
-    events: &'a (dyn Fn(VenueEvent) -> Result<(), String> + Send),
+    events: &'a (dyn Fn(VenueEvent) -> Result<(), VenueLinkError> + Send),
     generation: u64,
     requests: VenueRequestReceiver,
     environment: AccountEnvironment,

@@ -26,6 +26,7 @@ aeris_market_data = { path = "../../domain/market_data" }
 aeris_observability = { path = "../../observability" }
 aeris_platform_runtime = { path = "../../platform_runtime" }
 aeris_provider_history = { path = "../../provider_history" }
+aeris_trading = { path = "../../domain/trading" }
 chrono.workspace = true
 prost.workspace = true
 rustls.workspace = true

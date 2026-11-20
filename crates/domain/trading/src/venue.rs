@@ -461,6 +461,36 @@ pub struct VenueEvent {
     pub observed_unix_nanos: i64,
 }
 
+/// Typed error returned by the trading owner's broker-venue attach or event callback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VenueLinkError(pub String);
+
+impl core::fmt::Display for VenueLinkError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for VenueLinkError {}
+
+impl From<String> for VenueLinkError {
+    fn from(detail: String) -> Self {
+        Self(detail)
+    }
+}
+
+/// One venue session generation and the receiver of its requests.
+pub type VenueSession = Result<(u64, crate::venue_outbox::VenueRequestReceiver), VenueLinkError>;
+
+/// The trading owner's two ends of a broker venue. `attach` starts one venue session
+/// generation with the venue's capabilities and returns its request receiver; the relay
+/// calls it again after every reconnect so the owner reconciles each account under the
+/// new session. `events` delivers the venue's reports to the owner's bounded inbox.
+pub struct BrokerVenueLink {
+    pub attach: Box<dyn FnMut(VenueCapabilities) -> VenueSession + Send + 'static>,
+    pub events: Box<dyn Fn(VenueEvent) -> Result<(), VenueLinkError> + Send + 'static>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
