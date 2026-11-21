@@ -112,6 +112,10 @@ params_ultimate_oscillator = Périodes 7 · 14 · 28
 params_cumulative = Cumulé
 params_chaikin_oscillator = Rapide 3 · Lente 10
 params_klinger = Rapide 34 · Lente 55 · Signal 13
+indicator_twap = Prix moyen pondéré par le temps (TWAP)
+indicator_adr_levels = Niveaux ADR
+indicator_squeeze_momentum = Squeeze Momentum
+params_squeeze_momentum = BB 20 · KC 20
 
 # Types de graphique.
 chart_type_candles = Bougies

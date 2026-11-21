@@ -444,8 +444,8 @@ fn definition(interval: ChartInterval) -> ScanDefinition {
                 bollinger(Line::Lower),
             ),
             above_zero(study(
-                ScanStudy::Vortex,
-                Line::PlusVi,
+                ScanStudy::AdxDmi,
+                Line::PlusDi,
                 &[whole(WILDER_PERIOD)],
             )),
             above_zero(study(ScanStudy::Atr, Line::Value, &[whole(WILDER_PERIOD)])),

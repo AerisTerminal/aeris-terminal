@@ -568,7 +568,6 @@ pub(in crate::desktop) const fn runtime_managed_indicator(indicator: ChartIndica
         indicator,
         ChartIndicator::Sma
             | ChartIndicator::Ema
-            | ChartIndicator::Wma
             | ChartIndicator::Bollinger
             | ChartIndicator::Vwap
             | ChartIndicator::Rsi

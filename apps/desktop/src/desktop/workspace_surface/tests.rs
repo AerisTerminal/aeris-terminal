@@ -764,10 +764,10 @@ fn study_decimal_editor_round_trips_exact_fixed_point_values() {
 #[test]
 fn failed_study_setting_reinitialization_preserves_durable_configuration() {
     let study_id = StudyInstanceId::try_from_u64(1).expect("study id");
-    let original = default_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study");
+    let original = default_runtime_study(1, ChartIndicator::Ema, true).expect("EMA study");
     let mut replacement = original.clone();
     replacement.settings = vec![WorkspaceStudySettingState {
-        identifier: aeris_study_sdk::BUILTIN_WMA_PERIOD_SETTING.to_string(),
+        identifier: aeris_study_sdk::BUILTIN_EMA_PERIOD_SETTING.to_string(),
         value: Some(workspace_study_setting_state::Value::Integer(42)),
     }];
     let series = BarSeriesKey {
@@ -1027,7 +1027,7 @@ fn runtime_subtree_removal_fixture() -> (StudiesController, StudyInstanceId, Stu
     let mut studies = StudiesController::restore(vec![
         pending_runtime_study(dependent_legacy_study(5, 4), true),
         pending_runtime_study(
-            default_runtime_study(6, ChartIndicator::Wma, true).expect("unrelated deferred study"),
+            default_runtime_study(6, ChartIndicator::Ema, true).expect("unrelated deferred study"),
             false,
         ),
     ]);
@@ -1043,7 +1043,7 @@ fn runtime_subtree_removal_fixture() -> (StudiesController, StudyInstanceId, Stu
     });
     studies.activate(RuntimeStudyState {
         study_id: unrelated_id,
-        persisted: default_runtime_study(3, ChartIndicator::Wma, true).expect("unrelated study"),
+        persisted: default_runtime_study(3, ChartIndicator::Ema, true).expect("unrelated study"),
         resolved_chart_series: None,
     });
     studies.insert_pending(
@@ -1167,12 +1167,6 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
                 session_profile: None,
             },
             WorkspaceChartIndicatorState {
-                kind: "wma".to_string(),
-                visible: true,
-                volume: None,
-                session_profile: None,
-            },
-            WorkspaceChartIndicatorState {
                 kind: "bollinger".to_string(),
                 visible: false,
                 volume: None,
@@ -1217,11 +1211,10 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
         "the migration materialized every legacy entry into the study graph"
     );
     let restored = persisted_runtime_studies(Some(&state));
-    assert_eq!(restored.len(), 9);
+    assert_eq!(restored.len(), 8);
     let expected = [
         (aeris_study_sdk::BUILTIN_SMA_IDENTIFIER, false),
         (aeris_study_sdk::BUILTIN_EMA_IDENTIFIER, true),
-        (aeris_study_sdk::BUILTIN_WMA_IDENTIFIER, true),
         (aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER, false),
         (aeris_study_sdk::BUILTIN_VWAP_IDENTIFIER, true),
         (aeris_study_sdk::BUILTIN_ATR_IDENTIFIER, false),
@@ -1235,7 +1228,7 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
         assert_eq!(state.persisted.local_id, index as u64 + 1);
     }
     assert_eq!(
-        restored[3].persisted.output_identifiers,
+        restored[2].persisted.output_identifiers,
         vec![
             aeris_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
             aeris_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
@@ -1300,13 +1293,13 @@ fn retired_legacy_indicator_kinds_are_dropped_without_affecting_other_indicators
 
 #[test]
 fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicates() {
-    let durable_wma = default_runtime_study(7, ChartIndicator::Wma, true).expect("WMA study");
+    let durable_ema = default_runtime_study(7, ChartIndicator::Ema, true).expect("EMA study");
     let durable_rsi = default_runtime_study(8, ChartIndicator::Rsi, true).expect("RSI study");
     let state = WorkspaceChartState {
-        studies: vec![durable_wma.clone(), durable_rsi.clone()],
+        studies: vec![durable_ema.clone(), durable_rsi.clone()],
         indicators: vec![
             WorkspaceChartIndicatorState {
-                kind: "wma".to_string(),
+                kind: "ema".to_string(),
                 visible: false,
                 volume: None,
                 session_profile: None,
@@ -1342,7 +1335,7 @@ fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicat
     let restored = persisted_runtime_studies(Some(&state));
 
     assert_eq!(restored.len(), 4);
-    assert_eq!(restored[0].persisted, durable_wma);
+    assert_eq!(restored[0].persisted, durable_ema);
     assert_eq!(restored[1].persisted, durable_rsi);
     assert_eq!(
         restored[2].persisted.local_id, 9,
@@ -1365,7 +1358,6 @@ fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicat
 fn migrated_picker_indicators_are_runtime_managed() {
     assert!(runtime_managed_indicator(ChartIndicator::Sma));
     assert!(runtime_managed_indicator(ChartIndicator::Ema));
-    assert!(runtime_managed_indicator(ChartIndicator::Wma));
     assert!(runtime_managed_indicator(ChartIndicator::Bollinger));
     assert!(runtime_managed_indicator(ChartIndicator::Vwap));
     assert!(runtime_managed_indicator(ChartIndicator::Rsi));
@@ -1533,7 +1525,7 @@ fn runtime_managed_indicators_are_not_written_to_the_legacy_indicator_field() {
             session_profile: None,
         },
         ChartIndicatorState {
-            indicator: ChartIndicator::Wma,
+            indicator: ChartIndicator::Ema,
             visible: false,
             volume: None,
             session_profile: None,
@@ -1646,7 +1638,7 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
     let mut studies = StudiesController::default();
     studies.activate(RuntimeStudyState {
         study_id: first,
-        persisted: default_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
+        persisted: default_runtime_study(1, ChartIndicator::Ema, true).expect("EMA study"),
         resolved_chart_series: None,
     });
     studies.activate(RuntimeStudyState {
@@ -1659,7 +1651,7 @@ fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() 
     studies.insert_pending(
         3,
         PendingRuntimeStudyState {
-            persisted: default_runtime_study(3, ChartIndicator::Wma, true).expect("WMA study"),
+            persisted: default_runtime_study(3, ChartIndicator::Ema, true).expect("EMA study"),
             resolved_chart_series: None,
             remove_on_registration: false,
             persist_on_registration: true,
@@ -1769,7 +1761,7 @@ fn clearing_unregistered_runtime_studies_cancels_pending_and_drops_deferred_work
     studies.insert_pending(
         1,
         PendingRuntimeStudyState {
-            persisted: default_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
+            persisted: default_runtime_study(1, ChartIndicator::Ema, true).expect("EMA study"),
             resolved_chart_series: None,
             remove_on_registration: false,
             persist_on_registration: true,

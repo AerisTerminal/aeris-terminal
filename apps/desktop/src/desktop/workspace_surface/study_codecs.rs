@@ -406,15 +406,6 @@ fn default_runtime_study_contract(
             )],
             vec![aeris_study_sdk::BUILTIN_EMA_OUTPUT_IDENTIFIER.to_string()],
         ),
-        ChartIndicator::Wma => (
-            aeris_study_sdk::BUILTIN_WMA_IDENTIFIER,
-            aeris_study_sdk::BUILTIN_WMA_IMPLEMENTATION_REVISION,
-            vec![integer_setting(
-                aeris_study_sdk::BUILTIN_WMA_PERIOD_SETTING,
-                aeris_study_sdk::BUILTIN_WMA_DEFAULT_PERIOD,
-            )],
-            vec![aeris_study_sdk::BUILTIN_WMA_OUTPUT_IDENTIFIER.to_string()],
-        ),
         ChartIndicator::Bollinger => default_bollinger_contract(),
         ChartIndicator::Vwap => (
             aeris_study_sdk::BUILTIN_VWAP_IDENTIFIER,

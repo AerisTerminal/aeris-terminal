@@ -225,7 +225,6 @@ pub enum ChartIndicator {
     Vwap,
     Sma,
     Ema,
-    Wma,
     Bollinger,
     Rsi,
     Macd,
@@ -253,12 +252,11 @@ pub struct ChartIndicatorState {
 
 impl ChartIndicator {
     /// All indicators that can be calculated truthfully from the installed OHLC columns.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::Volume,
         Self::Vwap,
         Self::Sma,
         Self::Ema,
-        Self::Wma,
         Self::Bollinger,
         Self::Rsi,
         Self::Macd,
@@ -279,7 +277,6 @@ impl ChartIndicator {
             Self::Vwap => "vwap",
             Self::Sma => "sma",
             Self::Ema => "ema",
-            Self::Wma => "wma",
             Self::Bollinger => "bollinger",
             Self::Rsi => "rsi",
             Self::Macd => "macd",
@@ -299,7 +296,6 @@ impl ChartIndicator {
             "vwap" => Self::Vwap,
             "sma" => Self::Sma,
             "ema" => Self::Ema,
-            "wma" => Self::Wma,
             "bollinger" => Self::Bollinger,
             "rsi" => Self::Rsi,
             "macd" => Self::Macd,
@@ -319,7 +315,6 @@ impl ChartIndicator {
             Self::Vwap => tr!(chart_ui::INDICATOR_VWAP),
             Self::Sma => tr!(chart_ui::INDICATOR_SMA),
             Self::Ema => tr!(chart_ui::INDICATOR_EMA),
-            Self::Wma => tr!(chart_ui::INDICATOR_WMA),
             Self::Bollinger => tr!(chart_ui::INDICATOR_BOLLINGER),
             Self::Rsi => tr!(chart_ui::INDICATOR_RSI),
             Self::Macd => tr!(chart_ui::INDICATOR_MACD),
@@ -337,7 +332,7 @@ impl ChartIndicator {
         match self {
             Self::Volume => tr!(chart_ui::PARAMS_VOLUME),
             Self::Vwap => tr!(chart_ui::PARAMS_SESSION_ANCHORED),
-            Self::Sma | Self::Ema | Self::Wma => tr!(chart_ui::PARAMS_PERIOD_20),
+            Self::Sma | Self::Ema => tr!(chart_ui::PARAMS_PERIOD_20),
             Self::Bollinger => tr!(chart_ui::PARAMS_PERIOD_20_DEVIATION_2),
             Self::Rsi | Self::Atr => tr!(chart_ui::PARAMS_PERIOD_14),
             Self::Macd => tr!(chart_ui::PARAMS_MACD),
@@ -353,7 +348,6 @@ impl ChartIndicator {
             IndicatorKind::Vwap => Self::Vwap,
             IndicatorKind::Sma { .. } => Self::Sma,
             IndicatorKind::Ema { .. } => Self::Ema,
-            IndicatorKind::Wma { .. } => Self::Wma,
             IndicatorKind::Bollinger { .. } => Self::Bollinger,
             IndicatorKind::Rsi { .. } => Self::Rsi,
             IndicatorKind::Macd { .. } => Self::Macd,
@@ -371,7 +365,6 @@ impl ChartIndicator {
             Self::Vwap => IndicatorKind::Vwap,
             Self::Sma => IndicatorKind::Sma { period: 20 },
             Self::Ema => IndicatorKind::Ema { period: 20 },
-            Self::Wma => IndicatorKind::Wma { period: 20 },
             Self::Bollinger => IndicatorKind::Bollinger {
                 period: 20,
                 deviation: 2.0,

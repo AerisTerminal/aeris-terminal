@@ -112,6 +112,10 @@ params_ultimate_oscillator = 期間 7 · 14 · 28
 params_cumulative = 累積
 params_chaikin_oscillator = 短期 3 · 長期 10
 params_klinger = 短期 34 · 長期 55 · シグナル 13
+indicator_twap = 時間加重平均価格 (TWAP)
+indicator_adr_levels = ADRレベル
+indicator_squeeze_momentum = スクイーズモメンタム
+params_squeeze_momentum = BB 20 · KC 20
 
 # チャートタイプ。
 chart_type_candles = ローソク足

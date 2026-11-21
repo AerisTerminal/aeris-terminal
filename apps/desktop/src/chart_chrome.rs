@@ -19,7 +19,6 @@ pub const HEADER_ICON_SIZE: f32 = HEADER_CONTROL_CONTENT_SIZE * 0.75;
 pub enum IndicatorKind {
     Sma,
     Ema,
-    Wma,
     BollingerBands,
     Vwap,
     Volume,
@@ -37,7 +36,6 @@ impl IndicatorKind {
         match self {
             Self::Sma => "sma",
             Self::Ema => "ema",
-            Self::Wma => "wma",
             Self::BollingerBands => "bollinger",
             Self::Vwap => "vwap",
             Self::Volume => "volume",
@@ -117,7 +115,7 @@ impl IndicatorSpec {
     }
 }
 
-pub const INDICATOR_SPECS: [IndicatorSpec; 12] = [
+pub const INDICATOR_SPECS: [IndicatorSpec; 11] = [
     IndicatorSpec {
         kind: IndicatorKind::Sma,
         label: "Simple Moving Average",
@@ -128,13 +126,6 @@ pub const INDICATOR_SPECS: [IndicatorSpec; 12] = [
     IndicatorSpec {
         kind: IndicatorKind::Ema,
         label: "Exponential Moving Average",
-        parameters: IndicatorParameters::Period { period: 20 },
-        parameter_description: "Period 20",
-        location: IndicatorLocation::MainChartOverlay,
-    },
-    IndicatorSpec {
-        kind: IndicatorKind::Wma,
-        label: "Weighted Moving Average",
         parameters: IndicatorParameters::Period { period: 20 },
         parameter_description: "Period 20",
         location: IndicatorLocation::MainChartOverlay,
@@ -1046,7 +1037,6 @@ mod tests {
             [
                 IndicatorKind::Sma,
                 IndicatorKind::Ema,
-                IndicatorKind::Wma,
                 IndicatorKind::BollingerBands,
                 IndicatorKind::Vwap,
                 IndicatorKind::VolumeProfile,
@@ -1065,7 +1055,6 @@ mod tests {
         assert_eq!(
             INDICATOR_SPECS.map(|spec| spec.parameters),
             [
-                IndicatorParameters::Period { period: 20 },
                 IndicatorParameters::Period { period: 20 },
                 IndicatorParameters::Period { period: 20 },
                 IndicatorParameters::BollingerBands {
@@ -1090,12 +1079,12 @@ mod tests {
             ]
         );
         assert!(
-            INDICATOR_SPECS[..7]
+            INDICATOR_SPECS[..6]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::MainChartOverlay)
         );
         assert!(
-            INDICATOR_SPECS[8..]
+            INDICATOR_SPECS[7..]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::OscillatorPane)
         );
@@ -1128,7 +1117,7 @@ mod tests {
                 .into_iter()
                 .map(|spec| spec.kind)
                 .collect::<Vec<_>>(),
-            vec![IndicatorKind::Sma, IndicatorKind::Ema, IndicatorKind::Wma]
+            vec![IndicatorKind::Sma, IndicatorKind::Ema]
         );
     }
 

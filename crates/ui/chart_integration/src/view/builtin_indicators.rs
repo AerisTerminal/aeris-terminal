@@ -10,24 +10,14 @@ use aeris_localization::{chart_ui, tr};
 /// One Aeris Charts built-in indicator, created with the engine's canonical defaults.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BuiltinIndicator {
-    Dema,
-    Tema,
-    Smma,
-    Hma,
-    Alma,
-    Kama,
-    McGinley,
     Vwma,
-    LinearRegression,
-    Envelopes,
     Donchian,
     Keltner,
-    AtrBands,
     VwapBands,
+    Twap,
     ParabolicSar,
     SuperTrend,
     Ichimoku,
-    ZigZag,
     PivotStandard,
     PivotFibonacci,
     PivotCamarilla,
@@ -37,37 +27,13 @@ pub enum BuiltinIndicator {
     SessionLevels,
     PreviousPeriodLevels,
     OpeningRange,
-    Aroon,
-    AwesomeOscillator,
-    Dpo,
-    ChandeMomentum,
-    BollingerMetrics,
-    StandardDeviation,
+    AdrLevels,
     Cci,
-    WilliamsR,
     StochasticRsi,
-    Momentum,
-    RateOfChange,
     AdxDmi,
-    Choppiness,
-    HistoricalVolatility,
-    Trix,
-    Kst,
-    Tsi,
-    MassIndex,
-    Vortex,
-    CoppockCurve,
-    FisherTransform,
-    UltimateOscillator,
+    SqueezeMomentum,
     Obv,
-    AccumulationDistribution,
-    PriceVolumeTrend,
-    ChaikinOscillator,
-    Klinger,
     RelativeVolume,
-    VolumeOscillator,
-    ElderForce,
-    EaseOfMovement,
     Cmf,
     Mfi,
 }
@@ -78,25 +44,15 @@ const DEFAULT_DEVIATION: f64 = 2.0;
 
 impl BuiltinIndicator {
     /// Every built-in indicator in menu order: overlays, market structure, oscillators, volume.
-    pub const ALL: [Self; 60] = [
-        Self::Dema,
-        Self::Tema,
-        Self::Smma,
-        Self::Hma,
-        Self::Alma,
-        Self::Kama,
-        Self::McGinley,
+    pub const ALL: [Self; 26] = [
         Self::Vwma,
-        Self::LinearRegression,
-        Self::Envelopes,
         Self::Donchian,
         Self::Keltner,
-        Self::AtrBands,
         Self::VwapBands,
+        Self::Twap,
         Self::ParabolicSar,
         Self::SuperTrend,
         Self::Ichimoku,
-        Self::ZigZag,
         Self::PivotStandard,
         Self::PivotFibonacci,
         Self::PivotCamarilla,
@@ -106,37 +62,13 @@ impl BuiltinIndicator {
         Self::SessionLevels,
         Self::PreviousPeriodLevels,
         Self::OpeningRange,
-        Self::Aroon,
-        Self::AwesomeOscillator,
-        Self::Dpo,
-        Self::ChandeMomentum,
-        Self::BollingerMetrics,
-        Self::StandardDeviation,
+        Self::AdrLevels,
         Self::Cci,
-        Self::WilliamsR,
         Self::StochasticRsi,
-        Self::Momentum,
-        Self::RateOfChange,
         Self::AdxDmi,
-        Self::Choppiness,
-        Self::HistoricalVolatility,
-        Self::Trix,
-        Self::Kst,
-        Self::Tsi,
-        Self::MassIndex,
-        Self::Vortex,
-        Self::CoppockCurve,
-        Self::FisherTransform,
-        Self::UltimateOscillator,
+        Self::SqueezeMomentum,
         Self::Obv,
-        Self::AccumulationDistribution,
-        Self::PriceVolumeTrend,
-        Self::ChaikinOscillator,
-        Self::Klinger,
         Self::RelativeVolume,
-        Self::VolumeOscillator,
-        Self::ElderForce,
-        Self::EaseOfMovement,
         Self::Cmf,
         Self::Mfi,
     ];
@@ -146,24 +78,14 @@ impl BuiltinIndicator {
     #[must_use]
     pub const fn identifier(self) -> &'static str {
         match self {
-            Self::Dema => "dema",
-            Self::Tema => "tema",
-            Self::Smma => "smma",
-            Self::Hma => "hma",
-            Self::Alma => "alma",
-            Self::Kama => "kama",
-            Self::McGinley => "mcginley",
             Self::Vwma => "vwma",
-            Self::LinearRegression => "linear_regression",
-            Self::Envelopes => "envelopes",
             Self::Donchian => "donchian",
             Self::Keltner => "keltner",
-            Self::AtrBands => "atr_bands",
             Self::VwapBands => "vwap_bands",
+            Self::Twap => "twap",
             Self::ParabolicSar => "parabolic_sar",
             Self::SuperTrend => "supertrend",
             Self::Ichimoku => "ichimoku",
-            Self::ZigZag => "zigzag",
             Self::PivotStandard => "pivot_points_standard",
             Self::PivotFibonacci => "pivot_points_fibonacci",
             Self::PivotCamarilla => "pivot_points_camarilla",
@@ -173,37 +95,13 @@ impl BuiltinIndicator {
             Self::SessionLevels => "session_levels",
             Self::PreviousPeriodLevels => "previous_period_levels",
             Self::OpeningRange => "opening_range",
-            Self::Aroon => "aroon",
-            Self::AwesomeOscillator => "awesome_oscillator",
-            Self::Dpo => "dpo",
-            Self::ChandeMomentum => "chande_momentum",
-            Self::BollingerMetrics => "bollinger_metrics",
-            Self::StandardDeviation => "standard_deviation",
+            Self::AdrLevels => "adr_levels",
             Self::Cci => "cci",
-            Self::WilliamsR => "williams_r",
             Self::StochasticRsi => "stochastic_rsi",
-            Self::Momentum => "momentum",
-            Self::RateOfChange => "roc",
             Self::AdxDmi => "adx_dmi",
-            Self::Choppiness => "choppiness",
-            Self::HistoricalVolatility => "historical_volatility",
-            Self::Trix => "trix",
-            Self::Kst => "kst",
-            Self::Tsi => "tsi",
-            Self::MassIndex => "mass_index",
-            Self::Vortex => "vortex",
-            Self::CoppockCurve => "coppock_curve",
-            Self::FisherTransform => "fisher_transform",
-            Self::UltimateOscillator => "ultimate_oscillator",
+            Self::SqueezeMomentum => "squeeze_momentum",
             Self::Obv => "obv",
-            Self::AccumulationDistribution => "accumulation_distribution",
-            Self::PriceVolumeTrend => "price_volume_trend",
-            Self::ChaikinOscillator => "chaikin_oscillator",
-            Self::Klinger => "klinger",
             Self::RelativeVolume => "relative_volume",
-            Self::VolumeOscillator => "volume_oscillator",
-            Self::ElderForce => "elder_force",
-            Self::EaseOfMovement => "ease_of_movement",
             Self::Cmf => "cmf",
             Self::Mfi => "mfi",
         }
@@ -221,24 +119,14 @@ impl BuiltinIndicator {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Dema => tr!(chart_ui::INDICATOR_DEMA),
-            Self::Tema => tr!(chart_ui::INDICATOR_TEMA),
-            Self::Smma => tr!(chart_ui::INDICATOR_SMMA),
-            Self::Hma => tr!(chart_ui::INDICATOR_HMA),
-            Self::Alma => tr!(chart_ui::INDICATOR_ALMA),
-            Self::Kama => tr!(chart_ui::INDICATOR_KAMA),
-            Self::McGinley => tr!(chart_ui::INDICATOR_MCGINLEY),
             Self::Vwma => tr!(chart_ui::INDICATOR_VWMA),
-            Self::LinearRegression => tr!(chart_ui::INDICATOR_LINEAR_REGRESSION),
-            Self::Envelopes => tr!(chart_ui::INDICATOR_ENVELOPES),
             Self::Donchian => tr!(chart_ui::INDICATOR_DONCHIAN),
             Self::Keltner => tr!(chart_ui::INDICATOR_KELTNER),
-            Self::AtrBands => tr!(chart_ui::INDICATOR_ATR_BANDS),
             Self::VwapBands => tr!(chart_ui::INDICATOR_VWAP_BANDS),
+            Self::Twap => tr!(chart_ui::INDICATOR_TWAP),
             Self::ParabolicSar => tr!(chart_ui::INDICATOR_PARABOLIC_SAR),
             Self::SuperTrend => tr!(chart_ui::INDICATOR_SUPERTREND),
             Self::Ichimoku => tr!(chart_ui::INDICATOR_ICHIMOKU),
-            Self::ZigZag => tr!(chart_ui::INDICATOR_ZIGZAG),
             Self::PivotStandard => tr!(chart_ui::INDICATOR_PIVOT_STANDARD),
             Self::PivotFibonacci => tr!(chart_ui::INDICATOR_PIVOT_FIBONACCI),
             Self::PivotCamarilla => tr!(chart_ui::INDICATOR_PIVOT_CAMARILLA),
@@ -248,37 +136,13 @@ impl BuiltinIndicator {
             Self::SessionLevels => tr!(chart_ui::INDICATOR_SESSION_LEVELS),
             Self::PreviousPeriodLevels => tr!(chart_ui::INDICATOR_PREVIOUS_PERIOD_LEVELS),
             Self::OpeningRange => tr!(chart_ui::INDICATOR_OPENING_RANGE),
-            Self::Aroon => tr!(chart_ui::INDICATOR_AROON),
-            Self::AwesomeOscillator => tr!(chart_ui::INDICATOR_AWESOME_OSCILLATOR),
-            Self::Dpo => tr!(chart_ui::INDICATOR_DPO),
-            Self::ChandeMomentum => tr!(chart_ui::INDICATOR_CHANDE_MOMENTUM),
-            Self::BollingerMetrics => tr!(chart_ui::INDICATOR_BOLLINGER_METRICS),
-            Self::StandardDeviation => tr!(chart_ui::INDICATOR_STANDARD_DEVIATION),
+            Self::AdrLevels => tr!(chart_ui::INDICATOR_ADR_LEVELS),
             Self::Cci => tr!(chart_ui::INDICATOR_CCI),
-            Self::WilliamsR => tr!(chart_ui::INDICATOR_WILLIAMS_R),
             Self::StochasticRsi => tr!(chart_ui::INDICATOR_STOCHASTIC_RSI),
-            Self::Momentum => tr!(chart_ui::INDICATOR_MOMENTUM),
-            Self::RateOfChange => tr!(chart_ui::INDICATOR_ROC),
             Self::AdxDmi => tr!(chart_ui::INDICATOR_ADX_DMI),
-            Self::Choppiness => tr!(chart_ui::INDICATOR_CHOPPINESS),
-            Self::HistoricalVolatility => tr!(chart_ui::INDICATOR_HISTORICAL_VOLATILITY),
-            Self::Trix => tr!(chart_ui::INDICATOR_TRIX),
-            Self::Kst => tr!(chart_ui::INDICATOR_KST),
-            Self::Tsi => tr!(chart_ui::INDICATOR_TSI),
-            Self::MassIndex => tr!(chart_ui::INDICATOR_MASS_INDEX),
-            Self::Vortex => tr!(chart_ui::INDICATOR_VORTEX),
-            Self::CoppockCurve => tr!(chart_ui::INDICATOR_COPPOCK),
-            Self::FisherTransform => tr!(chart_ui::INDICATOR_FISHER),
-            Self::UltimateOscillator => tr!(chart_ui::INDICATOR_ULTIMATE_OSCILLATOR),
+            Self::SqueezeMomentum => tr!(chart_ui::INDICATOR_SQUEEZE_MOMENTUM),
             Self::Obv => tr!(chart_ui::INDICATOR_OBV),
-            Self::AccumulationDistribution => tr!(chart_ui::INDICATOR_ACCUMULATION_DISTRIBUTION),
-            Self::PriceVolumeTrend => tr!(chart_ui::INDICATOR_PRICE_VOLUME_TREND),
-            Self::ChaikinOscillator => tr!(chart_ui::INDICATOR_CHAIKIN_OSCILLATOR),
-            Self::Klinger => tr!(chart_ui::INDICATOR_KLINGER),
             Self::RelativeVolume => tr!(chart_ui::INDICATOR_RELATIVE_VOLUME),
-            Self::VolumeOscillator => tr!(chart_ui::INDICATOR_VOLUME_OSCILLATOR),
-            Self::ElderForce => tr!(chart_ui::INDICATOR_ELDER_FORCE),
-            Self::EaseOfMovement => tr!(chart_ui::INDICATOR_EASE_OF_MOVEMENT),
             Self::Cmf => tr!(chart_ui::INDICATOR_CMF),
             Self::Mfi => tr!(chart_ui::INDICATOR_MFI),
         }
@@ -288,41 +152,19 @@ impl BuiltinIndicator {
     #[must_use]
     pub fn parameters(self) -> &'static str {
         match self {
-            Self::Dema
-            | Self::Tema
-            | Self::Smma
-            | Self::Hma
-            | Self::McGinley
-            | Self::Vwma
+            Self::Vwma
             | Self::Donchian
-            | Self::Aroon
-            | Self::Dpo
-            | Self::ChandeMomentum
-            | Self::StandardDeviation
             | Self::Cci
-            | Self::WilliamsR
-            | Self::Momentum
-            | Self::RateOfChange
             | Self::AdxDmi
-            | Self::Choppiness
-            | Self::Vortex
-            | Self::FisherTransform
             | Self::RelativeVolume
-            | Self::ElderForce
-            | Self::EaseOfMovement
             | Self::Cmf
-            | Self::Mfi => tr!(chart_ui::PARAMS_PERIOD_14),
-            Self::Alma => tr!(chart_ui::PARAMS_ALMA),
-            Self::Kama => tr!(chart_ui::PARAMS_KAMA),
-            Self::LinearRegression => tr!(chart_ui::PARAMS_PERIOD_20_DEVIATION_2),
-            Self::Envelopes => tr!(chart_ui::PARAMS_ENVELOPES),
-            Self::Keltner | Self::AtrBands => tr!(chart_ui::PARAMS_MULTIPLIER_2),
+            | Self::Mfi
+            | Self::AdrLevels => tr!(chart_ui::PARAMS_PERIOD_14),
+            Self::Keltner => tr!(chart_ui::PARAMS_MULTIPLIER_2),
             Self::VwapBands => tr!(chart_ui::PARAMS_VWAP_BANDS),
+            Self::Twap => tr!(chart_ui::PARAMS_SESSION_ANCHORED),
             Self::SuperTrend => tr!(chart_ui::PARAMS_MULTIPLIER_3),
-            Self::ZigZag => tr!(chart_ui::PARAMS_DEVIATION_2_PERCENT),
-            Self::ParabolicSar | Self::Ichimoku | Self::AwesomeOscillator => {
-                tr!(chart_ui::PARAMS_STANDARD)
-            }
+            Self::ParabolicSar | Self::Ichimoku => tr!(chart_ui::PARAMS_STANDARD),
             Self::PivotStandard
             | Self::PivotFibonacci
             | Self::PivotCamarilla
@@ -332,21 +174,9 @@ impl BuiltinIndicator {
             Self::SessionLevels => tr!(chart_ui::PARAMS_UTC_SESSIONS),
             Self::PreviousPeriodLevels => tr!(chart_ui::PARAMS_UTC_DAYS),
             Self::OpeningRange => tr!(chart_ui::PARAMS_OPENING_RANGE),
-            Self::BollingerMetrics => tr!(chart_ui::PARAMS_BOLLINGER),
             Self::StochasticRsi => tr!(chart_ui::PARAMS_STOCHASTIC_RSI),
-            Self::HistoricalVolatility => tr!(chart_ui::PARAMS_HISTORICAL_VOLATILITY),
-            Self::Trix => tr!(chart_ui::PARAMS_TRIX),
-            Self::Kst => tr!(chart_ui::PARAMS_KST),
-            Self::Tsi => tr!(chart_ui::PARAMS_TSI),
-            Self::MassIndex => tr!(chart_ui::PARAMS_MASS_INDEX),
-            Self::CoppockCurve => tr!(chart_ui::PARAMS_COPPOCK),
-            Self::UltimateOscillator => tr!(chart_ui::PARAMS_ULTIMATE_OSCILLATOR),
-            Self::Obv | Self::AccumulationDistribution | Self::PriceVolumeTrend => {
-                tr!(chart_ui::PARAMS_CUMULATIVE)
-            }
-            Self::ChaikinOscillator => tr!(chart_ui::PARAMS_CHAIKIN_OSCILLATOR),
-            Self::Klinger => tr!(chart_ui::PARAMS_KLINGER),
-            Self::VolumeOscillator => tr!(chart_ui::PARAMS_MACD),
+            Self::SqueezeMomentum => tr!(chart_ui::PARAMS_SQUEEZE_MOMENTUM),
+            Self::Obv => tr!(chart_ui::PARAMS_CUMULATIVE),
         }
     }
 
@@ -355,19 +185,7 @@ impl BuiltinIndicator {
     pub const fn reads_volume(self) -> bool {
         matches!(
             self,
-            Self::Vwma
-                | Self::VwapBands
-                | Self::Obv
-                | Self::AccumulationDistribution
-                | Self::PriceVolumeTrend
-                | Self::ChaikinOscillator
-                | Self::Klinger
-                | Self::RelativeVolume
-                | Self::VolumeOscillator
-                | Self::ElderForce
-                | Self::EaseOfMovement
-                | Self::Cmf
-                | Self::Mfi
+            Self::Vwma | Self::VwapBands | Self::Obv | Self::RelativeVolume | Self::Cmf | Self::Mfi
         )
     }
 

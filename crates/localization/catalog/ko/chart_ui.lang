@@ -112,6 +112,10 @@ params_ultimate_oscillator = 기간 7 · 14 · 28
 params_cumulative = 누적
 params_chaikin_oscillator = 단기 3 · 장기 10
 params_klinger = 단기 34 · 장기 55 · 시그널 13
+indicator_twap = 시간가중평균가격 (TWAP)
+indicator_adr_levels = ADR 레벨
+indicator_squeeze_momentum = 스퀴즈 모멘텀
+params_squeeze_momentum = BB 20 · KC 20
 
 # 차트 유형.
 chart_type_candles = 캔들

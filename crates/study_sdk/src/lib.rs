@@ -2034,8 +2034,32 @@ pub mod builtins {
         result
     }
 
+    fn weighted_moving_average(values: &[f64], period: usize) -> Vec<Option<f64>> {
+        if period == 0 || values.is_empty() {
+            return vec![None; values.len()];
+        }
+        let Ok(count) = u32::try_from(period) else {
+            return vec![None; values.len()];
+        };
+        let span = f64::from(count);
+        let weight_sum = span * (span + 1.0) / 2.0;
+        let mut out = vec![None; values.len()];
+        for index in (period - 1)..values.len() {
+            let start = index + 1 - period;
+            let mut sum = 0.0;
+            for (offset, value) in values[start..=index].iter().enumerate() {
+                let Ok(weight_u32) = u32::try_from(offset + 1) else {
+                    return vec![None; values.len()];
+                };
+                sum += *value * f64::from(weight_u32);
+            }
+            out[index] = Some(sum / weight_sum);
+        }
+        out
+    }
+
     fn wma_with_gaps(source: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
-        map_dense_segments(source, |dense| aeris_charts_indicators::wma(dense, period))
+        map_dense_segments(source, |dense| weighted_moving_average(dense, period))
     }
 
     fn bollinger_with_gaps(
@@ -2106,7 +2130,7 @@ pub mod builtins {
 
             assert_eq!(
                 wma_with_gaps(&source, 3),
-                aeris_charts_indicators::wma(&dense, 3)
+                weighted_moving_average(&dense, 3)
             );
             assert_eq!(
                 bollinger_with_gaps(&source, 3, 2.0),

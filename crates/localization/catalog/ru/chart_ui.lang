@@ -112,6 +112,10 @@ params_ultimate_oscillator = Периоды 7 · 14 · 28
 params_cumulative = Накопительно
 params_chaikin_oscillator = Быстрый 3 · Медленный 10
 params_klinger = Быстрый 34 · Медленный 55 · Сигнал 13
+indicator_twap = Средневзвешенная по времени цена (TWAP)
+indicator_adr_levels = Уровни ADR
+indicator_squeeze_momentum = Squeeze Momentum
+params_squeeze_momentum = BB 20 · KC 20
 
 # Типы графика.
 chart_type_candles = Свечи

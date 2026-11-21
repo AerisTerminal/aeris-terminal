@@ -67,58 +67,24 @@ pub(super) fn study_label(study: ScanStudy) -> &'static str {
     tr!(match study {
         ScanStudy::Sma => panels::SCAN_STUDY_SMA,
         ScanStudy::Ema => panels::SCAN_STUDY_EMA,
-        ScanStudy::Wma => panels::SCAN_STUDY_WMA,
-        ScanStudy::Dema => panels::SCAN_STUDY_DEMA,
-        ScanStudy::Tema => panels::SCAN_STUDY_TEMA,
-        ScanStudy::Smma => panels::SCAN_STUDY_SMMA,
-        ScanStudy::Hma => panels::SCAN_STUDY_HMA,
         ScanStudy::Vwma => panels::SCAN_STUDY_VWMA,
-        ScanStudy::Kama => panels::SCAN_STUDY_KAMA,
-        ScanStudy::McGinley => panels::SCAN_STUDY_MCGINLEY,
-        ScanStudy::Alma => panels::SCAN_STUDY_ALMA,
-        ScanStudy::LinearRegression => panels::SCAN_STUDY_LINEAR_REGRESSION,
         ScanStudy::Rsi => panels::SCAN_STUDY_RSI,
         ScanStudy::Macd => panels::SCAN_STUDY_MACD,
         ScanStudy::Stochastic => panels::SCAN_STUDY_STOCHASTIC,
         ScanStudy::StochasticRsi => panels::SCAN_STUDY_STOCHASTIC_RSI,
         ScanStudy::Cci => panels::SCAN_STUDY_CCI,
-        ScanStudy::WilliamsR => panels::SCAN_STUDY_WILLIAMS_R,
-        ScanStudy::Momentum => panels::SCAN_STUDY_MOMENTUM,
-        ScanStudy::RateOfChange => panels::SCAN_STUDY_ROC,
-        ScanStudy::ChandeMomentum => panels::SCAN_STUDY_CHANDE_MOMENTUM,
-        ScanStudy::Dpo => panels::SCAN_STUDY_DPO,
-        ScanStudy::AwesomeOscillator => panels::SCAN_STUDY_AWESOME_OSCILLATOR,
-        ScanStudy::Aroon => panels::SCAN_STUDY_AROON,
-        ScanStudy::Trix => panels::SCAN_STUDY_TRIX,
-        ScanStudy::Kst => panels::SCAN_STUDY_KST,
-        ScanStudy::Tsi => panels::SCAN_STUDY_TSI,
-        ScanStudy::FisherTransform => panels::SCAN_STUDY_FISHER_TRANSFORM,
-        ScanStudy::UltimateOscillator => panels::SCAN_STUDY_ULTIMATE_OSCILLATOR,
-        ScanStudy::CoppockCurve => panels::SCAN_STUDY_COPPOCK_CURVE,
+        ScanStudy::SqueezeMomentum => panels::SCAN_STUDY_SQUEEZE_MOMENTUM,
         ScanStudy::AdxDmi => panels::SCAN_STUDY_ADX_DMI,
         ScanStudy::ParabolicSar => panels::SCAN_STUDY_PARABOLIC_SAR,
         ScanStudy::SuperTrend => panels::SCAN_STUDY_SUPERTREND,
         ScanStudy::Ichimoku => panels::SCAN_STUDY_ICHIMOKU,
-        ScanStudy::Vortex => panels::SCAN_STUDY_VORTEX,
-        ScanStudy::Choppiness => panels::SCAN_STUDY_CHOPPINESS,
-        ScanStudy::MassIndex => panels::SCAN_STUDY_MASS_INDEX,
         ScanStudy::Atr => panels::SCAN_STUDY_ATR,
-        ScanStudy::StandardDeviation => panels::SCAN_STUDY_STANDARD_DEVIATION,
-        ScanStudy::HistoricalVolatility => panels::SCAN_STUDY_HISTORICAL_VOLATILITY,
         ScanStudy::Bollinger => panels::SCAN_STUDY_BOLLINGER,
-        ScanStudy::BollingerMetrics => panels::SCAN_STUDY_BOLLINGER_METRICS,
         ScanStudy::Donchian => panels::SCAN_STUDY_DONCHIAN,
         ScanStudy::Keltner => panels::SCAN_STUDY_KELTNER,
-        ScanStudy::Envelopes => panels::SCAN_STUDY_ENVELOPES,
-        ScanStudy::AtrBands => panels::SCAN_STUDY_ATR_BANDS,
         ScanStudy::HighestHigh => panels::SCAN_OPERAND_HIGHEST_HIGH,
         ScanStudy::LowestLow => panels::SCAN_OPERAND_LOWEST_LOW,
-        ScanStudy::ChaikinOscillator => panels::SCAN_STUDY_CHAIKIN_OSCILLATOR,
         ScanStudy::RelativeVolume => panels::SCAN_STUDY_RELATIVE_VOLUME,
-        ScanStudy::Klinger => panels::SCAN_STUDY_KLINGER,
-        ScanStudy::VolumeOscillator => panels::SCAN_STUDY_VOLUME_OSCILLATOR,
-        ScanStudy::ElderForce => panels::SCAN_STUDY_ELDER_FORCE,
-        ScanStudy::EaseOfMovement => panels::SCAN_STUDY_EASE_OF_MOVEMENT,
         ScanStudy::Cmf => panels::SCAN_STUDY_CMF,
         ScanStudy::Mfi => panels::SCAN_STUDY_MFI,
     })
@@ -159,6 +125,10 @@ pub(super) fn parameter_label(name: ScanStudyParameterName) -> &'static str {
         Name::Smoothing => panels::SCAN_PARAMETER_SMOOTHING,
         Name::EmaPeriod => panels::SCAN_PARAMETER_EMA_PERIOD,
         Name::SumPeriod => panels::SCAN_PARAMETER_SUM_PERIOD,
+        Name::BbPeriod => panels::SCAN_PARAMETER_BB_PERIOD,
+        Name::BbMult => panels::SCAN_PARAMETER_BB_MULT,
+        Name::KcPeriod => panels::SCAN_PARAMETER_KC_PERIOD,
+        Name::KcMult => panels::SCAN_PARAMETER_KC_MULT,
     })
 }
 
@@ -1974,41 +1944,11 @@ mod tests {
     }
 
     #[test]
-    fn an_on_off_parameter_is_a_switch_not_a_text() {
+    fn non_toggle_parameter_ignores_toggle_updates() {
         let mut draft = ScanDraft::default();
-        let envelopes = OperandKind::Study(ScanStudy::Envelopes);
-        let descriptor = ScanStudy::Envelopes.descriptor();
-        let exponential = descriptor
-            .parameter_index(ScanStudyParameterName::Exponential)
-            .expect("envelopes can average exponentially");
-        assert_eq!(
-            descriptor.parameters[exponential].kind,
-            ScanStudyParameterKind::Toggle
-        );
-        assert!(
-            !envelopes
-                .parts()
-                .contains(&OperandPart::Parameter(exponential))
-        );
-        assert!(draft.set_operand_kind(0, ScanSide::Right, envelopes));
-        assert!(!draft.conditions[0].right.toggle(exponential));
-        assert!(draft.set_operand_toggle(0, ScanSide::Right, (exponential, true)));
-        assert!(draft.conditions[0].right.toggle(exponential));
         assert!(
             !draft.set_operand_toggle(0, ScanSide::Right, (0, true)),
-            "the period is not on/off"
-        );
-        let right = draft.definition().expect("runs").conditions[0].right;
-        let ScanOperand::Study(operand) = right else {
-            panic!("a study operand");
-        };
-        assert_eq!(operand.parameters[exponential], ScanNumber::from(1));
-        assert_eq!(operand_label(right), "Envelopes Upper(20, 2, Exponential)");
-        assert!(draft.set_operand_toggle(0, ScanSide::Right, (exponential, false)));
-        assert_eq!(
-            operand_label(draft.definition().expect("runs").conditions[0].right),
-            "Envelopes Upper(20, 2)",
-            "an off switch is not named"
+            "a period parameter is not on/off"
         );
     }
 
@@ -2204,9 +2144,9 @@ mod tests {
         );
         assert_eq!(
             operand_label(ScanOperand::Study(ScanStudyOperand::new(
-                ScanStudy::AwesomeOscillator
+                ScanStudy::ParabolicSar
             ))),
-            OperandKind::Study(ScanStudy::AwesomeOscillator).label(),
+            OperandKind::Study(ScanStudy::ParabolicSar).label(),
             "a study without parameters"
         );
         assert_eq!(

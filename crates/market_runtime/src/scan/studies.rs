@@ -30,69 +30,33 @@ const RECURSIVE_WARMUP_PERIODS: usize = 10;
 const PARABOLIC_SAR_HISTORY_BARS: usize = 250;
 /// Ichimoku's longest window, leading span B's 52 bars.
 const ICHIMOKU_HISTORY_BARS: usize = 52;
-/// The awesome oscillator's slow 34-bar average.
-const AWESOME_OSCILLATOR_HISTORY_BARS: usize = 34;
 
 /// One study a scan operand can read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScanStudy {
     Sma,
     Ema,
-    Wma,
-    Dema,
-    Tema,
-    Smma,
-    Hma,
     Vwma,
-    Kama,
-    McGinley,
-    Alma,
-    LinearRegression,
     Rsi,
     Macd,
     Stochastic,
     StochasticRsi,
     Cci,
-    WilliamsR,
-    Momentum,
-    RateOfChange,
-    ChandeMomentum,
-    Dpo,
-    AwesomeOscillator,
-    Aroon,
-    Trix,
-    Kst,
-    Tsi,
-    FisherTransform,
-    UltimateOscillator,
-    CoppockCurve,
+    SqueezeMomentum,
     AdxDmi,
     ParabolicSar,
     SuperTrend,
     Ichimoku,
-    Vortex,
-    Choppiness,
-    MassIndex,
     Atr,
-    StandardDeviation,
-    HistoricalVolatility,
     Bollinger,
-    BollingerMetrics,
     Donchian,
     Keltner,
-    Envelopes,
-    AtrBands,
     /// Highest high of the `period` bars before the current bar.
     HighestHigh,
     /// Lowest low of the `period` bars before the current bar.
     LowestLow,
-    ChaikinOscillator,
     /// Current volume divided by the mean volume of the previous `period` bars.
     RelativeVolume,
-    Klinger,
-    VolumeOscillator,
-    ElderForce,
-    EaseOfMovement,
     Cmf,
     Mfi,
 }
@@ -187,6 +151,10 @@ pub enum ScanStudyParameterName {
     Smoothing,
     EmaPeriod,
     SumPeriod,
+    BbPeriod,
+    BbMult,
+    KcPeriod,
+    KcMult,
 }
 
 impl ScanStudyParameterName {
@@ -225,6 +193,10 @@ impl ScanStudyParameterName {
             Self::Smoothing => "smoothing",
             Self::EmaPeriod => "ema_period",
             Self::SumPeriod => "sum_period",
+            Self::BbPeriod => "bb_period",
+            Self::BbMult => "bb_mult",
+            Self::KcPeriod => "kc_period",
+            Self::KcMult => "kc_mult",
         }
     }
 }
@@ -502,10 +474,6 @@ impl Values<'_> {
     fn real(self, index: usize) -> f64 {
         self.0[index].value()
     }
-
-    fn toggle(self, index: usize) -> bool {
-        self.whole(index) != 0
-    }
 }
 
 const fn recursive(period: usize) -> usize {
@@ -578,19 +546,14 @@ use ScanValueUnit as Unit;
 
 const PRICE: &[ScanStudyOutput] = &[line(Output::Value, Unit::Price)];
 const NUMBER: &[ScanStudyOutput] = &[line(Output::Value, Unit::Number)];
-const QUANTITY: &[ScanStudyOutput] = &[line(Output::Value, Unit::Quantity)];
 const PRICE_BANDS: &[ScanStudyOutput] = &[
     line(Output::Upper, Unit::Price),
     line(Output::Basis, Unit::Price),
     line(Output::Lower, Unit::Price),
 ];
 
-const fn with_signal(main: ScanStudyOutputName, unit: ScanValueUnit) -> [ScanStudyOutput; 2] {
-    [line(main, unit), line(Output::Signal, unit)]
-}
-
 /// Indexed by [`ScanStudy`]; `the_table_is_indexed_by_study` checks the order.
-static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
+static SCAN_STUDIES: [ScanStudyDescriptor; 22] = [
     ScanStudyDescriptor {
         study: ScanStudy::Sma,
         identifier: "sma",
@@ -610,112 +573,12 @@ static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
         history: |values| recursive(values.whole(0)),
     },
     ScanStudyDescriptor {
-        study: ScanStudy::Wma,
-        identifier: "wma",
-        family: Family::MovingAverages,
-        parameters: &[period(20)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| IncrementalState::wma(values.whole(0))),
-        history: |values| values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Dema,
-        identifier: "dema",
-        family: Family::MovingAverages,
-        parameters: &[period(20)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| IncrementalState::dema(values.whole(0))),
-        history: |values| recursive(values.whole(0)) + values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Tema,
-        identifier: "tema",
-        family: Family::MovingAverages,
-        parameters: &[period(20)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| IncrementalState::tema(values.whole(0))),
-        history: |values| recursive(values.whole(0)) + 2 * values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Smma,
-        identifier: "smma",
-        family: Family::MovingAverages,
-        parameters: &[period(20)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| IncrementalState::smma(values.whole(0))),
-        history: |values| recursive(values.whole(0)),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Hma,
-        identifier: "hma",
-        family: Family::MovingAverages,
-        parameters: &[period(20)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| IncrementalState::hma(values.whole(0))),
-        // A weighted average of `period` bars, smoothed over the square root of `period`.
-        history: |values| 2 * values.whole(0),
-    },
-    ScanStudyDescriptor {
         study: ScanStudy::Vwma,
         identifier: "vwma",
         family: Family::MovingAverages,
         parameters: &[period(20)],
         outputs: PRICE,
         calculation: Calculation::Chart(|values| IncrementalState::vwma(values.whole(0))),
-        history: |values| values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Kama,
-        identifier: "kama",
-        family: Family::MovingAverages,
-        parameters: &[
-            period(10),
-            period_named(Name::Fast, 2),
-            period_named(Name::Slow, 30),
-        ],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::kama(values.whole(0), values.whole(1), values.whole(2))
-        }),
-        history: |values| recursive(values.whole(2)) + values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::McGinley,
-        identifier: "mcginley",
-        family: Family::MovingAverages,
-        parameters: &[period(20)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| IncrementalState::mcginley(values.whole(0))),
-        history: |values| recursive(values.whole(0)),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Alma,
-        identifier: "alma",
-        family: Family::MovingAverages,
-        parameters: &[
-            period(20),
-            decimal_named(Name::Offset, decimal(85, 2), (whole(0), whole(1))),
-            decimal_named(Name::Sigma, whole(6), (decimal(1, 2), whole(100))),
-        ],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::alma(values.whole(0), values.real(1), values.real(2))
-        }),
-        history: |values| values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::LinearRegression,
-        identifier: "linear_regression",
-        family: Family::MovingAverages,
-        parameters: &[period(20), deviation(2)],
-        outputs: &[
-            line(Output::Curve, Unit::Price),
-            line(Output::Upper, Unit::Price),
-            line(Output::Lower, Unit::Price),
-        ],
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::linear_regression(values.whole(0), values.real(1))
-        }),
         history: |values| values.whole(0),
     },
     ScanStudyDescriptor {
@@ -787,174 +650,26 @@ static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
         history: |values| values.whole(0),
     },
     ScanStudyDescriptor {
-        study: ScanStudy::WilliamsR,
-        identifier: "williams_r",
-        family: Family::Oscillators,
-        parameters: &[period(14)],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| IncrementalState::williams_r(values.whole(0))),
-        history: |values| values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Momentum,
-        identifier: "momentum",
-        family: Family::Oscillators,
-        parameters: &[period(10)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| IncrementalState::momentum(values.whole(0))),
-        history: |values| values.whole(0) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::RateOfChange,
-        identifier: "roc",
-        family: Family::Oscillators,
-        parameters: &[period(10)],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| IncrementalState::rate_of_change(values.whole(0))),
-        history: |values| values.whole(0) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::ChandeMomentum,
-        identifier: "chande_momentum",
-        family: Family::Oscillators,
-        parameters: &[period(14)],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::chande_momentum(values.whole(0))
-        }),
-        history: |values| values.whole(0) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Dpo,
-        identifier: "dpo",
-        family: Family::Oscillators,
-        parameters: &[period(20)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| IncrementalState::dpo(values.whole(0))),
-        history: |values| values.whole(0) + values.whole(0) / 2 + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::AwesomeOscillator,
-        identifier: "awesome_oscillator",
-        family: Family::Oscillators,
-        parameters: &[],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|_| IncrementalState::awesome_oscillator()),
-        history: |_| AWESOME_OSCILLATOR_HISTORY_BARS,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Aroon,
-        identifier: "aroon",
-        family: Family::Oscillators,
-        parameters: &[period(25)],
-        outputs: &[
-            line(Output::AroonUp, Unit::Number),
-            line(Output::AroonDown, Unit::Number),
-        ],
-        calculation: Calculation::Chart(|values| IncrementalState::aroon(values.whole(0))),
-        history: |values| values.whole(0) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Trix,
-        identifier: "trix",
-        family: Family::Oscillators,
-        parameters: &[period(15), period_named(Name::Signal, 9)],
-        outputs: &with_signal(Output::Trix, Unit::Number),
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::trix(values.whole(0), values.whole(1))
-        }),
-        // A triple EMA, its one-bar change, then the signal.
-        history: |values| recursive(values.whole(0)) + 2 * values.whole(0) + values.whole(1),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Kst,
-        identifier: "kst",
+        study: ScanStudy::SqueezeMomentum,
+        identifier: "squeeze_momentum",
         family: Family::Oscillators,
         parameters: &[
-            period_named(Name::RocPeriod1, 10),
-            period_named(Name::RocPeriod2, 15),
-            period_named(Name::RocPeriod3, 20),
-            period_named(Name::RocPeriod4, 30),
-            period_named(Name::Smoothing1, 10),
-            period_named(Name::Smoothing2, 10),
-            period_named(Name::Smoothing3, 10),
-            period_named(Name::Smoothing4, 15),
-            period_named(Name::Signal, 9),
+            period_named(Name::BbPeriod, 20),
+            decimal_named(Name::BbMult, whole(2), BAND_WIDTH),
+            period_named(Name::KcPeriod, 20),
+            decimal_named(Name::KcMult, decimal(15, 1), BAND_WIDTH),
         ],
-        outputs: &with_signal(Output::Kst, Unit::Number),
+        // Output 1 is the zero-line squeeze dot anchor; only momentum is a numeric line.
+        outputs: NUMBER,
         calculation: Calculation::Chart(|values| {
-            IncrementalState::kst(
-                [0, 1, 2, 3].map(|index| values.whole(index)),
-                [4, 5, 6, 7].map(|index| values.whole(index)),
-                values.whole(8),
+            IncrementalState::squeeze_momentum(
+                values.whole(0),
+                values.real(1),
+                values.whole(2),
+                values.real(3),
             )
         }),
-        history: |values| {
-            (0..4)
-                .map(|index| values.whole(index) + values.whole(index + 4))
-                .max()
-                .unwrap_or(0)
-                + values.whole(8)
-        },
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Tsi,
-        identifier: "tsi",
-        family: Family::Oscillators,
-        parameters: &[
-            period_named(Name::Long, 25),
-            period_named(Name::Short, 13),
-            period_named(Name::Signal, 13),
-        ],
-        outputs: &with_signal(Output::Tsi, Unit::Number),
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::tsi(values.whole(0), values.whole(1), values.whole(2))
-        }),
-        history: |values| recursive(values.whole(0)) + values.whole(1) + values.whole(2),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::FisherTransform,
-        identifier: "fisher_transform",
-        family: Family::Oscillators,
-        parameters: &[period(10)],
-        outputs: &[
-            line(Output::Fisher, Unit::Number),
-            line(Output::Trigger, Unit::Number),
-        ],
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::fisher_transform(values.whole(0))
-        }),
-        history: |values| recursive(values.whole(0)),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::UltimateOscillator,
-        identifier: "ultimate_oscillator",
-        family: Family::Oscillators,
-        parameters: &[
-            period_named(Name::ShortPeriod, 7),
-            period_named(Name::MediumPeriod, 14),
-            period_named(Name::LongPeriod, 28),
-        ],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::ultimate_oscillator(values.whole(0), values.whole(1), values.whole(2))
-        }),
-        history: |values| values.whole(0).max(values.whole(1)).max(values.whole(2)) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::CoppockCurve,
-        identifier: "coppock_curve",
-        family: Family::Oscillators,
-        parameters: &[
-            period_named(Name::LongPeriod, 14),
-            period_named(Name::ShortPeriod, 11),
-            period_named(Name::Smoothing, 10),
-        ],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::coppock_curve(values.whole(0), values.whole(1), values.whole(2))
-        }),
-        history: |values| values.whole(0).max(values.whole(1)) + values.whole(2) + 1,
+        history: |values| values.whole(0).max(values.whole(2)) * 2,
     },
     ScanStudyDescriptor {
         study: ScanStudy::AdxDmi,
@@ -1007,45 +722,6 @@ static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
         history: |_| ICHIMOKU_HISTORY_BARS,
     },
     ScanStudyDescriptor {
-        study: ScanStudy::Vortex,
-        identifier: "vortex",
-        family: Family::Trend,
-        parameters: &[period(14)],
-        outputs: &[
-            line(Output::PlusVi, Unit::Number),
-            line(Output::MinusVi, Unit::Number),
-        ],
-        calculation: Calculation::Chart(|values| IncrementalState::vortex(values.whole(0))),
-        history: |values| values.whole(0) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Choppiness,
-        identifier: "choppiness",
-        family: Family::Trend,
-        parameters: &[ScanStudyParameter {
-            minimum: whole(2),
-            ..period(14)
-        }],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| IncrementalState::choppiness(values.whole(0))),
-        history: |values| values.whole(0) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::MassIndex,
-        identifier: "mass_index",
-        family: Family::Trend,
-        parameters: &[
-            period_named(Name::EmaPeriod, 9),
-            period_named(Name::SumPeriod, 25),
-        ],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::mass_index(values.whole(0), values.whole(1))
-        }),
-        // A ratio of an EMA of the range to an EMA of that EMA, summed.
-        history: |values| recursive(values.whole(0)) + values.whole(0) + values.whole(1),
-    },
-    ScanStudyDescriptor {
         study: ScanStudy::Atr,
         identifier: "atr",
         family: Family::Volatility,
@@ -1055,31 +731,6 @@ static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
         history: |values| recursive(values.whole(0)),
     },
     ScanStudyDescriptor {
-        study: ScanStudy::StandardDeviation,
-        identifier: "standard_deviation",
-        family: Family::Volatility,
-        parameters: &[period(20)],
-        outputs: PRICE,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::standard_deviation(values.whole(0))
-        }),
-        history: |values| values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::HistoricalVolatility,
-        identifier: "historical_volatility",
-        family: Family::Volatility,
-        parameters: &[
-            period(20),
-            decimal_named(Name::Annualization, whole(252), (whole(1), whole(1_000))),
-        ],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::historical_volatility(values.whole(0), values.real(1))
-        }),
-        history: |values| values.whole(0) + 1,
-    },
-    ScanStudyDescriptor {
         study: ScanStudy::Bollinger,
         identifier: "bollinger",
         family: Family::BandsAndChannels,
@@ -1087,20 +738,6 @@ static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
         outputs: PRICE_BANDS,
         calculation: Calculation::Chart(|values| {
             IncrementalState::bollinger(values.whole(0), values.real(1))
-        }),
-        history: |values| values.whole(0),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::BollingerMetrics,
-        identifier: "bollinger_metrics",
-        family: Family::BandsAndChannels,
-        parameters: &[period(20), deviation(2)],
-        outputs: &[
-            line(Output::PercentB, Unit::Number),
-            line(Output::BandWidth, Unit::Number),
-        ],
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::bollinger_metrics(values.whole(0), values.real(1))
         }),
         history: |values| values.whole(0),
     },
@@ -1125,44 +762,6 @@ static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
         history: |values| recursive(values.whole(0)),
     },
     ScanStudyDescriptor {
-        study: ScanStudy::Envelopes,
-        identifier: "envelopes",
-        family: Family::BandsAndChannels,
-        parameters: &[
-            period(20),
-            decimal_named(Name::Percent, whole(2), (decimal(1, 1), whole(50))),
-            ScanStudyParameter {
-                name: Name::Exponential,
-                kind: ScanStudyParameterKind::Toggle,
-                default: whole(0),
-                minimum: whole(0),
-                maximum: whole(1),
-            },
-        ],
-        outputs: PRICE_BANDS,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::envelopes(values.whole(0), values.real(1), values.toggle(2))
-        }),
-        history: |values| {
-            if values.toggle(2) {
-                recursive(values.whole(0))
-            } else {
-                values.whole(0)
-            }
-        },
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::AtrBands,
-        identifier: "atr_bands",
-        family: Family::BandsAndChannels,
-        parameters: &[period(14), multiplier(2)],
-        outputs: PRICE_BANDS,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::atr_bands(values.whole(0), values.real(1))
-        }),
-        history: |values| recursive(values.whole(0)),
-    },
-    ScanStudyDescriptor {
         study: ScanStudy::HighestHigh,
         identifier: "highest_high",
         family: Family::BandsAndChannels,
@@ -1181,19 +780,6 @@ static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
         history: |values| values.whole(0) + 1,
     },
     ScanStudyDescriptor {
-        study: ScanStudy::ChaikinOscillator,
-        identifier: "chaikin_oscillator",
-        family: Family::Volume,
-        parameters: &[period_named(Name::Fast, 3), period_named(Name::Slow, 10)],
-        outputs: QUANTITY,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::chaikin_oscillator(values.whole(0), values.whole(1))
-        }),
-        // The difference of two EMAs of accumulation/distribution, where its starting level
-        // cancels.
-        history: |values| recursive(values.whole(1)),
-    },
-    ScanStudyDescriptor {
         study: ScanStudy::RelativeVolume,
         identifier: "relative_volume",
         family: Family::Volume,
@@ -1201,67 +787,6 @@ static SCAN_STUDIES: [ScanStudyDescriptor; 56] = [
         outputs: &[line(Output::Value, Unit::Multiple)],
         calculation: Calculation::Chart(|values| {
             IncrementalState::relative_volume(values.whole(0))
-        }),
-        history: |values| values.whole(0) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::Klinger,
-        identifier: "klinger",
-        family: Family::Volume,
-        parameters: &[
-            period_named(Name::Fast, 34),
-            period_named(Name::Slow, 55),
-            period_named(Name::Signal, 13),
-        ],
-        outputs: &with_signal(Output::Klinger, Unit::Quantity),
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::klinger(values.whole(0), values.whole(1), values.whole(2))
-        }),
-        history: |values| recursive(values.whole(1)) + values.whole(2),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::VolumeOscillator,
-        identifier: "volume_oscillator",
-        family: Family::Volume,
-        parameters: &[
-            period_named(Name::Fast, 12),
-            period_named(Name::Slow, 26),
-            period_named(Name::Signal, 9),
-        ],
-        outputs: &[
-            line(Output::Pvo, Unit::Number),
-            line(Output::Signal, Unit::Number),
-            line(Output::Histogram, Unit::Number),
-        ],
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::volume_oscillator(values.whole(0), values.whole(1), values.whole(2))
-        }),
-        history: |values| recursive(values.whole(1)) + values.whole(2),
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::ElderForce,
-        identifier: "elder_force",
-        family: Family::Volume,
-        parameters: &[period(13)],
-        outputs: QUANTITY,
-        calculation: Calculation::Chart(|values| IncrementalState::elder_force(values.whole(0))),
-        history: |values| recursive(values.whole(0)) + 1,
-    },
-    ScanStudyDescriptor {
-        study: ScanStudy::EaseOfMovement,
-        identifier: "ease_of_movement",
-        family: Family::Volume,
-        parameters: &[
-            period(14),
-            decimal_named(
-                Name::Divisor,
-                whole(100_000_000),
-                (whole(1), whole(1_000_000_000_000)),
-            ),
-        ],
-        outputs: NUMBER,
-        calculation: Calculation::Chart(|values| {
-            IncrementalState::ease_of_movement(values.whole(0), values.real(1))
         }),
         history: |values| values.whole(0) + 1,
     },
@@ -1335,20 +860,7 @@ mod tests {
         match study {
             ScanStudy::Sma => indicators::sma(close, 20),
             ScanStudy::Ema => indicators::ema(close, 20),
-            ScanStudy::Wma => indicators::wma(close, 20),
-            ScanStudy::Dema => indicators::dema(close, 20),
-            ScanStudy::Tema => indicators::tema(close, 20),
-            ScanStudy::Smma => indicators::smma(close, 20),
-            ScanStudy::Hma => indicators::hma(close, 20),
             ScanStudy::Vwma => indicators::vwma(close, volume, 20),
-            ScanStudy::Kama => indicators::kama(close, 10, 2, 30),
-            ScanStudy::McGinley => indicators::mcginley(close, 20),
-            ScanStudy::Alma => indicators::alma(close, 20, 0.85, 6.0),
-            ScanStudy::LinearRegression => {
-                line(indicators::linear_regression(close, 20, 2.0), |point| {
-                    [point.curve, point.upper, point.lower][output]
-                })
-            }
             ScanStudy::Rsi => indicators::rsi(close, 14),
             ScanStudy::Macd => line(indicators::macd(close, 12, 26, 9), |point| {
                 [point.macd, point.signal, point.histogram][output]
@@ -1360,34 +872,10 @@ mod tests {
             }
             ScanStudy::StochasticRsi => indicators::stochastic_rsi(close, 14, 14),
             ScanStudy::Cci => indicators::cci(high, low, close, 20),
-            ScanStudy::WilliamsR => indicators::williams_r(high, low, close, 14),
-            ScanStudy::Momentum => indicators::momentum(close, 10),
-            ScanStudy::RateOfChange => indicators::rate_of_change(close, 10),
-            ScanStudy::ChandeMomentum => indicators::chande_momentum(close, 14),
-            ScanStudy::Dpo => indicators::dpo(close, 20),
-            ScanStudy::AwesomeOscillator => indicators::awesome_oscillator(high, low),
-            ScanStudy::Aroon => line(indicators::aroon(high, low, 25), |(up, down)| {
-                [up, down][output]
-            }),
-            ScanStudy::Trix => line(indicators::trix(close, 15, 9), |point| {
-                [point.line, point.signal][output]
-            }),
-            ScanStudy::Kst => line(
-                indicators::kst(close, [10, 15, 20, 30], [10, 10, 10, 15], 9),
-                |point| [point.line, point.signal][output],
+            ScanStudy::SqueezeMomentum => line(
+                indicators::squeeze_momentum(high, low, close, 20, 2.0, 20, 1.5),
+                |point| point.momentum,
             ),
-            ScanStudy::Tsi => line(indicators::tsi(close, 25, 13, 13), |point| {
-                [point.line, point.signal][output]
-            }),
-            ScanStudy::FisherTransform => {
-                line(indicators::fisher_transform(high, low, 10), |point| {
-                    [point.line, point.trigger][output]
-                })
-            }
-            ScanStudy::UltimateOscillator => {
-                indicators::ultimate_oscillator(high, low, close, 7, 14, 28)
-            }
-            ScanStudy::CoppockCurve => indicators::coppock_curve(close, 14, 11, 10),
             ScanStudy::AdxDmi => line(indicators::adx_dmi(high, low, close, 14), |point| {
                 [point.plus_di, point.minus_di, point.adx][output]
             }),
@@ -1401,55 +889,19 @@ mod tests {
                     point.leading_b,
                 ][output]
             }),
-            ScanStudy::Vortex => line(indicators::vortex(high, low, close, 14), |point| {
-                [point.plus, point.minus][output]
-            }),
-            ScanStudy::Choppiness => indicators::choppiness(high, low, close, 14),
-            ScanStudy::MassIndex => indicators::mass_index(high, low, 9, 25),
             ScanStudy::Atr => indicators::atr(high, low, close, 14),
-            ScanStudy::StandardDeviation => indicators::standard_deviation(close, 20),
-            ScanStudy::HistoricalVolatility => indicators::historical_volatility(close, 20, 252.0),
             ScanStudy::Bollinger => line(indicators::bollinger(close, 20, 2.0), |point| {
                 [point.upper, point.middle, point.lower][output]
             }),
-            ScanStudy::BollingerMetrics => line(
-                indicators::bollinger_metrics(close, 20, 2.0),
-                |(percent_b, bandwidth)| [percent_b, bandwidth][output],
-            ),
             ScanStudy::Donchian => line(indicators::donchian(high, low, 20), |point| {
                 [point.upper, point.middle, point.lower][output]
             }),
             ScanStudy::Keltner => line(indicators::keltner(high, low, close, 20, 2.0), |point| {
                 [point.upper, point.middle, point.lower][output]
             }),
-            ScanStudy::Envelopes => line(
-                indicators::envelopes(close, 20, 2.0, false),
-                |(upper, basis, lower)| [upper, basis, lower][output],
-            ),
-            ScanStudy::AtrBands => {
-                line(indicators::atr_bands(high, low, close, 14, 2.0), |point| {
-                    [point.upper, point.basis, point.lower][output]
-                })
-            }
             ScanStudy::HighestHigh => prior(high, f64::max),
             ScanStudy::LowestLow => prior(low, f64::min),
-            ScanStudy::ChaikinOscillator => {
-                indicators::chaikin_oscillator(high, low, close, volume, 3, 10)
-            }
             ScanStudy::RelativeVolume => indicators::relative_volume(volume, 20),
-            ScanStudy::Klinger => line(
-                indicators::klinger(high, low, close, volume, 34, 55, 13),
-                |point| [point.line, point.signal][output],
-            ),
-            ScanStudy::VolumeOscillator => {
-                line(indicators::volume_oscillator(volume, 12, 26, 9), |point| {
-                    [point.line, point.signal, point.histogram][output]
-                })
-            }
-            ScanStudy::ElderForce => indicators::elder_force(close, volume, 13),
-            ScanStudy::EaseOfMovement => {
-                indicators::ease_of_movement(high, low, volume, 14, 100_000_000.0)
-            }
             ScanStudy::Cmf => indicators::cmf(high, low, close, volume, 20),
             ScanStudy::Mfi => indicators::mfi(high, low, close, volume, 14),
         }
@@ -1522,7 +974,10 @@ mod tests {
             };
             let operand = ScanStudyOperand::new(descriptor.study);
             let drawn = build(Values(&operand.parameters)).output_count();
-            let dropped = usize::from(descriptor.study == ScanStudy::Ichimoku);
+            let dropped = usize::from(matches!(
+                descriptor.study,
+                ScanStudy::Ichimoku | ScanStudy::SqueezeMomentum
+            ));
             assert_eq!(
                 descriptor.outputs.len() + dropped,
                 drawn,

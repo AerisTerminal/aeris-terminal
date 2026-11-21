@@ -3263,7 +3263,6 @@ fn indicator_catalog_maps_to_aeris_charts_with_legacy_defaults() {
     let cases = [
         (ChartIndicator::Sma, 1, "sma", "SMA 20"),
         (ChartIndicator::Ema, 1, "ema", "EMA 20"),
-        (ChartIndicator::Wma, 1, "wma", "WMA 20"),
         (ChartIndicator::Bollinger, 3, "bollinger", "Bollinger 20 2"),
         (ChartIndicator::Rsi, 1, "rsi", "RSI 14"),
         (ChartIndicator::Macd, 3, "macd", "MACD 12 26 9"),
@@ -5133,7 +5132,9 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
 
 #[test]
 fn indicator_metadata_matches_the_legacy_picker_copy() {
-    assert_eq!(ChartIndicator::ALL.len(), 12);
+    assert_eq!(ChartIndicator::ALL.len(), 11);
+    assert_eq!(ChartIndicator::from_identifier("wma"), None);
+    assert_eq!(ChartIndicator::from_identifier("dema"), None);
     assert_eq!(ChartIndicator::Volume.label(), "Volume");
     assert_eq!(
         ChartIndicator::VolumeProfile.label(),

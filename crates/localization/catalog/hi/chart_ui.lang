@@ -112,6 +112,10 @@ params_ultimate_oscillator = पीरियड 7 · 14 · 28
 params_cumulative = क्यूम्यूलेटिव
 params_chaikin_oscillator = फ़ास्ट 3 · स्लो 10
 params_klinger = फ़ास्ट 34 · स्लो 55 · सिग्नल 13
+indicator_twap = समय-भारित औसत मूल्य (TWAP)
+indicator_adr_levels = ADR स्तर
+indicator_squeeze_momentum = स्क्वीज़ मोमेंटम
+params_squeeze_momentum = BB 20 · KC 20
 
 # Chart types.
 chart_type_candles = कैंडल

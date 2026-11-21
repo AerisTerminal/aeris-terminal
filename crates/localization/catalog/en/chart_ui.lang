@@ -112,6 +112,10 @@ params_ultimate_oscillator = Periods 7 · 14 · 28
 params_cumulative = Cumulative
 params_chaikin_oscillator = Fast 3 · Slow 10
 params_klinger = Fast 34 · Slow 55 · Signal 13
+indicator_twap = Time Weighted Average Price
+indicator_adr_levels = Average Daily Range Levels
+indicator_squeeze_momentum = Squeeze Momentum
+params_squeeze_momentum = BB 20 · KC 20
 
 # Chart types.
 chart_type_candles = Candles
