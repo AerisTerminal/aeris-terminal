@@ -100,9 +100,8 @@ fn chart_and_price_alert_share_one_provider_quote_until_last_release() {
 
     let transcript = transcript.lock().expect("demand transcript");
     let subscriptions = transcript.demands.iter().map(|demand| {
-        let wire = crate::market_service::providers::rithmic::rithmic_wire(demand)
-            .expect("installed instrument");
-        let quotes = wire.instruments.iter().filter(|item| item.quotes).count();
+        let wire = crate::market_service::providers::rithmic::rithmic_wire(demand);
+        let quotes = wire.instruments.iter().filter(|item| item.quotes()).count();
         assert!(quotes <= 1, "a shared quote never duplicates the wire subscription");
         quotes
     }).collect::<Vec<_>>();
@@ -297,7 +296,10 @@ fn hyperliquid_coordinator_retries_at_bounded_jittered_deadlines() {
         assert!(coordinator_turn(
             coordinator,
             &command_receiver,
-            &[crate::market_service::HYPERLIQUID_DESCRIPTOR.flush_demand],
+            &[(
+                crate::market_service::HYPERLIQUID_DESCRIPTOR.id,
+                crate::market_service::HYPERLIQUID_DESCRIPTOR.demand_flush,
+            )],
             &std::sync::atomic::AtomicBool::new(false),
             Some(Duration::ZERO),
         ));
@@ -365,8 +367,7 @@ fn hyperliquid_coordinator_retries_at_bounded_jittered_deadlines() {
 
 #[test]
 fn rithmic_transport_recovery_does_not_stack_coordinator_retry() {
-    use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
-    use crate::market_service::provider_event::ProviderEvent;
+    use crate::market_service::provider_event::{ProviderEvent, ProviderFault, ProviderFaultKind};
     let mut boundary = Boundary::new();
     let transcript = Arc::new(Mutex::new(DemandTranscript::default()));
     boundary.register_replay_session(Box::new(RecordingSession {
@@ -376,7 +377,14 @@ fn rithmic_transport_recovery_does_not_stack_coordinator_retry() {
     boundary.demand(boundary.series(), 1);
     let epoch = boundary.coordinator.provider_registry.epoch("rithmic").expect("epoch");
     let wire = crate::rithmic_realtime::into_wire_provider_event(
-        RithmicRealtimeEvent::Disconnected(1, Some(ProviderInvalidationReason::Transport)),
+        RithmicRealtimeEvent::Disconnected(
+            1,
+            Some(ProviderFault {
+                kind: ProviderFaultKind::Transport,
+                auto_recovers: true,
+                detail: "Transport disconnected",
+            }),
+        ),
     );
     boundary.coordinator.handle_bound_provider_event(ProviderEvent {
         provider: "rithmic",

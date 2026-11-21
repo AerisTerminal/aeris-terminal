@@ -50,14 +50,10 @@ pub use descriptors::{
 };
 mod error;
 pub use error::{MarketServiceError, ProviderAuthError};
+pub mod plugin;
 mod provider_auth;
-mod providers;
 #[cfg(test)]
-use providers::rithmic::RITHMIC_PRESENTATION;
-use providers::{
-    hyperliquid::{HYPERLIQUID_DESCRIPTOR, LiveHyperliquidHistory},
-    rithmic::{LiveRithmicHistory, RITHMIC_DESCRIPTOR},
-};
+use crate::test_shims::providers;
 mod quotes;
 pub use quotes::{QuoteSourceKind, QuoteState};
 mod trading_feed;
@@ -80,10 +76,9 @@ pub use recording::{
     RecordingReplaySpeed, RecordingReplayStatus,
 };
 
-const COMMAND_CAPACITY: usize = 64;
+pub const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
-const REALTIME_CAPACITY: usize = 2_048;
-const RITHMIC_REALTIME_CONTROL_CAPACITY: usize = 2;
+pub const REALTIME_CAPACITY: usize = 2_048;
 const REALTIME_DRAIN_BUDGET: usize = 256;
 /// Bar updates a consumer may fall behind by before the oldest is dropped.
 const CONSUMER_SERIES_QUEUE_CAPACITY: usize = 1_024;
@@ -213,11 +208,23 @@ pub struct MarketServiceStatus {
 #[cfg(feature = "probe")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeStatus {
-    pub hyperliquid_sessions: u64,
+    pub provider_sessions: BTreeMap<String, u64>,
     pub stale_events: u64,
     pub stale_history: u64,
     pub maximum_queued_series_updates: usize,
     pub retry_attempts: Vec<ProbeRetry>,
+}
+
+#[cfg(feature = "probe")]
+impl ProbeStatus {
+    /// Successful session count observed for `provider_id`.
+    #[must_use]
+    pub fn sessions(&self, provider_id: &str) -> u64 {
+        self.provider_sessions
+            .get(provider_id)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(feature = "probe")]
@@ -284,7 +291,7 @@ enum Command {
     ProviderWake,
     Status(Reply<MarketServiceStatus>),
     #[cfg(feature = "probe")]
-    ProbeFailWebSocket(u8, Reply<()>),
+    ProbeFailWebSocket(String, u8, Reply<()>),
     AvailableStreams(String, StreamRequirements, Reply<StreamRequirements>),
     Attach(ClientId, Reply<()>),
     Detach(ClientId, Reply<()>),
@@ -358,7 +365,7 @@ enum Command {
 /// A full command queue already guarantees the coordinator is runnable, so a
 /// dropped wake in that case cannot delay provider-event draining.
 #[derive(Clone)]
-pub(crate) struct ProviderCoordinatorWake {
+pub struct ProviderCoordinatorWake {
     commands: SyncSender<Command>,
     slots: Arc<BTreeMap<&'static str, ProviderWakeSlot>>,
     pending: Arc<AtomicBool>,
@@ -391,13 +398,14 @@ impl ProviderCoordinatorWake {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_tests() -> Self {
+    /// Constructs a detached coordinator wake for unit tests outside `market_runtime`.
+    #[must_use]
+    pub fn for_tests() -> Self {
         let (commands, _receiver) = mpsc::sync_channel(1);
         Self::new(commands, ["rithmic", "hyperliquid"])
     }
 
-    pub(crate) fn report_overflow(&self, provider: &str, generation: u64) {
+    pub fn report_overflow(&self, provider: &str, generation: u64) {
         if let Some(slot) = self.slots.get(provider) {
             slot.overflow.fetch_max(generation, Ordering::AcqRel);
             slot.pending_overflow
@@ -406,7 +414,8 @@ impl ProviderCoordinatorWake {
         self.notify();
     }
 
-    pub(crate) fn overflowed(&self, provider: &str, generation: u64) -> bool {
+    #[must_use]
+    pub fn overflowed(&self, provider: &str, generation: u64) -> bool {
         generation != 0
             && self
                 .slots
@@ -422,7 +431,7 @@ impl ProviderCoordinatorWake {
         self.notify();
     }
 
-    pub(crate) fn notify(&self) {
+    pub fn notify(&self) {
         if self.pending.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -434,13 +443,14 @@ impl ProviderCoordinatorWake {
 
 /// Catalog responses must never block the session owner. Saturation rejects
 /// outstanding catalog requests through a fixed out-of-band flag.
-pub(crate) struct CatalogPublisher<T> {
+pub struct CatalogPublisher<T> {
     events: SyncSender<T>,
     provider: &'static str,
     wake: ProviderCoordinatorWake,
 }
 impl<T> CatalogPublisher<T> {
-    pub(crate) fn new(
+    #[must_use]
+    pub fn new(
         events: SyncSender<T>,
         provider: &'static str,
         wake: ProviderCoordinatorWake,
@@ -451,7 +461,9 @@ impl<T> CatalogPublisher<T> {
             wake,
         }
     }
-    pub(crate) fn send(&self, event: T) -> Result<(), mpsc::SendError<T>> {
+    /// # Errors
+    /// Returns the unsent event when the bounded catalog lane is full or disconnected.
+    pub fn send(&self, event: T) -> Result<(), mpsc::SendError<T>> {
         match self.events.try_send(event) {
             Ok(()) => {
                 self.wake.notify();
@@ -470,14 +482,24 @@ impl<T> CatalogPublisher<T> {
 }
 
 #[derive(Clone)]
-struct HistoryRequest {
-    ticket: history::tracker::HistoryTicket,
-    provider_generation: ProviderGeneration,
-    series: BarSeriesKey,
-    instrument: Option<InstallProviderInstrument>,
-    maximum_bars: usize,
-    range: Option<HistoryRange>,
-    stop: Arc<AtomicBool>,
+pub struct HistoryRequest {
+    pub(super) ticket: history::tracker::HistoryTicket,
+    pub provider_generation: ProviderGeneration,
+    pub series: BarSeriesKey,
+    pub instrument: Option<InstallProviderInstrument>,
+    pub maximum_bars: usize,
+    pub range: Option<HistoryRange>,
+    pub stop: Arc<AtomicBool>,
+}
+
+impl HistoryRequest {
+    #[must_use]
+    pub const fn req_window(&self) -> HistoryFetchWindow {
+        HistoryFetchWindow {
+            maximum_bars: self.maximum_bars,
+            range: self.range,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -526,39 +548,31 @@ const EMPTY_CURRENT_HISTORY_RETAINED_DETAIL: &str =
 
 pub(crate) use aeris_provider_spi::HistoryFetchWindow;
 
-impl HistoryRequest {
-    const fn req_window(&self) -> HistoryFetchWindow {
-        HistoryFetchWindow {
-            maximum_bars: self.maximum_bars,
-            range: self.range,
-        }
-    }
-}
+pub type HistorySnapshot = aeris_provider_spi::ProviderHistorySnapshot;
 
-type HistorySnapshot = aeris_provider_spi::ProviderHistorySnapshot;
-
-fn history_instrument_from_install(
+#[must_use]
+pub fn history_instrument_from_install(
     installed: &InstallProviderInstrument,
 ) -> aeris_provider_spi::HistoryInstrument {
     descriptors::resolved_from_install(installed).to_history_instrument()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProviderInstrumentDemand {
-    instrument: InstallProviderInstrument,
-    streams: StreamRequirements,
-    display_depth: bool,
+pub struct ProviderInstrumentDemand {
+    pub instrument: InstallProviderInstrument,
+    pub streams: StreamRequirements,
+    pub display_depth: bool,
     /// Order levels are demanded and the instrument holds one of the
     /// provider's order-level subscriptions.
-    order_levels: bool,
+    pub order_levels: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ProviderDemand {
-    instruments: Vec<ProviderInstrumentDemand>,
-    candle_series: Vec<(BarSeriesKey, StreamRequirements, InstallProviderInstrument)>,
-    explicit_trade_ids: BTreeSet<String>,
-    missing_catalog: bool,
+pub struct ProviderDemand {
+    pub instruments: Vec<ProviderInstrumentDemand>,
+    pub candle_series: Vec<(BarSeriesKey, StreamRequirements, InstallProviderInstrument)>,
+    pub explicit_trade_ids: BTreeSet<String>,
+    pub missing_catalog: bool,
 }
 
 impl ProviderDemand {
@@ -713,18 +727,27 @@ use provider_event::{
 
 /// A live bar that neither continues the published tail nor revises it in place
 /// cannot be appended, so the whole series is republished instead.
-trait HistorySource: Send + 'static {
+pub trait HistorySource: Send + 'static {
+    /// # Errors
+    /// Returns a provider-supplied error detail when historical bars cannot be loaded.
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String>;
 }
 
+/// How the coordinator flushes queued demand updates for a provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DemandFlushPolicy {
+    Pending,
+    Dirty,
+    SessionManaged,
+}
+
 #[derive(Clone, Copy)]
-struct ProviderDescriptor {
-    id: &'static str,
-    presentation: ProviderPresentation,
-    login_schema: Option<&'static descriptors::LoginSchema>,
-    capabilities: ProviderCapabilities,
-    start: ProviderRuntimeStarter,
-    flush_demand: for<'a> fn(&mut Coordinator<'a>),
+pub struct ProviderDescriptor {
+    pub id: &'static str,
+    pub presentation: ProviderPresentation,
+    pub login_schema: Option<&'static descriptors::LoginSchema>,
+    pub capabilities: ProviderCapabilities,
+    pub demand_flush: DemandFlushPolicy,
 }
 
 /// User-facing metadata; never used to decide market-session behavior.
@@ -732,40 +755,40 @@ type ProviderPresentation = &'static ProviderPresentationDescriptor;
 
 /// Provider-owned market behavior consumed by the generic coordinator.
 #[derive(Clone, Copy)]
-struct ProviderCapabilities {
-    account_id: &'static str,
-    engine: EngineProviderCapabilities,
-    always_open: bool,
-    concurrency: ConcurrencyLimits,
-    depth: Option<DepthCapabilities>,
-    quotes: Option<QuoteCapability>,
-    reconnect: reconnect::ReconnectPolicy,
-    history: ProviderHistoryCapabilities,
-    recovery_policy: ProviderRecoveryPolicy,
-    alert_demand_update: AlertDemandUpdate,
-    live_model: LiveModel,
+pub struct ProviderCapabilities {
+    pub account_id: &'static str,
+    pub engine: EngineProviderCapabilities,
+    pub always_open: bool,
+    pub concurrency: ConcurrencyLimits,
+    pub depth: Option<DepthCapabilities>,
+    pub quotes: Option<QuoteCapability>,
+    pub reconnect: reconnect::ReconnectPolicy,
+    pub history: ProviderHistoryCapabilities,
+    pub recovery_policy: ProviderRecoveryPolicy,
+    pub alert_demand_update: AlertDemandUpdate,
+    pub live_model: LiveModel,
     /// Timestamp convention of the provider's session, week and month bars,
     /// which trade-built bars must reproduce to stay one bar per period.
-    calendar_bar_stamp: calendar::CalendarBarStamp,
-    overflow_recovery_detail: &'static str,
-    candle_requires_connected: bool,
-    candle_correction_detail: &'static str,
-    candle_wire_interval: Option<fn(BarPeriod) -> Result<String, String>>,
-    candle_demand_policy: CandleDemandPolicy,
-    trade_demand_policy: TradeDemandPolicy,
-    instrument_missing_detail: &'static str,
-    catalog_session_binding: CatalogSessionBinding,
+    pub calendar_bar_stamp: calendar::CalendarBarStamp,
+    pub overflow_recovery_detail: &'static str,
+    pub candle_requires_connected: bool,
+    pub candle_correction_detail: &'static str,
+    pub candle_wire_interval: Option<fn(BarPeriod) -> Result<String, String>>,
+    pub candle_demand_policy: CandleDemandPolicy,
+    pub trade_demand_policy: TradeDemandPolicy,
+    pub instrument_missing_detail: &'static str,
+    pub catalog_session_binding: CatalogSessionBinding,
     /// Instruments that may hold an order-level subscription at once. Each
     /// canonical order-level book holds at most `MAXIMUM_ORDER_LEVEL_ORDERS`.
-    maximum_order_level_instruments: usize,
+    pub maximum_order_level_instruments: usize,
     /// Whether a live series silent while its calendar is open is recovered.
     /// A source whose silence is chosen (a paused replay) never recovers for it.
-    recovers_silence: bool,
+    pub recovers_silence: bool,
 }
 
 /// Which provider session a resolved catalog instrument belongs to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CatalogSessionBinding {
+pub enum CatalogSessionBinding {
     /// The metadata is valid only for the session that resolved it, so a
     /// resolution from a retired session is rejected as stale.
     ResolvingSession,
@@ -776,68 +799,110 @@ enum CatalogSessionBinding {
 }
 
 #[derive(Clone, Copy)]
-struct ConcurrencyLimits {
-    maximum_sessions: u8,
+pub struct ConcurrencyLimits {
+    pub maximum_sessions: u8,
 }
 
 #[derive(Clone, Copy)]
-struct DepthCapabilities;
+pub struct DepthCapabilities;
 
 /// Runtime dispatch and supported periods; the adapter's historical dataset
 /// limits remain in `aeris_provider_history::HistoryCapabilities`.
 #[derive(Clone, Copy)]
-struct ProviderHistoryCapabilities {
+pub struct ProviderHistoryCapabilities {
     /// Name of the dedicated history worker thread.
-    worker: &'static str,
-    supported_period: fn(BarPeriod) -> Result<(), String>,
+    pub worker: &'static str,
+    pub supported_period: fn(BarPeriod) -> Result<(), String>,
 }
 
 #[derive(Clone, Copy)]
-enum QuoteCapability {
+pub enum QuoteCapability {
     DedicatedTopOfBook,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LiveModel {
+pub enum LiveModel {
     TradeBuilt,
     ProviderCandles,
 }
 
-/// Shared provider-owned state that runtime starters attach to.
+/// Shared runtime-owned state that provider runtime starters attach to.
 struct ProviderStartContext {
-    rithmic_login: crate::rithmic_realtime::RithmicLoginRevision,
     recording_replays: Arc<recording::RecordingReplays>,
 }
 
-type ProviderRuntimeStarter = fn(
-    ProviderRuntimeSpec,
-    &SyncSender<Command>,
-    ProviderCoordinatorWake,
-    &MarketEngine,
-    &Arc<Mutex<BTreeSet<String>>>,
-    &ProviderStartContext,
-) -> Result<ProviderRuntimeRecord, String>;
+/// Opaque handle passed to a provider plugin's starter closure.
+pub struct ProviderStartHandle<'a> {
+    completions: &'a SyncSender<Command>,
+    wake: ProviderCoordinatorWake,
+    engine: &'a MarketEngine,
+    active_workers: &'a Arc<Mutex<BTreeSet<String>>>,
+    context: &'a ProviderStartContext,
+}
+
+impl ProviderStartHandle<'_> {
+    /// Starts the bounded history worker for `spec` and returns the initialized handle.
+    ///
+    /// # Errors
+    /// Returns an error when the history source is missing or the worker thread cannot spawn.
+    pub fn start_history_runtime(
+        &self,
+        spec: ProviderRuntimeSpec,
+    ) -> Result<StartedProviderRuntime, String> {
+        ProviderRuntimeRegistry::start_history_runtime(spec, self.completions, self.active_workers)
+    }
+
+    #[must_use]
+    pub fn wake(&self) -> ProviderCoordinatorWake {
+        self.wake.clone()
+    }
+
+    /// Returns the configured initial reconnect delay for `provider_id`.
+    ///
+    /// # Errors
+    /// Returns an error when `provider_id` is not registered in the engine.
+    pub fn configured_reconnect_delay(&self, provider_id: &str) -> Result<Duration, String> {
+        configured_reconnect_delay(self.engine, provider_id)
+    }
+
+    #[must_use]
+    pub fn active_workers(&self) -> Arc<Mutex<BTreeSet<String>>> {
+        Arc::clone(self.active_workers)
+    }
+
+    pub(in crate::market_service) fn recording_replays(&self) -> &Arc<recording::RecordingReplays> {
+        &self.context.recording_replays
+    }
+}
+
+pub type ProviderRuntimeStarter = Box<
+    dyn FnOnce(
+            ProviderRuntimeSpec,
+            &ProviderStartHandle<'_>,
+        ) -> Result<ProviderRuntimeRecord, String>
+        + Send,
+>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProviderRecoveryPolicy {
+pub enum ProviderRecoveryPolicy {
     CoordinatorReissuesDemand,
     WorkerReconcilesDemand,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AlertDemandUpdate {
+pub enum AlertDemandUpdate {
     Immediate,
     MarkDirty,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CandleDemandPolicy {
+pub enum CandleDemandPolicy {
     SessionManaged,
     ReconcileAfterSelection,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TradeDemandPolicy {
+pub enum TradeDemandPolicy {
     Immediate,
     SessionManaged,
 }
@@ -910,21 +975,242 @@ const RECORDING_REPLAY_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         maximum_order_level_instruments: 0,
         recovers_silence: false,
     },
-    start: recording::start_replay_runtime,
-    flush_demand: flush_recording_replay_demand,
+    demand_flush: DemandFlushPolicy::SessionManaged,
 };
 
+/// Returns the local recording-replay provider descriptor for composition roots.
+#[must_use]
+pub const fn recording_replay_descriptor() -> ProviderDescriptor {
+    RECORDING_REPLAY_DESCRIPTOR
+}
+
+/// Whether a provider identity is the local recording replay source. Its
+/// instruments never trade, and surfaces never persist or default to them.
+#[must_use]
+pub fn is_recording_replay_provider(provider_id: &str) -> bool {
+    provider_id == RECORDING_REPLAY_DESCRIPTOR.id
+}
+
+#[cfg(any(test, feature = "replay"))]
+const TEST_CANDLE_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentationDescriptor {
+    id: "hyperliquid",
+    display_name: "Hyperliquid",
+    chart_interval_labels: &[
+        "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
+    ],
+    daily_bars: crate::ProviderDailyBarCadence::FixedDay,
+    search_hint: "Search Hyperliquid markets",
+    logo_key: "hyperliquid",
+    broker_venue_id: None,
+    attribution: None,
+    catalog_symbol: ProviderCatalogSymbol::ProviderSymbol,
+    selection_entitlement_id: "hyperliquid-public",
+    catalog_refresh_on_startup: true,
+    ready_label_suffix: "",
+    feed_level: crate::ProviderFeedLevel::PriceLevels,
+    search_categories_available: false,
+    market_screen_available: true,
+    market_scan_available: true,
+    trades_available: true,
+    connection_kind: crate::ProviderConnectionKind::Public,
+};
+
+#[cfg(any(test, feature = "replay"))]
+fn test_candle_wire_interval(period: BarPeriod) -> Result<String, String> {
+    match period {
+        BarPeriod::Time { seconds: 60 } => Ok("1m".into()),
+        BarPeriod::Time { seconds: 180 } => Ok("3m".into()),
+        BarPeriod::Time { seconds: 300 } => Ok("5m".into()),
+        BarPeriod::Time { seconds: 900 } => Ok("15m".into()),
+        BarPeriod::Time { seconds: 1_800 } => Ok("30m".into()),
+        BarPeriod::Time { seconds: 3_600 } => Ok("1h".into()),
+        BarPeriod::Time { seconds: 7_200 } => Ok("2h".into()),
+        BarPeriod::Time { seconds: 14_400 } => Ok("4h".into()),
+        BarPeriod::Time { seconds: 28_800 } => Ok("8h".into()),
+        BarPeriod::Time { seconds: 43_200 } => Ok("12h".into()),
+        BarPeriod::Time { seconds: 86_400 } | BarPeriod::Session { days: 1 } => Ok("1d".into()),
+        BarPeriod::Time { seconds: 259_200 } => Ok("3d".into()),
+        BarPeriod::Week { weeks: 1 } => Ok("1w".into()),
+        BarPeriod::Month { months: 1 } => Ok("1M".into()),
+        _ => Err(format!("unsupported test candle period: {period:?}")),
+    }
+}
+
+#[cfg(any(test, feature = "replay"))]
+pub(super) const TEST_CANDLE_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "hyperliquid",
+    presentation: &TEST_CANDLE_PRESENTATION,
+    login_schema: None,
+    capabilities: ProviderCapabilities {
+        account_id: "hyperliquid-public",
+        engine: EngineProviderCapabilities {
+            historical_bars: true,
+            realtime_bars: true,
+            streams: StreamRequirements::BARS
+                .with(MarketStream::Trades)
+                .with(MarketStream::Quotes)
+                .with(MarketStream::Depth),
+        },
+        always_open: true,
+        concurrency: ConcurrencyLimits {
+            maximum_sessions: 1,
+        },
+        depth: Some(DepthCapabilities),
+        quotes: Some(QuoteCapability::DedicatedTopOfBook),
+        reconnect: reconnect::ReconnectPolicy::hyperliquid(),
+        history: ProviderHistoryCapabilities {
+            worker: "aeris-test-candle-history",
+            supported_period: |period| test_candle_wire_interval(period).map(|_| ()),
+        },
+        recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
+        alert_demand_update: AlertDemandUpdate::MarkDirty,
+        live_model: LiveModel::ProviderCandles,
+        calendar_bar_stamp: calendar::CalendarBarStamp::TradingDateMidnightUtc,
+        overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
+        candle_requires_connected: true,
+        candle_correction_detail: "Provider candle correction requires covering history",
+        candle_wire_interval: Some(test_candle_wire_interval),
+        candle_demand_policy: CandleDemandPolicy::ReconcileAfterSelection,
+        trade_demand_policy: TradeDemandPolicy::SessionManaged,
+        instrument_missing_detail: "Test candle instrument is not installed",
+        catalog_session_binding: CatalogSessionBinding::CurrentSession,
+        maximum_order_level_instruments: 0,
+        recovers_silence: true,
+    },
+    demand_flush: DemandFlushPolicy::Dirty,
+};
+
+#[cfg(test)]
+pub(super) const TEST_TRADE_BUILT_ACCOUNT_ID: &str = "rithmic-test";
+
+#[cfg(test)]
+pub(super) const RITHMIC_PRESENTATION: ProviderPresentationDescriptor =
+    ProviderPresentationDescriptor {
+        id: "rithmic",
+        display_name: "Rithmic",
+        chart_interval_labels: &[
+            "1s", "5s", "10s", "15s", "30s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
+            "8h", "12h", "1D", "1W", "1M",
+        ],
+        daily_bars: crate::ProviderDailyBarCadence::TradingSession,
+        search_hint: "Search Rithmic symbols",
+        logo_key: "rithmic",
+        broker_venue_id: Some(aeris_trading::venue::BROKER_VENUE_ID),
+        attribution: None,
+        catalog_symbol: ProviderCatalogSymbol::ProviderSymbol,
+        selection_entitlement_id: TEST_TRADE_BUILT_ACCOUNT_ID,
+        catalog_refresh_on_startup: false,
+        ready_label_suffix: "",
+        feed_level: crate::ProviderFeedLevel::OrderLevels,
+        search_categories_available: false,
+        market_screen_available: false,
+        market_scan_available: false,
+        trades_available: true,
+        connection_kind: crate::ProviderConnectionKind::Credentials,
+    };
+
+#[cfg(test)]
+const TEST_LOGIN_SCHEMA: descriptors::LoginSchema = descriptors::LoginSchema {
+    fields: &[
+        descriptors::LoginField {
+            id: "server",
+            kind: descriptors::LoginFieldKind::Server,
+            secret: false,
+        },
+        descriptors::LoginField {
+            id: "system",
+            kind: descriptors::LoginFieldKind::System,
+            secret: false,
+        },
+        descriptors::LoginField {
+            id: "user",
+            kind: descriptors::LoginFieldKind::UserId,
+            secret: false,
+        },
+        descriptors::LoginField {
+            id: "password",
+            kind: descriptors::LoginFieldKind::Password,
+            secret: true,
+        },
+    ],
+    discover_servers: true,
+};
+
+#[cfg(test)]
+fn test_trade_built_supported_period(period: BarPeriod) -> Result<(), String> {
+    match period {
+        BarPeriod::Time {
+            seconds:
+                1 | 5 | 10 | 15 | 30 | 60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800
+                | 43_200,
+        }
+        | BarPeriod::Session { days: 1 }
+        | BarPeriod::Week { weeks: 1 }
+        | BarPeriod::Month { months: 1 } => Ok(()),
+        _ => Err(format!("unsupported test period: {period:?}")),
+    }
+}
+
+#[cfg(test)]
+pub(super) const TEST_TRADE_BUILT_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "rithmic",
+    presentation: &RITHMIC_PRESENTATION,
+    login_schema: Some(&TEST_LOGIN_SCHEMA),
+    capabilities: ProviderCapabilities {
+        account_id: TEST_TRADE_BUILT_ACCOUNT_ID,
+        engine: EngineProviderCapabilities {
+            historical_bars: true,
+            realtime_bars: true,
+            streams: StreamRequirements::BARS
+                .with(MarketStream::Trades)
+                .with(MarketStream::Quotes)
+                .with(MarketStream::Depth)
+                .with(MarketStream::OrderLevels),
+        },
+        always_open: false,
+        concurrency: ConcurrencyLimits {
+            maximum_sessions: 1,
+        },
+        depth: Some(DepthCapabilities),
+        quotes: Some(QuoteCapability::DedicatedTopOfBook),
+        reconnect: reconnect::ReconnectPolicy::rithmic_recovery(),
+        history: ProviderHistoryCapabilities {
+            worker: "aeris-test-trade-history",
+            supported_period: test_trade_built_supported_period,
+        },
+        recovery_policy: ProviderRecoveryPolicy::CoordinatorReissuesDemand,
+        alert_demand_update: AlertDemandUpdate::Immediate,
+        live_model: LiveModel::TradeBuilt,
+        calendar_bar_stamp: calendar::CalendarBarStamp::SessionOpen,
+        overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
+        candle_requires_connected: false,
+        candle_correction_detail: "Provider candle correction requires covering history",
+        candle_wire_interval: None,
+        candle_demand_policy: CandleDemandPolicy::SessionManaged,
+        trade_demand_policy: TradeDemandPolicy::Immediate,
+        instrument_missing_detail: "Test trade-built instrument is not installed",
+        catalog_session_binding: CatalogSessionBinding::ResolvingSession,
+        maximum_order_level_instruments: 8,
+        recovers_silence: true,
+    },
+    demand_flush: DemandFlushPolicy::Pending,
+};
+
+#[cfg(test)]
+pub(super) const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = TEST_CANDLE_DESCRIPTOR;
+
+#[cfg(test)]
+pub(super) const RITHMIC_DESCRIPTOR: ProviderDescriptor = TEST_TRADE_BUILT_DESCRIPTOR;
+
+#[cfg(test)]
 const BUILT_IN_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
-    RITHMIC_DESCRIPTOR,
-    HYPERLIQUID_DESCRIPTOR,
+    TEST_TRADE_BUILT_DESCRIPTOR,
+    TEST_CANDLE_DESCRIPTOR,
     RECORDING_REPLAY_DESCRIPTOR,
 ];
 
-/// Built-in provider presentation metadata for provider-neutral desktop UI.
-#[must_use]
-pub fn built_in_provider_presentations() -> &'static [ProviderPresentationDescriptor] {
-    // Keep this projection in the runtime registry so desktop presentation does
-    // not maintain a second provider metadata table.
+#[cfg(test)]
+pub(crate) fn test_built_in_provider_presentations() -> &'static [ProviderPresentationDescriptor] {
     static PRESENTATIONS: std::sync::OnceLock<Vec<ProviderPresentationDescriptor>> =
         std::sync::OnceLock::new();
     PRESENTATIONS
@@ -937,9 +1223,8 @@ pub fn built_in_provider_presentations() -> &'static [ProviderPresentationDescri
         .as_slice()
 }
 
-/// Published provider metadata comes from the same registry that starts sessions.
-#[must_use]
-pub fn published_provider_descriptors() -> &'static [descriptors::ProviderDescriptor] {
+#[cfg(test)]
+pub(super) fn published_provider_descriptors() -> &'static [descriptors::ProviderDescriptor] {
     static DESCRIPTORS: std::sync::OnceLock<Vec<descriptors::ProviderDescriptor>> =
         std::sync::OnceLock::new();
     DESCRIPTORS
@@ -952,17 +1237,6 @@ pub fn published_provider_descriptors() -> &'static [descriptors::ProviderDescri
         .as_slice()
 }
 
-/// Whether a provider identity is the local recording replay source. Its
-/// instruments never trade, and surfaces never persist or default to them.
-#[must_use]
-pub fn is_recording_replay_provider(provider_id: &str) -> bool {
-    provider_id == RECORDING_REPLAY_DESCRIPTOR.id
-}
-
-fn flush_recording_replay_demand(coordinator: &mut Coordinator<'_>) {
-    coordinator.flush_session_managed_demand(RECORDING_REPLAY_DESCRIPTOR.id);
-}
-
 /// Replays build fixed-period bars from recorded trades; calendar periods
 /// would need the recorded venue's sessions at the replay clock.
 fn recording_replay_supported_period(period: BarPeriod) -> Result<(), String> {
@@ -972,53 +1246,43 @@ fn recording_replay_supported_period(period: BarPeriod) -> Result<(), String> {
     }
 }
 
-struct ProviderRuntimeSpec {
-    descriptor: ProviderDescriptor,
-    history: Option<Box<dyn HistorySource>>,
-    realtime: ProviderRealtimeSpec,
-    #[cfg(any(test, feature = "replay"))]
-    scripted: Option<scripted_provider::ScriptedChannels>,
-}
-
-struct ProviderRealtimeSpec {
-    enabled: bool,
+pub struct ProviderRuntimeSpec {
+    pub descriptor: ProviderDescriptor,
+    pub(super) history: Option<Box<dyn HistorySource>>,
+    pub realtime_enabled: bool,
+    pub(super) starter: ProviderRuntimeStarter,
 }
 
 impl ProviderRuntimeSpec {
-    fn rithmic(history: Box<dyn HistorySource>, enabled: bool) -> Self {
+    /// Creates a provider runtime registration for [`MarketServiceBuilder::register_provider`].
+    #[must_use]
+    pub fn new(
+        descriptor: ProviderDescriptor,
+        history: Option<Box<dyn HistorySource>>,
+        realtime_enabled: bool,
+        starter: ProviderRuntimeStarter,
+    ) -> Self {
         Self {
-            descriptor: RITHMIC_DESCRIPTOR,
-            history: Some(history),
-            realtime: ProviderRealtimeSpec { enabled },
-            #[cfg(any(test, feature = "replay"))]
-            scripted: None,
-        }
-    }
-
-    fn hyperliquid(history: Box<dyn HistorySource>, enabled: bool) -> Self {
-        Self {
-            descriptor: HYPERLIQUID_DESCRIPTOR,
-            history: Some(history),
-            realtime: ProviderRealtimeSpec { enabled },
-            #[cfg(any(test, feature = "replay"))]
-            scripted: None,
+            descriptor,
+            history,
+            realtime_enabled,
+            starter,
         }
     }
 
     /// The replay starter supplies its own history source from the recordings.
-    fn recording_replay() -> Self {
+    pub(super) fn recording_replay() -> Self {
         Self {
             descriptor: RECORDING_REPLAY_DESCRIPTOR,
             history: None,
-            realtime: ProviderRealtimeSpec { enabled: true },
-            #[cfg(any(test, feature = "replay"))]
-            scripted: None,
+            realtime_enabled: true,
+            starter: Box::new(recording::start_replay_runtime),
         }
     }
 }
 
 #[derive(Default)]
-struct ProviderRuntimeLifecycle {
+pub struct ProviderRuntimeLifecycle {
     generation: AtomicU64,
     reconnecting: AtomicBool,
     transport_rtt_nanos: AtomicU64,
@@ -1048,7 +1312,7 @@ impl ProviderRuntimeLifecycle {
         (value != 0).then_some(value)
     }
 
-    fn mark_terminal_failure(&self, detail: impl Into<String>) {
+    pub fn mark_terminal_failure(&self, detail: impl Into<String>) {
         *self
             .terminal_failure
             .lock()
@@ -1077,13 +1341,13 @@ type ProviderSessionFactory =
 /// Concrete provider workers bind their own control/event channels behind this
 /// pair so `ProviderRuntimeRecord`, `ProviderDispatch`, and `Coordinator` never
 /// branch on concrete provider channel types.
-struct ProviderRealtimeChannels {
+pub struct ProviderRealtimeChannels {
     session_factory: ProviderSessionFactory,
     take_event: Box<dyn Fn() -> Option<ProviderEvent> + Send>,
 }
 
 impl ProviderRealtimeChannels {
-    fn new<F, T>(session_factory: F, take_event: T) -> Self
+    pub fn new<F, T>(session_factory: F, take_event: T) -> Self
     where
         F: Fn(&SyncSender<HistoryRequest>) -> Box<dyn provider_session::ProviderSession>
             + Send
@@ -1124,21 +1388,21 @@ impl ProviderRealtimeChannels {
 }
 
 /// Provider-neutral request for one instrument's display-depth book stream.
-struct DisplayDepthRequest {
-    instrument: InstallProviderInstrument,
-    provider_generation: u64,
+pub struct DisplayDepthRequest {
+    pub instrument: InstallProviderInstrument,
+    pub provider_generation: u64,
 }
 
 type DisplayDepthDemandSender = Box<dyn Fn(&[DisplayDepthRequest]) -> Result<bool, String> + Send>;
 
 /// Provider-neutral display-depth control sender and event source.
-struct ProviderDisplayDepthChannels {
+pub struct ProviderDisplayDepthChannels {
     send_demand: DisplayDepthDemandSender,
     take_event: Box<dyn Fn() -> Option<ProviderDisplayDepthEvent> + Send>,
 }
 
 impl ProviderDisplayDepthChannels {
-    fn new<S, T>(send_demand: S, take_event: T) -> Self
+    pub fn new<S, T>(send_demand: S, take_event: T) -> Self
     where
         S: Fn(&[DisplayDepthRequest]) -> Result<bool, String> + Send + 'static,
         T: Fn() -> Option<ProviderDisplayDepthEvent> + Send + 'static,
@@ -1158,24 +1422,27 @@ impl ProviderDisplayDepthChannels {
     }
 }
 
-struct ProviderCatalogChannels {
-    enabled: bool,
-    channels: Box<dyn ProviderCatalogChannel>,
+pub struct ProviderCatalogChannels {
+    pub enabled: bool,
+    pub channels: Box<dyn ProviderCatalogChannel>,
 }
 
-trait ProviderCatalogChannel: Send {
+pub trait ProviderCatalogChannel: Send {
     fn try_recv(&self) -> Option<ProviderCatalogEvent>;
+    /// # Errors
+    /// Returns an error when the catalog worker rejects or cannot accept `command`.
     fn send(&self, provider_id: &str, command: ProviderCatalogCommand) -> Result<(), String>;
 }
 
-struct ProviderCatalogChannelImpl<C, E> {
+pub struct ProviderCatalogChannelImpl<C, E> {
     controls: SyncSender<C>,
     events: Receiver<E>,
     dispatch: fn(&SyncSender<C>, &str, ProviderCatalogCommand) -> Result<(), String>,
 }
 
 impl<C, E> ProviderCatalogChannelImpl<C, E> {
-    fn new(
+    #[must_use]
+    pub fn new(
         controls: SyncSender<C>,
         events: Receiver<E>,
         dispatch: fn(&SyncSender<C>, &str, ProviderCatalogCommand) -> Result<(), String>,
@@ -1200,26 +1467,26 @@ impl<C: Send, E: Into<ProviderCatalogEvent> + Send> ProviderCatalogChannel
     }
 }
 
-struct ProviderRuntimeRecord {
-    descriptor: ProviderDescriptor,
-    history: SyncSender<HistoryRequest>,
-    cancellation: Arc<AtomicBool>,
-    lifecycle: Arc<ProviderRuntimeLifecycle>,
-    realtime: Option<ProviderRealtimeChannels>,
-    display_depth: Option<ProviderDisplayDepthChannels>,
-    catalog: ProviderCatalogChannels,
-    workers: Vec<thread::JoinHandle<()>>,
+pub struct ProviderRuntimeRecord {
+    pub descriptor: ProviderDescriptor,
+    pub history: SyncSender<HistoryRequest>,
+    pub cancellation: Arc<AtomicBool>,
+    pub lifecycle: Arc<ProviderRuntimeLifecycle>,
+    pub realtime: Option<ProviderRealtimeChannels>,
+    pub display_depth: Option<ProviderDisplayDepthChannels>,
+    pub catalog: ProviderCatalogChannels,
+    pub workers: Vec<thread::JoinHandle<()>>,
 }
 
-struct StartedProviderRuntime {
-    history: SyncSender<HistoryRequest>,
-    cancellation: Arc<AtomicBool>,
-    lifecycle: Arc<ProviderRuntimeLifecycle>,
-    workers: Vec<thread::JoinHandle<()>>,
+pub struct StartedProviderRuntime {
+    pub history: SyncSender<HistoryRequest>,
+    pub cancellation: Arc<AtomicBool>,
+    pub lifecycle: Arc<ProviderRuntimeLifecycle>,
+    pub workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl StartedProviderRuntime {
-    fn cancel_and_join(self) {
+    pub fn cancel_and_join(self) {
         self.cancellation.store(true, Ordering::Release);
         drop(self.history);
         join_runtime_workers(self.workers);
@@ -1236,13 +1503,14 @@ struct ProviderRuntimeRegistry {
     order: Vec<&'static str>,
 }
 
-struct ActiveWorkerGuard {
+pub struct ActiveWorkerGuard {
     name: &'static str,
     active: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl ActiveWorkerGuard {
-    fn register(name: &'static str, active: Arc<Mutex<BTreeSet<String>>>) -> Self {
+    #[must_use]
+    pub fn register(name: &'static str, active: Arc<Mutex<BTreeSet<String>>>) -> Self {
         active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1282,7 +1550,7 @@ struct ProviderDispatchRecord<'a> {
     catalog: Option<&'a dyn ProviderCatalogChannel>,
 }
 
-enum ProviderCatalogCommand {
+pub enum ProviderCatalogCommand {
     Search(SearchProviderInstruments),
     Select(SelectProviderInstrument),
     Screen(ScreenProviderMarkets),
@@ -1308,7 +1576,7 @@ enum ProviderRuntimeEvent {
     Catalog(&'static str, ProviderCatalogEvent),
 }
 
-enum ProviderDisplayDepthEvent {
+pub enum ProviderDisplayDepthEvent {
     Reset {
         display_generation: u64,
     },
@@ -1319,7 +1587,7 @@ enum ProviderDisplayDepthEvent {
     },
 }
 
-enum ProviderCatalogEvent {
+pub enum ProviderCatalogEvent {
     SearchCompleted(ProviderInstrumentSearchResult),
     SelectionResolved {
         consumer_id: u64,
@@ -1393,7 +1661,6 @@ impl ProviderRuntimeEvent {
 mod broker_venue;
 pub mod calendar;
 pub use broker_venue::{BrokerVenueLink, BrokerVenueRunner};
-pub use providers::rithmic::{RithmicLoginSummary, RithmicServer};
 mod runtime;
 pub use runtime::MarketServiceBuilder;
 use runtime::join_runtime_workers;
@@ -1523,9 +1790,10 @@ use publication::{
 mod instrument_selection;
 #[cfg(test)]
 use instrument_selection::InvalidMarketRequest;
+pub use instrument_selection::try_send_catalog_control;
 use instrument_selection::{
-    id, try_send_catalog_control, validate_provider_instrument, validate_provider_scan,
-    validate_provider_screen, validate_provider_search, validate_provider_selection,
+    id, validate_provider_instrument, validate_provider_scan, validate_provider_screen,
+    validate_provider_search, validate_provider_selection,
 };
 
 mod history;

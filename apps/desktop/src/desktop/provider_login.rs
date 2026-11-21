@@ -237,7 +237,7 @@ impl TerminalApp {
     }
 
     pub(super) fn check_provider_logins(&mut self, window: &Window, cx: &mut Context<Self>) {
-        for descriptor in aeris_market_runtime::published_provider_descriptors() {
+        for descriptor in aeris_market_providers::published_provider_descriptors() {
             if matches!(descriptor.connect, ConnectMethod::VaultCredentials { .. }) {
                 self.run_provider_login_operation(
                     ProviderId(descriptor.id),
@@ -912,7 +912,7 @@ mod tests {
         let mut vault =
             std::collections::BTreeMap::from([("unrelated".to_string(), "preserved".to_string())]);
         let mut sign_in_calls = 0;
-        for descriptor in aeris_market_runtime::published_provider_descriptors() {
+        for descriptor in aeris_market_providers::published_provider_descriptors() {
             let ConnectMethod::VaultCredentials { schema } = descriptor.connect else {
                 continue;
             };

@@ -347,7 +347,7 @@ fn panel_sidebar(
 }
 
 fn connections_groups(connections: ConnectionsView<'_>, theme: &AerisTheme) -> Vec<AnyElement> {
-    connection_provider_ids(aeris_market_runtime::published_provider_descriptors())
+    connection_provider_ids(aeris_market_providers::published_provider_descriptors())
         .into_iter()
         .enumerate()
         .map(|(index, provider)| {
@@ -938,7 +938,7 @@ mod provider_descriptor_tests {
 
     #[test]
     fn connection_list_includes_each_published_provider_in_order() {
-        let published = aeris_market_runtime::published_provider_descriptors();
+        let published = aeris_market_providers::published_provider_descriptors();
         assert_eq!(
             connection_provider_ids(published)
                 .iter()

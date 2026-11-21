@@ -64,7 +64,7 @@ impl DesktopLifecycle {
             trading_stores: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
             services: aeris_desktop::services::DesktopServices::new(
-                aeris_market_runtime::MarketService::start().expect("test market owner"),
+                aeris_market_providers::start_market_service().expect("test market owner"),
                 super::tests::test_trading_service(),
                 aeris_account_runtime::AccountService::new(
                     aeris_account_runtime::AccountServiceConfig::production(),

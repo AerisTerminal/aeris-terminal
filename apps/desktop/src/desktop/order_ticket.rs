@@ -282,7 +282,7 @@ impl TicketBroker {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Practice => tr!(panels::TICKET_BROKER_PRACTICE),
-            Self::Broker => aeris_market_runtime::built_in_provider_presentations()
+            Self::Broker => aeris_market_providers::built_in_provider_presentations()
                 .iter()
                 .find(|descriptor| {
                     descriptor.broker_venue_id == Some(aeris_trading::venue::BROKER_VENUE_ID)
@@ -1758,7 +1758,7 @@ mod tests {
 
     #[test]
     fn broker_ticket_uses_registered_venue_display_name() {
-        let descriptor = aeris_market_runtime::built_in_provider_presentations()
+        let descriptor = aeris_market_providers::built_in_provider_presentations()
             .iter()
             .find(|descriptor| {
                 descriptor.broker_venue_id == Some(aeris_trading::venue::BROKER_VENUE_ID)
@@ -1965,7 +1965,7 @@ mod tests {
         assert_eq!(ticket_status(None, 2), "Flat · 2 working orders");
         account.environment = aeris_trading::AccountEnvironment::Demo;
         account.venue_id = aeris_trading::venue::BROKER_VENUE_ID.to_string();
-        let broker_label = aeris_market_runtime::built_in_provider_presentations()
+        let broker_label = aeris_market_providers::built_in_provider_presentations()
             .iter()
             .find(|descriptor| descriptor.broker_venue_id == Some(account.venue_id.as_str()))
             .map(|descriptor| descriptor.display_name);

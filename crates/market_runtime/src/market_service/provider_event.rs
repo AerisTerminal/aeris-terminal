@@ -3,21 +3,39 @@ use super::{
     lifecycle::RecoveryReason,
 };
 use aeris_market_engine::fence::{Epoch, ProviderTag};
-pub(crate) use aeris_provider_spi::{ProviderFault, ProviderFaultKind};
+pub use aeris_provider_spi::{ProviderFault, ProviderFaultKind};
 use std::collections::BTreeMap;
 
-pub(super) struct ProviderEvent {
+pub struct ProviderEvent {
     pub(super) provider: &'static str,
     pub(super) generation: Epoch<ProviderTag>,
     pub(super) wire_generation: u64,
     pub(super) kind: ProviderEventKind,
 }
 
+impl ProviderEvent {
+    /// Binds a wire event to its coordinator-owned session epoch.
+    #[must_use]
+    pub const fn bound(
+        provider: &'static str,
+        generation: Epoch<ProviderTag>,
+        wire_generation: u64,
+        kind: ProviderEventKind,
+    ) -> Self {
+        Self {
+            provider,
+            generation,
+            wire_generation,
+            kind,
+        }
+    }
+}
+
 /// Untrusted adapter identity, retained only at adapter conversion boundaries.
-pub(crate) struct WireProviderEvent {
-    pub(crate) provider: &'static str,
-    pub(crate) generation: u64,
-    pub(crate) kind: ProviderEventKind,
+pub struct WireProviderEvent {
+    pub provider: &'static str,
+    pub generation: u64,
+    pub kind: ProviderEventKind,
 }
 
 /// Tracks accepted adapter generations; epoch minting belongs to `ProviderRegistry`.
@@ -87,13 +105,13 @@ impl ProviderEpochRegistry {
     }
 }
 
-pub(crate) enum ProviderTradeBatch {
+pub enum ProviderTradeBatch {
     One(MarketTrade),
     Many(Vec<MarketTrade>),
 }
 
 #[derive(Clone)]
-pub(crate) enum ProviderDisconnect {
+pub enum ProviderDisconnect {
     SequenceGap {
         detail: &'static str,
         auto_recover: bool,
@@ -111,7 +129,8 @@ pub(crate) enum ProviderDisconnect {
 }
 
 impl ProviderDisconnect {
-    pub(crate) const fn from_fault(fault: ProviderFault) -> Self {
+    #[must_use]
+    pub const fn from_fault(fault: ProviderFault) -> Self {
         match fault.kind {
             ProviderFaultKind::SequenceGap => Self::SequenceGap {
                 detail: fault.detail,
@@ -139,7 +158,7 @@ impl ProviderDisconnect {
     }
 }
 
-pub(crate) enum ProviderEventKind {
+pub enum ProviderEventKind {
     /// The adapter replaced its transport; the registry must reserve a new epoch and rebind.
     TransportReplaced,
     Connecting,
@@ -163,7 +182,8 @@ pub(crate) enum ProviderEventKind {
 }
 
 impl ProviderEventKind {
-    pub(crate) const fn recovering_from_fault(fault: ProviderFault) -> Self {
+    #[must_use]
+    pub const fn recovering_from_fault(fault: ProviderFault) -> Self {
         let recovery_reason = match fault.kind {
             ProviderFaultKind::SequenceGap => Some(RecoveryReason::SequenceGap),
             ProviderFaultKind::Transport
@@ -185,9 +205,9 @@ impl ProviderEventKind {
     }
 }
 
-pub(crate) struct ProviderCandleSymbol {
-    pub(crate) coin: String,
-    pub(crate) interval: String,
+pub struct ProviderCandleSymbol {
+    pub coin: String,
+    pub interval: String,
 }
 
 impl ProviderCandleSymbol {

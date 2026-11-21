@@ -19,12 +19,17 @@ use super::{
 };
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum ProviderSessionError {
+pub enum ProviderSessionError {
     Unavailable,
     InvalidDemand,
 }
 
-pub(super) trait ProviderSession: Send {
+pub trait ProviderSession: Send {
+    /// Injects a synthetic WebSocket failure for probe tests.
+    ///
+    /// # Errors
+    /// Returns [`ProviderSessionError::Unavailable`] if the provider does not
+    /// support probe failure injection or its worker channel is closed.
     #[cfg(feature = "probe")]
     fn probe_fail_websocket(
         &self,
@@ -41,12 +46,20 @@ pub(super) trait ProviderSession: Send {
     fn adapter_labels_sessions(&self) -> bool {
         false
     }
+    /// Starts or reconnects the provider transport under `epoch`.
+    ///
+    /// # Errors
+    /// Returns [`ProviderSessionError`] if the worker channel is unavailable.
     fn connect(
         &self,
         epoch: Epoch<ProviderTag>,
         sink: ProviderEventSink,
     ) -> Result<bool, ProviderSessionError>;
     /// Adopt an adapter-owned replacement without opening another transport.
+    ///
+    /// # Errors
+    /// Returns [`ProviderSessionError`] if rebinding is unsupported or the
+    /// worker channel is unavailable.
     fn rebind(
         &self,
         _epoch: Epoch<ProviderTag>,
@@ -54,8 +67,21 @@ pub(super) trait ProviderSession: Send {
     ) -> Result<bool, ProviderSessionError> {
         Err(ProviderSessionError::Unavailable)
     }
+    /// Applies the current provider demand snapshot to the worker.
+    ///
+    /// # Errors
+    /// Returns [`ProviderSessionError`] if the demand is invalid or the worker
+    /// channel is unavailable.
     fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError>;
+    /// Enqueues a historical bar request for the worker.
+    ///
+    /// # Errors
+    /// Returns [`ProviderSessionError`] if the history channel is unavailable.
     fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError>;
+    /// Releases the transport when no demand remains.
+    ///
+    /// # Errors
+    /// Returns [`ProviderSessionError`] if the worker channel is unavailable.
     fn release_idle(&self) -> Result<bool, ProviderSessionError>;
     fn shutdown(&self);
 }
@@ -117,12 +143,13 @@ struct RetryRecord {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ProviderEventSink {
-    pub(crate) epoch: Epoch<ProviderTag>,
+pub struct ProviderEventSink {
+    pub epoch: Epoch<ProviderTag>,
 }
 
 impl ProviderEventSink {
-    pub(crate) fn stamp<T>(self, value: T) -> aeris_market_engine::fence::Fenced<ProviderTag, T> {
+    #[must_use]
+    pub fn stamp<T>(self, value: T) -> aeris_market_engine::fence::Fenced<ProviderTag, T> {
         aeris_market_engine::fence::Fenced {
             epoch: self.epoch,
             value,
@@ -130,10 +157,11 @@ impl ProviderEventSink {
     }
 }
 
-pub(super) fn try_control<T>(
-    sender: &SyncSender<T>,
-    control: T,
-) -> Result<bool, ProviderSessionError> {
+/// Sends a control message on a bounded worker channel without blocking.
+///
+/// # Errors
+/// Returns [`ProviderSessionError::Unavailable`] if the worker channel is disconnected.
+pub fn try_control<T>(sender: &SyncSender<T>, control: T) -> Result<bool, ProviderSessionError> {
     match sender.try_send(control) {
         Ok(()) => Ok(true),
         Err(TrySendError::Full(_)) => Ok(false),

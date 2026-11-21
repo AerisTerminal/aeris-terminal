@@ -206,14 +206,14 @@ fn unsupported(
 mod tests {
     use super::{legacy_interval, persisted_interval, resolve_cadence};
     use crate::ProviderDailyBarCadence;
-    use crate::built_in_provider_presentations;
+    use crate::market_service::test_built_in_provider_presentations;
     use aeris_contracts::{SeriesCadence, SeriesKey};
     use aeris_instruments::CalendarSourceKind;
     use aeris_market_data::{BarPeriod, ChartInterval};
 
     #[test]
     fn every_offered_interval_round_trips_for_every_provider_presentation() {
-        for presentation in built_in_provider_presentations() {
+        for presentation in test_built_in_provider_presentations() {
             for interval in ChartInterval::ALL {
                 let persisted = interval.label();
                 assert_eq!(persisted_interval(persisted), Some(interval));
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn hyperliquid_daily_cadences_are_fixed_utc_durations() {
-        let presentation = built_in_provider_presentations()
+        let presentation = test_built_in_provider_presentations()
             .iter()
             .find(|presentation| presentation.id == "hyperliquid")
             .expect("Hyperliquid presentation");
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn unknown_calendar_rejects_week_and_month_without_silent_live_handoff() {
-        let presentation = built_in_provider_presentations()
+        let presentation = test_built_in_provider_presentations()
             .iter()
             .find(|presentation| presentation.id == "rithmic")
             .expect("Rithmic presentation");

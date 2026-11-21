@@ -318,7 +318,7 @@ pub struct ProviderMarketScan {
 
 /// One instrument's bars, oldest first, converted to the chart's values.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct ScanBars {
+pub struct ScanBars {
     /// Open times in Unix seconds.
     times: Vec<i64>,
     open: Vec<f64>,
@@ -331,11 +331,8 @@ pub(crate) struct ScanBars {
 impl ScanBars {
     /// Converts fixed-point bars the way the chart does: each value divided by its scale.
     #[allow(clippy::cast_precision_loss)]
-    pub(crate) fn from_market_bars(
-        bars: &[MarketBar],
-        price_scale: u8,
-        quantity_scale: u8,
-    ) -> Self {
+    #[must_use]
+    pub fn from_market_bars(bars: &[MarketBar], price_scale: u8, quantity_scale: u8) -> Self {
         let price = 10_f64.powi(i32::from(price_scale));
         let quantity = 10_f64.powi(i32::from(quantity_scale));
         let column = |value: fn(&MarketBar) -> i64, divisor: f64| {
@@ -374,14 +371,15 @@ impl ScanBars {
 
 /// Result of one instrument's evaluation.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct ScanOutcome {
-    pub(crate) matched: bool,
-    pub(crate) values: Vec<ScanConditionValues>,
-    pub(crate) change_percent: Option<f64>,
+pub struct ScanOutcome {
+    pub matched: bool,
+    pub values: Vec<ScanConditionValues>,
+    pub change_percent: Option<f64>,
 }
 
 /// Evaluates a validated definition on the current (last) bar of `bars`.
-pub(crate) fn evaluate(definition: &ScanDefinition, bars: &ScanBars) -> ScanOutcome {
+#[must_use]
+pub fn evaluate(definition: &ScanDefinition, bars: &ScanBars) -> ScanOutcome {
     let mut series = OperandSeries::new(bars);
     let mut held = Vec::with_capacity(definition.conditions.len());
     let mut values = Vec::with_capacity(definition.conditions.len());
@@ -404,7 +402,8 @@ pub(crate) fn evaluate(definition: &ScanDefinition, bars: &ScanBars) -> ScanOutc
 }
 
 /// Fractional digits the bars' prices use: the scale less the trailing zeros all of them share.
-pub(crate) fn price_decimals(bars: &[MarketBar], price_scale: u32) -> u32 {
+#[must_use]
+pub fn price_decimals(bars: &[MarketBar], price_scale: u32) -> u32 {
     let mut decimals = 0;
     for price in bars
         .iter()

@@ -265,6 +265,7 @@ dependencies = [
  "aeris_instruments",
  "aeris_localization",
  "aeris_market_data",
+ "aeris_market_providers",
  "aeris_market_runtime",
  "aeris_observability",
  "aeris_platform_runtime",
@@ -331,12 +332,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "aeris_market_providers"
+version = "1.11.1"
+dependencies = [
+ "aeris_contracts",
+ "aeris_hyperliquid_market_adapter",
+ "aeris_instruments",
+ "aeris_market_data",
+ "aeris_market_engine",
+ "aeris_market_runtime",
+ "aeris_observability",
+ "aeris_platform_runtime",
+ "aeris_provider_history",
+ "aeris_provider_spi",
+ "aeris_rithmic_protocol_adapter",
+ "aeris_trading",
+ "chrono",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "aeris_market_runtime"
 version = "1.11.1"
 dependencies = [
  "aeris_charts_indicators",
  "aeris_contracts",
- "aeris_hyperliquid_market_adapter",
  "aeris_instruments",
  "aeris_market_data",
  "aeris_market_engine",
@@ -344,7 +365,6 @@ dependencies = [
  "aeris_platform_runtime",
  "aeris_provider_history",
  "aeris_provider_spi",
- "aeris_rithmic_protocol_adapter",
  "aeris_trading",
  "chrono",
  "chrono-tz",
@@ -400,6 +420,7 @@ dependencies = [
  "aeris_instruments",
  "aeris_market_data",
  "aeris_market_engine",
+ "aeris_market_providers",
  "aeris_market_runtime",
  "aeris_platform_runtime",
  "aeris_trading",

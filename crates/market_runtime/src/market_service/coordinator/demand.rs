@@ -237,10 +237,18 @@ impl Coordinator<'_> {
             #[cfg(feature = "probe")]
             probe: {
                 let (stale_events, stale_history) = self.provider_epochs.stale_counts();
+                let mut provider_sessions = std::collections::BTreeMap::new();
+                let mut retry_attempts = Vec::new();
+                let now = self.clock.monotonic();
+                for &provider_id in self.providers.records.keys() {
+                    provider_sessions.insert(
+                        provider_id.to_string(),
+                        self.provider_registry.successful_connections(provider_id),
+                    );
+                    retry_attempts.extend(self.provider_registry.probe_retries(provider_id, now));
+                }
                 super::super::ProbeStatus {
-                    hyperliquid_sessions: self
-                        .provider_registry
-                        .successful_connections(super::super::HYPERLIQUID_DESCRIPTOR.id),
+                    provider_sessions,
                     stale_events,
                     stale_history,
                     maximum_queued_series_updates: self
@@ -249,10 +257,7 @@ impl Coordinator<'_> {
                         .map(|events| events.maximum_series_depth)
                         .max()
                         .unwrap_or(0),
-                    retry_attempts: self.provider_registry.probe_retries(
-                        super::super::HYPERLIQUID_DESCRIPTOR.id,
-                        self.clock.monotonic(),
-                    ),
+                    retry_attempts,
                 }
             },
         }

@@ -149,7 +149,7 @@ fn order_level_images_reach_only_demanding_consumers_with_exact_order_identity()
     let subscription = latest_subscription(&boundary).expect("order-level demand subscribes");
     assert!(matches!(subscription.instruments.as_slice(), [demand]
         if demand.instrument.instrument_id == selected.instrument_id
-            && demand.order_levels && !demand.order_book));
+            && demand.order_levels && !demand.order_book()));
     let ladder = consumer(2);
     boundary.register_consumer(ladder);
     boundary.demand_for(
@@ -158,7 +158,7 @@ fn order_level_images_reach_only_demanding_consumers_with_exact_order_identity()
     let subscription = latest_subscription(&boundary).expect("depth demand resubscribes");
     assert!(
         matches!(subscription.instruments.as_slice(), [demand]
-            if demand.order_levels && demand.order_book),
+            if demand.order_levels && demand.order_book()),
         "aggregate depth is additive to order levels on one instrument subscription"
     );
 
@@ -206,7 +206,7 @@ fn depth_demand_alone_never_subscribes_order_levels() {
     );
     let subscription = latest_subscription(&boundary).expect("depth demand subscribes");
     assert!(matches!(subscription.instruments.as_slice(), [demand]
-        if demand.order_book && !demand.order_levels));
+        if demand.order_book() && !demand.order_levels));
     boundary.provider_event(covering_image(&instrument(), 1, 1));
     let events = boundary.events();
     assert!(

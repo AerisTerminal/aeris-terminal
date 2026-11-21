@@ -22,7 +22,21 @@ pub fn instrument_venue(instrument: &InstallProviderInstrument) -> Option<Venue>
                 .rsplit_once(':')
                 .and_then(|(_, code)| venue(code))
         })
-        .or_else(|| (instrument.provider == "hyperliquid").then_some(Venue::Continuous))
+        .or_else(|| {
+            instrument
+                .contract_metadata
+                .as_ref()
+                .and_then(|meta| meta.instrument_class)
+                .and_then(|class| aeris_contracts::ProviderInstrumentClass::try_from(class).ok())
+                .is_some_and(|class| {
+                    matches!(
+                        class,
+                        aeris_contracts::ProviderInstrumentClass::CryptoSpot
+                            | aeris_contracts::ProviderInstrumentClass::CryptoPerpetual
+                    )
+                })
+                .then_some(Venue::Continuous)
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

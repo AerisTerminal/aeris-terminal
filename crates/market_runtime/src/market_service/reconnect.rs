@@ -5,13 +5,13 @@ use std::time::Duration;
 use super::clock::Clock;
 
 #[derive(Clone, Copy)]
-pub(crate) enum Jitter {
+pub enum Jitter {
     Full,
     Equal,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ReconnectPolicy {
+pub struct ReconnectPolicy {
     initial: Duration,
     multiplier: u32,
     cap: Duration,
@@ -20,13 +20,16 @@ pub(crate) struct ReconnectPolicy {
 }
 
 impl ReconnectPolicy {
-    pub(crate) const fn healthy_reset_after(self) -> Duration {
+    #[must_use]
+    pub const fn healthy_reset_after(self) -> Duration {
         self.healthy_reset_after
     }
-    pub(crate) const fn initial_delay(self) -> Duration {
+    #[must_use]
+    pub const fn initial_delay(self) -> Duration {
         self.initial
     }
-    pub(crate) const fn new(
+    #[must_use]
+    pub const fn new(
         initial: Duration,
         multiplier: u32,
         cap: Duration,
@@ -42,7 +45,8 @@ impl ReconnectPolicy {
         }
     }
 
-    pub(crate) const fn hyperliquid() -> Self {
+    #[must_use]
+    pub const fn hyperliquid() -> Self {
         Self::new(
             Duration::from_millis(500),
             2,
@@ -52,7 +56,8 @@ impl ReconnectPolicy {
         )
     }
 
-    pub(crate) const fn rithmic_recovery() -> Self {
+    #[must_use]
+    pub const fn rithmic_recovery() -> Self {
         Self::new(
             Duration::from_secs(1),
             2,
@@ -64,29 +69,31 @@ impl ReconnectPolicy {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum RetryClass {
+pub enum RetryClass {
     Transient,
     RateLimited { retry_after: Duration },
     Fatal,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RetryDecision {
+pub enum RetryDecision {
     Wait(Duration),
     Fatal,
 }
 
-pub(crate) struct Backoff {
+pub struct Backoff {
     policy: ReconnectPolicy,
     attempts: u32,
     random: u64,
 }
 
 impl Backoff {
-    pub(crate) const fn policy(&self) -> ReconnectPolicy {
+    #[must_use]
+    pub const fn policy(&self) -> ReconnectPolicy {
         self.policy
     }
-    pub(crate) fn new(policy: ReconnectPolicy, clock: &dyn Clock, seed: u64) -> Self {
+    #[must_use]
+    pub fn new(policy: ReconnectPolicy, clock: &dyn Clock, seed: u64) -> Self {
         // Wall clock and caller-supplied identity make separate workers independent
         // while a replayed clock and seed always reproduce the same sequence.
         let random = clock.wall_nanos().unwrap_or_default().cast_unsigned() ^ seed;
@@ -98,11 +105,12 @@ impl Backoff {
     }
 
     #[cfg(any(test, feature = "probe"))]
-    pub(crate) fn attempts(&self) -> u32 {
+    #[must_use]
+    pub fn attempts(&self) -> u32 {
         self.attempts
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.attempts = 0;
     }
 
@@ -113,7 +121,7 @@ impl Backoff {
         }
     }
 
-    pub(crate) fn failure(&mut self, class: RetryClass) -> RetryDecision {
+    pub fn failure(&mut self, class: RetryClass) -> RetryDecision {
         match class {
             RetryClass::Fatal => RetryDecision::Fatal,
             RetryClass::RateLimited { retry_after } => RetryDecision::Wait(retry_after),
@@ -122,7 +130,7 @@ impl Backoff {
     }
 
     /// Next jittered delay after a transient failure; transient failures never exhaust.
-    pub(crate) fn transient_delay(&mut self) -> Duration {
+    pub fn transient_delay(&mut self) -> Duration {
         self.attempts = self.attempts.saturating_add(1);
         let mut ceiling = self.policy.initial;
         for _ in 1..self.attempts.min(32) {

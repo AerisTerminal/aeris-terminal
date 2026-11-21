@@ -179,7 +179,7 @@ impl Observation {
                 "epoch":current, "kind":"connection_attempt",
                 "elapsed_ms":self.started.elapsed().as_millis()}));
         }
-        self.sessions = status.probe.hyperliquid_sessions;
+        self.sessions = status.probe.sessions("hyperliquid");
         self.maximum_queued = self
             .maximum_queued
             .max(status.probe.maximum_queued_series_updates);
@@ -309,7 +309,7 @@ fn reconnect(
 ) -> ProbeResult<()> {
     let old_epoch = state.epoch;
     let old_sessions = state.sessions;
-    market(service.probe_fail_hyperliquid_websocket(0))?;
+    market(service.probe_fail_provider_websocket("hyperliquid", 0))?;
     state.until(service, Duration::from_secs(25), |current| {
         current.epoch > old_epoch
             && current.sessions > old_sessions
@@ -334,7 +334,7 @@ fn retry_schedule(
     let prior = state.epoch;
     let start = Instant::now();
     let started_unix_ms = utc_now().timestamp_millis();
-    market(service.probe_fail_hyperliquid_websocket(2))?;
+    market(service.probe_fail_provider_websocket("hyperliquid", 2))?;
     state.until(service, Duration::from_secs(30), |current| {
         current.epoch >= prior + 3 && current.live && current.sessions >= 3
     })?;

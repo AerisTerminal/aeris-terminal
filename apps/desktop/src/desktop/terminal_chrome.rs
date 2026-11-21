@@ -1783,7 +1783,7 @@ mod tests {
 
     #[test]
     fn attribution_follows_held_provider_session() {
-        let presentations = aeris_market_runtime::built_in_provider_presentations();
+        let presentations = aeris_market_providers::built_in_provider_presentations();
         let attributed = presentations
             .iter()
             .find(|p| p.attribution.is_some())

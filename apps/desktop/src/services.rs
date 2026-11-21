@@ -114,7 +114,7 @@ mod tests {
 
     fn services() -> DesktopServices {
         DesktopServices::new(
-            MarketService::start().expect("independent market owner"),
+            aeris_market_providers::start_market_service().expect("independent market owner"),
             trading(),
             AccountService::new(aeris_account_runtime::AccountServiceConfig::production()),
             DesktopPersistence::new(
@@ -216,14 +216,14 @@ mod tests {
         let first_clock = Arc::new(ManualClock::new(1_000_000_000));
         let second_clock = Arc::new(ManualClock::new(2_000_000_000));
         let first = DesktopServices::new(
-            MarketService::start().expect("first market"),
+            aeris_market_providers::start_market_service().expect("first market"),
             trading(),
             AccountService::new(aeris_account_runtime::AccountServiceConfig::production()),
             DesktopPersistence::new(std::env::temp_dir().join("aeris-clock-first")),
             first_clock.clone(),
         );
         let second = DesktopServices::new(
-            MarketService::start().expect("second market"),
+            aeris_market_providers::start_market_service().expect("second market"),
             trading(),
             AccountService::new(aeris_account_runtime::AccountServiceConfig::production()),
             DesktopPersistence::new(std::env::temp_dir().join("aeris-clock-second")),

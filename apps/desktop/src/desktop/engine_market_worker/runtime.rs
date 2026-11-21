@@ -1041,7 +1041,7 @@ mod tests {
 
     #[test]
     fn an_endpoint_retires_and_acknowledges_once() {
-        let market = MarketService::start().expect("market runtime");
+        let market = aeris_market_providers::start_market_service().expect("market runtime");
         market.attach(1).expect("client attaches");
         market
             .register_consumer(1, 1, 7)
@@ -1462,7 +1462,7 @@ mod tests {
 
     #[test]
     fn market_session_publications_follow_each_desktop_clock() {
-        let market = MarketService::start().expect("market runtime");
+        let market = aeris_market_providers::start_market_service().expect("market runtime");
         let product = super::super::fixture_futures_contract("ES");
         let first_time = 1_781_568_000_000_000_000;
         let second_time = first_time + 5 * 24 * 60 * 60 * 1_000_000_000;
@@ -1513,7 +1513,7 @@ mod tests {
 
     #[test]
     fn market_session_status_retries_after_mailbox_backpressure() {
-        let market = MarketService::start().expect("market runtime");
+        let market = aeris_market_providers::start_market_service().expect("market runtime");
         let clock = ManualClock::new(1_781_568_000_000_000_000);
         let (_pane, mut record) = super::super::worker_endpoint(
             1,
@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn catalog_terms_status_uses_the_retrying_session_route_after_the_catalog_reply() {
-        let market = MarketService::start().expect("market runtime");
+        let market = aeris_market_providers::start_market_service().expect("market runtime");
         let clock = ManualClock::new(1_781_568_000_000_000_000);
         let (_pane, mut record) = super::super::worker_endpoint(
             1,
@@ -1643,7 +1643,7 @@ mod tests {
 
     #[test]
     fn a_full_or_closed_pane_mailbox_does_not_stop_the_market_worker() {
-        let market = MarketService::start().expect("market runtime");
+        let market = aeris_market_providers::start_market_service().expect("market runtime");
         let clock = ManualClock::new(1_781_568_000_000_000_000);
         let product = super::super::fixture_futures_contract("ES");
         let (_pane, mut record) = super::super::worker_endpoint(
@@ -1697,7 +1697,7 @@ mod tests {
     fn a_pending_selections_provider_state_waits_for_its_adoption() {
         use aeris_market_runtime::{InstrumentDescriptor, ResolvedSeries, SelectionOutcome};
 
-        let market = MarketService::start().expect("market runtime");
+        let market = aeris_market_providers::start_market_service().expect("market runtime");
         let clock = ManualClock::new(1_781_568_000_000_000_000);
         let (mut pane, mut record) = super::super::worker_endpoint(
             1,

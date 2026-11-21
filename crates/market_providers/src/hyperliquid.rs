@@ -17,13 +17,29 @@ use aeris_hyperliquid_market_adapter::{
 };
 use aeris_market_data::BarPeriod;
 use aeris_market_engine::{
-    MarketEngine, MarketStream, ProviderCapabilities as EngineProviderCapabilities,
-    StreamRequirements,
+    MarketStream, ProviderCapabilities as EngineProviderCapabilities, StreamRequirements,
     fence::{Epoch, Fenced, ProviderTag},
+};
+use aeris_market_runtime::plugin::{ProviderEventSink, ProviderSession, ProviderSessionError};
+use aeris_market_runtime::{
+    ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence, ProviderFeedLevel,
+    ProviderPresentationDescriptor,
+    plugin::{
+        ActiveWorkerGuard, AlertDemandUpdate, COMMAND_CAPACITY, CalendarBarStamp,
+        CandleDemandPolicy, CatalogPublisher, CatalogSessionBinding, ConcurrencyLimits,
+        DemandFlushPolicy, DepthCapabilities, DisplayDepthRequest, HistoryRequest, HistorySnapshot,
+        HistorySource, LiveModel, ProviderCapabilities, ProviderCatalogChannelImpl,
+        ProviderCatalogChannels, ProviderCatalogCommand, ProviderCatalogEvent,
+        ProviderCoordinatorWake, ProviderDemand, ProviderDescriptor, ProviderDisplayDepthChannels,
+        ProviderDisplayDepthEvent, ProviderEvent, ProviderHistoryCapabilities,
+        ProviderRealtimeChannels, ProviderRecoveryPolicy, ProviderRuntimeRecord,
+        ProviderRuntimeSpec, ProviderStartHandle, QuoteCapability, REALTIME_CAPACITY,
+        ReconnectPolicy, StartedProviderRuntime, SystemClock, TradeDemandPolicy,
+        history_instrument_from_install, try_control, try_send_catalog_control,
+    },
 };
 
 use crate::{
-    ProviderCatalogSymbol, ProviderPresentationDescriptor,
     hyperliquid_display_depth::{
         HyperliquidDisplayBookDemand, HyperliquidDisplayDepthControl,
         HyperliquidDisplayDepthDemand, HyperliquidDisplayDepthEvent,
@@ -36,31 +52,16 @@ use crate::{
     },
 };
 
-use super::super::{
-    ActiveWorkerGuard, AlertDemandUpdate, COMMAND_CAPACITY, CandleDemandPolicy, CatalogPublisher,
-    CatalogSessionBinding, Command, ConcurrencyLimits, Coordinator, DepthCapabilities,
-    DisplayDepthRequest, HistoryRequest, HistorySnapshot, HistorySource, LiveModel,
-    ProviderCapabilities, ProviderCatalogChannelImpl, ProviderCatalogChannels,
-    ProviderCatalogCommand, ProviderCatalogEvent, ProviderCoordinatorWake, ProviderDemand,
-    ProviderDescriptor, ProviderDisplayDepthChannels, ProviderDisplayDepthEvent, ProviderEvent,
-    ProviderHistoryCapabilities, ProviderRealtimeChannels, ProviderRecoveryPolicy,
-    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, ProviderStartContext,
-    QuoteCapability, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, StartedProviderRuntime,
-    TradeDemandPolicy, calendar,
-    clock::SystemClock,
-    configured_reconnect_delay,
-    provider_session::{ProviderEventSink, ProviderSession, ProviderSessionError, try_control},
-    reconnect, try_send_catalog_control,
-};
+const REALTIME_CONTROL_CAPACITY: usize = 2;
 
-pub(in super::super) const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor =
+pub(crate) const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor =
     ProviderPresentationDescriptor {
         id: "hyperliquid",
         display_name: "Hyperliquid",
         chart_interval_labels: &[
             "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
         ],
-        daily_bars: crate::ProviderDailyBarCadence::FixedDay,
+        daily_bars: ProviderDailyBarCadence::FixedDay,
         search_hint: "Search Hyperliquid markets",
         logo_key: "hyperliquid",
         broker_venue_id: None,
@@ -69,22 +70,33 @@ pub(in super::super) const HYPERLIQUID_PRESENTATION: ProviderPresentationDescrip
         selection_entitlement_id: "hyperliquid-public",
         catalog_refresh_on_startup: true,
         ready_label_suffix: "",
-        feed_level: crate::ProviderFeedLevel::PriceLevels,
+        feed_level: ProviderFeedLevel::PriceLevels,
         search_categories_available: false,
         market_screen_available: true,
         market_scan_available: true,
         trades_available: true,
-        connection_kind: crate::ProviderConnectionKind::Public,
+        connection_kind: ProviderConnectionKind::Public,
     };
 
-pub(in super::super) const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+pub(crate) const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "hyperliquid",
     presentation: &HYPERLIQUID_PRESENTATION,
     login_schema: None,
     capabilities: HYPERLIQUID_CAPABILITIES,
-    start: start_hyperliquid_runtime,
-    flush_demand: flush_hyperliquid_provider_demand,
+    demand_flush: DemandFlushPolicy::Dirty,
 };
+
+pub(crate) fn provider_spec(
+    history: Box<dyn HistorySource>,
+    realtime_enabled: bool,
+) -> ProviderRuntimeSpec {
+    ProviderRuntimeSpec::new(
+        HYPERLIQUID_DESCRIPTOR,
+        Some(history),
+        realtime_enabled,
+        Box::new(start_hyperliquid_runtime),
+    )
+}
 
 const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     account_id: HYPERLIQUID_PUBLIC_ACCOUNT_ID,
@@ -102,7 +114,7 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     },
     depth: Some(DepthCapabilities),
     quotes: Some(QuoteCapability::DedicatedTopOfBook),
-    reconnect: reconnect::ReconnectPolicy::hyperliquid(),
+    reconnect: ReconnectPolicy::hyperliquid(),
     history: ProviderHistoryCapabilities {
         worker: "aeris-hyperliquid-history",
         supported_period: hyperliquid_supported_period,
@@ -110,7 +122,7 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
     alert_demand_update: AlertDemandUpdate::MarkDirty,
     live_model: LiveModel::ProviderCandles,
-    calendar_bar_stamp: calendar::CalendarBarStamp::TradingDateMidnightUtc,
+    calendar_bar_stamp: CalendarBarStamp::TradingDateMidnightUtc,
     overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
     candle_requires_connected: true,
     candle_correction_detail: "Hyperliquid candle replacement requires covering history",
@@ -124,7 +136,7 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
 };
 
 #[derive(Default)]
-pub(in super::super) struct LiveHyperliquidHistory(HyperliquidHttpClient);
+pub(crate) struct LiveHyperliquidHistory(HyperliquidHttpClient);
 
 impl HistorySource for LiveHyperliquidHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
@@ -132,7 +144,7 @@ impl HistorySource for LiveHyperliquidHistory {
             .instrument
             .as_ref()
             .ok_or_else(|| "Provider instrument is not installed".to_string())?;
-        let instrument = super::super::history_instrument_from_install(installed);
+        let instrument = history_instrument_from_install(installed);
         aeris_hyperliquid_market_adapter::history::fetch(
             &mut self.0,
             &request.series,
@@ -144,7 +156,7 @@ impl HistorySource for LiveHyperliquidHistory {
     }
 }
 
-pub(in super::super) fn hyperliquid_wire(demand: &ProviderDemand) -> HyperliquidDemand {
+pub(crate) fn hyperliquid_wire(demand: &ProviderDemand) -> HyperliquidDemand {
     let mut candles = BTreeSet::new();
     let mut trades = BTreeSet::new();
     let mut quotes = BTreeSet::new();
@@ -229,10 +241,10 @@ pub(in super::super) fn hyperliquid_wire(demand: &ProviderDemand) -> Hyperliquid
     }
 }
 
-pub(in super::super) struct HyperliquidSession {
-    pub(in super::super) controls: SyncSender<HyperliquidRealtimeControl>,
-    pub(in super::super) display_controls: SyncSender<HyperliquidDisplayDepthControl>,
-    pub(in super::super) history: SyncSender<HistoryRequest>,
+pub(crate) struct HyperliquidSession {
+    pub(crate) controls: SyncSender<HyperliquidRealtimeControl>,
+    pub(crate) display_controls: SyncSender<HyperliquidDisplayDepthControl>,
+    pub(crate) history: SyncSender<HistoryRequest>,
 }
 
 impl ProviderSession for HyperliquidSession {
@@ -280,7 +292,7 @@ impl ProviderSession for HyperliquidSession {
     }
 }
 
-pub(in super::super) fn realtime_channels(
+pub(crate) fn realtime_channels(
     controls: SyncSender<HyperliquidRealtimeControl>,
     events: Receiver<Fenced<ProviderTag, HyperliquidRealtimeEvent>>,
     display_controls: SyncSender<HyperliquidDisplayDepthControl>,
@@ -297,17 +309,17 @@ pub(in super::super) fn realtime_channels(
             let bound = events.try_recv().ok()?;
             let epoch = bound.epoch;
             let wire = crate::hyperliquid_realtime::into_wire_provider_event(bound.value);
-            (wire.generation == epoch.get().get()).then_some(ProviderEvent {
-                provider: wire.provider,
-                generation: epoch,
-                wire_generation: wire.generation,
-                kind: wire.kind,
-            })
+            (wire.generation == epoch.get().get()).then_some(ProviderEvent::bound(
+                wire.provider,
+                epoch,
+                wire.generation,
+                wire.kind,
+            ))
         },
     )
 }
 
-pub(in super::super) fn display_depth_channels(
+pub(crate) fn display_depth_channels(
     controls: SyncSender<HyperliquidDisplayDepthControl>,
     events: Receiver<HyperliquidDisplayDepthEvent>,
 ) -> ProviderDisplayDepthChannels {
@@ -343,11 +355,11 @@ pub(in super::super) fn display_depth_channels(
                 }
             }
         },
-        move || events.try_recv().ok().map(ProviderDisplayDepthEvent::from),
+        move || events.try_recv().ok().map(display_depth_event),
     )
 }
 
-pub(in super::super) fn dispatch_catalog(
+pub(crate) fn dispatch_catalog(
     controls: &SyncSender<HyperliquidCatalogControl>,
     provider: &str,
     command: ProviderCatalogCommand,
@@ -359,7 +371,7 @@ pub(in super::super) fn dispatch_catalog(
         ProviderCatalogCommand::Scan(scan) => {
             let interval = scan.definition.timeframe;
             // Every Hyperliquid market trades around the clock.
-            let period = crate::resolve_cadence(
+            let period = aeris_market_runtime::resolve_cadence(
                 interval,
                 &HYPERLIQUID_PRESENTATION,
                 aeris_instruments::CalendarSourceKind::AlwaysOpen,
@@ -371,18 +383,16 @@ pub(in super::super) fn dispatch_catalog(
     try_send_catalog_control(controls, control, provider)
 }
 
-impl From<HyperliquidDisplayDepthEvent> for ProviderDisplayDepthEvent {
-    fn from(event: HyperliquidDisplayDepthEvent) -> Self {
-        match event {
-            HyperliquidDisplayDepthEvent::Reset { display_generation } => {
-                Self::Reset { display_generation }
-            }
-            HyperliquidDisplayDepthEvent::Snapshot(display) => Self::Snapshot {
-                provider_generation: display.provider_generation,
-                display_generation: display.display_generation,
-                snapshot: display.snapshot,
-            },
+fn display_depth_event(event: HyperliquidDisplayDepthEvent) -> ProviderDisplayDepthEvent {
+    match event {
+        HyperliquidDisplayDepthEvent::Reset { display_generation } => {
+            ProviderDisplayDepthEvent::Reset { display_generation }
         }
+        HyperliquidDisplayDepthEvent::Snapshot(display) => ProviderDisplayDepthEvent::Snapshot {
+            provider_generation: display.provider_generation,
+            display_generation: display.display_generation,
+            snapshot: display.snapshot,
+        },
     }
 }
 
@@ -427,35 +437,26 @@ fn hyperliquid_supported_period(period: BarPeriod) -> Result<(), String> {
         .map_err(|_| "Provider history is unavailable for this interval".to_string())
 }
 
-fn flush_hyperliquid_provider_demand(coordinator: &mut Coordinator<'_>) {
-    coordinator.flush_dirty_demand(HYPERLIQUID_DESCRIPTOR.id);
-}
-
-pub(in super::super) fn start_hyperliquid_runtime(
+fn start_hyperliquid_runtime(
     spec: ProviderRuntimeSpec,
-    completions: &SyncSender<Command>,
-    wake: ProviderCoordinatorWake,
-    engine: &MarketEngine,
-    active_workers: &Arc<Mutex<BTreeSet<String>>>,
-    _context: &ProviderStartContext,
+    handle: &ProviderStartHandle<'_>,
 ) -> Result<ProviderRuntimeRecord, String> {
-    let enabled = spec.realtime.enabled;
+    let enabled = spec.realtime_enabled;
     let descriptor = spec.descriptor;
-    let started =
-        ProviderRuntimeRegistry::start_history_runtime(spec, completions, active_workers)?;
-    start_hyperliquid_record(started, descriptor, enabled, wake, engine, active_workers)
+    let started = handle.start_history_runtime(spec)?;
+    start_hyperliquid_record(started, descriptor, enabled, handle)
 }
 
 fn start_hyperliquid_record(
     mut started: StartedProviderRuntime,
     descriptor: ProviderDescriptor,
     enabled: bool,
-    wake: ProviderCoordinatorWake,
-    engine: &MarketEngine,
-    active_workers: &Arc<Mutex<BTreeSet<String>>>,
+    handle: &ProviderStartHandle<'_>,
 ) -> Result<ProviderRuntimeRecord, String> {
+    let wake = handle.wake();
+    let active_workers = handle.active_workers();
     let reconnect_delay = if enabled {
-        match configured_reconnect_delay(engine, descriptor.id) {
+        match handle.configured_reconnect_delay(descriptor.id) {
             Ok(delay) => Some(delay),
             Err(error) => {
                 started.cancel_and_join();
@@ -474,11 +475,9 @@ fn start_hyperliquid_record(
     let (scan_jobs, scan_jobs_rx) =
         mpsc::sync_channel(crate::hyperliquid_market_scan::SCAN_JOB_CAPACITY);
     let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
-    let (realtime_controls, realtime_controls_rx) =
-        mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
+    let (realtime_controls, realtime_controls_rx) = mpsc::sync_channel(REALTIME_CONTROL_CAPACITY);
     let (display_events_tx, display_events) = mpsc::sync_channel(REALTIME_CAPACITY);
-    let (display_controls, display_controls_rx) =
-        mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
+    let (display_controls, display_controls_rx) = mpsc::sync_channel(REALTIME_CONTROL_CAPACITY);
     // One generation counter shared by the catalog thread (install
     // stamping) and the realtime thread (socket sessions). The realtime
     // thread owns it: every connection publishes its generation here.
@@ -489,14 +488,14 @@ fn start_hyperliquid_record(
             return Err("Provider reconnect policy is unavailable".to_string());
         };
         if let Err(error) =
-            spawn_hyperliquid_scan(&mut started, active_workers, scan_jobs_rx, scan_events_tx)
+            spawn_hyperliquid_scan(&mut started, &active_workers, scan_jobs_rx, scan_events_tx)
         {
             started.cancel_and_join();
             return Err(error.to_string());
         }
         if let Err(error) = spawn_hyperliquid_catalog(
             &mut started,
-            active_workers,
+            &active_workers,
             catalog_controls_rx,
             catalog_events_tx,
             scan_jobs,
@@ -507,7 +506,7 @@ fn start_hyperliquid_record(
         }
         if let Err(error) = spawn_hyperliquid_provider(
             &mut started,
-            active_workers,
+            &active_workers,
             realtime_controls_rx,
             realtime_events_tx,
             ws_generation,
@@ -518,7 +517,7 @@ fn start_hyperliquid_record(
         }
         if let Err(error) = spawn_hyperliquid_display_depth(
             &mut started,
-            active_workers,
+            &active_workers,
             display_controls_rx,
             display_events_tx,
             wake,

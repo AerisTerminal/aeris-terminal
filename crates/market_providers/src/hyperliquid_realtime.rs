@@ -23,11 +23,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{
-    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
-    ProviderMarketScan, ProviderMarketScreen, ScanProviderMarkets, ScreenProviderMarkets,
-    SearchProviderInstruments, SelectProviderInstrument,
-};
 use aeris_contracts::{InstallProviderInstrument, ProviderContractMetadata};
 use aeris_hyperliquid_market_adapter::{
     DeliveredTradeIds, HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig,
@@ -36,11 +31,15 @@ use aeris_hyperliquid_market_adapter::{
 };
 use aeris_market_data::{BarPeriod, DepthSnapshot, MarketTrade, TopOfBookQuote};
 use aeris_market_engine::fence::{Fenced, ProviderTag};
+use aeris_market_runtime::{
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
+    ProviderMarketScan, ProviderMarketScreen, ScanProviderMarkets, ScreenProviderMarkets,
+    SearchProviderInstruments, SelectProviderInstrument,
+    plugin::{CatalogPublisher, ProviderCoordinatorWake, ProviderEventSink},
+};
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
 use crate::hyperliquid_market_scan::HyperliquidScanJob;
-use crate::market_service::provider_session::ProviderEventSink;
-use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
 use aeris_hyperliquid_market_adapter::screen::{RetainedMarketStatistics, instrument_summary};
 
 pub(crate) const CATALOG_WORKER_NAME: &str = "aeris-hyperliquid-catalog";
@@ -1641,8 +1640,8 @@ fn unix_nanos_now() -> i64 {
 
 pub(crate) fn into_wire_provider_event(
     event: HyperliquidRealtimeEvent,
-) -> crate::market_service::provider_event::WireProviderEvent {
-    use crate::market_service::provider_event::{
+) -> aeris_market_runtime::plugin::WireProviderEvent {
+    use aeris_market_runtime::plugin::{
         ProviderCandleSymbol, ProviderDisconnect, ProviderEventKind, ProviderFault,
         ProviderFaultKind, ProviderTradeBatch, WireProviderEvent,
     };
@@ -2076,7 +2075,7 @@ mod tests {
             provider: "hyperliquid".into(),
             query: "BTC".into(),
             maximum_results: 16,
-            categories: crate::InstrumentSearchCategories::ALL,
+            categories: aeris_market_runtime::InstrumentSearchCategories::ALL,
             exchange: exchange.map(str::to_string),
         };
         let exchanges = |event| match event {

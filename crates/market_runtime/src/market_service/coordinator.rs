@@ -151,7 +151,7 @@ fn run_coordinator(
         .providers
         .records
         .values()
-        .map(|record| record.descriptor.flush_demand)
+        .map(|record| (record.descriptor.id, record.descriptor.demand_flush))
         .collect::<Vec<_>>();
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -169,12 +169,27 @@ fn run_coordinator(
     }
 }
 
+fn flush_provider_demands(
+    coordinator: &mut Coordinator<'_>,
+    demand_flushers: &[(&'static str, super::DemandFlushPolicy)],
+) {
+    for &(provider_id, policy) in demand_flushers {
+        match policy {
+            super::DemandFlushPolicy::Pending => coordinator.flush_pending_demand(provider_id),
+            super::DemandFlushPolicy::Dirty => coordinator.flush_dirty_demand(provider_id),
+            super::DemandFlushPolicy::SessionManaged => {
+                coordinator.flush_session_managed_demand(provider_id);
+            }
+        }
+    }
+}
+
 /// Runs one production coordinator turn through the bounded provider lanes and
 /// command receiver. A quiet coordinator blocks until a command or a real deadline.
 fn coordinator_turn(
     coordinator: &mut Coordinator<'_>,
     commands: &Receiver<Command>,
-    demand_flushers: &[for<'a> fn(&mut Coordinator<'a>)],
+    demand_flushers: &[(&'static str, super::DemandFlushPolicy)],
     shutdown: &AtomicBool,
     test_wait: Option<Duration>,
 ) -> bool {
@@ -211,17 +226,13 @@ fn coordinator_turn(
     }
     if active {
         coordinator.control_retry = false;
-        for flush in demand_flushers {
-            flush(coordinator);
-        }
+        flush_provider_demands(coordinator, demand_flushers);
         coordinator.release_idle();
     }
     if due.contains(TimerKey::CONTROL_RETRY) && !active {
         coordinator.control_retry = false;
         coordinator.connect_due_providers();
-        for flush in demand_flushers {
-            flush(coordinator);
-        }
+        flush_provider_demands(coordinator, demand_flushers);
         coordinator.release_idle();
     }
     if due.contains(TimerKey::WATCHDOG | TimerKey::SESSION_TRANSITION) {
@@ -867,10 +878,10 @@ impl Coordinator<'_> {
                 let _ = reply.send(Ok(self.status()));
             }
             #[cfg(feature = "probe")]
-            Command::ProbeFailWebSocket(count, reply) => {
+            Command::ProbeFailWebSocket(provider_id, count, reply) => {
                 let result = match self
                     .provider_registry
-                    .probe_fail_websocket(super::HYPERLIQUID_DESCRIPTOR.id, count)
+                    .probe_fail_websocket(&provider_id, count)
                 {
                     Ok(true) => Ok(()),
                     _ => Err("WebSocket probe control unavailable".to_string()),
@@ -4769,7 +4780,7 @@ mod tests {
                 1,
                 "BTC".into(),
                 "1m".into(),
-                aeris_hyperliquid_market_adapter::HyperliquidLiveCandle {
+                crate::hyperliquid_realtime::MockLiveCandle {
                     open_nanos: 3 * 60 * 1_000_000_000,
                     open: 100,
                     high: 104,
@@ -6172,7 +6183,7 @@ mod tests {
                 1,
                 "BTC".into(),
                 "1m".into(),
-                aeris_hyperliquid_market_adapter::HyperliquidLiveCandle {
+                crate::hyperliquid_realtime::MockLiveCandle {
                     open_nanos: 3 * 60 * 1_000_000_000,
                     open: 100,
                     high: 104,
@@ -7501,11 +7512,9 @@ mod tests {
                 .is_some_and(SeriesLifecycle::history_ready)
         );
         assert_eq!(live.coverage(), Some((0, 0)));
-        let demand = coordinator
-            .rithmic_realtime_demand()
-            .expect("Rithmic demand rebuilds");
+        let demand = coordinator.rithmic_realtime_demand();
         assert_eq!(demand.instruments.len(), 1);
-        assert!(demand.instruments[0].trades);
+        assert!(demand.instruments[0].trades());
 
         coordinator.handle_provider_event(crate::rithmic_realtime::into_wire_provider_event(
             RithmicRealtimeEvent::Disconnected(1, None),

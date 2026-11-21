@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_recording_replay_chart_never_enters_the_layout_drawings() {
-        let replay_provider = aeris_market_runtime::published_provider_descriptors()
+        let replay_provider = aeris_market_providers::published_provider_descriptors()
             .iter()
             .map(|descriptor| descriptor.id)
             .find(|id| is_recording_replay_provider(id))

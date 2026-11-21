@@ -499,7 +499,7 @@ fn apply_fee_schedule(
 pub fn run(root: &DataRoot, options: &Options, evidence: &mut Evidence) -> ProbeResult<()> {
     let _lock =
         InstanceLock::acquire(root).map_err(|error| ProbeError::Runtime(error.to_string()))?;
-    let market_service = market(MarketService::start())?;
+    let market_service = market(aeris_market_providers::start_market_service())?;
     let result = run_with_market(&market_service, root, options, evidence);
     let started = Instant::now();
     let shutdown = market_service.shutdown(Duration::from_secs(10));
@@ -949,7 +949,7 @@ impl Probe<'_> {
         // Four injected failures hold the socket down through several backoff steps so
         // the order lands while the feed is Stale but before the next session generation
         // clears the owner's session state.
-        market(market_service.probe_fail_hyperliquid_websocket(4))?;
+        market(market_service.probe_fail_provider_websocket("hyperliquid", 4))?;
         let transition_deadline = Instant::now() + Duration::from_secs(20);
         let mut observed_not_live = false;
         while Instant::now() < transition_deadline {

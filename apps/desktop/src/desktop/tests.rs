@@ -8099,7 +8099,7 @@ fn desktop_provider_labels_come_from_runtime_descriptors() {
     assert_eq!(super::ProviderId("rithmic").display(), "Rithmic");
     assert_eq!(super::ProviderId("hyperliquid").display(), "Hyperliquid");
     // Every provider id round-trips; an id the build does not expose maps to none.
-    for descriptor in aeris_market_runtime::published_provider_descriptors() {
+    for descriptor in aeris_market_providers::published_provider_descriptors() {
         let provider = super::ProviderId(descriptor.id);
         assert_eq!(super::ProviderId::find(provider.id()), Some(provider));
     }
@@ -8133,7 +8133,7 @@ fn desktop_provider_labels_come_from_runtime_descriptors() {
 
 #[test]
 fn provider_presentation_controls_chart_types_intervals_queues_and_trades() {
-    let mut fixture = aeris_market_runtime::built_in_provider_presentations()[0];
+    let mut fixture = aeris_market_providers::built_in_provider_presentations()[0];
     fixture.id = "fixture-third";
     fixture.chart_interval_labels = &["3D"];
     fixture.feed_level = aeris_market_runtime::ProviderFeedLevel::PriceLevels;

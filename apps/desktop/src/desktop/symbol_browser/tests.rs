@@ -101,7 +101,7 @@ fn provider_set_comes_from_published_descriptors() {
             autoload_catalog: false,
             offered_intervals: &["1m"],
         },
-        aeris_market_runtime::published_provider_descriptors()[0].clone(),
+        aeris_market_providers::published_provider_descriptors()[0].clone(),
     ];
     assert!(
         !scope_lanes_from_descriptors(SymbolSearchScope::All, &descriptors)

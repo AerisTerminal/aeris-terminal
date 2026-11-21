@@ -509,7 +509,7 @@ impl TerminalApp {
                 state: &self.pages.bottom_panel,
                 chart: surface.chart.clone(),
                 attribution: terminal_chrome::attribution_for_session(
-                    aeris_market_runtime::built_in_provider_presentations(),
+                    aeris_market_providers::built_in_provider_presentations(),
                     surface.provider,
                     surface
                         .connection_state

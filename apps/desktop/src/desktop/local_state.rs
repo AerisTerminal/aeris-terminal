@@ -619,7 +619,7 @@ fn rebase_durable_instrument(instrument: &mut InstallProviderInstrument) {
     instrument.session_generation = 1;
     instrument.selection_generation = 1;
     if let Some(display) =
-        aeris_market_runtime::migrate_retained_provider_display_symbol(instrument)
+        aeris_market_providers::migrate_retained_provider_display_symbol(instrument)
     {
         instrument.display_symbol = display;
     }
@@ -1495,7 +1495,7 @@ mod tests {
 
     #[test]
     fn workspace_writer_and_reader_round_trip_every_chart_interval_for_every_provider() {
-        for presentation in aeris_market_runtime::built_in_provider_presentations() {
+        for presentation in aeris_market_providers::built_in_provider_presentations() {
             for interval in ChartInterval::ALL {
                 let path = temporary_workspace_path();
                 let mut workspace = default_workspace();

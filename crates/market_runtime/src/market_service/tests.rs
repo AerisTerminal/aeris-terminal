@@ -1,11 +1,8 @@
 use super::{
-    providers::{
-        hyperliquid::{HYPERLIQUID_PRESENTATION, start_hyperliquid_runtime},
-        rithmic::rithmic_supported_period,
-    },
-    *,
+    TEST_CANDLE_PRESENTATION as HYPERLIQUID_PRESENTATION,
+    TEST_TRADE_BUILT_ACCOUNT_ID as RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
+    providers::rithmic::rithmic_supported_period, *,
 };
-use aeris_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
 
 #[test]
 fn every_registered_provider_has_a_complete_published_descriptor() {
@@ -267,8 +264,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             maximum_order_level_instruments: 0,
             ..RITHMIC_DESCRIPTOR.capabilities
         },
-        start: start_hyperliquid_runtime,
-        flush_demand: |_| {},
+        demand_flush: DemandFlushPolicy::Pending,
     };
     let mut engine =
         configured_engine_from_descriptors(&[RITHMIC_DESCRIPTOR, HYPERLIQUID_DESCRIPTOR, fourth])

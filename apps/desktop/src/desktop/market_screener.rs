@@ -539,7 +539,7 @@ pub(super) struct MarketScreener {
 impl Default for MarketScreener {
     fn default() -> Self {
         Self {
-            provider: aeris_market_runtime::built_in_provider_presentations()
+            provider: aeris_market_providers::built_in_provider_presentations()
                 .iter()
                 .find(|descriptor| descriptor.market_screen_available),
             worker: None,

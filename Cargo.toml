@@ -6,6 +6,7 @@ members = [
     "crates/application",
     "crates/account_runtime",
     "crates/market_engine",
+    "crates/market_providers",
     "crates/market_runtime",
     "crates/context_runtime",
     "crates/trading_runtime",

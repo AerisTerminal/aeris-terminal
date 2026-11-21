@@ -136,9 +136,7 @@ fn benchmark_coordinator() -> Result<(Coordinator<'static>, Vec<BarSeriesKey>), 
     use std::num::NonZeroU64;
 
     const SERIES: usize = 64;
-    let mut engine = super::super::configured_engine_from_descriptors(
-        super::super::BUILT_IN_PROVIDER_DESCRIPTORS,
-    )?;
+    let mut engine = super::super::configured_engine_from_descriptors(&[])?;
     let generation = ProviderGeneration(NonZeroU64::MIN);
     engine
         .register_provider(

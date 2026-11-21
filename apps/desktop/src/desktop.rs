@@ -685,7 +685,7 @@ macro_rules! provider_action {
                 let id = value
                     .as_str()
                     .ok_or_else(|| gpui::private::anyhow::anyhow!("Expected a provider ID"))?;
-                let descriptor = aeris_market_runtime::published_provider_descriptors()
+                let descriptor = aeris_market_providers::published_provider_descriptors()
                     .iter()
                     .find(|descriptor| descriptor.id == id)
                     .ok_or_else(|| gpui::private::anyhow::anyhow!("Unknown provider ID"))?;
@@ -769,7 +769,7 @@ const fn stabilized_connection_state(
 fn provider_presentation(
     provider: ProviderId,
 ) -> Option<&'static aeris_market_runtime::ProviderPresentationDescriptor> {
-    aeris_market_runtime::built_in_provider_presentations()
+    aeris_market_providers::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == provider.id())
 }
@@ -808,7 +808,7 @@ fn provider_intervals(provider: ProviderId) -> &'static [ChartInterval] {
     static INTERVALS: OnceLock<Vec<(&'static str, Vec<ChartInterval>)>> = OnceLock::new();
     INTERVALS
         .get_or_init(|| {
-            aeris_market_runtime::built_in_provider_presentations()
+            aeris_market_providers::built_in_provider_presentations()
                 .iter()
                 .map(|descriptor| {
                     (
@@ -1327,13 +1327,13 @@ impl ProviderId {
     }
 
     fn descriptor(self) -> Option<&'static aeris_market_runtime::ProviderDescriptor> {
-        aeris_market_runtime::published_provider_descriptors()
+        aeris_market_providers::published_provider_descriptors()
             .iter()
             .find(|descriptor| descriptor.id == self.0)
     }
 
     fn find(id: &str) -> Option<Self> {
-        aeris_market_runtime::published_provider_descriptors()
+        aeris_market_providers::published_provider_descriptors()
             .iter()
             .find(|descriptor| descriptor.id == id)
             .map(|descriptor| Self(descriptor.id))
@@ -4292,7 +4292,7 @@ fn with_readiness_account_session<G, Q: AccountRefreshExitClaim>(
 fn run_candidate_services(
     workspace_revision: u64,
 ) -> Result<aeris_release_lifecycle::ReadinessReport, String> {
-    let market = aeris_market_runtime::MarketService::start()?;
+    let market = aeris_market_providers::start_market_service()?;
     let (trading_copy, trading) =
         start_readiness_trading(&trading_database_path().map_err(|error| error.to_string())?)?;
     let report = (|| {
@@ -5695,7 +5695,7 @@ fn start_signed_in_runtime(startup: SignedInStartup) -> Result<SignedInRuntime, 
         diagnostic!("Aeris context owner could not start: {error}");
         tr!(workspace::CONTEXT_SERVICE_FAILED)
     })?;
-    let market = match aeris_market_runtime::MarketService::start() {
+    let market = match aeris_market_providers::start_market_service() {
         Ok(market) => market,
         Err(error) => {
             diagnostic!("Aeris market owner could not start: {error}");

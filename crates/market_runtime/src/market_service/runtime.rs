@@ -2,12 +2,12 @@ use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COMMAND_CAPACITY, ClientId, Command,
     ConsumerId, ConsumerIdentity, ConsumerResourceClass, DisplayDepthRequest, Duration,
     GenerationId, HISTORY_CAPACITY, HistoryRequest, InstallProviderInstrument, Instant,
-    InstrumentStreamKey, LeaseOwner, LiveHyperliquidHistory, LiveRithmicHistory, MarketDataLeaseId,
-    MarketEngine, MarketRuntime, MarketService, MarketServiceError, MarketServiceProviders,
-    MarketServiceStatus, Mutex, NativeStudyRegistration, Ordering, OwnedCoordinatorChannels,
-    ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord,
-    ProviderEventLane, ProviderRuntimeEvent, ProviderRuntimeLifecycle, ProviderRuntimeRecord,
-    ProviderRuntimeRegistry, ProviderRuntimeSpec, QuoteSubscription, Reply, ScanProviderMarkets,
+    InstrumentStreamKey, LeaseOwner, MarketDataLeaseId, MarketEngine, MarketRuntime, MarketService,
+    MarketServiceError, MarketServiceProviders, MarketServiceStatus, Mutex,
+    NativeStudyRegistration, Ordering, OwnedCoordinatorChannels, ProviderCatalogCommand,
+    ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord, ProviderEventLane,
+    ProviderRuntimeEvent, ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry,
+    ProviderRuntimeSpec, ProviderStartHandle, QuoteSubscription, Reply, ScanProviderMarkets,
     ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
     StartedProviderRuntime, StreamRequirements, StudyInstanceId, SyncSender, TrySendError,
     Viewport, WorkspaceId, id, mpsc, spawn_coordinator, spawn_history_worker, thread,
@@ -15,7 +15,6 @@ use super::{
     validate_provider_search, validate_provider_selection,
 };
 use crate::ProviderPresentationDescriptor;
-use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_trading::market::{MarketFeedError, QuoteInterest, QuoteInterestSink};
 
 struct RuntimeChannels {
@@ -84,14 +83,25 @@ impl ProviderRuntimeRegistry {
     }
 
     fn start_record(
-        spec: ProviderRuntimeSpec,
+        mut spec: ProviderRuntimeSpec,
         completions: &SyncSender<Command>,
         wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
         context: &super::ProviderStartContext,
     ) -> Result<ProviderRuntimeRecord, String> {
-        (spec.descriptor.start)(spec, completions, wake, engine, active_workers, context)
+        let handle = ProviderStartHandle {
+            completions,
+            wake,
+            engine,
+            active_workers,
+            context,
+        };
+        let starter = std::mem::replace(
+            &mut spec.starter,
+            Box::new(|_, _| Err("provider runtime starter already consumed".to_string())),
+        );
+        starter(spec, &handle)
     }
 
     pub(super) fn start_history_runtime(
@@ -369,7 +379,7 @@ impl ProviderDispatch<'_> {
             .ok_or_else(|| "Provider display-depth worker is unavailable".to_string())?
             .display_depth
         else {
-            return Ok(false);
+            return Ok(true);
         };
         display_depth.send_demand(requests)
     }
@@ -419,13 +429,9 @@ impl MarketService {
         instrument: &aeris_contracts::InstallProviderInstrument,
     ) -> super::calendar::MarketCalendarService {
         use super::calendar::{CalendarSource, MarketCalendarService};
-        let capabilities = super::BUILT_IN_PROVIDER_DESCRIPTORS
-            .iter()
-            .find(|descriptor| descriptor.id == instrument.provider)
-            .map(|descriptor| descriptor.capabilities);
         let mut calendar = MarketCalendarService::default();
         calendar.resolve(instrument);
-        if capabilities.is_some_and(|capabilities| capabilities.always_open) {
+        if super::is_recording_replay_provider(&instrument.provider) {
             calendar.insert(instrument.instrument_id.clone(), CalendarSource::AlwaysOpen);
         }
         calendar
@@ -451,7 +457,7 @@ impl MarketService {
 
 /// Composition-root builder for [`MarketService`].
 ///
-/// Allows registering built-in or custom provider plugins, auth adapters, and
+/// Allows registering provider plugins, local recording replay, auth adapters, and
 /// broker venue runners before starting the single in-process coordinator.
 #[derive(Default)]
 pub struct MarketServiceBuilder {
@@ -461,24 +467,20 @@ pub struct MarketServiceBuilder {
         Arc<dyn super::provider_auth::ProviderAuthAdapter>,
     )>,
     broker_venues: Vec<(String, super::BrokerVenueRunner)>,
-    include_built_in_defaults: bool,
 }
 
 impl MarketServiceBuilder {
-    /// Adds the standard built-in providers (Rithmic, Hyperliquid, and
-    /// local recording replay) along with their default auth and broker runners.
+    /// Registers a provider plugin runtime specification.
     #[must_use]
-    pub fn with_built_in_providers(mut self) -> Self {
-        self.providers.push(ProviderRuntimeSpec::rithmic(
-            Box::new(LiveRithmicHistory),
-            true,
-        ));
-        self.providers.push(ProviderRuntimeSpec::hyperliquid(
-            Box::<LiveHyperliquidHistory>::default(),
-            true,
-        ));
+    pub fn register_provider(mut self, spec: ProviderRuntimeSpec) -> Self {
+        self.providers.push(spec);
+        self
+    }
+
+    /// Adds the local recording-replay provider source.
+    #[must_use]
+    pub fn with_recording_replay(mut self) -> Self {
         self.providers.push(ProviderRuntimeSpec::recording_replay());
-        self.include_built_in_defaults = true;
         self
     }
 
@@ -505,9 +507,8 @@ impl MarketServiceBuilder {
     }
 
     #[cfg(test)]
-    pub(super) fn register_provider_spec(mut self, spec: ProviderRuntimeSpec) -> Self {
-        self.providers.push(spec);
-        self
+    pub(super) fn register_provider_spec(self, spec: ProviderRuntimeSpec) -> Self {
+        self.register_provider(spec)
     }
 
     /// Starts the composed [`MarketService`].
@@ -527,30 +528,12 @@ impl MarketService {
         MarketServiceBuilder::default()
     }
 
-    /// Starts the desktop-owned in-process market runtime.
-    ///
-    /// Market state is intentionally ephemeral. History is requested from the
-    /// provider when demanded; no local market-history store or persisted hot set
-    /// participates in startup.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the market engine or one of the bounded provider
-    /// runtime workers cannot be initialized.
-    pub fn start() -> Result<Self, String> {
-        Self::builder()
-            .with_built_in_providers()
-            .start()
-            .map_err(String::from)
-    }
-
     #[cfg(any(test, feature = "replay"))]
     pub(super) fn start_composed(providers: Vec<ProviderRuntimeSpec>) -> Result<Self, String> {
         Self::start_from_builder(MarketServiceBuilder {
             providers,
             auth_adapters: Vec::new(),
             broker_venues: Vec::new(),
-            include_built_in_defaults: true,
         })
         .map_err(String::from)
     }
@@ -560,7 +543,6 @@ impl MarketService {
             providers,
             auth_adapters,
             broker_venues,
-            include_built_in_defaults,
         } = builder;
         let provider_presentations = providers
             .iter()
@@ -586,10 +568,7 @@ impl MarketService {
         ));
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
-        let start_context = super::ProviderStartContext {
-            rithmic_login: RithmicLoginRevision::default(),
-            recording_replays,
-        };
+        let start_context = super::ProviderStartContext { recording_replays };
         let provider_registry = ProviderRuntimeRegistry::start(
             providers,
             &command_tx,
@@ -615,12 +594,8 @@ impl MarketService {
             )
             .map_err(MarketServiceError::WorkerSpawnFailed)?,
         ];
-        let (provider_auth, broker_venue_runners) = Self::build_registries(
-            include_built_in_defaults,
-            &start_context.rithmic_login,
-            auth_adapters,
-            broker_venues,
-        )?;
+        let (provider_auth, broker_venue_runners) =
+            Self::build_registries(auth_adapters, broker_venues)?;
         let market = Self::build_market_service(
             command_tx,
             shutdown,
@@ -644,8 +619,6 @@ impl MarketService {
     }
 
     fn build_registries(
-        include_built_in_defaults: bool,
-        rithmic_revision: &RithmicLoginRevision,
         auth_adapters: Vec<(
             &'static str,
             Arc<dyn super::provider_auth::ProviderAuthAdapter>,
@@ -660,20 +633,6 @@ impl MarketService {
     > {
         let mut provider_auth = super::provider_auth::ProviderAuthRegistry::default();
         let mut broker_venue_runners = super::broker_venue::BrokerVenueRunnerRegistry::default();
-        if include_built_in_defaults {
-            let rithmic_login = Arc::new(super::providers::rithmic::RithmicLogin::new(
-                rithmic_revision.clone(),
-            ));
-            let revision = rithmic_login.revision.clone();
-            provider_auth.register(
-                super::RITHMIC_DESCRIPTOR.id,
-                rithmic_login as Arc<dyn super::provider_auth::ProviderAuthAdapter>,
-            );
-            broker_venue_runners.register(
-                aeris_trading::venue::BROKER_VENUE_ID,
-                super::providers::rithmic::default_broker_venue_runner(revision),
-            )?;
-        }
         for (provider_id, adapter) in auth_adapters {
             provider_auth.register(provider_id, adapter);
         }
@@ -824,8 +783,9 @@ impl MarketService {
     /// Returns an error outside validation mode or when the bounded provider
     /// control channel is unavailable.
     #[cfg(feature = "probe")]
-    pub fn probe_fail_hyperliquid_websocket(
+    pub fn probe_fail_provider_websocket(
         &self,
+        provider_id: &str,
         subsequent_connect_failures: u8,
     ) -> Result<(), String> {
         if !aeris_platform_runtime::data_root::active_data_root()
@@ -838,6 +798,7 @@ impl MarketService {
         }
         self.request(|reply| {
             Ok(Command::ProbeFailWebSocket(
+                provider_id.to_string(),
                 subsequent_connect_failures,
                 reply,
             ))
@@ -1422,7 +1383,7 @@ mod tests {
             .expect("bounded catalog request");
         assert!(matches!(
             control_rx.try_recv(),
-            Ok(RithmicCatalogControl::Search(_))
+            Ok(RithmicCatalogControl::Search(()))
         ));
         event_tx
             .send(
@@ -1477,7 +1438,7 @@ mod tests {
         );
         assert!(matches!(
             rithmic_rx.try_recv(),
-            Ok(RithmicCatalogControl::Search(_))
+            Ok(RithmicCatalogControl::Search(()))
         ));
 
         let (hyperliquid_tx, hyperliquid_rx) = mpsc::sync_channel(1);
@@ -1496,7 +1457,7 @@ mod tests {
             .expect("public provider supports market screens");
         assert!(matches!(
             hyperliquid_rx.try_recv(),
-            Ok(HyperliquidCatalogControl::Screen(_))
+            Ok(HyperliquidCatalogControl::Screen(()))
         ));
         let mut unoffered = ScanProviderMarkets::default();
         unoffered.definition.timeframe = aeris_market_data::ChartInterval::Second5;
@@ -1642,7 +1603,6 @@ mod tests {
             Arc::new(Mutex::new(BTreeSet::new())),
             Vec::new(),
             super::super::ProviderStartContext {
-                rithmic_login: RithmicLoginRevision::default(),
                 recording_replays: Arc::new(super::super::recording::RecordingReplays::new(
                     Arc::new(super::super::recording::MarketRecording::new(Arc::new(
                         super::super::clock::SystemClock,
@@ -1688,7 +1648,6 @@ mod tests {
             Arc::new(Mutex::new(BTreeSet::new())),
             Vec::new(),
             super::super::ProviderStartContext {
-                rithmic_login: RithmicLoginRevision::default(),
                 recording_replays: Arc::new(super::super::recording::RecordingReplays::new(
                     Arc::new(super::super::recording::MarketRecording::new(Arc::new(
                         super::super::clock::SystemClock,
@@ -1751,12 +1710,15 @@ mod tests {
                 id: "fourth-test-provider",
                 ..super::super::RITHMIC_PRESENTATION
             };
-        let mut spec = ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), false);
-        spec.descriptor.id = "fourth-test-provider";
-        spec.descriptor.presentation = &FOURTH_PRESENTATION;
-        spec.descriptor.capabilities.account_id = "fourth-test-account";
-        spec.descriptor.capabilities.history.worker = "aeris-fourth-history";
-        spec.descriptor.flush_demand = |_| {};
+        let mut descriptor = super::super::RITHMIC_DESCRIPTOR;
+        descriptor.id = "fourth-test-provider";
+        descriptor.presentation = &FOURTH_PRESENTATION;
+        descriptor.capabilities.account_id = "fourth-test-account";
+        descriptor.capabilities.history.worker = "aeris-fourth-history";
+        let spec = super::super::providers::rithmic::mock_history_only_spec(
+            descriptor,
+            Box::new(super::super::providers::rithmic::MockHistorySource),
+        );
         let service = MarketService::start_composed(vec![spec]).expect("fourth runtime starts");
         assert!(
             service
@@ -1815,13 +1777,15 @@ mod tests {
                 id: "mock-third-provider",
                 ..super::super::RITHMIC_PRESENTATION
             };
-        let mut spec = ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), false);
-        spec.descriptor.id = "mock-third-provider";
-        spec.descriptor.presentation = &MOCK_PRESENTATION;
-        spec.descriptor.capabilities.account_id = "mock-third-account";
-        spec.descriptor.capabilities.history.worker = "aeris-mock-third-history";
-        spec.descriptor.flush_demand = |_| {};
-
+        let mut descriptor = super::super::RITHMIC_DESCRIPTOR;
+        descriptor.id = "mock-third-provider";
+        descriptor.presentation = &MOCK_PRESENTATION;
+        descriptor.capabilities.account_id = "mock-third-account";
+        descriptor.capabilities.history.worker = "aeris-mock-third-history";
+        let spec = super::super::providers::rithmic::mock_history_only_spec(
+            descriptor,
+            Box::new(super::super::providers::rithmic::MockHistorySource),
+        );
         let broker_started = Arc::new(AtomicUsize::new(0));
         let broker_started_flag = Arc::clone(&broker_started);
         let service = MarketService::builder()
@@ -1849,28 +1813,20 @@ mod tests {
                 .expect("status")
                 .providers
                 .iter()
-                .any(|provider| provider.provider == "mock-third-provider")
+                .any(|p| p.provider == "mock-third-provider")
         );
         let systems = service
             .discover_provider_servers("mock-third-provider", "mock-sim")
             .expect("mock auth servers");
         assert_eq!(systems, vec!["mock-sim:MockSim".to_string()]);
-
         let link = BrokerVenueLink {
-            attach: Box::new(|_caps| {
-                let (_tx, rx) = aeris_trading::venue_outbox::bounded_venue_requests(4);
-                Ok((1, rx))
-            }),
-            events: Box::new(|_event| Ok(())),
+            attach: Box::new(|_| Ok((1, aeris_trading::venue_outbox::bounded_venue_requests(4).1))),
+            events: Box::new(|_| Ok(())),
         };
+        let conn = ConnectionId::try_new("sim-1").expect("valid connection id");
         service
-            .attach_broker_venue_for(
-                "mock-broker",
-                &ConnectionId::try_new("sim-1").expect("valid connection id"),
-                link,
-            )
+            .attach_broker_venue_for("mock-broker", &conn, link)
             .expect("mock broker attaches");
-
         let deadline = Instant::now() + Duration::from_secs(2);
         while broker_started.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
@@ -1884,12 +1840,14 @@ mod tests {
     #[test]
     fn uncached_study_dependency_uses_existing_bounded_history_worker() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let service = MarketService::start_composed(vec![ProviderRuntimeSpec::rithmic(
-            Box::new(RecordingStudyHistory {
-                calls: Arc::clone(&calls),
-            }),
-            false,
-        )])
+        let service = MarketService::start_composed(vec![
+            super::super::providers::rithmic::mock_history_only_spec(
+                super::super::RITHMIC_DESCRIPTOR,
+                Box::new(RecordingStudyHistory {
+                    calls: Arc::clone(&calls),
+                }),
+            ),
+        ])
         .expect("test runtime starts");
         service.attach(1).expect("client attaches");
         service

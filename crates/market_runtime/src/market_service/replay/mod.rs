@@ -379,7 +379,9 @@ fn replay_stale_epoch_completion() {
 
 #[test]
 fn replay_gap_recovery() {
-    use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
+    use crate::market_service::provider_event::{
+        ProviderEvent, ProviderEventKind, ProviderFault, ProviderFaultKind,
+    };
     let mut harness = ReplayHarness::new();
     harness.run([
         ReplayStep::Demand(harness.boundary.series(), 1),
@@ -392,17 +394,19 @@ fn replay_gap_recovery() {
         .provider_registry
         .epoch("rithmic")
         .unwrap();
-    let wire = crate::rithmic_realtime::into_wire_provider_event(
-        RithmicRealtimeEvent::Recovering(1, Some(ProviderInvalidationReason::SequenceGap)),
-    );
-    harness.boundary.coordinator.handle_bound_provider_event(
-        crate::market_service::provider_event::ProviderEvent {
+    harness
+        .boundary
+        .coordinator
+        .handle_bound_provider_event(ProviderEvent {
             provider: "rithmic",
             generation: epoch,
-            wire_generation: wire.generation,
-            kind: wire.kind,
-        },
-    );
+            wire_generation: 1,
+            kind: ProviderEventKind::recovering_from_fault(ProviderFault {
+                kind: ProviderFaultKind::SequenceGap,
+                auto_recovers: true,
+                detail: "Sequence gap",
+            }),
+        });
     assert!(matches!(
         harness
             .boundary

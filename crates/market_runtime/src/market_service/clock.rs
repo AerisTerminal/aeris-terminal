@@ -2,12 +2,12 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-pub(crate) trait Clock: Send + Sync {
+pub trait Clock: Send + Sync {
     fn monotonic(&self) -> Instant;
     fn wall_nanos(&self) -> Option<i64>;
 }
 
-pub(crate) struct SystemClock;
+pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn monotonic(&self) -> Instant {

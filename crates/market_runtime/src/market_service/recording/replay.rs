@@ -23,18 +23,17 @@ use crate::market_service::provider_session::{
     ProviderEventSink, ProviderSession, ProviderSessionError,
 };
 use crate::market_service::{
-    ActiveWorkerGuard, Command, FormingBar, HistoryRequest, HistorySnapshot, HistorySource,
-    MarketEngine, MarketStream, ProviderCatalogChannel, ProviderCatalogChannels,
-    ProviderCatalogCommand, ProviderCatalogEvent, ProviderCoordinatorWake, ProviderDemand,
-    ProviderEvent, ProviderEventKind, ProviderRealtimeChannels, ProviderRuntimeRecord,
-    ProviderRuntimeRegistry, ProviderRuntimeSpec, ProviderStartContext, ProviderTradeBatch,
+    ActiveWorkerGuard, FormingBar, HistoryRequest, HistorySnapshot, HistorySource, MarketStream,
+    ProviderCatalogChannel, ProviderCatalogChannels, ProviderCatalogCommand, ProviderCatalogEvent,
+    ProviderCoordinatorWake, ProviderDemand, ProviderEvent, ProviderEventKind,
+    ProviderRealtimeChannels, ProviderRuntimeRecord, ProviderRuntimeSpec, ProviderTradeBatch,
     REALTIME_CAPACITY,
 };
 use aeris_contracts::InstallProviderInstrument;
 use aeris_market_data::BarPeriod;
 use aeris_market_engine::fence::{Epoch, ProviderTag};
 use aeris_observability::diagnostic;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -709,19 +708,15 @@ impl ProviderCatalogChannel for ReplayCatalog {
 /// Starts the replay source: its history worker and its playback worker.
 pub(in crate::market_service) fn start_runtime(
     mut spec: ProviderRuntimeSpec,
-    completions: &SyncSender<Command>,
-    wake: ProviderCoordinatorWake,
-    _engine: &MarketEngine,
-    active_workers: &Arc<Mutex<BTreeSet<String>>>,
-    context: &ProviderStartContext,
+    handle: &super::super::ProviderStartHandle<'_>,
 ) -> Result<ProviderRuntimeRecord, String> {
-    let replays = Arc::clone(&context.recording_replays);
+    let replays = Arc::clone(handle.recording_replays());
+    let wake = handle.wake();
     spec.history = Some(Box::new(ReplayHistory {
         replays: Arc::clone(&replays),
     }));
     let descriptor = spec.descriptor;
-    let mut started =
-        ProviderRuntimeRegistry::start_history_runtime(spec, completions, active_workers)?;
+    let mut started = handle.start_history_runtime(spec)?;
     let (controls, messages) = mpsc::sync_channel(WORKER_QUEUE_CAPACITY);
     let (events_tx, events) = mpsc::sync_channel(REALTIME_CAPACITY);
     let (publish, resolved) = mpsc::sync_channel(CATALOG_QUEUE_CAPACITY);
@@ -740,7 +735,7 @@ pub(in crate::market_service) fn start_runtime(
         outgoing: VecDeque::new(),
         seeks_seen: 0,
     };
-    let activity = Arc::clone(active_workers);
+    let activity = handle.active_workers();
     let lifecycle = Arc::clone(&started.lifecycle);
     let spawned = thread::Builder::new()
         .name(WORKER_NAME.to_owned())

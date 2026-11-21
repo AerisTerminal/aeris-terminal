@@ -200,7 +200,7 @@ pub(super) fn instrument_dialog_content(
 const SYMBOL_PROVIDER_MENU_WIDTH: f32 = 200.0;
 
 fn symbol_menu_providers() -> Vec<ProviderId> {
-    aeris_market_runtime::published_provider_descriptors()
+    aeris_market_providers::published_provider_descriptors()
         .iter()
         .filter(|descriptor| descriptor.symbol_browser)
         .map(|descriptor| ProviderId(descriptor.id))
@@ -550,7 +550,7 @@ mod tests {
                 "{provider:?} listed twice"
             );
         }
-        for provider in aeris_market_runtime::published_provider_descriptors()
+        for provider in aeris_market_providers::published_provider_descriptors()
             .iter()
             .filter(|descriptor| descriptor.symbol_browser)
             .map(|descriptor| ProviderId(descriptor.id))

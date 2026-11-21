@@ -111,7 +111,9 @@ pub(super) fn valid_catalog_field(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-pub(super) fn try_send_catalog_control<C>(
+/// # Errors
+/// Returns an error when the bounded catalog control channel is full or disconnected.
+pub fn try_send_catalog_control<C>(
     controls: &SyncSender<C>,
     control: C,
     provider_id: &str,

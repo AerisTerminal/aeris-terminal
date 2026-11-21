@@ -582,9 +582,7 @@ impl Coordinator<'_> {
     }
 
     #[cfg(test)]
-    pub(super) fn rithmic_realtime_demand(
-        &self,
-    ) -> Result<crate::rithmic_realtime::RithmicRealtimeDemand, String> {
+    pub(super) fn rithmic_realtime_demand(&self) -> crate::rithmic_realtime::RithmicRealtimeDemand {
         super::providers::rithmic::rithmic_wire(&self.provider_demand(super::RITHMIC_DESCRIPTOR.id))
     }
 
@@ -3210,35 +3208,5 @@ mod tests {
             live.quiet_stall_recoveries, 0,
             "a new session starts unpenalized"
         );
-    }
-
-    #[test]
-    fn terminal_rithmic_failures_do_not_auto_resubscribe() {
-        use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
-        for reason in [
-            ProviderInvalidationReason::Authentication,
-            ProviderInvalidationReason::AgreementRequired,
-            ProviderInvalidationReason::UnsupportedSystem,
-            ProviderInvalidationReason::SchemaMismatch,
-            ProviderInvalidationReason::MalformedMessage,
-        ] {
-            assert!(
-                !crate::rithmic_realtime::invalidation_fault(Some(reason)).auto_recovers,
-                "{reason:?}"
-            );
-        }
-        for reason in [
-            ProviderInvalidationReason::Transport,
-            ProviderInvalidationReason::HeartbeatSilence,
-            ProviderInvalidationReason::MessageSilence,
-            ProviderInvalidationReason::SequenceGap,
-            ProviderInvalidationReason::QueueOverflow,
-        ] {
-            assert!(
-                crate::rithmic_realtime::invalidation_fault(Some(reason)).auto_recovers,
-                "{reason:?}"
-            );
-        }
-        assert!(crate::rithmic_realtime::invalidation_fault(None).auto_recovers);
     }
 }

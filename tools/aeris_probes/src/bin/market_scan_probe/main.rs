@@ -19,7 +19,7 @@ use aeris_market_runtime::{
     ProviderMarketScanMatch, ScanComparison, ScanCondition, ScanDefinition, ScanNumber,
     ScanOperand, ScanPriceField, ScanProviderMarkets, ScanStudy, ScanStudyOperand,
     ScanStudyOutputName, SelectionOutcome, SelectionRequest, SeriesPresentationStatus,
-    SeriesTailOperation, StreamRequirements, built_in_provider_presentations, persisted_interval,
+    SeriesTailOperation, StreamRequirements, persisted_interval,
 };
 use aeris_platform_runtime::data_root::{DataRoot, InstanceLock};
 use aeris_probes::{Envelope, Evidence, ProbeError, ProbeResult, market, validate_paths};
@@ -791,7 +791,7 @@ fn scenario(
     interval: ChartInterval,
     evidence: &mut Evidence,
 ) -> ProbeResult<()> {
-    let provider = built_in_provider_presentations()
+    let provider = aeris_market_providers::built_in_provider_presentations()
         .iter()
         .find(|presentation| presentation.market_scan_available)
         .map(|presentation| presentation.id);
@@ -864,7 +864,7 @@ fn scenario(
 fn run(root: &DataRoot, interval: ChartInterval, evidence: &mut Evidence) -> ProbeResult<()> {
     let _lock =
         InstanceLock::acquire(root).map_err(|error| ProbeError::Runtime(error.to_string()))?;
-    let service = market(MarketService::start())?;
+    let service = market(aeris_market_providers::start_market_service())?;
     let result = scenario(&service, interval, evidence);
     let shutdown = service.shutdown(Duration::from_secs(10));
     result?;

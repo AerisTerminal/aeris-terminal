@@ -1156,7 +1156,7 @@ mod tests {
     #[test]
     fn provider_logo_keys_resolve_to_exchange_logos() {
         let logo_for = |provider: &str| {
-            aeris_market_runtime::built_in_provider_presentations()
+            aeris_market_providers::built_in_provider_presentations()
                 .iter()
                 .find(|descriptor| descriptor.id == provider)
                 .and_then(|descriptor| ExchangeLogo::for_logo_key(descriptor.logo_key))

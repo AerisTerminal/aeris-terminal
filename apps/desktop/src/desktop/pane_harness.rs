@@ -1400,7 +1400,7 @@ fn fresh_default_partial_terms_cover_chart_and_stay_ready_through_live_updates(
     assert!(aeris_market_runtime::market_service::instrument_terms_from_install(&product).is_err());
     let descriptor = aeris_market_runtime::InstrumentDescriptor::from_install(
         &product,
-        aeris_market_runtime::built_in_provider_presentations()
+        aeris_market_providers::built_in_provider_presentations()
             .iter()
             .find(|presentation| presentation.id == product.provider)
             .expect("published default provider"),
@@ -6134,7 +6134,7 @@ fn deferred_sma_study() -> PendingRuntimeStudyState {
 
 #[gpui::test]
 fn pane_harness_deferred_study_registers_on_a_selected_rithmic_market(cx: &mut TestAppContext) {
-    let entitlement = aeris_market_runtime::built_in_provider_presentations()
+    let entitlement = aeris_market_providers::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == "rithmic")
         .expect("Rithmic presentation")
@@ -6999,7 +6999,7 @@ fn pane_harness_recording_replay_refuses_orders_and_is_never_saved(cx: &mut Test
     harness.publish_snapshot(120, cx);
     harness.adopt_owner_publication(&subscription, cx);
     cx.run_until_parked();
-    let replay_provider = aeris_market_runtime::published_provider_descriptors()
+    let replay_provider = aeris_market_providers::published_provider_descriptors()
         .iter()
         .map(|descriptor| descriptor.id)
         .find(|id| aeris_market_runtime::is_recording_replay_provider(id))

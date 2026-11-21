@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-pub(super) use aeris_provider_spi::ProviderAuthAdapter;
+pub use aeris_provider_spi::ProviderAuthAdapter;
 
 use super::{
     MarketService,
@@ -30,15 +30,19 @@ impl ProviderAuthRegistry {
         self.adapters.insert(provider_id, adapter);
     }
 
-    fn adapter(&self, provider_id: &str) -> Result<&dyn ProviderAuthAdapter, ProviderAuthError> {
+    fn adapter(
+        &self,
+        provider_id: &str,
+        presentations: &[crate::ProviderPresentationDescriptor],
+    ) -> Result<&dyn ProviderAuthAdapter, ProviderAuthError> {
         if let Some(adapter) = self.adapters.get(provider_id) {
             return Ok(adapter.as_ref());
         }
-        let registration = super::BUILT_IN_PROVIDER_DESCRIPTORS
+        let presentation = presentations
             .iter()
             .find(|provider| provider.id == provider_id)
             .ok_or(ProviderAuthError::UnsupportedProvider)?;
-        if registration.login_schema.is_none() {
+        if presentation.connection_kind != crate::ProviderConnectionKind::Credentials {
             return Err(ProviderAuthError::NoSavedCredentials);
         }
         Err(ProviderAuthError::Unavailable(
@@ -56,7 +60,10 @@ impl MarketService {
         &self,
         provider_id: &str,
     ) -> Result<Vec<ProviderLoginServer>, String> {
-        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        let adapter = self
+            .runtime
+            .provider_auth
+            .adapter(provider_id, &self.runtime.provider_presentations)?;
         Ok(adapter.servers())
     }
 
@@ -69,7 +76,10 @@ impl MarketService {
         provider_id: &str,
         server_id: &str,
     ) -> Result<Vec<String>, String> {
-        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        let adapter = self
+            .runtime
+            .provider_auth
+            .adapter(provider_id, &self.runtime.provider_presentations)?;
         adapter
             .discover_servers(server_id, Arc::clone(&self.runtime.shutdown))
             .map_err(String::from)
@@ -83,7 +93,10 @@ impl MarketService {
         &self,
         provider_id: &str,
     ) -> Result<Option<SavedProviderLogin>, String> {
-        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        let adapter = self
+            .runtime
+            .provider_auth
+            .adapter(provider_id, &self.runtime.provider_presentations)?;
         adapter.saved_login().map_err(String::from)
     }
 
@@ -97,7 +110,10 @@ impl MarketService {
         provider_id: &str,
         fields: &[LoginFieldValue<'_>],
     ) -> Result<(), String> {
-        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        let adapter = self
+            .runtime
+            .provider_auth
+            .adapter(provider_id, &self.runtime.provider_presentations)?;
         adapter
             .sign_in(fields, Arc::clone(&self.runtime.shutdown))
             .map_err(String::from)
@@ -108,7 +124,10 @@ impl MarketService {
     /// # Errors
     /// Rejects unsupported providers or reports a failed vault deletion.
     pub fn forget_provider_login(&self, provider_id: &str) -> Result<(), String> {
-        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        let adapter = self
+            .runtime
+            .provider_auth
+            .adapter(provider_id, &self.runtime.provider_presentations)?;
         adapter.forget_login().map_err(String::from)
     }
 
@@ -121,7 +140,10 @@ impl MarketService {
         &self,
         provider_id: &str,
     ) -> Result<Vec<PendingAgreement>, ProviderAuthError> {
-        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        let adapter = self
+            .runtime
+            .provider_auth
+            .adapter(provider_id, &self.runtime.provider_presentations)?;
         adapter.pending_agreements(Arc::clone(&self.runtime.shutdown))
     }
 
@@ -134,7 +156,10 @@ impl MarketService {
         provider_id: &str,
         agreement_id: &str,
     ) -> Result<(), ProviderAuthError> {
-        let adapter = self.runtime.provider_auth.adapter(provider_id)?;
+        let adapter = self
+            .runtime
+            .provider_auth
+            .adapter(provider_id, &self.runtime.provider_presentations)?;
         adapter.accept_agreement(agreement_id, Arc::clone(&self.runtime.shutdown))
     }
 }
@@ -182,23 +207,24 @@ mod tests {
     #[test]
     fn registry_rejects_public_and_unknown_providers_and_dispatches_registered_adapters() {
         let mut registry = ProviderAuthRegistry::default();
+        let presentations = crate::market_service::test_built_in_provider_presentations();
         assert_eq!(
-            registry.adapter("hyperliquid").err(),
+            registry.adapter("hyperliquid", presentations).err(),
             Some(ProviderAuthError::NoSavedCredentials)
         );
         assert_eq!(
-            registry.adapter("unknown-provider").err(),
+            registry.adapter("unknown-provider", presentations).err(),
             Some(ProviderAuthError::UnsupportedProvider)
         );
         assert_eq!(
-            registry.adapter("rithmic").err(),
+            registry.adapter("rithmic", presentations).err(),
             Some(ProviderAuthError::Unavailable(
                 "Provider login is unavailable"
             ))
         );
         registry.register("mock-broker", Arc::new(DummyAuth));
         let adapter = registry
-            .adapter("mock-broker")
+            .adapter("mock-broker", presentations)
             .expect("registered auth adapter resolves");
         assert_eq!(adapter.servers().len(), 1);
         assert_eq!(

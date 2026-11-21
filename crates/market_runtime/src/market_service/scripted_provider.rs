@@ -2,20 +2,19 @@
 //! This is deliberately absent from ordinary market-runtime builds.
 
 use super::{
-    Arc, AtomicBool, BTreeSet, Command, Duration, HISTORY_CAPACITY, HYPERLIQUID_DESCRIPTOR,
-    InstallProviderInstrument, MarketEngine, MarketService, Mutex, Ordering,
-    ProviderCatalogChannel, ProviderCatalogChannels, ProviderCatalogCommand,
-    ProviderCoordinatorWake, ProviderRealtimeSpec, ProviderRuntimeLifecycle, ProviderRuntimeRecord,
-    ProviderRuntimeSpec, ProviderStartContext, REALTIME_CAPACITY,
-    RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver, RecvTimeoutError, SyncSender, TopOfBookQuote,
-    mpsc, providers, thread, validate_provider_instrument,
-};
-use crate::hyperliquid_realtime::{
-    HYPERLIQUID_PUBLIC_ACCOUNT_ID, HyperliquidDemand, HyperliquidRealtimeControl,
-    HyperliquidRealtimeEvent,
+    Arc, AtomicBool, Duration, HISTORY_CAPACITY, HistoryRequest, InstallProviderInstrument,
+    MarketService, Ordering, ProviderCatalogChannel, ProviderCatalogChannels,
+    ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDemand, ProviderEvent,
+    ProviderEventKind, ProviderRealtimeChannels, ProviderRuntimeLifecycle, ProviderRuntimeRecord,
+    ProviderRuntimeSpec, ProviderStartHandle, REALTIME_CAPACITY, Receiver, RecvTimeoutError,
+    SyncSender, TEST_CANDLE_DESCRIPTOR, TopOfBookQuote, mpsc,
+    provider_session::{ProviderEventSink, ProviderSession, ProviderSessionError, try_control},
+    thread, validate_provider_instrument,
 };
 use aeris_market_data::{EventMetadata, QualifiedTimestamp, QuoteLevel};
-use aeris_market_engine::fence::{Fenced, ProviderTag};
+use aeris_market_engine::MarketStream;
+
+const SCRIPTED_CONTROL_CAPACITY: usize = 4;
 
 struct ScriptedQuote {
     bid: i64,
@@ -30,9 +29,10 @@ enum ScriptedRequest {
     Subscriptions(SyncSender<(usize, usize)>),
 }
 
-pub(super) struct ScriptedChannels {
-    quotes: Receiver<ScriptedRequest>,
-    instrument: InstallProviderInstrument,
+enum ScriptedControl {
+    Connect(ProviderEventSink),
+    Subscribe { quotes: Vec<String>, candles: usize },
+    Stop,
 }
 
 /// Test-only handle to the bounded, lease-aware provider worker.
@@ -96,8 +96,8 @@ impl MarketService {
     pub fn start_scripted_quotes(
         instrument: InstallProviderInstrument,
     ) -> Result<(Self, ScriptedQuoteProvider), String> {
-        if instrument.provider != HYPERLIQUID_DESCRIPTOR.id
-            || instrument.entitlement_id != HYPERLIQUID_PUBLIC_ACCOUNT_ID
+        if instrument.provider != TEST_CANDLE_DESCRIPTOR.id
+            || instrument.entitlement_id != TEST_CANDLE_DESCRIPTOR.capabilities.account_id
             || instrument.session_generation == 0
         {
             return Err("scripted instrument must use the fixture's provider route".into());
@@ -105,18 +105,14 @@ impl MarketService {
         validate_provider_instrument(&instrument)?;
         let installed = instrument.clone();
         let (quotes, receiver) = mpsc::sync_channel(8);
-        let spec = ProviderRuntimeSpec {
-            descriptor: super::ProviderDescriptor {
-                start: start_scripted_runtime,
-                ..HYPERLIQUID_DESCRIPTOR
-            },
-            history: None,
-            realtime: ProviderRealtimeSpec { enabled: true },
-            scripted: Some(ScriptedChannels {
-                quotes: receiver,
-                instrument,
+        let spec = ProviderRuntimeSpec::new(
+            TEST_CANDLE_DESCRIPTOR,
+            None,
+            true,
+            Box::new(move |spec, handle| {
+                start_scripted_runtime(&spec, handle, receiver, instrument)
             }),
-        };
+        );
         // Install the fixture's verified Terms before trading asks for its
         // route. Demand and subsequent quotes still use the production lanes.
         let service = Self::start_composed(vec![spec])?;
@@ -125,21 +121,61 @@ impl MarketService {
     }
 }
 
+struct ScriptedSession {
+    controls: SyncSender<ScriptedControl>,
+    history: SyncSender<HistoryRequest>,
+}
+
+impl ProviderSession for ScriptedSession {
+    fn connect(
+        &self,
+        _epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+        sink: ProviderEventSink,
+    ) -> Result<bool, ProviderSessionError> {
+        try_control(&self.controls, ScriptedControl::Connect(sink))
+    }
+
+    fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
+        let quotes = demand
+            .instruments
+            .iter()
+            .filter(|requested| requested.streams.contains(MarketStream::Quotes))
+            .map(|requested| requested.instrument.instrument_id.clone())
+            .collect();
+        let candles = demand
+            .candle_series
+            .iter()
+            .filter(|(_, streams, _)| streams.contains(MarketStream::Bars))
+            .count();
+        try_control(
+            &self.controls,
+            ScriptedControl::Subscribe { quotes, candles },
+        )
+    }
+
+    fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError> {
+        try_control(&self.history, request)
+    }
+
+    fn release_idle(&self) -> Result<bool, ProviderSessionError> {
+        try_control(&self.controls, ScriptedControl::Stop)
+    }
+
+    fn shutdown(&self) {
+        let _ = try_control(&self.controls, ScriptedControl::Stop);
+    }
+}
+
 fn start_scripted_runtime(
-    mut spec: ProviderRuntimeSpec,
-    _completions: &SyncSender<Command>,
-    wake: ProviderCoordinatorWake,
-    _engine: &MarketEngine,
-    _active_workers: &Arc<Mutex<BTreeSet<String>>>,
-    _context: &ProviderStartContext,
+    spec: &ProviderRuntimeSpec,
+    handle: &ProviderStartHandle<'_>,
+    quotes: Receiver<ScriptedRequest>,
+    instrument: InstallProviderInstrument,
 ) -> Result<ProviderRuntimeRecord, String> {
-    let channels = spec.scripted.take().ok_or("scripted channels missing")?;
-    let instrument = channels.instrument;
+    let wake = handle.wake();
     let (history, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
-    let (controls, controls_rx) = mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
+    let (controls, controls_rx) = mpsc::sync_channel(SCRIPTED_CONTROL_CAPACITY);
     let (events_tx, events) = mpsc::sync_channel(REALTIME_CAPACITY);
-    let (display_controls, display_rx) = mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
-    let (_display_tx, display_events) = mpsc::sync_channel(REALTIME_CAPACITY);
     let cancellation = Arc::new(AtomicBool::new(false));
     let stop = Arc::clone(&cancellation);
     let worker = thread::Builder::new()
@@ -148,9 +184,8 @@ fn start_scripted_runtime(
             run_scripted_worker(
                 &instrument,
                 &WorkerChannels {
-                    quotes: channels.quotes,
+                    quotes,
                     controls: controls_rx,
-                    display: display_rx,
                     history: history_rx,
                     events: events_tx,
                 },
@@ -164,15 +199,16 @@ fn start_scripted_runtime(
         history,
         cancellation,
         lifecycle: Arc::new(ProviderRuntimeLifecycle::default()),
-        realtime: Some(providers::hyperliquid::realtime_channels(
-            controls,
-            events,
-            display_controls.clone(),
+        realtime: Some(ProviderRealtimeChannels::new(
+            move |history| {
+                Box::new(ScriptedSession {
+                    controls: controls.clone(),
+                    history: history.clone(),
+                })
+            },
+            move || events.try_recv().ok(),
         )),
-        display_depth: Some(providers::hyperliquid::display_depth_channels(
-            display_controls,
-            display_events,
-        )),
+        display_depth: None,
         catalog: ProviderCatalogChannels {
             enabled: false,
             channels: Box::new(UnavailableCatalog),
@@ -195,10 +231,9 @@ impl ProviderCatalogChannel for UnavailableCatalog {
 
 struct WorkerChannels {
     quotes: Receiver<ScriptedRequest>,
-    controls: Receiver<HyperliquidRealtimeControl>,
-    display: Receiver<crate::hyperliquid_display_depth::HyperliquidDisplayDepthControl>,
-    history: Receiver<super::HistoryRequest>,
-    events: SyncSender<Fenced<ProviderTag, HyperliquidRealtimeEvent>>,
+    controls: Receiver<ScriptedControl>,
+    history: Receiver<HistoryRequest>,
+    events: SyncSender<ProviderEvent>,
 }
 
 fn run_scripted_worker(
@@ -207,25 +242,25 @@ fn run_scripted_worker(
     wake: &ProviderCoordinatorWake,
     stop: &AtomicBool,
 ) {
-    let mut sink: Option<super::provider_session::ProviderEventSink> = None;
-    let mut demand = HyperliquidDemand::default();
+    let mut sink: Option<ProviderEventSink> = None;
+    let mut subscribed_quotes: Vec<String> = Vec::new();
+    let mut subscribed_candles: usize = 0;
     while !stop.load(Ordering::Acquire) {
         while let Ok(request) = channels.quotes.try_recv() {
             match request {
                 ScriptedRequest::Subscriptions(reply) => {
-                    let _ = reply.send((demand.quotes.len(), demand.candles.len()));
+                    let _ = reply.send((subscribed_quotes.len(), subscribed_candles));
                 }
                 ScriptedRequest::Quote(quote) => {
-                    let subscribed = demand
-                        .quotes
+                    let subscribed = subscribed_quotes
                         .iter()
-                        .any(|key| key.instrument_id == instrument.instrument_id);
+                        .any(|id| id == &instrument.instrument_id);
                     let result = sink.filter(|_| subscribed).map_or_else(
                         || Err("scripted quote has no active instrument lease".into()),
                         |sink| {
                             channels
                                 .events
-                                .try_send(sink.stamp(quote_event(instrument, &quote, sink)))
+                                .try_send(bound_event(sink, quote_event(instrument, &quote, sink)))
                                 .map_err(|_| {
                                     "scripted realtime queue is full or unavailable".to_string()
                                 })
@@ -240,64 +275,67 @@ fn run_scripted_worker(
         if channels.history.try_recv().is_ok() {
             break;
         }
-        while channels.display.try_recv().is_ok() {}
         match channels.controls.recv_timeout(Duration::from_millis(2)) {
-            Ok(HyperliquidRealtimeControl::Connect(next)) => {
-                let generation = next.epoch.get().get();
+            Ok(ScriptedControl::Connect(next)) => {
                 sink = Some(next);
-                for event in [
-                    HyperliquidRealtimeEvent::Connecting(generation),
-                    HyperliquidRealtimeEvent::Connected(generation),
-                ] {
-                    if channels.events.try_send(next.stamp(event)).is_ok() {
+                for kind in [ProviderEventKind::Connecting, ProviderEventKind::Connected] {
+                    if channels.events.try_send(bound_event(next, kind)).is_ok() {
                         wake.notify();
                     }
                 }
             }
-            Ok(HyperliquidRealtimeControl::Subscribe(next)) => demand = next,
-            Ok(HyperliquidRealtimeControl::Stop) => {
-                sink = None;
-                demand = HyperliquidDemand::default();
+            Ok(ScriptedControl::Subscribe { quotes, candles }) => {
+                subscribed_quotes = quotes;
+                subscribed_candles = candles;
             }
-            #[cfg(feature = "probe")]
-            Ok(HyperliquidRealtimeControl::FailWebSocket { .. }) => {}
+            Ok(ScriptedControl::Stop) => {
+                sink = None;
+                subscribed_quotes.clear();
+                subscribed_candles = 0;
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 }
 
+fn bound_event(sink: ProviderEventSink, kind: ProviderEventKind) -> ProviderEvent {
+    ProviderEvent {
+        provider: TEST_CANDLE_DESCRIPTOR.id,
+        generation: sink.epoch,
+        wire_generation: sink.epoch.get().get(),
+        kind,
+    }
+}
+
 fn quote_event(
     instrument: &InstallProviderInstrument,
     quote: &ScriptedQuote,
-    sink: super::provider_session::ProviderEventSink,
-) -> HyperliquidRealtimeEvent {
+    sink: ProviderEventSink,
+) -> ProviderEventKind {
     let generation = sink.epoch.get().get();
-    HyperliquidRealtimeEvent::Quote(
-        generation,
-        TopOfBookQuote {
-            metadata: EventMetadata {
-                provider_id: instrument.provider.clone(),
-                instrument_id: instrument.instrument_id.clone(),
-                entitlement_id: instrument.entitlement_id.clone(),
-                source_sequence: quote.sequence,
-                session_generation: generation,
-                timestamps: QualifiedTimestamp {
-                    exchange_unix_nanos: None,
-                    provider_unix_nanos: None,
-                    received_unix_nanos: quote.received_unix_nanos,
-                },
+    ProviderEventKind::Quote(TopOfBookQuote {
+        metadata: EventMetadata {
+            provider_id: instrument.provider.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            entitlement_id: instrument.entitlement_id.clone(),
+            source_sequence: quote.sequence,
+            session_generation: generation,
+            timestamps: QualifiedTimestamp {
+                exchange_unix_nanos: None,
+                provider_unix_nanos: None,
+                received_unix_nanos: quote.received_unix_nanos,
             },
-            bid: Some(QuoteLevel {
-                price: quote.bid,
-                quantity: None,
-                order_count: None,
-            }),
-            ask: Some(QuoteLevel {
-                price: quote.ask,
-                quantity: None,
-                order_count: None,
-            }),
         },
-    )
+        bid: Some(QuoteLevel {
+            price: quote.bid,
+            quantity: None,
+            order_count: None,
+        }),
+        ask: Some(QuoteLevel {
+            price: quote.ask,
+            quantity: None,
+            order_count: None,
+        }),
+    })
 }

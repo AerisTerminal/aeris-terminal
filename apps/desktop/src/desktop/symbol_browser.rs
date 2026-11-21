@@ -838,7 +838,7 @@ impl SymbolBrowser {
 fn scope_lanes(scope: SymbolSearchScope) -> Vec<ProviderLane> {
     scope_lanes_from_descriptors(
         scope,
-        aeris_market_runtime::published_provider_descriptors(),
+        aeris_market_providers::published_provider_descriptors(),
     )
 }
 

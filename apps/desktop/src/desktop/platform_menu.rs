@@ -1376,7 +1376,7 @@ mod tests {
                 .child(
                     about_section(
                         about_details(&account, None),
-                        aeris_market_runtime::built_in_provider_presentations()
+                        aeris_market_providers::built_in_provider_presentations()
                             .iter()
                             .find_map(|p| p.attribution),
                         1_780_000_000,
@@ -1403,7 +1403,7 @@ mod tests {
             let attributed_bounds = cx
                 .debug_bounds("about_section_attributed")
                 .expect("about section with provider notices");
-            let attributed = aeris_market_runtime::built_in_provider_presentations()
+            let attributed = aeris_market_providers::built_in_provider_presentations()
                 .iter()
                 .find_map(|p| p.attribution);
             assert_eq!(theme_bounds.size.height, px(THEME_SECTION_HEIGHT));
@@ -1442,7 +1442,7 @@ mod tests {
     fn layout_height_counts_every_section_and_separator() {
         // The panel's inset plus border on both edges.
         let panel_chrome = 9.0;
-        let attributed = aeris_market_runtime::built_in_provider_presentations()
+        let attributed = aeris_market_providers::built_in_provider_presentations()
             .iter()
             .find_map(|p| p.attribution);
         let development = PlatformMenuLayout {
@@ -1490,7 +1490,7 @@ mod tests {
 
     #[test]
     fn provider_notices_carry_the_requested_year_and_owners() {
-        let attribution = aeris_market_runtime::built_in_provider_presentations()
+        let attribution = aeris_market_providers::built_in_provider_presentations()
             .iter()
             .find_map(|p| p.attribution)
             .unwrap();

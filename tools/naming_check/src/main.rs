@@ -2592,6 +2592,7 @@ mod tests {
         Platform,
         Adapter,
         Runtime,
+        ProviderComposition,
         Presentation,
         CompositionRoot,
     }
@@ -2622,6 +2623,7 @@ mod tests {
             | "aeris_market_runtime"
             | "aeris_study_sdk"
             | "aeris_trading_runtime" => CrateLayer::Runtime,
+            "aeris_market_providers" => CrateLayer::ProviderComposition,
             "aeris_application" | "aeris_chart_integration" | "aeris_terminal_ui" => {
                 CrateLayer::Presentation
             }
@@ -2633,12 +2635,18 @@ mod tests {
     }
 
     fn layer_may_depend_on(layer: CrateLayer, dependency: CrateLayer) -> bool {
-        use CrateLayer::{Adapter, CompositionRoot, Domain, Leaf, Platform, Presentation, Runtime};
+        use CrateLayer::{
+            Adapter, CompositionRoot, Domain, Leaf, Platform, Presentation, ProviderComposition,
+            Runtime,
+        };
         match layer {
             Leaf => false,
             Domain => matches!(dependency, Leaf | Domain),
             Platform | Adapter => matches!(dependency, Leaf | Domain | Platform),
-            Runtime => matches!(dependency, Leaf | Domain | Platform | Adapter | Runtime),
+            Runtime => matches!(dependency, Leaf | Domain | Platform | Runtime),
+            ProviderComposition => {
+                matches!(dependency, Leaf | Domain | Platform | Adapter | Runtime)
+            }
             Presentation => matches!(dependency, Leaf | Domain | Platform | Presentation),
             CompositionRoot => dependency != CompositionRoot,
         }
@@ -2676,6 +2684,7 @@ mod tests {
                 }
                 "aeris_market_runtime" => {
                     matches!(*dependency, "aeris_trading_runtime" | "aeris_study_sdk")
+                        || target == Some(CrateLayer::Adapter)
                 }
                 _ => false,
             };
@@ -2704,15 +2713,23 @@ mod tests {
         for (package, dependencies) in [
             (
                 "aeris_market_runtime",
+                &["aeris_market_engine", "chrono"][..],
+            ),
+            (
+                "aeris_market_providers",
                 &[
-                    "aeris_market_engine",
+                    "aeris_market_runtime",
                     "aeris_rithmic_protocol_adapter",
-                    "chrono",
+                    "aeris_hyperliquid_market_adapter",
                 ][..],
             ),
             (
                 "aeris_desktop",
-                &["aeris_market_runtime", "aeris_trading_runtime"][..],
+                &[
+                    "aeris_market_providers",
+                    "aeris_market_runtime",
+                    "aeris_trading_runtime",
+                ][..],
             ),
             ("aeris_study_sdk", &["aeris_market_runtime"][..]),
         ] {
@@ -2730,10 +2747,22 @@ mod tests {
                 &["aeris_hyperliquid_market_adapter"][..],
             ),
             ("aeris_trading_runtime", &["aeris_platform_runtime"][..]),
+            (
+                "aeris_market_runtime",
+                &["aeris_rithmic_protocol_adapter"][..],
+            ),
+            (
+                "aeris_market_runtime",
+                &["aeris_hyperliquid_market_adapter"][..],
+            ),
             ("aeris_market_runtime", &["aeris_trading_runtime"][..]),
             ("aeris_market_runtime", &["aeris_study_sdk"][..]),
             ("aeris_market_runtime", &["rusqlite"][..]),
             ("aeris_market_runtime", &["aeris_desktop"][..]),
+            (
+                "aeris_market_providers",
+                &["aeris_market_runtime", "aeris_trading_runtime"][..],
+            ),
             (
                 "aeris_study_sdk",
                 &["aeris_market_runtime", "aeris_trading_runtime"][..],
@@ -4797,7 +4826,12 @@ mod tests {
             "history source and the one bounded catalog channel for registered providers",
         ),
         (
-            "crates/market_runtime/src/rithmic_realtime.rs",
+            "crates/market_runtime/src/market_service/provider_session.rs",
+            1,
+            "provider-neutral realtime session boundary for pluggable provider runtimes",
+        ),
+        (
+            "crates/market_providers/src/rithmic_realtime.rs",
             1,
             "catalog session seam so search queueing and caching are tested without a session",
         ),
@@ -5453,6 +5487,7 @@ mod tests {
         // in the signed-in startup that the sign-in gate releases.
         for signed_in_only in [
             "MarketService::start",
+            "start_market_service(",
             "attach_broker_venue(",
             "attach_trading_market_feed(",
             "start_context_service(",
@@ -6288,7 +6323,7 @@ jobs:
         // the one native-vault entry; none may arrive through the environment,
         // arguments, CI or source.
         let readers = [
-            "crates/market_runtime/src/rithmic_realtime.rs",
+            "crates/market_providers/src/rithmic_realtime.rs",
             "crates/adapters/rithmic_protocol/src/history_fetch.rs",
             "crates/adapters/rithmic_protocol/src/login.rs",
             "crates/adapters/rithmic_protocol/src/venue/mod.rs",
@@ -6361,7 +6396,7 @@ jobs:
             "crates/adapters/rithmic_protocol/src/protocol.rs",
             "crates/adapters/rithmic_protocol/src/session_tests.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
-            "crates/market_runtime/src/rithmic_realtime.rs",
+            "crates/market_providers/src/rithmic_realtime.rs",
             "crates/adapters/rithmic_protocol/src/history_fetch.rs",
             "crates/adapters/rithmic_protocol/src/venue/mod.rs",
         ] {
@@ -6738,6 +6773,8 @@ jobs:
         [
             // The desktop reads and writes the workspace file.
             "apps/desktop/Cargo.toml",
+            // The provider composition crate installs resolved instruments for the market runtime.
+            "crates/market_providers/Cargo.toml",
             // The runtime restores the instrument and series identities a saved pane stores.
             "crates/market_runtime/Cargo.toml",
         ]

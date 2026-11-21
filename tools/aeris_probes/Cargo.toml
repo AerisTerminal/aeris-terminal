@@ -27,6 +27,7 @@ name = "market_scan_probe"
 path = "src/bin/market_scan_probe/main.rs"
 
 [dependencies]
+aeris_market_providers = { path = "../../crates/market_providers", features = ["probe"] }
 aeris_market_runtime = { path = "../../crates/market_runtime", features = ["probe"] }
 aeris_market_engine = { path = "../../crates/market_engine" }
 aeris_market_data = { path = "../../crates/domain/market_data" }

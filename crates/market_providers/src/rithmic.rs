@@ -2,7 +2,6 @@
 //! fetcher, and catalog dispatcher.
 
 use std::{
-    collections::BTreeSet,
     sync::{
         Arc, Mutex,
         atomic::Ordering,
@@ -13,38 +12,38 @@ use std::{
 
 use aeris_market_data::BarPeriod;
 use aeris_market_engine::{
-    MarketEngine, MarketStream, ProviderCapabilities as EngineProviderCapabilities,
-    StreamRequirements,
+    MarketStream, ProviderCapabilities as EngineProviderCapabilities, StreamRequirements,
     fence::{Epoch, ProviderTag},
 };
-pub(in super::super) use aeris_rithmic_protocol_adapter::{
+use aeris_market_runtime::{
+    BrokerVenueRunner, ProviderAttribution, ProviderCatalogSymbol, ProviderConnectionKind,
+    ProviderDailyBarCadence, ProviderFeedLevel, ProviderPresentationDescriptor,
+    plugin::{
+        ActiveWorkerGuard, AlertDemandUpdate, COMMAND_CAPACITY, CalendarBarStamp,
+        CandleDemandPolicy, CatalogPublisher, CatalogSessionBinding, ConcurrencyLimits,
+        DemandFlushPolicy, DepthCapabilities, HistoryRequest, HistorySnapshot, HistorySource,
+        LiveModel, ProviderCapabilities, ProviderCatalogChannelImpl, ProviderCatalogChannels,
+        ProviderCatalogCommand, ProviderCatalogEvent, ProviderDemand, ProviderDescriptor,
+        ProviderEvent, ProviderEventKind, ProviderEventSink, ProviderHistoryCapabilities,
+        ProviderRealtimeChannels, ProviderRecoveryPolicy, ProviderRuntimeRecord,
+        ProviderRuntimeSpec, ProviderSession, ProviderSessionError, ProviderStartHandle,
+        QuoteCapability, REALTIME_CAPACITY, ReconnectPolicy, StartedProviderRuntime,
+        TradeDemandPolicy, history_instrument_from_install, try_control, try_send_catalog_control,
+    },
+};
+pub(crate) use aeris_rithmic_protocol_adapter::{
     RITHMIC_LOGIN_SCHEMA, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicLogin,
 };
 pub use aeris_rithmic_protocol_adapter::{RithmicLoginSummary, RithmicServer};
 
-use crate::{
-    ProviderCatalogSymbol, ProviderPresentationDescriptor,
-    rithmic_realtime::{
-        RithmicCatalogControl, RithmicCatalogEvent, RithmicInstrumentDemand, RithmicLoginRevision,
-        RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent,
-    },
+use crate::rithmic_realtime::{
+    RithmicCatalogControl, RithmicCatalogEvent, RithmicInstrumentDemand, RithmicLoginRevision,
+    RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent,
 };
 
-use super::super::{
-    ActiveWorkerGuard, AlertDemandUpdate, COMMAND_CAPACITY, CandleDemandPolicy, CatalogPublisher,
-    CatalogSessionBinding, Command, ConcurrencyLimits, Coordinator, DepthCapabilities,
-    HistoryRequest, HistorySnapshot, HistorySource, LiveModel, ProviderCapabilities,
-    ProviderCatalogChannelImpl, ProviderCatalogChannels, ProviderCatalogCommand,
-    ProviderCatalogEvent, ProviderCoordinatorWake, ProviderDemand, ProviderDescriptor,
-    ProviderEvent, ProviderEventKind, ProviderHistoryCapabilities, ProviderRealtimeChannels,
-    ProviderRecoveryPolicy, ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec,
-    ProviderStartContext, QuoteCapability, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY,
-    StartedProviderRuntime, TradeDemandPolicy, calendar, configured_reconnect_delay,
-    provider_session::{ProviderEventSink, ProviderSession, ProviderSessionError, try_control},
-    reconnect, try_send_catalog_control,
-};
+const RITHMIC_REALTIME_CONTROL_CAPACITY: usize = 2;
 
-pub(in super::super) const RITHMIC_PRESENTATION: ProviderPresentationDescriptor =
+pub(crate) const RITHMIC_PRESENTATION: ProviderPresentationDescriptor =
     ProviderPresentationDescriptor {
         id: "rithmic",
         display_name: "Rithmic",
@@ -52,11 +51,11 @@ pub(in super::super) const RITHMIC_PRESENTATION: ProviderPresentationDescriptor 
             "1s", "5s", "10s", "15s", "30s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
             "8h", "12h", "1D", "1W", "1M",
         ],
-        daily_bars: crate::ProviderDailyBarCadence::TradingSession,
+        daily_bars: ProviderDailyBarCadence::TradingSession,
         search_hint: "Search Rithmic symbols",
         logo_key: "rithmic",
         broker_venue_id: Some(aeris_trading::venue::BROKER_VENUE_ID),
-        attribution: Some(crate::ProviderAttribution {
+        attribution: Some(ProviderAttribution {
             market_data_mark_key: "market_data_by_rithmic",
             powered_by_mark_key: "powered_by_omne",
             notices: &[
@@ -71,15 +70,15 @@ pub(in super::super) const RITHMIC_PRESENTATION: ProviderPresentationDescriptor 
         catalog_refresh_on_startup: false,
         ready_label_suffix: "",
         // Rithmic streams depth by order, not only aggregated price levels.
-        feed_level: crate::ProviderFeedLevel::OrderLevels,
+        feed_level: ProviderFeedLevel::OrderLevels,
         search_categories_available: false,
         market_screen_available: false,
         market_scan_available: false,
         trades_available: true,
-        connection_kind: crate::ProviderConnectionKind::Credentials,
+        connection_kind: ProviderConnectionKind::Credentials,
     };
 
-pub(in super::super) const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+pub(crate) const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "rithmic",
     presentation: &RITHMIC_PRESENTATION,
     login_schema: Some(&RITHMIC_LOGIN_SCHEMA),
@@ -100,7 +99,7 @@ pub(in super::super) const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDesc
         },
         depth: Some(DepthCapabilities),
         quotes: Some(QuoteCapability::DedicatedTopOfBook),
-        reconnect: reconnect::ReconnectPolicy::rithmic_recovery(),
+        reconnect: ReconnectPolicy::rithmic_recovery(),
         history: ProviderHistoryCapabilities {
             worker: "aeris-rithmic-history",
             supported_period: rithmic_supported_period,
@@ -108,7 +107,7 @@ pub(in super::super) const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDesc
         recovery_policy: ProviderRecoveryPolicy::CoordinatorReissuesDemand,
         alert_demand_update: AlertDemandUpdate::Immediate,
         live_model: LiveModel::TradeBuilt,
-        calendar_bar_stamp: calendar::CalendarBarStamp::SessionOpen,
+        calendar_bar_stamp: CalendarBarStamp::SessionOpen,
         overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
         candle_requires_connected: false,
         candle_correction_detail: "Provider candle correction requires covering history",
@@ -120,11 +119,10 @@ pub(in super::super) const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDesc
         maximum_order_level_instruments: 8,
         recovers_silence: true,
     },
-    start: start_rithmic_runtime,
-    flush_demand: flush_rithmic_provider_demand,
+    demand_flush: DemandFlushPolicy::Pending,
 };
 
-pub(in super::super) struct LiveRithmicHistory;
+pub(crate) struct LiveRithmicHistory;
 
 impl HistorySource for LiveRithmicHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
@@ -132,7 +130,7 @@ impl HistorySource for LiveRithmicHistory {
             .instrument
             .as_ref()
             .ok_or_else(|| "Provider instrument is not installed".to_string())?;
-        let instrument = super::super::history_instrument_from_install(installed);
+        let instrument = history_instrument_from_install(installed);
         aeris_rithmic_protocol_adapter::history_fetch::fetch(
             &request.series,
             request.provider_generation.0.get(),
@@ -143,9 +141,7 @@ impl HistorySource for LiveRithmicHistory {
     }
 }
 
-pub(in super::super) fn rithmic_wire(
-    demand: &ProviderDemand,
-) -> Result<RithmicRealtimeDemand, String> {
+pub(crate) fn rithmic_wire(demand: &ProviderDemand) -> Result<RithmicRealtimeDemand, String> {
     if demand.missing_catalog {
         return Err("Rithmic instrument is not installed".to_string());
     }
@@ -174,17 +170,17 @@ pub(in super::super) fn rithmic_wire(
     })
 }
 
-pub(in super::super) struct RithmicSession {
-    pub(in super::super) controls: SyncSender<RithmicRealtimeControl>,
-    pub(in super::super) history: SyncSender<HistoryRequest>,
-    pub(in super::super) binding: Arc<Mutex<RithmicBinding>>,
+pub(crate) struct RithmicSession {
+    pub(crate) controls: SyncSender<RithmicRealtimeControl>,
+    pub(crate) history: SyncSender<HistoryRequest>,
+    pub(crate) binding: Arc<Mutex<RithmicBinding>>,
 }
 
 #[derive(Default)]
-pub(in super::super) struct RithmicBinding {
-    pub(in super::super) sink: Option<ProviderEventSink>,
-    pub(in super::super) wire_generation: Option<u64>,
-    pub(in super::super) pending: Option<RithmicRealtimeEvent>,
+pub(crate) struct RithmicBinding {
+    pub(crate) sink: Option<ProviderEventSink>,
+    pub(crate) wire_generation: Option<u64>,
+    pub(crate) pending: Option<RithmicRealtimeEvent>,
 }
 
 impl ProviderSession for RithmicSession {
@@ -246,7 +242,7 @@ impl ProviderSession for RithmicSession {
 }
 
 impl RithmicBinding {
-    pub(in super::super) fn take(
+    pub(crate) fn take(
         &mut self,
         events: &Receiver<RithmicRealtimeEvent>,
     ) -> Option<ProviderEvent> {
@@ -260,28 +256,28 @@ impl RithmicBinding {
             Some(current) if wire_generation < current => None,
             Some(current) if wire_generation > current => {
                 self.pending = Some(event);
-                Some(ProviderEvent {
-                    provider: RITHMIC_DESCRIPTOR.id,
-                    generation: sink.epoch,
+                Some(ProviderEvent::bound(
+                    RITHMIC_DESCRIPTOR.id,
+                    sink.epoch,
                     wire_generation,
-                    kind: ProviderEventKind::TransportReplaced,
-                })
+                    ProviderEventKind::TransportReplaced,
+                ))
             }
             _ => {
                 self.wire_generation = Some(wire_generation);
                 let wire = crate::rithmic_realtime::into_wire_provider_event(event);
-                Some(ProviderEvent {
-                    provider: wire.provider,
-                    generation: sink.epoch,
+                Some(ProviderEvent::bound(
+                    wire.provider,
+                    sink.epoch,
                     wire_generation,
-                    kind: wire.kind,
-                })
+                    wire.kind,
+                ))
             }
         }
     }
 }
 
-pub(in super::super) fn realtime_channels(
+pub(crate) fn realtime_channels(
     controls: SyncSender<RithmicRealtimeControl>,
     events: Receiver<RithmicRealtimeEvent>,
     binding: Arc<Mutex<RithmicBinding>>,
@@ -304,7 +300,7 @@ pub(in super::super) fn realtime_channels(
     )
 }
 
-pub(in super::super) fn dispatch_catalog(
+pub(crate) fn dispatch_catalog(
     controls: &SyncSender<RithmicCatalogControl>,
     provider: &str,
     command: ProviderCatalogCommand,
@@ -346,35 +342,32 @@ impl From<RithmicCatalogEvent> for ProviderCatalogEvent {
     }
 }
 
-pub(in super::super) fn rithmic_supported_period(period: BarPeriod) -> Result<(), String> {
+pub(crate) fn provider_spec(
+    history: Box<dyn HistorySource>,
+    realtime_enabled: bool,
+    login: RithmicLoginRevision,
+) -> ProviderRuntimeSpec {
+    ProviderRuntimeSpec::new(
+        RITHMIC_DESCRIPTOR,
+        Some(history),
+        realtime_enabled,
+        Box::new(move |spec, handle| start_rithmic_runtime(spec, handle, login)),
+    )
+}
+
+fn rithmic_supported_period(period: BarPeriod) -> Result<(), String> {
     aeris_rithmic_protocol_adapter::history_fetch::chart_interval(period).map(|_| ())
 }
 
-fn flush_rithmic_provider_demand(coordinator: &mut Coordinator<'_>) {
-    coordinator.flush_pending_demand(RITHMIC_DESCRIPTOR.id);
-}
-
-pub(in super::super) fn start_rithmic_runtime(
+fn start_rithmic_runtime(
     spec: ProviderRuntimeSpec,
-    completions: &SyncSender<Command>,
-    wake: ProviderCoordinatorWake,
-    engine: &MarketEngine,
-    active_workers: &Arc<Mutex<BTreeSet<String>>>,
-    context: &ProviderStartContext,
+    handle: &ProviderStartHandle<'_>,
+    login: RithmicLoginRevision,
 ) -> Result<ProviderRuntimeRecord, String> {
-    let enabled = spec.realtime.enabled;
+    let enabled = spec.realtime_enabled;
     let descriptor = spec.descriptor;
-    let started =
-        ProviderRuntimeRegistry::start_history_runtime(spec, completions, active_workers)?;
-    start_rithmic_record(
-        started,
-        descriptor,
-        enabled,
-        context.rithmic_login.clone(),
-        wake,
-        engine,
-        active_workers,
-    )
+    let started = handle.start_history_runtime(spec)?;
+    start_rithmic_record(started, descriptor, enabled, login, handle)
 }
 
 fn start_rithmic_record(
@@ -382,12 +375,12 @@ fn start_rithmic_record(
     descriptor: ProviderDescriptor,
     enabled: bool,
     login: RithmicLoginRevision,
-    wake: ProviderCoordinatorWake,
-    engine: &MarketEngine,
-    active_workers: &Arc<Mutex<BTreeSet<String>>>,
+    handle: &ProviderStartHandle<'_>,
 ) -> Result<ProviderRuntimeRecord, String> {
+    let wake = handle.wake();
+    let active_workers = handle.active_workers();
     let reconnect_delay = if enabled {
-        match configured_reconnect_delay(engine, descriptor.id) {
+        match handle.configured_reconnect_delay(descriptor.id) {
             Ok(delay) => Some(delay),
             Err(error) => {
                 started.cancel_and_join();
@@ -411,7 +404,7 @@ fn start_rithmic_record(
             started.cancel_and_join();
             return Err("Provider reconnect policy is unavailable".to_string());
         };
-        let worker_activity = Arc::clone(active_workers);
+        let worker_activity = Arc::clone(&active_workers);
         let provider = thread::Builder::new()
             .name(crate::rithmic_realtime::WORKER_NAME.to_string())
             .spawn(move || {
@@ -462,9 +455,7 @@ fn start_rithmic_record(
     })
 }
 
-pub(in super::super) fn default_broker_venue_runner(
-    revision: RithmicLoginRevision,
-) -> super::super::BrokerVenueRunner {
+pub(crate) fn default_broker_venue_runner(revision: RithmicLoginRevision) -> BrokerVenueRunner {
     Arc::new(move |link, shutdown| {
         aeris_rithmic_protocol_adapter::venue::run(link, &shutdown, &revision);
     })

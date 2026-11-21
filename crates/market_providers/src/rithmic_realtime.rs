@@ -10,14 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentKind,
-    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument,
-};
 use aeris_contracts::{InstallProviderInstrument, ProviderContractMetadata};
 use aeris_market_data::{
     DepthSnapshot, MarketEvent, MarketTrade, OrderLevelEvent, OrderLevelUpdate, TopOfBookQuote,
+};
+use aeris_market_runtime::{
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentKind,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
+    SelectProviderInstrument,
+    plugin::{CatalogPublisher, ProviderCoordinatorWake},
 };
 use aeris_platform_runtime::{
     NativeCredentialVault, NativeNetworkMonitor, NativeNetworkMonitorCancellation,
@@ -37,8 +38,6 @@ use aeris_rithmic_protocol_adapter::{
     SearchPattern, SessionGeneration, SymbolSearchResult, apply_rithmic_environment_event,
     try_recv_rithmic_event,
 };
-
-use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
 
 const CALLBACK_CAPACITY: usize = 256;
 pub(crate) const WORKER_NAME: &str = "aeris-rithmic-provider";
@@ -1563,9 +1562,9 @@ fn serve_demand(
 ) -> DemandExit {
     let mut transport_recovery = false;
     let mut replacing = false;
-    let mut recovery = crate::market_service::reconnect::Backoff::new(
-        crate::market_service::reconnect::ReconnectPolicy::rithmic_recovery(),
-        &crate::market_service::clock::SystemClock,
+    let mut recovery = aeris_market_runtime::plugin::Backoff::new(
+        aeris_market_runtime::plugin::ReconnectPolicy::rithmic_recovery(),
+        &aeris_market_runtime::plugin::SystemClock,
         0x5249_5448,
     );
     loop {
@@ -1629,13 +1628,13 @@ fn serve_demand(
 fn replacement_delay(
     replacing: bool,
     transport_recovery: bool,
-    recovery: &mut crate::market_service::reconnect::Backoff,
+    recovery: &mut aeris_market_runtime::plugin::Backoff,
 ) -> Option<Duration> {
     if !replacing || transport_recovery {
         return None;
     }
-    let crate::market_service::reconnect::RetryDecision::Wait(delay) =
-        recovery.failure(crate::market_service::reconnect::RetryClass::Transient)
+    let aeris_market_runtime::plugin::RetryDecision::Wait(delay) =
+        recovery.failure(aeris_market_runtime::plugin::RetryClass::Transient)
     else {
         unreachable!("Rithmic non-transport recovery has no budget");
     };
@@ -2546,8 +2545,8 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 
 pub(crate) const fn invalidation_fault(
     reason: Option<ProviderInvalidationReason>,
-) -> crate::market_service::provider_event::ProviderFault {
-    use crate::market_service::provider_event::{ProviderFault, ProviderFaultKind};
+) -> aeris_market_runtime::plugin::ProviderFault {
+    use aeris_market_runtime::plugin::{ProviderFault, ProviderFaultKind};
     match reason {
         Some(ProviderInvalidationReason::Transport) => ProviderFault {
             kind: ProviderFaultKind::Transport,
@@ -2609,8 +2608,8 @@ pub(crate) const fn invalidation_fault(
 
 pub(crate) fn into_wire_provider_event(
     event: RithmicRealtimeEvent,
-) -> crate::market_service::provider_event::WireProviderEvent {
-    use crate::market_service::provider_event::{
+) -> aeris_market_runtime::plugin::WireProviderEvent {
+    use aeris_market_runtime::plugin::{
         ProviderDisconnect, ProviderEventKind, ProviderTradeBatch, WireProviderEvent,
     };
     let generation = event.generation();
@@ -2661,13 +2660,13 @@ mod tests {
         publish_catalog_callback, queue_depth_snapshot, reject_catalog_generation,
         reject_pending_catalog, reject_undispatched, retire_pending_catalog_generation,
     };
-    use crate::{
-        InstrumentSearchCategories, ProviderCatalogRejectionReason, ProviderInstrumentKind,
-        ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
-    };
     use aeris_market_data::{
         BookSide, DepthSnapshot, EventMetadata, OrderLevelChange, OrderLevelEvent,
         OrderLevelSnapshot, OrderLevelUpdate, QualifiedTimestamp,
+    };
+    use aeris_market_runtime::{
+        InstrumentSearchCategories, ProviderCatalogRejectionReason, ProviderInstrumentKind,
+        ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
     };
     use aeris_platform_runtime::{NetworkEvent, PowerEvent};
     use aeris_rithmic_protocol_adapter::{
@@ -2677,11 +2676,39 @@ mod tests {
     };
 
     #[test]
+    fn terminal_rithmic_failures_do_not_auto_resubscribe() {
+        use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
+        for reason in [
+            ProviderInvalidationReason::Authentication,
+            ProviderInvalidationReason::AgreementRequired,
+            ProviderInvalidationReason::UnsupportedSystem,
+            ProviderInvalidationReason::SchemaMismatch,
+            ProviderInvalidationReason::MalformedMessage,
+        ] {
+            assert!(
+                !super::invalidation_fault(Some(reason)).auto_recovers,
+                "{reason:?}"
+            );
+        }
+        for reason in [
+            ProviderInvalidationReason::Transport,
+            ProviderInvalidationReason::HeartbeatSilence,
+            ProviderInvalidationReason::MessageSilence,
+            ProviderInvalidationReason::SequenceGap,
+            ProviderInvalidationReason::QueueOverflow,
+        ] {
+            assert!(
+                super::invalidation_fault(Some(reason)).auto_recovers,
+                "{reason:?}"
+            );
+        }
+        assert!(super::invalidation_fault(None).auto_recovers);
+    }
+
+    #[test]
     fn reconnect_transport_uses_only_adapter_and_nontransport_is_bounded() {
-        use crate::market_service::{
-            clock::ScriptedClock,
-            reconnect::{Backoff, ReconnectPolicy},
-        };
+        use crate::ScriptedClock;
+        use aeris_market_runtime::plugin::{Backoff, ReconnectPolicy};
         let clock = ScriptedClock::new(42);
         let mut backoff = Backoff::new(ReconnectPolicy::rithmic_recovery(), &clock, 10);
         assert_eq!(super::replacement_delay(false, false, &mut backoff), None);
@@ -2787,11 +2814,11 @@ mod tests {
         let catalog_publications = super::CatalogPublisher::new(
             catalog_events,
             "rithmic",
-            crate::market_service::ProviderCoordinatorWake::for_tests(),
+            aeris_market_runtime::plugin::ProviderCoordinatorWake::for_tests(),
         );
         let (_realtime_sender, realtime_controls) = mpsc::sync_channel(1);
         let (realtime_publications, published) = mpsc::sync_channel(8);
-        let coordinator_wake = crate::market_service::ProviderCoordinatorWake::for_tests();
+        let coordinator_wake = aeris_market_runtime::plugin::ProviderCoordinatorWake::for_tests();
         let login = super::RithmicLoginRevision::default();
         let channels = super::ProviderChannels {
             catalog_controls: &catalog_controls,
@@ -2872,7 +2899,7 @@ mod tests {
             super::CatalogPublisher::new(
                 sender,
                 "rithmic",
-                crate::market_service::ProviderCoordinatorWake::for_tests(),
+                aeris_market_runtime::plugin::ProviderCoordinatorWake::for_tests(),
             ),
             published,
         )
@@ -3679,11 +3706,11 @@ mod tests {
         let catalog_publications = super::CatalogPublisher::new(
             publications,
             "rithmic",
-            crate::market_service::ProviderCoordinatorWake::for_tests(),
+            aeris_market_runtime::plugin::ProviderCoordinatorWake::for_tests(),
         );
         let (realtime_sender, realtime_controls) = mpsc::sync_channel(1);
         let (realtime_publications, _realtime_events) = mpsc::sync_channel(1);
-        let coordinator_wake = crate::market_service::ProviderCoordinatorWake::for_tests();
+        let coordinator_wake = aeris_market_runtime::plugin::ProviderCoordinatorWake::for_tests();
         let login = super::RithmicLoginRevision::default();
         let channels = super::ProviderChannels {
             catalog_controls: &catalog_controls,

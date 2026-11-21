@@ -1267,7 +1267,7 @@ pub(super) struct MarketScan {
 impl Default for MarketScan {
     fn default() -> Self {
         Self::new(
-            aeris_market_runtime::built_in_provider_presentations()
+            aeris_market_providers::built_in_provider_presentations()
                 .iter()
                 .find(|descriptor| descriptor.market_scan_available),
         )
@@ -1780,7 +1780,7 @@ mod tests {
     #[test]
     fn the_builder_offers_every_interval_the_scanning_provider_charts() {
         assert_eq!(MarketScan::new(None).intervals(), Vec::new());
-        let provider = aeris_market_runtime::built_in_provider_presentations()
+        let provider = aeris_market_providers::built_in_provider_presentations()
             .iter()
             .find(|presentation| presentation.market_scan_available)
             .expect("a provider answers market scans");

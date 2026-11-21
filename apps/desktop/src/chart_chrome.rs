@@ -336,7 +336,7 @@ impl SymbolSearchScope {
     /// A saved scope naming a provider this build does not register falls back to all.
     fn parse(value: &str) -> Self {
         let registered = |id: &str| {
-            aeris_market_runtime::built_in_provider_presentations()
+            aeris_market_providers::built_in_provider_presentations()
                 .iter()
                 .find(|descriptor| descriptor.id == id)
                 .map(|descriptor| descriptor.id)

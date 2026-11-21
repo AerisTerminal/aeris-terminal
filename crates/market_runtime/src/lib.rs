@@ -10,15 +10,15 @@ mod catalog;
 pub mod fence {
     pub use aeris_market_engine::fence::{ConsumerTag, EpochSequence, Fenced};
 }
-pub(crate) use aeris_hyperliquid_market_adapter::display_depth as hyperliquid_display_depth;
-mod hyperliquid_market_scan;
-mod hyperliquid_realtime;
 pub mod market_service;
 mod provider_presentation;
-mod rithmic_realtime;
 mod scan;
 mod status;
 pub mod study;
+#[cfg(test)]
+mod test_shims;
+#[cfg(test)]
+pub(crate) use test_shims::{hyperliquid_display_depth, hyperliquid_realtime, rithmic_realtime};
 
 pub use aeris_provider_spi::{
     ConnectionDescriptor, ConnectionId, ConnectionIdError, CredentialSource, DEFAULT_CONNECTION_ID,
@@ -41,12 +41,12 @@ pub use provider_presentation::{
 pub use scan::{
     MAXIMUM_SCAN_CONDITIONS, MAXIMUM_SCAN_HISTORY_BARS, MAXIMUM_SCAN_NUMBER_SCALE,
     MAXIMUM_SCAN_PERIOD, MAXIMUM_SCAN_RESULTS, MAXIMUM_SCAN_STUDY_PARAMETERS,
-    MAXIMUM_SCAN_UNIVERSE, ProviderMarketScan, ProviderMarketScanMatch, ScanComparison,
+    MAXIMUM_SCAN_UNIVERSE, ProviderMarketScan, ProviderMarketScanMatch, ScanBars, ScanComparison,
     ScanCondition, ScanConditionValues, ScanDefinition, ScanDefinitionError, ScanMatchMode,
-    ScanNumber, ScanOperand, ScanPriceField, ScanProgress, ScanProviderMarkets, ScanStudy,
-    ScanStudyDescriptor, ScanStudyFamily, ScanStudyOperand, ScanStudyOutput, ScanStudyOutputName,
-    ScanStudyParameter, ScanStudyParameterKind, ScanStudyParameterName, ScanValueUnit,
-    scan_studies,
+    ScanNumber, ScanOperand, ScanOutcome, ScanPriceField, ScanProgress, ScanProviderMarkets,
+    ScanStudy, ScanStudyDescriptor, ScanStudyFamily, ScanStudyOperand, ScanStudyOutput,
+    ScanStudyOutputName, ScanStudyParameter, ScanStudyParameterKind, ScanStudyParameterName,
+    ScanValueUnit, evaluate as evaluate_scan, price_decimals as scan_price_decimals, scan_studies,
 };
 pub use status::{
     EngineFaultCode, FailureStage, Fault, MarketSessionPhase, MarketSessionSource,
@@ -56,30 +56,6 @@ pub use status::{
 
 /// Maximum durable alerts owned by one market consumer.
 pub const MAXIMUM_PRICE_ALERTS_PER_CONSUMER: usize = 32;
-
-/// Returns a safe provider-owned replacement for a legacy durable display
-/// symbol when the old identity carries enough information to migrate it.
-///
-/// Routing identity is never rewritten here. This exists so durable desktop
-/// state can refresh presentation aliases without learning provider-specific
-/// symbol rules.
-#[must_use]
-pub fn migrate_retained_provider_display_symbol(
-    instrument: &aeris_contracts::InstallProviderInstrument,
-) -> Option<String> {
-    match instrument.provider.as_str() {
-        "hyperliquid" => aeris_hyperliquid_market_adapter::legacy_display_label(
-            &instrument.instrument_id,
-            &instrument.provider_symbol,
-            &instrument.display_symbol,
-        ),
-        "rithmic" => aeris_rithmic_protocol_adapter::legacy_display_label(
-            &instrument.instrument_id,
-            &instrument.display_symbol,
-        ),
-        _ => None,
-    }
-}
 
 /// One bounded, fixed-point price alert evaluated by the market coordinator.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -462,8 +438,7 @@ pub use market_service::descriptors::{
 pub use market_service::{
     BrokerVenueLink, BrokerVenueRunner, MAXIMUM_RECENT_LADDER_TRADES, MarketService,
     MarketServiceBuilder, MarketServiceStatus, QuoteSubscription,
-    RECENT_LADDER_TRADE_RETENTION_NANOS, RithmicLoginSummary, RithmicServer,
-    built_in_provider_presentations, is_recording_replay_provider, published_provider_descriptors,
+    RECENT_LADDER_TRADE_RETENTION_NANOS, is_recording_replay_provider, plugin,
 };
 pub use market_service::{
     DEFAULT_RECORDING_CAPACITY_BYTES, MAXIMUM_RECORDED_INSTRUMENTS,

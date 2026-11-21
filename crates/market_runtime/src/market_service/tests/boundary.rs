@@ -277,7 +277,10 @@ impl Boundary {
         assert!(coordinator_turn(
             &mut self.coordinator,
             &self.command_receiver,
-            &[super::super::super::RITHMIC_DESCRIPTOR.flush_demand],
+            &[(
+                super::super::super::RITHMIC_DESCRIPTOR.id,
+                super::super::super::RITHMIC_DESCRIPTOR.demand_flush,
+            )],
             &std::sync::atomic::AtomicBool::new(false),
             Some(std::time::Duration::ZERO),
         ));

@@ -280,7 +280,7 @@ impl Drop for TradingGuard {
 pub fn run(root: &DataRoot, evidence: &mut Evidence) -> ProbeResult<()> {
     let _lock =
         InstanceLock::acquire(root).map_err(|error| ProbeError::Runtime(error.to_string()))?;
-    let market_service = market(MarketService::start())?;
+    let market_service = market(aeris_market_providers::start_market_service())?;
     let result = run_with_market(&market_service, root, evidence);
     let shutdown = market_service.shutdown(Duration::from_secs(10));
     result?;
@@ -1033,7 +1033,7 @@ impl Probe<'_> {
             Ok(self.recorder.latest_quote(ETH_ID))
         })?
         .provider_generation;
-        market(market_service.probe_fail_hyperliquid_websocket(0))?;
+        market(market_service.probe_fail_provider_websocket("hyperliquid", 0))?;
         let resubscribed = poll_until(Duration::from_secs(45), || {
             Ok(self
                 .recorder

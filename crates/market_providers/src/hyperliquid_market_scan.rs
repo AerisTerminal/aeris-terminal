@@ -26,12 +26,11 @@ use aeris_hyperliquid_market_adapter::{
 use aeris_market_data::{BarPeriod, MarketBar};
 
 use crate::hyperliquid_realtime::HyperliquidCatalogEvent;
-use crate::market_service::CatalogPublisher;
-use crate::market_service::clock::Clock;
-use crate::scan::{ScanBars, evaluate, price_decimals};
-use crate::{
+use aeris_market_runtime::plugin::{CatalogPublisher, Clock};
+use aeris_market_runtime::{
     MAXIMUM_SCAN_HISTORY_BARS, ProviderInstrumentSummary, ProviderMarketScan,
-    ProviderMarketScanMatch, ScanDefinition, ScanProgress, ScanProviderMarkets,
+    ProviderMarketScanMatch, ScanBars, ScanDefinition, ScanProgress, ScanProviderMarkets,
+    evaluate_scan as evaluate, scan_price_decimals as price_decimals,
 };
 
 pub(crate) const SCAN_WORKER_NAME: &str = "aeris-hyperliquid-scan";
@@ -578,9 +577,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::market_service::ProviderCoordinatorWake;
-    use crate::market_service::clock::ScriptedClock;
-    use crate::{
+    use crate::ScriptedClock;
+    use aeris_market_runtime::plugin::ProviderCoordinatorWake;
+    use aeris_market_runtime::{
         ProviderInstrumentKind, ScanComparison, ScanCondition, ScanConditionValues, ScanMatchMode,
         ScanNumber, ScanOperand, ScanPriceField,
     };
@@ -1060,7 +1059,7 @@ mod tests {
             .expect("a provider answers market scans");
         let mut offered = 0;
         for interval in aeris_market_data::ChartInterval::ALL {
-            let Ok(period) = crate::resolve_cadence(
+            let Ok(period) = aeris_market_runtime::resolve_cadence(
                 interval,
                 presentation,
                 aeris_instruments::CalendarSourceKind::AlwaysOpen,

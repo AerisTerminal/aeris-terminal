@@ -76,11 +76,16 @@ violations and missing verification explicitly, and never describe them as satis
   (`ProviderAuthAdapter`, `PendingAgreement`, `ConnectionId`, `CredentialSource`,
   `ResolvedProviderInstrument`, `HistoryInstrument`, `ProviderFault`, and presentation descriptors)
   and depend only on leaf domain crates, never on `aeris_contracts`, `market_runtime`, or
-  `trading_runtime`. `MarketService::builder()` (`MarketServiceBuilder`) registers market providers,
-  `ProviderAuthAdapter`s (`ProviderAuthRegistry`), and `BrokerVenueRunner`s
-  (`BrokerVenueRunnerRegistry`); core `market_service/` modules (`broker_venue.rs`, `calendar/mod.rs`,
-  `coordinator.rs`, `coordinator/*`, `error.rs`, `history.rs`, `order_book.rs`, `provider_auth.rs`,
-  `realtime.rs`) stay provider-neutral and are enforced by `tools/naming_check`.
+  `trading_runtime`. `crates/market_runtime` has zero Cargo dependencies on any `crates/adapters/*`
+  crate and exposes `aeris_market_runtime::plugin` + `MarketService::builder()` (`MarketServiceBuilder`)
+  for registering market providers, `ProviderAuthAdapter`s (`ProviderAuthRegistry`), and
+  `BrokerVenueRunner`s (`BrokerVenueRunnerRegistry`). Concrete built-in provider plugins and
+  realtime/scan workers live in the thin composition crate `crates/market_providers`
+  (`aeris_market_providers`, `CrateLayer::ProviderComposition`), which only composition roots
+  (`apps/desktop`, `tools/aeris_probes`) may depend on. Core `market_service/` modules
+  (`broker_venue.rs`, `calendar/mod.rs`, `coordinator.rs`, `coordinator/*`, `error.rs`,
+  `history.rs`, `order_book.rs`, `provider_auth.rs`, `realtime.rs`) stay provider-neutral, and
+  both rules are enforced by `tools/naming_check`.
 - `BrokerVenueRegistry` in `trading_runtime` owns bounded multi-venue broker attachments keyed by
   `(VenueId, ConnectionId)` (`attach_broker_venue_for`); `aeris_trading::venue` owns the neutral
   `VenueSession` / `BrokerVenueLink` contract, and concrete venue drivers live inside their
@@ -213,8 +218,8 @@ violations and missing verification explicitly, and never describe them as satis
 - The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,
   or canonical candle state.
 - Desktop provider identities are opaque runtime IDs looked up in
-  `market_runtime::published_provider_descriptors()` and
-  `built_in_provider_presentations()`. The runtime test
+  `aeris_market_providers::published_provider_descriptors()` and
+  `aeris_market_providers::built_in_provider_presentations()`. The composition test
   `every_registered_provider_has_a_complete_published_descriptor` covers every registration;
   `tools/naming_check` rejects a desktop production `enum TerminalProvider` or
   `FALLBACK_TERMINAL_PROVIDER`. Only descriptors with `symbol_browser` enabled enter the

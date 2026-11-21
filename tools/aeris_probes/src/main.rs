@@ -16,7 +16,7 @@ fn run(
     use aeris_platform_runtime::data_root::InstanceLock;
     let _lock =
         InstanceLock::acquire(root).map_err(|error| ProbeError::Runtime(error.to_string()))?;
-    let service = market(aeris_market_runtime::MarketService::start())?;
+    let service = market(aeris_market_providers::start_market_service())?;
     let result = live::run(&service, options, evidence);
     let started = Instant::now();
     let shutdown = service.shutdown(std::time::Duration::from_secs(2));

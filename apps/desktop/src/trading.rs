@@ -594,7 +594,7 @@ pub fn kill_feedback(
 }
 
 fn broker_venue_display_name() -> &'static str {
-    aeris_market_runtime::built_in_provider_presentations()
+    aeris_market_providers::built_in_provider_presentations()
         .iter()
         .find(|descriptor| {
             descriptor.broker_venue_id == Some(aeris_trading::venue::BROKER_VENUE_ID)

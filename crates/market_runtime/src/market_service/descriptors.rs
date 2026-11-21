@@ -140,18 +140,7 @@ impl InstrumentRequest {
             provider_id: instrument.provider.clone(),
             instrument_id: instrument.instrument_id.clone(),
             entitlement_id: instrument.entitlement_id.clone(),
-            query: Some(
-                match super::built_in_provider_presentations()
-                    .iter()
-                    .find(|provider| provider.id == instrument.provider)
-                    .map(|provider| provider.catalog_symbol)
-                {
-                    Some(crate::ProviderCatalogSymbol::DisplaySymbol) => {
-                        instrument.display_symbol.clone()
-                    }
-                    _ => instrument.provider_symbol.clone(),
-                },
-            ),
+            query: Some(instrument.provider_symbol.clone()),
         })
     }
 }
@@ -371,7 +360,7 @@ mod startup_tests {
         assert!(super::super::instrument_terms_from_install(&default).is_err());
         let descriptor = InstrumentDescriptor::from_install(
             &default,
-            &super::super::providers::hyperliquid::HYPERLIQUID_PRESENTATION,
+            super::super::TEST_CANDLE_DESCRIPTOR.presentation,
             true,
         )
         .expect("provisional default descriptor");

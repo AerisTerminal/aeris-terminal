@@ -125,7 +125,7 @@ fn main() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     let _lock = aeris_platform_runtime::data_root::InstanceLock::acquire(root)
         .map_err(|error| error.to_string())?;
-    let market = MarketService::start()?;
+    let market = aeris_market_providers::start_market_service()?;
     let result = run(&market, &symbol, seconds);
     let shutdown = market.shutdown(Duration::from_secs(10));
     result?;

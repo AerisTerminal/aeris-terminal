@@ -302,7 +302,7 @@ fn start() -> Result<
 > {
     let product = fixture_public_crypto();
     let (mut workers, factory) = start_group(
-        MarketService::start()?,
+        aeris_market_providers::start_market_service()?,
         vec![(DEFAULT_WORKSPACE_ID, product)],
         crate::desktop::tests::test_trading_service(),
         Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
@@ -775,7 +775,7 @@ pub(crate) fn runtime_provider_display_name(provider: &str) -> &str {
 fn provider_presentation(
     provider: &str,
 ) -> Option<&'static aeris_market_runtime::ProviderPresentationDescriptor> {
-    aeris_market_runtime::built_in_provider_presentations()
+    aeris_market_providers::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == provider)
 }
@@ -967,7 +967,7 @@ mod tests {
         assert!(queues.contains(MarketStream::Depth));
         assert!(queues.contains(MarketStream::OrderLevels));
 
-        let market = MarketService::start().expect("market runtime");
+        let market = aeris_market_providers::start_market_service().expect("market runtime");
         let price_levels_only = chart_demand_streams(
             &market,
             &fixture_public_crypto().provider,
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     fn depth_opened_before_a_restored_selection_resolves_waits_for_the_selection() {
-        let market = MarketService::start().expect("market runtime");
+        let market = aeris_market_providers::start_market_service().expect("market runtime");
         let (_pane, mut record) = worker_endpoint(
             1,
             2,
