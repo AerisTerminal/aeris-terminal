@@ -725,24 +725,24 @@ fn setting_row(label: &'static str, control: impl IntoElement, theme: &AerisThem
         .child(control)
 }
 
-/// Theme section: a Light and Dark tab pair on the Theme row, then one chip per palette preset.
-/// The menu stays open after a pick so the whole panel re-renders in the new theme.
+/// Theme section: a Light and Dark track-tab pair on the Theme row, then one chip per palette
+/// preset. The menu stays open after a pick so the whole panel re-renders in the new theme.
 fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
     let label = tr!(shell::SECTION_THEME);
-    let modes = TabList::new("platform_menu_theme_modes", label, theme)
-        .compact()
-        .children(THEME_MODES.map(|mode| {
+    let modes = TabList::track("platform_menu_theme_modes", label, theme).children(
+        THEME_MODES.map(|mode| {
             let preview = AerisTheme::resolve(theme.preset, mode);
             let on_select = on_select.clone();
             Tab::new(theme_mode_tab_id(mode), theme)
-                .compact()
+                .track()
                 .selected(theme.mode == mode)
                 .on_click(move |_, window, cx| {
                     on_select(preview, window, cx);
                     cx.stop_propagation();
                 })
                 .child(tr!(theme_mode_name(mode)))
-        }));
+        }),
+    );
     section()
         .h(px(THEME_SECTION_HEIGHT))
         .pb(px(PRESET_GRID_BOTTOM_PADDING))

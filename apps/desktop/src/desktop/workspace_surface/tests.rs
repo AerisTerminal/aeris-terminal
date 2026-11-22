@@ -427,7 +427,7 @@ fn damaged_order_flow_indicator_settings_are_rejected() {
             ..book.clone()
         },
         WorkspaceOrderBookDepthState {
-            levels_per_side: 201,
+            levels_per_side: 1_025,
             ..book.clone()
         },
         WorkspaceOrderBookDepthState {
@@ -2323,7 +2323,11 @@ mod instrument_drawings {
         layout: &mut LayoutDrawings,
         cx: &mut VisualTestContext,
     ) -> bool {
-        cx.update(|_, cx| sync_layout_drawings(&panes.iter(), layout, cx))
+        let indexed = panes
+            .iter()
+            .enumerate()
+            .map(|(index, pane)| (index as u64 + 1, pane));
+        cx.update(|_, cx| sync_layout_drawings(&indexed, layout, cx))
     }
 
     fn layout_instruments(layout: &LayoutDrawings) -> Vec<String> {
@@ -2347,7 +2351,7 @@ mod instrument_drawings {
     }
 
     #[gpui::test]
-    fn panes_showing_one_instrument_share_its_drawings(cx: &mut TestAppContext) {
+    fn panes_showing_one_instrument_keep_independent_drawings(cx: &mut TestAppContext) {
         let mut layout = LayoutDrawings::default();
         let (first, _first_requests, cx) = open_surface(cx, instrument("A"), None);
         let (second, _second_requests, cx) = open_surface(cx, instrument("A"), None);
@@ -2360,11 +2364,20 @@ mod instrument_drawings {
         show(&second, "A", cx);
         assert_eq!(drawing_count(&second, cx), 0);
         share(&panes, &mut layout, cx);
-        assert_eq!(drawing_count(&second, cx), 1, "a new pane adopts them");
+        assert_eq!(
+            drawing_count(&second, cx),
+            0,
+            "a separate pane never inherits another pane's drawings"
+        );
 
         draw(&second, TWO_LINES, cx);
         share(&panes, &mut layout, cx);
-        assert_eq!(drawing_count(&first, cx), 2, "edits reach the other pane");
+        assert_eq!(
+            drawing_count(&first, cx),
+            1,
+            "edits on the second pane never overwrite the first pane"
+        );
+        assert_eq!(drawing_count(&second, cx), 2);
         let settled = drawing_revision(&first, cx);
         share(&panes, &mut layout, cx);
         assert_eq!(drawing_revision(&first, cx), settled, "nothing echoes back");
@@ -2379,13 +2392,11 @@ mod instrument_drawings {
         share(&panes, &mut layout, cx);
         assert_eq!(
             drawing_count(&second, cx),
-            0,
-            "a clear reaches the other pane"
+            2,
+            "clearing one pane leaves the other pane's drawings intact"
         );
-        assert!(layout.entries().is_empty(), "a cleared set is not saved");
 
         show(&second, "B", cx);
-        draw(&first, LINE, cx);
         share(&panes, &mut layout, cx);
         assert_eq!(
             drawing_count(&second, cx),
@@ -2394,22 +2405,15 @@ mod instrument_drawings {
         );
         show(&second, "A", cx);
         share(&panes, &mut layout, cx);
-        assert_eq!(drawing_count(&second, cx), 1, "switching back adopts them");
-
-        show(&first, "B", cx);
-        draw(&second, TWO_LINES, cx);
-        share(&panes, &mut layout, cx);
-        show(&first, "A", cx);
-        share(&panes, &mut layout, cx);
         assert_eq!(
-            drawing_count(&first, cx),
+            drawing_count(&second, cx),
             2,
-            "a pane showing another market remembers the current set"
+            "switching back restores this pane's own drawings"
         );
     }
 
-    /// Drawings belong to the layout, not to the pane that drew them: a pane split off a
-    /// chart and closed again never takes another instrument's drawings with it.
+    /// Each pane persists its own drawings per instrument; splitting or closing another pane
+    /// never overwrites or removes the original pane's saved drawings.
     #[gpui::test]
     fn a_split_pane_switching_instrument_keeps_every_instruments_drawings(cx: &mut TestAppContext) {
         let mut layout = LayoutDrawings::default();
@@ -2432,19 +2436,15 @@ mod instrument_drawings {
         share(&panes, &mut layout, cx);
         assert_eq!(
             drawing_count(&split, cx),
-            1,
-            "the split shows BTC's drawings"
+            0,
+            "the split pane starts with its own empty drawing set"
         );
         show(&split, "HYPE", cx);
         share(&panes, &mut layout, cx);
-        assert_eq!(
-            drawing_count(&split, cx),
-            2,
-            "the split shows HYPE's drawings"
-        );
+        assert_eq!(drawing_count(&split, cx), 0);
         assert_eq!(layout_instruments(&layout), ["BTC", "HYPE"]);
 
-        // The split pane closes; the remaining pane switches to HYPE.
+        // The split pane closes; the remaining pane still has both of its own instrument sets.
         show(&original, "HYPE", cx);
         share(std::slice::from_ref(&original), &mut layout, cx);
         assert_eq!(drawing_count(&original, cx), 2, "HYPE's drawings remain");

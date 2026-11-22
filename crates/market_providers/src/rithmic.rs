@@ -27,8 +27,8 @@ use aeris_market_runtime::{
         ProviderEvent, ProviderEventKind, ProviderEventSink, ProviderHistoryCapabilities,
         ProviderRealtimeChannels, ProviderRecoveryPolicy, ProviderRuntimeRecord,
         ProviderRuntimeSpec, ProviderSession, ProviderSessionError, ProviderStartHandle,
-        QuoteCapability, REALTIME_CAPACITY, ReconnectPolicy, StartedProviderRuntime,
-        TradeDemandPolicy, history_instrument_from_install, try_control, try_send_catalog_control,
+        QuoteCapability, REALTIME_CAPACITY, ReconnectPolicy, TradeDemandPolicy,
+        history_instrument_from_install, try_control, try_send_catalog_control,
     },
 };
 pub(crate) use aeris_rithmic_protocol_adapter::{
@@ -366,17 +366,7 @@ fn start_rithmic_runtime(
 ) -> Result<ProviderRuntimeRecord, String> {
     let enabled = spec.realtime_enabled;
     let descriptor = spec.descriptor;
-    let started = handle.start_history_runtime(spec)?;
-    start_rithmic_record(started, descriptor, enabled, login, handle)
-}
-
-fn start_rithmic_record(
-    mut started: StartedProviderRuntime,
-    descriptor: ProviderDescriptor,
-    enabled: bool,
-    login: RithmicLoginRevision,
-    handle: &ProviderStartHandle<'_>,
-) -> Result<ProviderRuntimeRecord, String> {
+    let mut started = handle.start_history_runtime(spec)?;
     let wake = handle.wake();
     let active_workers = handle.active_workers();
     let reconnect_delay = if enabled {

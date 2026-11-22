@@ -1,5 +1,6 @@
 //! Shared tab components. [`TabList`] + [`Tab`] are the Theme System `.ui-tabs` / `.ui-tab`
-//! underlined tabs for navigation and one-tap presets; [`TabList::sidebar`] with
+//! underlined tabs for navigation and one-tap presets; [`TabList::track`] with [`Tab::track`] is
+//! the `.ui-tabs-normal` / `.ui-tab-normal` pill-track switcher; [`TabList::sidebar`] with
 //! [`Tab::sidebar`] is the vertical section navigation of settings panels. Callers add only
 //! layout and spacing, never colors, borders or radii.
 
@@ -27,6 +28,15 @@ const TAB_UNDERLINE_WIDTH: Pixels = px(2.0);
 /// Compact tabs for dense panel headers: a shorter list with tighter spacing.
 const COMPACT_TAB_LIST_HEIGHT: Pixels = px(22.0);
 const COMPACT_TAB_GAP: Pixels = px(12.0);
+/// Normal (track) tabs (`.ui-tabs-normal` / `.ui-tab-normal`): 2px inset track with 24px pill tabs.
+const TRACK_PADDING: Pixels = px(2.0);
+const TRACK_TAB_GAP: Pixels = px(2.0);
+const TRACK_TAB_HEIGHT: Pixels = px(24.0);
+const TRACK_TAB_PADDING_X: Pixels = px(10.0);
+const TRACK_TAB_LINE_HEIGHT: Pixels = px(14.0);
+const TRACK_SURFACE_ALPHA: f32 = 0.6;
+const TRACK_BORDER_ALPHA: f32 = 0.7;
+const TRACK_SELECTED_BORDER_ALPHA: f32 = 0.7;
 /// Sidebar sections are spaced like the former segmented track inset.
 const SIDEBAR_TAB_GAP: Pixels = px(2.0);
 /// Sidebar sections are a comfortable 36 px click target that grows with a scaled panel.
@@ -64,6 +74,34 @@ impl TabList {
                 .gap(TAB_GAP)
                 .border_b(platform_border_width(theme))
                 .border_color(gpui_color(theme.colors.border)),
+        }
+    }
+
+    /// The `.ui-tabs-normal` pill track: 60%-alpha `surface` fill, 70%-alpha `border` edge,
+    /// `2px` padding and `2px` gap. Pair it with [`Tab::track`] tabs.
+    pub(crate) fn track(
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        theme: &AerisTheme,
+    ) -> Self {
+        Self {
+            base: div()
+                .id(id)
+                .role(gpui::Role::TabList)
+                .aria_label(label)
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(TRACK_TAB_GAP)
+                .p(TRACK_PADDING)
+                .border(platform_border_width(theme))
+                .border_color(gpui_color(
+                    theme.colors.border.with_alpha(TRACK_BORDER_ALPHA),
+                ))
+                .rounded(tab_radius())
+                .bg(gpui_color(
+                    theme.colors.surface.with_alpha(TRACK_SURFACE_ALPHA),
+                )),
         }
     }
 
@@ -110,6 +148,8 @@ impl RenderOnce for TabList {
 enum TabSurface {
     /// Theme System `.ui-tab` inside a [`TabList`].
     Segmented,
+    /// Theme System `.ui-tab-normal` pill inside a [`TabList::track`].
+    Track,
     /// A workspace document tab that rests on window chrome instead of a track.
     Chrome {
         resting: ThemeColor,
@@ -139,6 +179,30 @@ fn segmented_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColor
             text: colors.primary,
             hover_text: colors.primary,
             active_text: colors.primary,
+        }
+    } else {
+        SegmentedTabColors {
+            fill: None,
+            border: None,
+            text: colors.text_secondary,
+            hover_text: colors.text_default,
+            active_text: colors.text_default,
+        }
+    }
+}
+
+/// Theme System `.ui-tab-normal` colors: transparent while resting, `--surface-secondary` with a
+/// 70%-alpha `--text-default` border while selected; inactive tabs brighten to `--text-default`
+/// on hover and press.
+fn track_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColors {
+    let colors = theme.colors;
+    if selected {
+        SegmentedTabColors {
+            fill: Some(colors.surface_secondary),
+            border: Some(colors.text_default.with_alpha(TRACK_SELECTED_BORDER_ALPHA)),
+            text: colors.text_default,
+            hover_text: colors.text_default,
+            active_text: colors.text_default,
         }
     } else {
         SegmentedTabColors {
@@ -211,6 +275,12 @@ impl Tab {
         self
     }
 
+    /// Renders a `.ui-tab-normal` pill tab inside a [`TabList::track`].
+    pub(crate) const fn track(mut self) -> Self {
+        self.surface = TabSurface::Track;
+        self
+    }
+
     /// Renders a section of a [`TabList::sidebar`] on `--surface`.
     pub(crate) const fn sidebar(mut self) -> Self {
         self.surface = TabSurface::Sidebar { secondary: false };
@@ -267,8 +337,8 @@ impl RenderOnce for Tab {
         let border_width = platform_border_width(&self.theme);
         let radius = match self.surface {
             TabSurface::Segmented => px(0.0),
+            TabSurface::Track | TabSurface::Chrome { .. } => tab_radius(),
             TabSurface::Sidebar { .. } => sidebar_tab_radius(),
-            TabSurface::Chrome { .. } => tab_radius(),
         };
         let mut tab = match self.surface {
             TabSurface::Segmented => {
@@ -300,6 +370,7 @@ impl RenderOnce for Tab {
                     .active(move |tab| tab.text_color(gpui_color(state.active_text)))
                     .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary)))
             }
+            TabSurface::Track => render_track_tab(tab, &self.theme, selected, border_width),
             TabSurface::Sidebar { secondary } => {
                 let state = sidebar_tab_colors(&self.theme, selected, secondary);
                 let hover_fill = if secondary {
@@ -361,14 +432,68 @@ impl RenderOnce for Tab {
     }
 }
 
+fn render_track_tab(
+    tab: BaseButton,
+    theme: &AerisTheme,
+    selected: bool,
+    border_width: Pixels,
+) -> BaseButton {
+    let colors = theme.colors;
+    let state = track_tab_colors(theme, selected);
+    tab.flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .h(TRACK_TAB_HEIGHT)
+        .px(TRACK_TAB_PADDING_X)
+        .border(border_width)
+        .border_color(
+            state
+                .border
+                .map_or_else(gpui::transparent_black, gpui_color),
+        )
+        .when_some(state.fill, |tab, fill| tab.bg(gpui_color(fill)))
+        .text_xs()
+        .line_height(TRACK_TAB_LINE_HEIGHT)
+        .whitespace_nowrap()
+        .text_color(gpui_color(state.text))
+        .when(!selected, |tab| {
+            tab.hover(move |tab| tab.text_color(gpui_color(state.hover_text)))
+                .active(move |tab| tab.text_color(gpui_color(state.active_text)))
+        })
+        .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary)))
+}
+
 #[cfg(test)]
 mod tests {
     use aeris_design_system::AerisTheme;
     use gpui::px;
 
     use super::{
-        Tab, TabSurface, segmented_tab_colors, sidebar_tab_colors, sidebar_tab_radius, tab_radius,
+        TRACK_SELECTED_BORDER_ALPHA, Tab, TabSurface, segmented_tab_colors, sidebar_tab_colors,
+        sidebar_tab_radius, tab_radius, track_tab_colors,
     };
+
+    #[test]
+    fn track_tabs_follow_the_theme_system_ui_tab_normal_contract() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let colors = theme.colors;
+            let resting = track_tab_colors(&theme, false);
+            assert_eq!(resting.fill, None);
+            assert_eq!(resting.border, None);
+            assert_eq!(resting.text, colors.text_secondary);
+            assert_eq!(resting.hover_text, colors.text_default);
+            assert_eq!(resting.active_text, colors.text_default);
+
+            let selected = track_tab_colors(&theme, true);
+            assert_eq!(selected.fill, Some(colors.surface_secondary));
+            assert_eq!(
+                selected.border,
+                Some(colors.text_default.with_alpha(TRACK_SELECTED_BORDER_ALPHA))
+            );
+            assert_eq!(selected.text, colors.text_default);
+        }
+    }
 
     #[test]
     fn shared_tabs_use_the_platform_radius_tokens() {

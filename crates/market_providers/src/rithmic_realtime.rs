@@ -2341,7 +2341,7 @@ fn apply_current_environment(
     events: &RithmicProviderEvents,
     retries: &mut RithmicRetryScheduler,
     state: EnvironmentState,
-) -> Result<(), String> {
+) -> Result<(), &'static str> {
     if state.network == NetworkEvent::Unavailable {
         apply_rithmic_environment_event(
             runtime,
@@ -2349,7 +2349,7 @@ fn apply_current_environment(
             retries,
             RithmicEnvironmentEvent::Network(NetworkEvent::Unavailable),
         )
-        .map_err(|_| "Rithmic native network state could not be applied".to_string())?;
+        .map_err(|_| "Rithmic native network state could not be applied")?;
     }
     if state.suspended {
         apply_rithmic_environment_event(
@@ -2358,23 +2358,23 @@ fn apply_current_environment(
             retries,
             RithmicEnvironmentEvent::Power(PowerEvent::Suspending),
         )
-        .map_err(|_| "Rithmic native power state could not be applied".to_string())?;
+        .map_err(|_| "Rithmic native power state could not be applied")?;
     }
     if state.network != NetworkEvent::Unavailable && !state.suspended {
         runtime
             .request_connection()
-            .map_err(|error| format!("Rithmic connection could not start: {error}"))?;
+            .map_err(|_| "Rithmic connection could not start")?;
     }
     Ok(())
 }
 
-fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
+fn start_environment_monitors() -> Result<EnvironmentMonitors, &'static str> {
     let network = NativeNetworkMonitor::connect()
-        .map_err(|_| "Rithmic native network monitor is unavailable".to_string())?;
+        .map_err(|_| "Rithmic native network monitor is unavailable")?;
     let initial_network = network.current();
     let network_cancellation = network.cancellation();
-    let power = NativePowerMonitor::connect()
-        .map_err(|_| "Rithmic native power monitor is unavailable".to_string())?;
+    let power =
+        NativePowerMonitor::connect().map_err(|_| "Rithmic native power monitor is unavailable")?;
     let power_cancellation = power.cancellation();
     let (sender, receiver) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
     let mut network = network;
@@ -2387,24 +2387,23 @@ fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
                 .map(RithmicEnvironmentEvent::Network)
                 .map_err(|_| ())
         },
-    )?;
+    )
+    .map_err(|_| "Rithmic native environment monitor could not start")?;
     let mut power = power;
-    let power_worker =
-        match spawn_environment_monitor("aeris-engine-rithmic-power-monitor", sender, move || {
+    let Ok(power_worker) =
+        spawn_environment_monitor("aeris-engine-rithmic-power-monitor", sender, move || {
             power
                 .next_event()
                 .map(RithmicEnvironmentEvent::Power)
                 .map_err(|_| ())
-        }) {
-            Ok(worker) => worker,
-            Err(error) => {
-                drop(receiver);
-                network_cancellation.cancel();
-                power_cancellation.cancel();
-                let _ = network_worker.join();
-                return Err(error);
-            }
-        };
+        })
+    else {
+        drop(receiver);
+        network_cancellation.cancel();
+        power_cancellation.cancel();
+        let _ = network_worker.join();
+        return Err("Rithmic native environment monitor could not start");
+    };
     Ok(EnvironmentMonitors {
         events: Some(receiver),
         state: EnvironmentState {
@@ -2422,7 +2421,7 @@ fn spawn_environment_monitor(
     name: &'static str,
     sender: SyncSender<EnvironmentMessage>,
     mut next: impl FnMut() -> Result<RithmicEnvironmentEvent, ()> + Send + 'static,
-) -> Result<thread::JoinHandle<()>, String> {
+) -> std::io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name(name.to_string())
         .spawn(move || {
@@ -2437,7 +2436,6 @@ fn spawn_environment_monitor(
                 }
             }
         })
-        .map_err(|_| "Rithmic native environment monitor could not start".to_string())
 }
 
 fn provider_instrument(

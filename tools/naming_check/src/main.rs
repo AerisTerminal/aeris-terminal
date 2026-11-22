@@ -2608,13 +2608,15 @@ mod tests {
             | "aeris_platform_sys"
             | "aeris_provider_history"
             | "gpui-base" => CrateLayer::Leaf,
-            "aeris_provider_spi" | "aeris_trading" => CrateLayer::Domain,
+            "aeris_crypto_common" | "aeris_provider_spi" | "aeris_trading" => CrateLayer::Domain,
             "aeris_observability" | "aeris_platform_runtime" | "aeris_release_lifecycle" => {
                 CrateLayer::Platform
             }
-            "aeris_hyperliquid_market_adapter" | "aeris_rithmic_protocol_adapter" => {
-                CrateLayer::Adapter
-            }
+            "aeris_binance_market_adapter"
+            | "aeris_bybit_market_adapter"
+            | "aeris_hyperliquid_market_adapter"
+            | "aeris_okx_market_adapter"
+            | "aeris_rithmic_protocol_adapter" => CrateLayer::Adapter,
             // `aeris_study_sdk` is the accepted published-API facade above the in-process
             // study runtime, so it sits with the runtimes and may depend on `market_runtime`.
             "aeris_account_runtime"

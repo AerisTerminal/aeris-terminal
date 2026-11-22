@@ -130,8 +130,8 @@ impl TerminalApp {
         now_unix_ms(&self.lifecycle)
     }
 
-    /// Keeps every pane of every tab showing a layout on the layout's drawing set, and
-    /// persists the workspace when a set changed.
+    /// Persists each pane's own drawings into the layout's drawing set and restores them on
+    /// load or symbol switch without mirroring drawings across separate panes.
     pub(super) fn sync_layout_drawings(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
         for (layout_id, drawings) in self.saved.layout_drawings_mut() {
@@ -139,7 +139,7 @@ impl TerminalApp {
                 .tabs
                 .iter()
                 .filter(|workspace| workspace.saved_layout_id == *layout_id)
-                .flat_map(|workspace| workspace.panes.iter().map(|pane| &pane.surface));
+                .flat_map(|workspace| workspace.panes.iter().map(|pane| (pane.id, &pane.surface)));
             changed |= workspace_surface::sync_layout_drawings(&panes, drawings, cx);
         }
         if changed {
@@ -377,8 +377,9 @@ impl TerminalApp {
         workspace.label = label;
         workspace.autosaved_snapshot = Some(snapshot);
         for pane in &workspace.panes {
-            pane.surface
-                .update(cx, |surface, _| surface.rebind_layout_drawings(&drawings));
+            pane.surface.update(cx, |surface, _| {
+                surface.rebind_layout_drawings(pane.id, &drawings);
+            });
         }
         self.saved.layout_drawings_mut().insert(copy, drawings);
         self.retain_open_layout_drawings();

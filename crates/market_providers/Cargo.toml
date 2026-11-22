@@ -11,13 +11,17 @@ replay = ["aeris_market_runtime/replay"]
 probe = ["aeris_market_runtime/probe"]
 
 [dependencies]
+aeris_binance_market_adapter = { path = "../adapters/binance_market" }
+aeris_bybit_market_adapter = { path = "../adapters/bybit_market" }
 aeris_contracts = { path = "../contracts" }
+aeris_crypto_common = { path = "../crypto_common" }
 aeris_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
 aeris_instruments = { path = "../domain/instruments" }
 aeris_market_data = { path = "../domain/market_data" }
 aeris_market_engine = { path = "../market_engine" }
 aeris_market_runtime = { path = "../market_runtime" }
 aeris_observability = { path = "../observability" }
+aeris_okx_market_adapter = { path = "../adapters/okx_market" }
 aeris_platform_runtime = { path = "../platform_runtime" }
 aeris_provider_history = { path = "../provider_history" }
 aeris_provider_spi = { path = "../provider_spi" }

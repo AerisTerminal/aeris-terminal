@@ -155,15 +155,38 @@ fn listed_browser() -> SymbolBrowser {
     browser
 }
 
-fn all_scope() -> (SymbolBrowser, SymbolSearchRequest, SymbolSearchRequest) {
+fn all_scope() -> (
+    SymbolBrowser,
+    SymbolSearchRequest,
+    SymbolSearchRequest,
+    Vec<SymbolSearchRequest>,
+) {
     let mut browser = SymbolBrowser::new(SymbolSearchScope::All);
     let requests = browser.begin_search("BT").expect("query validates");
     let providers: Vec<_> = requests.iter().map(|request| request.provider).collect();
-    assert_eq!(providers, [RITHMIC, HYPERLIQUID], "every provider at once");
+    assert_eq!(
+        providers,
+        [
+            RITHMIC,
+            HYPERLIQUID,
+            ProviderId("binance"),
+            ProviderId("bybit"),
+            ProviderId("okx"),
+            ProviderId("crypto_agg"),
+        ],
+        "every provider at once"
+    );
     let mut requests = requests.into_iter();
     let first = requests.next().expect("first lane");
     let second = requests.next().expect("second lane");
-    (browser, first, second)
+    let rest: Vec<_> = requests.collect();
+    (browser, first, second, rest)
+}
+
+fn finish_other_lanes(browser: &mut SymbolBrowser, rest: &[SymbolSearchRequest]) {
+    for req in rest {
+        assert!(browser.apply_results(req.provider, req.request_id, Vec::new()));
+    }
 }
 
 #[test]
@@ -358,7 +381,7 @@ fn a_completed_search_rejects_duplicate_and_stale_results() {
 
 #[test]
 fn all_scope_lists_each_provider_as_it_answers_without_headers() {
-    let (mut browser, rithmic, hyperliquid) = all_scope();
+    let (mut browser, rithmic, hyperliquid, rest) = all_scope();
     assert_eq!(rithmic.request_id, hyperliquid.request_id);
     assert_eq!(rithmic.exchange, None);
     assert_eq!(browser.status(), SymbolBrowserStatus::Searching);
@@ -379,6 +402,7 @@ fn all_scope_lists_each_provider_as_it_answers_without_headers() {
     assert_eq!(browser.status(), SymbolBrowserStatus::Searching);
 
     assert!(browser.apply_results(RITHMIC, rithmic.request_id, vec![result("BTCZ6")]));
+    finish_other_lanes(&mut browser, &rest);
     assert_eq!(
         labels(&browser),
         ["BTCZ6", "BTC-USDC"],
@@ -392,7 +416,7 @@ fn all_scope_lists_each_provider_as_it_answers_without_headers() {
 
 #[test]
 fn all_scope_hides_an_unavailable_provider_and_retries_when_ready() {
-    let (mut browser, rithmic, hyperliquid) = all_scope();
+    let (mut browser, rithmic, hyperliquid, _rest) = all_scope();
     assert!(browser.reject_search(
         RITHMIC,
         rithmic.request_id,
@@ -421,9 +445,10 @@ fn all_scope_hides_an_unavailable_provider_and_retries_when_ready() {
 
 #[test]
 fn a_failed_provider_lists_nothing_without_hiding_others() {
-    let (mut browser, rithmic, hyperliquid) = all_scope();
+    let (mut browser, rithmic, hyperliquid, rest) = all_scope();
     assert!(browser.reject_search(RITHMIC, rithmic.request_id, SymbolSearchFailure::Failed));
     assert!(browser.apply_results(HYPERLIQUID, hyperliquid.request_id, vec![market("BTC")]));
+    finish_other_lanes(&mut browser, &rest);
     let entries = browser.menu_entries();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].provider, HYPERLIQUID);
@@ -435,10 +460,11 @@ fn a_failed_provider_lists_nothing_without_hiding_others() {
 
 #[test]
 fn exact_symbols_resolve_in_provider_order() {
-    let (mut browser, rithmic, hyperliquid) = all_scope();
+    let (mut browser, rithmic, hyperliquid, rest) = all_scope();
     assert!(browser.apply_results(HYPERLIQUID, hyperliquid.request_id, vec![market("BTC")]));
     assert_eq!(browser.exact_symbol("btc"), ExactSymbolMatch::Pending);
     assert!(browser.apply_results(RITHMIC, rithmic.request_id, vec![result("ESZ6")]));
+    finish_other_lanes(&mut browser, &rest);
     assert_eq!(
         browser.exact_symbol("btc-usdc"),
         ExactSymbolMatch::Found(InstrumentMenuSelection::SearchResult {
@@ -478,7 +504,7 @@ fn a_product_code_resolves_to_its_nearest_expiry_contract() {
 
 #[test]
 fn exchanges_are_learned_per_provider_and_bounded() {
-    let (mut browser, rithmic, hyperliquid) = all_scope();
+    let (mut browser, rithmic, hyperliquid, _rest) = all_scope();
     let mut cbot = result("ZBZ6");
     cbot.exchange = "CBOT".to_string();
     let mut invalid = result("BAD");

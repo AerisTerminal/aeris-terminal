@@ -9,9 +9,14 @@
 
 pub(crate) use aeris_hyperliquid_market_adapter::display_depth as hyperliquid_display_depth;
 
+mod aggregated_crypto;
+mod binance;
+mod bybit;
+mod crypto_runtime;
 mod hyperliquid;
 mod hyperliquid_market_scan;
 mod hyperliquid_realtime;
+mod okx;
 mod rithmic;
 mod rithmic_realtime;
 
@@ -31,12 +36,17 @@ pub use rithmic::{RithmicLoginSummary, RithmicServer};
 const BUILT_IN_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
     rithmic::RITHMIC_DESCRIPTOR,
     hyperliquid::HYPERLIQUID_DESCRIPTOR,
+    binance::BINANCE_DESCRIPTOR,
+    bybit::BYBIT_DESCRIPTOR,
+    okx::OKX_DESCRIPTOR,
+    aggregated_crypto::AGGREGATED_DESCRIPTOR,
     recording_replay_descriptor(),
 ];
 
 /// Returns a [`MarketServiceBuilder`] pre-registered with Aeris Terminal's
-/// built-in providers (Rithmic, Hyperliquid, and local recording replay),
-/// Rithmic authentication, and the Rithmic broker venue runner.
+/// built-in providers (Rithmic, Hyperliquid, Binance, Bybit, OKX, Aggregated
+/// Crypto, and local recording replay), Rithmic authentication, and the
+/// Rithmic broker venue runner.
 #[must_use]
 pub fn market_service_builder() -> MarketServiceBuilder {
     let rithmic_revision = rithmic_realtime::RithmicLoginRevision::default();
@@ -52,6 +62,10 @@ pub fn market_service_builder() -> MarketServiceBuilder {
             Box::<hyperliquid::LiveHyperliquidHistory>::default(),
             true,
         ))
+        .register_provider(binance::provider_spec(true))
+        .register_provider(bybit::provider_spec(true))
+        .register_provider(okx::provider_spec(true))
+        .register_provider(aggregated_crypto::provider_spec(true))
         .with_recording_replay()
         .register_auth(
             rithmic::RITHMIC_DESCRIPTOR.id,
@@ -174,5 +188,48 @@ mod tests {
         for presentation in presentations {
             assert_ne!(presentation.chart_interval_labels.len(), 0);
         }
+    }
+
+    #[test]
+    #[ignore = "drives live public Binance, Bybit, and OKX REST APIs"]
+    fn live_crypto_catalogs_and_candles_decode_cleanly() {
+        let binance = aeris_binance_market_adapter::fetch_catalog(
+            aeris_binance_market_adapter::BinanceHttpConfig::default(),
+        )
+        .expect("binance catalog");
+        assert!(
+            binance.get("usdm:BTCUSDT").is_some(),
+            "Binance USDT-M BTCUSDT missing"
+        );
+        assert!(
+            binance.get("spot:BTCUSDT").is_some(),
+            "Binance Spot BTCUSDT missing"
+        );
+
+        let bybit = aeris_bybit_market_adapter::fetch_catalog(
+            aeris_bybit_market_adapter::BybitHttpConfig::default(),
+        )
+        .expect("bybit catalog");
+        assert!(
+            bybit.get("linear:BTCUSDT").is_some(),
+            "Bybit Linear BTCUSDT missing"
+        );
+        assert!(
+            bybit.get("spot:BTCUSDT").is_some(),
+            "Bybit Spot BTCUSDT missing"
+        );
+
+        let okx = aeris_okx_market_adapter::fetch_catalog(
+            aeris_okx_market_adapter::OkxHttpConfig::default(),
+        )
+        .expect("okx catalog");
+        let okx_btc = okx
+            .get("swap:BTC-USDT-SWAP")
+            .expect("OKX BTC-USDT-SWAP missing");
+        assert!(okx_btc.ct_val_fixed > 0);
+        assert!(
+            okx.get("spot:BTC-USDT").is_some(),
+            "OKX Spot BTC-USDT missing"
+        );
     }
 }

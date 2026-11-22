@@ -6,7 +6,7 @@ use num_traits::ToPrimitive;
 const HISTORY_BUCKET_MICROS: i64 = 1_000_000;
 const MAX_HISTORY_BUCKETS: usize = 3_600;
 /// Levels kept per side of each recorded book; deeper levels are dropped.
-const MAX_LEVELS_PER_SIDE: usize = 200;
+const MAX_LEVELS_PER_SIDE: usize = 500;
 /// Retained history cells (about 17 MiB of levels). The engine evicts the oldest seconds first
 /// when a deep book reaches this ceiling before the hour does.
 const MAX_HISTORY_CELLS: usize = 720_000;

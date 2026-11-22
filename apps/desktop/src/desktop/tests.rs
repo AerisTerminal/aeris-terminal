@@ -8098,15 +8098,23 @@ fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_o
 fn desktop_provider_labels_come_from_runtime_descriptors() {
     assert_eq!(super::ProviderId("rithmic").display(), "Rithmic");
     assert_eq!(super::ProviderId("hyperliquid").display(), "Hyperliquid");
+    assert_eq!(super::ProviderId("binance").display(), "Binance");
+    assert_eq!(super::ProviderId("bybit").display(), "Bybit");
+    assert_eq!(super::ProviderId("okx").display(), "OKX");
+    assert_eq!(super::ProviderId("crypto_agg").display(), "Aggregated");
     // Every provider id round-trips; an id the build does not expose maps to none.
     for descriptor in aeris_market_providers::published_provider_descriptors() {
         let provider = super::ProviderId(descriptor.id);
         assert_eq!(super::ProviderId::find(provider.id()), Some(provider));
     }
-    assert_eq!(super::ProviderId::find("binance"), None);
+    assert_eq!(super::ProviderId::find("unregistered_provider"), None);
     for provider in [
         super::ProviderId("rithmic"),
         super::ProviderId("hyperliquid"),
+        super::ProviderId("binance"),
+        super::ProviderId("bybit"),
+        super::ProviderId("okx"),
+        super::ProviderId("crypto_agg"),
     ] {
         assert!(super::provider_chart_types(provider).contains(&super::ChartType::Footprint));
     }

@@ -1,12 +1,9 @@
-//! Chart drawings of one saved layout.
+//! Chart drawings of one saved layout, scoped per pane and instrument.
 //!
 //! Aeris Charts owns the drawings of the instrument a chart shows. Drawings are anchored to that
 //! instrument's prices, so a symbol switch replaces the chart with an empty one that is filled
-//! from the layout's drawing set. A saved layout keeps one drawing set per instrument, shared by
-//! every pane of every tab that shows the layout: each pane publishes its chart's committed edits
-//! into the set and imports the set's newer revisions, so a pane that switches instrument, is
-//! split off or closed never takes drawings with it. The exchanged document anchors drawings by
-//! exchange time, so panes on different timeframes stay aligned.
+//! from that pane's saved drawings for the new instrument. Each pane keeps its own drawings per
+//! instrument so separate charts (even on the same symbol) never mirror or overwrite each other.
 
 use aeris_chart_integration::{AerisChartView, saved_drawings_document};
 use aeris_contracts::{InstallProviderInstrument, WorkspaceInstrumentDrawingsState};
@@ -19,10 +16,13 @@ pub(super) const MAXIMUM_DRAWING_INSTRUMENTS_PER_LAYOUT: usize = 32;
 /// instrument is bounded by the chart's own drawing limit instead, so it is never evicted.
 pub(super) const MAXIMUM_REMEMBERED_DRAWING_BYTES_PER_LAYOUT: usize = 1_048_576;
 
-/// Stable identity drawings are keyed by. Session and selection generations are deliberately
-/// excluded: they fence one runtime process, not the market the drawings belong to.
+/// Stable identity drawings are keyed by: pane ID + provider + instrument ID. Session and
+/// selection generations are deliberately excluded: they fence one runtime process, not the
+/// market the drawings belong to. `pane_id == 0` represents a legacy layout-wide entry written
+/// before per-pane scoping.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DrawingInstrument {
+    pane_id: u64,
     provider: String,
     instrument_id: String,
 }
@@ -30,8 +30,25 @@ pub(super) struct DrawingInstrument {
 impl DrawingInstrument {
     fn of(instrument: &InstallProviderInstrument) -> Self {
         Self {
+            pane_id: 0,
             provider: instrument.provider.clone(),
             instrument_id: instrument.instrument_id.clone(),
+        }
+    }
+
+    fn for_pane(&self, pane_id: u64) -> Self {
+        Self {
+            pane_id,
+            provider: self.provider.clone(),
+            instrument_id: self.instrument_id.clone(),
+        }
+    }
+
+    fn legacy(&self) -> Self {
+        Self {
+            pane_id: 0,
+            provider: self.provider.clone(),
+            instrument_id: self.instrument_id.clone(),
         }
     }
 
@@ -41,6 +58,7 @@ impl DrawingInstrument {
             instrument_id: self.instrument_id.clone(),
             chart_state_json: document,
             locked_drawing_ids: Vec::new(),
+            pane_id: self.pane_id,
         }
     }
 }
@@ -95,6 +113,7 @@ impl LayoutDrawings {
             drawings.revision += 1;
             drawings.entries.push(LayoutEntry {
                 instrument: DrawingInstrument {
+                    pane_id: entry.pane_id,
                     provider: entry.provider,
                     instrument_id: entry.instrument_id,
                 },
@@ -268,19 +287,21 @@ impl PaneDrawingSync {
     }
 
     /// Publishes the chart's committed edits, and any captured from a replaced chart, into the
-    /// layout. Returns whether the layout changed.
+    /// layout under `pane_id`. Returns whether the layout changed.
     ///
     /// # Errors
     ///
     /// Returns an error when Aeris Charts cannot serialize the drawings.
     pub(super) fn publish(
         &mut self,
+        pane_id: u64,
         chart: Option<&AerisChartView>,
         layout: &mut LayoutDrawings,
     ) -> Result<bool, String> {
         let mut changed = false;
         if let Some((instrument, document)) = self.pending_publication.take() {
-            changed |= layout.set(&instrument, document);
+            let scoped = instrument.for_pane(pane_id);
+            changed |= layout.set(&scoped, document);
         }
         let (Some(instrument), Some(chart)) = (&self.chart_instrument, chart) else {
             return Ok(changed);
@@ -288,25 +309,28 @@ impl PaneDrawingSync {
         if self.pending_import || !chart.has_market_data() {
             return Ok(changed);
         }
+        let scoped = instrument.for_pane(pane_id);
         let revision = chart.drawing_revision();
         if revision == self.synced_chart_revision {
-            layout.touch(instrument);
+            layout.touch(&scoped);
             return Ok(changed);
         }
         self.synced_chart_revision = revision;
-        changed |= layout.set(instrument, chart_document(chart)?);
-        self.applied_revision = layout.revision_of(instrument).unwrap_or(0);
+        changed |= layout.set(&scoped, chart_document(chart)?);
+        self.applied_revision = layout.revision_of(&scoped).unwrap_or(0);
         Ok(changed)
     }
 
-    /// Brings the chart to the layout's drawings of its instrument when they changed since the
-    /// chart last showed them. Returns whether the chart changed.
+    /// Brings the chart to this pane's saved drawings for its instrument when they changed since
+    /// the chart last showed them. On initial load, falls back to a legacy `pane_id == 0` entry
+    /// if no pane-specific entry exists yet. Returns whether the chart changed.
     ///
     /// # Errors
     ///
     /// Returns an error when Aeris Charts rejects the drawings.
     pub(super) fn import(
         &mut self,
+        pane_id: u64,
         chart: &mut AerisChartView,
         layout: &LayoutDrawings,
     ) -> Result<bool, String> {
@@ -316,7 +340,12 @@ impl PaneDrawingSync {
         if !chart.has_market_data() {
             return Ok(false);
         }
-        let entry = layout.entry(instrument);
+        let scoped = instrument.for_pane(pane_id);
+        let entry = layout.entry(&scoped).or_else(|| {
+            self.pending_import
+                .then(|| layout.entry(&instrument.legacy()))
+                .flatten()
+        });
         let revision = entry.map(|entry| entry.revision);
         if !self.pending_import && revision.is_none_or(|revision| revision == self.applied_revision)
         {
@@ -338,9 +367,10 @@ impl PaneDrawingSync {
 
     /// Adopts `layout` as the set the chart already shows, after the tab moved to another layout
     /// holding the same drawings.
-    pub(super) fn rebind(&mut self, layout: &LayoutDrawings) {
+    pub(super) fn rebind(&mut self, pane_id: u64, layout: &LayoutDrawings) {
         if let Some(instrument) = &self.chart_instrument {
-            self.applied_revision = layout.revision_of(instrument).unwrap_or(0);
+            let scoped = instrument.for_pane(pane_id);
+            self.applied_revision = layout.revision_of(&scoped).unwrap_or(0);
         }
     }
 }
@@ -383,7 +413,9 @@ pub(super) fn bounded_instrument_drawings(
             || entry.instrument_id.is_empty()
             || entry.chart_state_json.is_empty()
             || kept.iter().any(|kept| {
-                kept.provider == entry.provider && kept.instrument_id == entry.instrument_id
+                kept.pane_id == entry.pane_id
+                    && kept.provider == entry.provider
+                    && kept.instrument_id == entry.instrument_id
             })
         {
             continue;
@@ -419,6 +451,7 @@ mod tests {
             instrument_id: instrument_id.to_string(),
             chart_state_json: json.to_string(),
             locked_drawing_ids: Vec::new(),
+            pane_id: 0,
         }
     }
 
@@ -431,6 +464,7 @@ mod tests {
 
     fn instrument(instrument_id: &str) -> DrawingInstrument {
         DrawingInstrument {
+            pane_id: 0,
             provider: "hyperliquid".to_string(),
             instrument_id: instrument_id.to_string(),
         }
@@ -529,7 +563,7 @@ mod tests {
         assert_eq!(sync.chart_instrument, None);
         assert!(!sync.pending_import, "a replay chart imports nothing");
         let mut layout = LayoutDrawings::from_saved(&[]);
-        assert_eq!(sync.publish(None, &mut layout), Ok(false));
+        assert_eq!(sync.publish(1, None, &mut layout), Ok(false));
         assert_eq!(ids(&layout.entries()), Vec::<&str>::new());
 
         let live = InstallProviderInstrument {

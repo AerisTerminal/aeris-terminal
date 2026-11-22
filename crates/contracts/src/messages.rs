@@ -654,6 +654,10 @@ pub struct WorkspaceInstrumentDrawingsState {
     /// Locks of workspaces saved before locks were drawing state, keyed by saved drawing id.
     #[prost(uint32, repeated, tag = "4")]
     pub locked_drawing_ids: Vec<u32>,
+    /// Stable pane identifier that owns these drawings (`0` for legacy layout-wide entries
+    /// written before per-pane drawing scoping).
+    #[prost(uint64, tag = "5")]
+    pub pane_id: u64,
 }
 
 /// Chart legend presentation. Every absent field means shown, and absent `indicators_collapsed`

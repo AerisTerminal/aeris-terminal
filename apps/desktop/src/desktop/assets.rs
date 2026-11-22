@@ -441,6 +441,8 @@ impl BrandAsset {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExchangeLogo {
     Binance,
+    Bybit,
+    Okx,
     #[default]
     Rithmic,
     Hyperliquid,
@@ -449,10 +451,12 @@ pub enum ExchangeLogo {
 }
 
 impl ExchangeLogo {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::Rithmic,
         Self::Hyperliquid,
         Self::Binance,
+        Self::Bybit,
+        Self::Okx,
         Self::AllProviders,
     ];
 
@@ -462,6 +466,10 @@ impl ExchangeLogo {
         match logo_key {
             "rithmic" => Some(Self::Rithmic),
             "hyperliquid" => Some(Self::Hyperliquid),
+            "binance" => Some(Self::Binance),
+            "bybit" => Some(Self::Bybit),
+            "okx" => Some(Self::Okx),
+            "all-providers" => Some(Self::AllProviders),
             _ => None,
         }
     }
@@ -470,6 +478,8 @@ impl ExchangeLogo {
     pub fn path(self) -> SharedString {
         let name = match self {
             Self::Binance => "binance.svg",
+            Self::Bybit => "bybit.svg",
+            Self::Okx => "okx.svg",
             Self::Rithmic => "rithmic.svg",
             Self::Hyperliquid => "hyperliquid.svg",
             Self::AllProviders => "all-providers.svg",
@@ -725,6 +735,8 @@ fn brand_asset(path: &str) -> Option<&'static [u8]> {
 fn exchange_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(EXCHANGE_ASSET_PREFIX)? {
         "binance.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/binance.svg"),
+        "bybit.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/bybit.svg"),
+        "okx.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/okx.svg"),
         "rithmic.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/rithmic.svg"),
         "hyperliquid.svg" => {
             include_bytes!("../../assets/exchange_assets/exchange_logo/hyperliquid.svg")
@@ -1163,6 +1175,10 @@ mod tests {
         };
         assert_eq!(logo_for("hyperliquid"), Some(ExchangeLogo::Hyperliquid));
         assert_eq!(logo_for("rithmic"), Some(ExchangeLogo::Rithmic));
+        assert_eq!(logo_for("binance"), Some(ExchangeLogo::Binance));
+        assert_eq!(logo_for("bybit"), Some(ExchangeLogo::Bybit));
+        assert_eq!(logo_for("okx"), Some(ExchangeLogo::Okx));
+        assert_eq!(logo_for("crypto_agg"), Some(ExchangeLogo::AllProviders));
         assert_eq!(ExchangeLogo::for_logo_key("unknown"), None);
     }
 }

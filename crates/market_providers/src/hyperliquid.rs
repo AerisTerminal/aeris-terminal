@@ -443,16 +443,7 @@ fn start_hyperliquid_runtime(
 ) -> Result<ProviderRuntimeRecord, String> {
     let enabled = spec.realtime_enabled;
     let descriptor = spec.descriptor;
-    let started = handle.start_history_runtime(spec)?;
-    start_hyperliquid_record(started, descriptor, enabled, handle)
-}
-
-fn start_hyperliquid_record(
-    mut started: StartedProviderRuntime,
-    descriptor: ProviderDescriptor,
-    enabled: bool,
-    handle: &ProviderStartHandle<'_>,
-) -> Result<ProviderRuntimeRecord, String> {
+    let mut started = handle.start_history_runtime(spec)?;
     let wake = handle.wake();
     let active_workers = handle.active_workers();
     let reconnect_delay = if enabled {
@@ -502,7 +493,7 @@ fn start_hyperliquid_record(
             Arc::clone(&ws_generation),
         ) {
             started.cancel_and_join();
-            return Err(error);
+            return Err(error.to_string());
         }
         if let Err(error) = spawn_hyperliquid_provider(
             &mut started,
@@ -513,7 +504,7 @@ fn start_hyperliquid_record(
             wake.clone(),
         ) {
             started.cancel_and_join();
-            return Err(error);
+            return Err(error.to_string());
         }
         if let Err(error) = spawn_hyperliquid_display_depth(
             &mut started,
@@ -524,7 +515,7 @@ fn start_hyperliquid_record(
             reconnect_delay,
         ) {
             started.cancel_and_join();
-            return Err(error);
+            return Err(error.to_string());
         }
     }
     Ok(ProviderRuntimeRecord {
@@ -555,7 +546,7 @@ fn spawn_hyperliquid_catalog(
     events: CatalogPublisher<HyperliquidCatalogEvent>,
     scan_jobs: mpsc::SyncSender<HyperliquidScanJob>,
     ws_generation: Arc<AtomicU64>,
-) -> Result<(), String> {
+) -> std::io::Result<()> {
     let cancellation = Arc::clone(&started.cancellation);
     let lifecycle = Arc::clone(&started.lifecycle);
     let activity = Arc::clone(active_workers);
@@ -577,8 +568,7 @@ fn spawn_hyperliquid_catalog(
             if !cancellation.load(Ordering::Acquire) {
                 lifecycle.mark_terminal_failure("Provider catalog runtime stopped unexpectedly");
             }
-        })
-        .map_err(|error| error.to_string())?;
+        })?;
     started.workers.push(worker);
     Ok(())
 }
@@ -624,7 +614,7 @@ fn spawn_hyperliquid_provider(
     events: mpsc::SyncSender<Fenced<ProviderTag, HyperliquidRealtimeEvent>>,
     ws_generation: Arc<AtomicU64>,
     wake: ProviderCoordinatorWake,
-) -> Result<(), String> {
+) -> std::io::Result<()> {
     let cancellation = Arc::clone(&started.cancellation);
     let lifecycle = Arc::clone(&started.lifecycle);
     let activity = Arc::clone(active_workers);
@@ -645,8 +635,7 @@ fn spawn_hyperliquid_provider(
             if !cancellation.load(Ordering::Acquire) {
                 lifecycle.mark_terminal_failure("Provider runtime stopped unexpectedly");
             }
-        })
-        .map_err(|error| error.to_string())?;
+        })?;
     started.workers.push(worker);
     Ok(())
 }
@@ -658,7 +647,7 @@ fn spawn_hyperliquid_display_depth(
     events: mpsc::SyncSender<HyperliquidDisplayDepthEvent>,
     wake: ProviderCoordinatorWake,
     reconnect_delay: Duration,
-) -> Result<(), String> {
+) -> std::io::Result<()> {
     let cancellation = Arc::clone(&started.cancellation);
     let activity = Arc::clone(active_workers);
     let worker = thread::Builder::new()
@@ -676,8 +665,7 @@ fn spawn_hyperliquid_display_depth(
                 &notify,
                 reconnect_delay,
             );
-        })
-        .map_err(|error| error.to_string())?;
+        })?;
     started.workers.push(worker);
     Ok(())
 }

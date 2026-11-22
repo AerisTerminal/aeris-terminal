@@ -533,7 +533,7 @@ pub struct OrderBookDepthSettings {
 
 impl OrderBookDepthSettings {
     /// Book levels drawn on each side the settings accept.
-    pub const LEVELS_PER_SIDE: std::ops::RangeInclusive<u16> = 1..=200;
+    pub const LEVELS_PER_SIDE: std::ops::RangeInclusive<u16> = 1..=1_024;
     /// Largest-bar lengths the settings accept, in logical pixels.
     pub const MAX_WIDTHS: std::ops::RangeInclusive<u16> = 20..=400;
     /// Bar opacities the settings accept, in percent.
@@ -552,7 +552,7 @@ impl Default for OrderBookDepthSettings {
     fn default() -> Self {
         Self {
             visible: true,
-            levels_per_side: 40,
+            levels_per_side: 200,
             max_width: 120,
             opacity_percent: 100,
             show_sizes: true,

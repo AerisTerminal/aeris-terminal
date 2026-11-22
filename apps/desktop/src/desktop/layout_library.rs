@@ -843,6 +843,7 @@ mod tests {
             instrument_id: "BTC".to_string(),
             chart_state_json: "{}".to_string(),
             locked_drawing_ids: Vec::new(),
+            pane_id: 1,
         }];
         let original = library
             .create("Scalping", &split_tab(1, 1, 2), Vec::new(), 10)

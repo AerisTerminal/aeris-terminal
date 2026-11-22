@@ -323,23 +323,24 @@ fn order_flow_aggregation(interval: ChartInterval) -> OrderFlowAggregation {
     }
 }
 
-/// Keeps the charts of every pane showing one saved layout on the layout's drawing set: every
-/// pane first publishes its chart's committed edits, then every pane imports the revisions it
-/// does not show yet. Returns whether the set changed.
+/// Keeps each pane's chart in sync with its own per-pane entries in the layout's drawing set:
+/// every pane publishes its chart's committed edits under its own `pane_id`, then imports its own
+/// saved drawings on load or symbol switch without mirroring drawings across separate panes.
+/// Returns whether the set changed.
 pub(super) fn sync_layout_drawings<'a>(
-    panes: &(impl Iterator<Item = &'a Entity<WorkspaceSurface>> + Clone),
+    panes: &(impl Iterator<Item = (u64, &'a Entity<WorkspaceSurface>)> + Clone),
     drawings: &mut LayoutDrawings,
     cx: &mut App,
 ) -> bool {
     let mut changed = false;
-    for pane in panes.clone() {
+    for (pane_id, pane) in panes.clone() {
         changed |= pane.update(cx, |surface, cx| {
-            surface.publish_layout_drawings(drawings, cx)
+            surface.publish_layout_drawings(pane_id, drawings, cx)
         });
     }
-    for pane in panes.clone() {
+    for (pane_id, pane) in panes.clone() {
         pane.update(cx, |surface, cx| {
-            surface.import_layout_drawings(drawings, cx);
+            surface.import_layout_drawings(pane_id, drawings, cx);
         });
     }
     changed
@@ -4146,24 +4147,34 @@ impl WorkspaceSurface {
         }
     }
 
-    fn publish_layout_drawings(&mut self, layout: &mut LayoutDrawings, cx: &App) -> bool {
+    fn publish_layout_drawings(
+        &mut self,
+        pane_id: u64,
+        layout: &mut LayoutDrawings,
+        cx: &App,
+    ) -> bool {
         let chart = self.chart.as_ref().map(|chart| chart.read(cx));
         self.retained_chart_presentation
             .drawings
-            .publish(chart, layout)
+            .publish(pane_id, chart, layout)
             .unwrap_or_else(|error| {
                 diagnostic!("Aeris drawings could not be saved to the layout: {error}");
                 false
             })
     }
 
-    fn import_layout_drawings(&mut self, layout: &LayoutDrawings, cx: &mut Context<Self>) {
+    fn import_layout_drawings(
+        &mut self,
+        pane_id: u64,
+        layout: &LayoutDrawings,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chart) = self.chart.clone() else {
             return;
         };
         let drawings = &mut self.retained_chart_presentation.drawings;
         let imported = chart.update(cx, |chart, chart_cx| {
-            let imported = drawings.import(chart, layout);
+            let imported = drawings.import(pane_id, chart, layout);
             if !matches!(imported, Ok(false)) {
                 chart_cx.notify();
             }
@@ -4178,8 +4189,10 @@ impl WorkspaceSurface {
     }
 
     /// Adopts `layout` as the drawing set the chart already shows.
-    pub(super) fn rebind_layout_drawings(&mut self, layout: &LayoutDrawings) {
-        self.retained_chart_presentation.drawings.rebind(layout);
+    pub(super) fn rebind_layout_drawings(&mut self, pane_id: u64, layout: &LayoutDrawings) {
+        self.retained_chart_presentation
+            .drawings
+            .rebind(pane_id, layout);
     }
 
     /// Keeps the chart's unpublished drawing edits for the next sync before it is replaced.

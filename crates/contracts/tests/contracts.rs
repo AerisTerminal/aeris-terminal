@@ -392,6 +392,7 @@ fn saved_layouts_round_trip_with_the_tab_that_shows_them() {
                 instrument_id: "instrument:rithmic:CME:MNQU6".into(),
                 chart_state_json: r#"{"schema":"aeris_charts-drawings"}"#.into(),
                 locked_drawing_ids: Vec::new(),
+                pane_id: 1,
             }],
         }],
         ..WorkspaceState::default()

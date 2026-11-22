@@ -159,11 +159,12 @@ violations and missing verification explicitly, and never describe them as satis
   implicit process-wide workspace path lookup may return.
 - Saved layouts are owned by the desktop `LayoutLibrary` (bounded at 100; creating past the
   bound is refused, never evicts a user layout). Every workspace tab shows one saved layout, and
-  a layout's chart drawings are one per-instrument `LayoutDrawings` set shared by every pane of
-  every tab showing it. Panes publish committed edits into that set and import its newer
-  revisions; panes never own or remember drawings, and no pane-to-pane drawing sync may return.
-  Pane chart state persists no drawings. A layout with autosave off changes only on an explicit
-  save and reopens at its last saved version after a restart.
+  a layout's chart drawings are persisted per `(pane_id, provider, instrument_id)` in
+  `LayoutDrawings` (with legacy `pane_id == 0` read-only fallback on initial load). Each pane
+  publishes its committed edits under its own `pane_id` and restores only its own saved drawings
+  on load or symbol switch; separate panes never mirror drawings onto each other, even on the
+  same symbol. A layout with autosave off changes only on an explicit save and reopens at its
+  last saved version after a restart.
 - Hiding every drawing at once is the engine's view switch (`set_drawings_hidden`), not a drawing
   edit: it never enters the layout's drawings or undo history. The desktop keeps the one choice in
   the chart chrome (`drawings_hidden`, off for documents written before it existed) and applies it
