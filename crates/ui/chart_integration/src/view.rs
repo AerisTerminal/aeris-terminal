@@ -452,7 +452,7 @@ pub enum FootprintDisplayMode {
 
 /// Rightward extensions drawn behind footprint clusters (naked POCs, stacked imbalance zones,
 /// and unfinished auctions).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FootprintExtensions {
     /// Extend untested completed footprint bar POCs rightward until price revisits them.
     pub show_naked_pocs: bool,
@@ -460,16 +460,6 @@ pub struct FootprintExtensions {
     pub show_stacked_imbalance_zones: bool,
     /// Mark and extend unfinished auctions at bar extremes until revisited.
     pub show_unfinished_auctions: bool,
-}
-
-impl Default for FootprintExtensions {
-    fn default() -> Self {
-        Self {
-            show_naked_pocs: true,
-            show_stacked_imbalance_zones: true,
-            show_unfinished_auctions: true,
-        }
-    }
 }
 
 /// Durable order-flow presentation settings. Market data and aggregation remain runtime-owned.
@@ -510,7 +500,7 @@ impl Default for OrderFlowSettings {
             depth_heatmap: None,
             ticks_per_row: 0,
             footprint_extensions: FootprintExtensions::default(),
-            show_extended_summary: true,
+            show_extended_summary: false,
         }
     }
 }
