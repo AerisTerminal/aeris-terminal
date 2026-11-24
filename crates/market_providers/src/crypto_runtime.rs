@@ -574,12 +574,14 @@ fn dispatch_crypto_catalog(
     }
 }
 
-/// Builds standard [`ProviderContractMetadata`] for a linear crypto perpetual or spot instrument.
+/// Builds standard [`ProviderContractMetadata`] for a fixed-tick linear crypto perpetual or spot instrument.
+///
+/// Fixed-tick venues leave `price_significant_figures` and `price_max_decimals` unset so
+/// `instrument_terms_from_install` resolves `PriceGrid::Fixed` from `InstallProviderInstrument::price_increment`.
 #[must_use]
 pub(crate) fn crypto_contract_metadata(
     is_spot: bool,
     quote_asset: &str,
-    price_decimals: u8,
     quantity_decimals: u8,
 ) -> ProviderContractMetadata {
     let order_quantity_increment = NORMALIZED_QUANTITY_SCALE
@@ -589,7 +591,6 @@ pub(crate) fn crypto_contract_metadata(
         point_value: Some(1),
         point_value_scale: Some(0),
         currency: Some(quote_asset.to_string()),
-        price_max_decimals: Some(u32::from(price_decimals)),
         order_quantity_increment,
         instrument_class: Some(if is_spot {
             aeris_contracts::ProviderInstrumentClass::CryptoSpot
@@ -612,13 +613,12 @@ pub(crate) fn build_install_instrument(
     provider_symbol: String,
     display_symbol: String,
     venue_id: String,
-    price_decimals: u8,
     quantity_decimals: u8,
     tick_size_fixed: i64,
     is_spot: bool,
     quote_asset: &str,
 ) -> InstallProviderInstrument {
-    let terms = crypto_contract_metadata(is_spot, quote_asset, price_decimals, quantity_decimals);
+    let terms = crypto_contract_metadata(is_spot, quote_asset, quantity_decimals);
     InstallProviderInstrument {
         provider: provider.to_string(),
         session_generation: session_generation.max(1),
@@ -732,4 +732,112 @@ pub(crate) fn now_unix_nanos() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map_or(1, |d| d.as_nanos());
     i64::try_from(nanos).unwrap_or(i64::MAX).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aeris_instruments::{InstrumentClass, InstrumentDecimal, PriceGrid};
+    use aeris_market_runtime::market_service::instrument_terms_from_install;
+
+    #[test]
+    fn fixed_tick_crypto_providers_produce_valid_practice_trading_terms() {
+        let cases = [
+            (
+                "crypto_agg",
+                "instrument:crypto_agg:BTCUSDT.P",
+                "PERP:BTC:USDT",
+                "BTCUSDT.P",
+                "AGG-PERP",
+                3_u8,
+                10_000_000_i64,
+                false,
+                InstrumentClass::CryptoPerpetual,
+            ),
+            (
+                "crypto_agg",
+                "instrument:crypto_agg:BTCUSDT",
+                "SPOT:BTC:USDT",
+                "BTCUSDT",
+                "AGG-SPOT",
+                5_u8,
+                1_000_000_i64,
+                true,
+                InstrumentClass::CryptoSpot,
+            ),
+            (
+                "binance",
+                "instrument:binance:usdm:BTCUSDT",
+                "usdm:BTCUSDT",
+                "BTCUSDT.P",
+                "BINANCE-FUTURES",
+                3_u8,
+                10_000_000_i64,
+                false,
+                InstrumentClass::CryptoPerpetual,
+            ),
+            (
+                "bybit",
+                "instrument:bybit:linear:BTCUSDT",
+                "linear:BTCUSDT",
+                "BTCUSDT.P",
+                "BYBIT-LINEAR",
+                3_u8,
+                10_000_000_i64,
+                false,
+                InstrumentClass::CryptoPerpetual,
+            ),
+            (
+                "okx",
+                "instrument:okx:swap:BTC-USDT-SWAP",
+                "swap:BTC-USDT-SWAP",
+                "BTCUSDT.P",
+                "OKX-SWAP",
+                2_u8,
+                10_000_000_i64,
+                false,
+                InstrumentClass::CryptoPerpetual,
+            ),
+        ];
+
+        for (
+            provider,
+            instrument_id,
+            provider_symbol,
+            display_symbol,
+            venue_id,
+            qty_decimals,
+            tick_size_fixed,
+            is_spot,
+            expected_class,
+        ) in cases
+        {
+            let install = build_install_instrument(
+                provider,
+                "public",
+                1,
+                1,
+                instrument_id.to_string(),
+                provider_symbol.to_string(),
+                display_symbol.to_string(),
+                venue_id.to_string(),
+                qty_decimals,
+                tick_size_fixed,
+                is_spot,
+                "USDT",
+            );
+            let terms = instrument_terms_from_install(&install).unwrap_or_else(|err| {
+                panic!("{provider} ({display_symbol}) must produce valid trading terms: {err}")
+            });
+            assert_eq!(terms.instrument_class, expected_class);
+            assert_eq!(
+                terms.price_grid,
+                PriceGrid::Fixed(
+                    InstrumentDecimal::try_new(tick_size_fixed, 8).expect("fixed tick")
+                )
+            );
+            assert_eq!(terms.currency, "USDT");
+            assert_eq!(terms.route.provider_id, provider);
+        }
+    }
 }

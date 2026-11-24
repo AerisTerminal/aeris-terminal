@@ -272,7 +272,6 @@ fn run_catalog(
                     item.provider_symbol.clone(),
                     item.display_symbol.clone(),
                     item.kind.exchange_label().to_string(),
-                    item.price_decimals,
                     item.quantity_decimals,
                     item.tick_size_fixed,
                     item.kind == OkxMarketKind::Spot,

@@ -729,7 +729,6 @@ fn run_catalog(
                     item.provider_symbol.clone(),
                     item.display_symbol.clone(),
                     venue_id,
-                    item.price_decimals,
                     item.quantity_decimals,
                     item.tick_size_fixed,
                     item.key.kind == CryptoMarketKind::Spot,
