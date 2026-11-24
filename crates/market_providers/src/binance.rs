@@ -539,6 +539,7 @@ fn run_realtime(
         let mut seq: u64 = 0;
         let mut demand_dirty = true;
         let mut failed = false;
+        let mut backfilled_trades: BTreeSet<String> = BTreeSet::new();
 
         'session: loop {
             if stop.load(Ordering::Acquire) {
@@ -570,6 +571,19 @@ fn run_realtime(
                     failed = true;
                     break 'session;
                 }
+                backfill_binance_trades(
+                    &demand,
+                    &mut backfilled_trades,
+                    &mut http,
+                    &mut futures_market.trade_dedup,
+                    &mut spot.trade_dedup,
+                    sink,
+                    events,
+                    wake,
+                    stop,
+                    generation,
+                    &mut seq,
+                );
                 demand_dirty = false;
             }
 
@@ -639,6 +653,79 @@ fn run_realtime(
             ) {
                 return;
             }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn backfill_binance_trades(
+    demand: &CryptoDemand,
+    backfilled: &mut BTreeSet<String>,
+    http_client: &mut BinanceHttpClient,
+    futures_dedup: &mut BTreeMap<String, TradeDedupRing<u64>>,
+    spot_dedup: &mut BTreeMap<String, TradeDedupRing<u64>>,
+    sink: ProviderEventSink,
+    events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
+    wake: &ProviderCoordinatorWake,
+    stop: &Arc<AtomicBool>,
+    generation: u64,
+    seq: &mut u64,
+) {
+    const BACKFILL_PAGES: usize = 5;
+    const CHUNK_SIZE: usize = 500;
+    backfilled.retain(|sym| demand.trades.iter().any(|t| t.provider_symbol == *sym));
+    for inst in &demand.trades {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        if !backfilled.insert(inst.provider_symbol.clone()) {
+            continue;
+        }
+        let Ok(sym) = parse_provider_symbol(&inst.provider_symbol) else {
+            continue;
+        };
+        let Ok(trades) = http_client.fetch_recent_agg_trades(
+            sym.kind,
+            &sym.wire_symbol,
+            &inst.instrument_id,
+            &inst.entitlement_id,
+            generation,
+            seq,
+            now_unix_nanos(),
+            BACKFILL_PAGES,
+            BinanceHttpConfig::default(),
+            stop,
+        ) else {
+            continue;
+        };
+        let dedup_map = match sym.kind {
+            BinanceMarketKind::UsdmPerp => &mut *futures_dedup,
+            BinanceMarketKind::Spot => &mut *spot_dedup,
+        };
+        let dedup = dedup_map
+            .entry(sym.wire_symbol.clone())
+            .or_insert_with(|| TradeDedupRing::new(8_192));
+        let mut batch = Vec::with_capacity(CHUNK_SIZE);
+        for (agg_id, trade) in trades {
+            if dedup.insert(agg_id) {
+                batch.push(trade);
+                if batch.len() >= CHUNK_SIZE {
+                    emit_data(
+                        sink,
+                        events,
+                        CryptoRealtimeEvent::Trades(generation, std::mem::take(&mut batch)),
+                        wake,
+                    );
+                }
+            }
+        }
+        if !batch.is_empty() {
+            emit_data(
+                sink,
+                events,
+                CryptoRealtimeEvent::Trades(generation, batch),
+                wake,
+            );
         }
     }
 }

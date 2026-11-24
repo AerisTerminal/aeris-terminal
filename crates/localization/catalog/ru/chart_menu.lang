@@ -235,3 +235,8 @@ show_developing_description = Показывает, как двигались т
 extend_naked_levels = Продлевать нетронутые уровни
 extend_naked_levels_description = Продлевает каждую точку контроля и границу зоны стоимости, пока их не коснётся более поздняя цена.
 session_profile_note = Рисуется на графиках свечей, баров и Хейкин-Аши по торговым сессиям инструмента.
+
+footprint_naked_pocs = Непротестированные POC
+footprint_stacked_zones = Зоны накопленного дисбаланса
+footprint_unfinished_auctions = Незавершённые аукционы
+footprint_extended_stats = Расширенная статистика бара

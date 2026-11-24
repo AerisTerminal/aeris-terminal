@@ -1221,7 +1221,12 @@ impl TerminalApp {
     ) -> bool {
         if !matches!(
             action,
-            ChartSettingsAction::FootprintMode(_) | ChartSettingsAction::FootprintTicksPerRow(_)
+            ChartSettingsAction::FootprintMode(_)
+                | ChartSettingsAction::FootprintTicksPerRow(_)
+                | ChartSettingsAction::ToggleFootprintNakedPocs
+                | ChartSettingsAction::ToggleFootprintStackedImbalanceZones
+                | ChartSettingsAction::ToggleFootprintUnfinishedAuctions
+                | ChartSettingsAction::ToggleFootprintExtendedSummary
         ) {
             return false;
         }
@@ -1231,6 +1236,21 @@ impl TerminalApp {
         match action {
             ChartSettingsAction::FootprintMode(mode) => settings.display_mode = mode,
             ChartSettingsAction::FootprintTicksPerRow(ticks) => settings.ticks_per_row = ticks,
+            ChartSettingsAction::ToggleFootprintNakedPocs => {
+                settings.footprint_extensions.show_naked_pocs =
+                    !settings.footprint_extensions.show_naked_pocs;
+            }
+            ChartSettingsAction::ToggleFootprintStackedImbalanceZones => {
+                settings.footprint_extensions.show_stacked_imbalance_zones =
+                    !settings.footprint_extensions.show_stacked_imbalance_zones;
+            }
+            ChartSettingsAction::ToggleFootprintUnfinishedAuctions => {
+                settings.footprint_extensions.show_unfinished_auctions =
+                    !settings.footprint_extensions.show_unfinished_auctions;
+            }
+            ChartSettingsAction::ToggleFootprintExtendedSummary => {
+                settings.show_extended_summary = !settings.show_extended_summary;
+            }
             _ => unreachable!(),
         }
         surface.update(cx, |surface, surface_cx| {
@@ -1324,6 +1344,10 @@ impl TerminalApp {
             ChartSettingsAction::CrosshairMode(_)
             | ChartSettingsAction::FootprintMode(_)
             | ChartSettingsAction::FootprintTicksPerRow(_)
+            | ChartSettingsAction::ToggleFootprintNakedPocs
+            | ChartSettingsAction::ToggleFootprintStackedImbalanceZones
+            | ChartSettingsAction::ToggleFootprintUnfinishedAuctions
+            | ChartSettingsAction::ToggleFootprintExtendedSummary
             | ChartSettingsAction::TpoCells(_)
             | ChartSettingsAction::TpoPeriod(_)
             | ChartSettingsAction::TpoValueArea(_)
@@ -1372,6 +1396,10 @@ impl TerminalApp {
             ChartSettingsAction::CrosshairMode(_)
             | ChartSettingsAction::FootprintMode(_)
             | ChartSettingsAction::FootprintTicksPerRow(_)
+            | ChartSettingsAction::ToggleFootprintNakedPocs
+            | ChartSettingsAction::ToggleFootprintStackedImbalanceZones
+            | ChartSettingsAction::ToggleFootprintUnfinishedAuctions
+            | ChartSettingsAction::ToggleFootprintExtendedSummary
             | ChartSettingsAction::TpoCells(_)
             | ChartSettingsAction::TpoPeriod(_)
             | ChartSettingsAction::TpoValueArea(_)

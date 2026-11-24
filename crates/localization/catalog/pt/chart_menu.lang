@@ -235,3 +235,8 @@ show_developing_description = Mostra como o ponto de controle e a área de valor
 extend_naked_levels = Estender níveis virgens
 extend_naked_levels_description = Estende cada ponto de controle e borda da área de valor até que um preço posterior o toque.
 session_profile_note = Desenhado em gráficos de velas, barras e Heikin Ashi a partir das sessões de negociação do instrumento.
+
+footprint_naked_pocs = POCs não testados
+footprint_stacked_zones = Zonas de desequilíbrio empilhado
+footprint_unfinished_auctions = Leilões inacabados
+footprint_extended_stats = Estatísticas estendidas por barra

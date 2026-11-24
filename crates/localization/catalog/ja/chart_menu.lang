@@ -235,3 +235,8 @@ show_developing_description = 各プロファイルで POC とバリューエリ
 extend_naked_levels = ネイキッドレベルを延長
 extend_naked_levels_description = 各 POC とバリューエリアの境界を、後の価格が触れるまで延長します。
 session_profile_note = 銘柄の取引セッションに基づき、ローソク足・バー・平均足チャートに描画されます。
+
+footprint_naked_pocs = 未テストPOC
+footprint_stacked_zones = スタック不均衡ゾーン
+footprint_unfinished_auctions = 未完了オークション
+footprint_extended_stats = 拡張バー統計

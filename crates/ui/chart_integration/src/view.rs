@@ -450,6 +450,28 @@ pub enum FootprintDisplayMode {
     BidAskHistogram,
 }
 
+/// Rightward extensions drawn behind footprint clusters (naked POCs, stacked imbalance zones,
+/// and unfinished auctions).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FootprintExtensions {
+    /// Extend untested completed footprint bar POCs rightward until price revisits them.
+    pub show_naked_pocs: bool,
+    /// Extend stacked bid/ask imbalance runs rightward as translucent S/R zones until tested.
+    pub show_stacked_imbalance_zones: bool,
+    /// Mark and extend unfinished auctions at bar extremes until revisited.
+    pub show_unfinished_auctions: bool,
+}
+
+impl Default for FootprintExtensions {
+    fn default() -> Self {
+        Self {
+            show_naked_pocs: true,
+            show_stacked_imbalance_zones: true,
+            show_unfinished_auctions: true,
+        }
+    }
+}
+
 /// Durable order-flow presentation settings. Market data and aggregation remain runtime-owned.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrderFlowSettings {
@@ -469,6 +491,10 @@ pub struct OrderFlowSettings {
     /// Instrument ticks per footprint row. Zero selects an automatic row size from recent bar
     /// ranges so cells stay legible on every timeframe.
     pub ticks_per_row: u32,
+    /// Rightward footprint extensions (naked POCs, stacked imbalance zones, unfinished auctions).
+    pub footprint_extensions: FootprintExtensions,
+    /// Expand the per-bar footprint summary footer from 2 lines (`Δ`, `V`) to 4 lines (`Δ`, `Δ%`, `V`, `Σ`).
+    pub show_extended_summary: bool,
 }
 
 impl Default for OrderFlowSettings {
@@ -483,6 +509,8 @@ impl Default for OrderFlowSettings {
             order_book_depth: None,
             depth_heatmap: None,
             ticks_per_row: 0,
+            footprint_extensions: FootprintExtensions::default(),
+            show_extended_summary: true,
         }
     }
 }

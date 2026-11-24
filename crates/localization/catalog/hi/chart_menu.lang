@@ -235,3 +235,8 @@ show_developing_description = दिखाता है कि हर प्र�
 extend_naked_levels = नेकेड स्तर बढ़ाएँ
 extend_naked_levels_description = हर पॉइंट ऑफ़ कंट्रोल और वैल्यू एरिया किनारे को तब तक बढ़ाता है जब तक बाद का मूल्य उसे न छू ले।
 session_profile_note = इंस्ट्रूमेंट के ट्रेडिंग सत्रों से कैंडल, बार और हेकिन आशी चार्ट पर बनाया जाता है।
+
+footprint_naked_pocs = अनटेस्टेड POCs
+footprint_stacked_zones = स्टैक्ड इम्बैलेंस ज़ोन
+footprint_unfinished_auctions = अधूरी नीलामी
+footprint_extended_stats = विस्तृत बार आँकड़े

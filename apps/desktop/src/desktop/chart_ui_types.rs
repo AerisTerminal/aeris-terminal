@@ -276,6 +276,10 @@ pub(super) enum ChartSettingsAction {
     FootprintMode(FootprintDisplayMode),
     /// Instrument ticks per footprint row; zero is automatic.
     FootprintTicksPerRow(u32),
+    ToggleFootprintNakedPocs,
+    ToggleFootprintStackedImbalanceZones,
+    ToggleFootprintUnfinishedAuctions,
+    ToggleFootprintExtendedSummary,
     TpoCells(TpoCells),
     /// Minutes each TPO letter covers.
     TpoPeriod(u16),

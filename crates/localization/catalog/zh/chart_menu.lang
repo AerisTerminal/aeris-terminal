@@ -235,3 +235,8 @@ show_developing_description = 显示控制点和价值区在每个分布中的�
 extend_naked_levels = 延伸裸露价位
 extend_naked_levels_description = 延伸每个控制点和价值区边界，直到之后的价格触及。
 session_profile_note = 根据品种的交易时段绘制在 K 线、美国线和平均 K 线图上。
+
+footprint_naked_pocs = 未测试 POC
+footprint_stacked_zones = 堆叠失衡区域
+footprint_unfinished_auctions = 未完成拍卖
+footprint_extended_stats = 扩展 K 线统计

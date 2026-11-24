@@ -81,9 +81,103 @@ pub fn decode_agg_trade(
     Ok((wire.symbol.to_ascii_uppercase(), wire.agg_trade_id, trade))
 }
 
+#[derive(Deserialize)]
+struct WireRestAggTrade {
+    #[serde(rename = "a")]
+    agg_trade_id: u64,
+    #[serde(rename = "p")]
+    price: RawDecimal,
+    #[serde(rename = "q")]
+    quantity: RawDecimal,
+    #[serde(rename = "T")]
+    trade_time_ms: i64,
+    #[serde(rename = "m")]
+    buyer_is_maker: bool,
+}
+
+/// Decodes a Binance REST `/aggTrades` JSON array into `(agg_trade_id, MarketTrade)` pairs.
+///
+/// # Errors
+/// Returns an error if the JSON array or any trade field is malformed.
+pub fn decode_rest_agg_trades(
+    bytes: &[u8],
+    instrument_id: &str,
+    entitlement_id: &str,
+    session_generation: u64,
+    next_sequence: &mut u64,
+    received_unix_nanos: i64,
+) -> CryptoResult<Vec<(u64, MarketTrade)>> {
+    let items: Vec<WireRestAggTrade> = serde_json::from_slice(bytes).map_err(|_| {
+        CryptoError::MalformedPayload("binance REST aggTrades payload is malformed".to_string())
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for wire in items {
+        let price = wire.price.to_fixed(NORMALIZED_PRICE_SCALE)?;
+        let quantity = wire.quantity.to_fixed(NORMALIZED_QUANTITY_SCALE)?;
+        if price <= 0 || quantity <= 0 {
+            continue;
+        }
+        let exchange_nanos = wire
+            .trade_time_ms
+            .checked_mul(NANOS_PER_MILLI)
+            .ok_or_else(|| {
+                CryptoError::MalformedPayload("binance aggTrade timestamp overflowed".to_string())
+            })?;
+        let aggressor = if wire.buyer_is_maker {
+            AggressorSide::Sell
+        } else {
+            AggressorSide::Buy
+        };
+        *next_sequence = next_sequence.saturating_add(1).max(1);
+        let trade = MarketTrade {
+            metadata: EventMetadata {
+                provider_id: "binance".to_string(),
+                instrument_id: instrument_id.to_string(),
+                entitlement_id: entitlement_id.to_string(),
+                source_sequence: *next_sequence,
+                session_generation,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(exchange_nanos),
+                    provider_unix_nanos: Some(exchange_nanos),
+                    received_unix_nanos,
+                },
+            },
+            trade_id: wire.agg_trade_id.to_string(),
+            price,
+            quantity,
+            aggressor,
+        };
+        trade
+            .validate()
+            .map_err(|error| CryptoError::MalformedPayload(error.to_string()))?;
+        out.push((wire.agg_trade_id, trade));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_rest_agg_trades_page() {
+        let payload = br#"[{"a":100,"p":"65000.1","q":"0.5","f":1,"l":1,"T":1700000000000,"m":false},{"a":101,"p":"65000.0","q":"1.2","f":2,"l":2,"T":1700000000500,"m":true}]"#;
+        let mut seq = 0_u64;
+        let trades = decode_rest_agg_trades(
+            payload,
+            "instrument:binance:usdm:BTCUSDT",
+            "binance-public",
+            1,
+            &mut seq,
+            1_700_000_001_000_000_000,
+        )
+        .unwrap();
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].0, 100);
+        assert_eq!(trades[0].1.aggressor, AggressorSide::Buy);
+        assert_eq!(trades[1].0, 101);
+        assert_eq!(trades[1].1.aggressor, AggressorSide::Sell);
+    }
 
     #[test]
     fn decodes_agg_trade_aggressor_side_correctly() {

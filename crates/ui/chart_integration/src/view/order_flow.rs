@@ -349,7 +349,7 @@ impl AerisChartView {
     ) -> OrderFlowPresentationOptions {
         OrderFlowPresentationOptions {
             aggregation,
-            visual: footprint_visual_options(cell_mode(self.order_flow_settings.display_mode)),
+            visual: footprint_visual_options(self.order_flow_settings),
             show_footprint: self.chart_type == super::ChartType::Footprint,
             show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
             cumulative_delta: cumulative_delta_options(self.order_flow_settings.cumulative_delta),
@@ -536,9 +536,13 @@ fn big_trades_options(settings: BigTradesSettings, theme: &AerisTheme) -> BigTra
 }
 
 /// Footprint cells keep the engine's order-flow tokens, which both themes share.
-fn footprint_visual_options(cell_mode: FootprintCellMode) -> FootprintVisualOptions {
+fn footprint_visual_options(settings: OrderFlowSettings) -> FootprintVisualOptions {
     FootprintVisualOptions {
-        cell_mode,
+        cell_mode: cell_mode(settings.display_mode),
+        show_naked_pocs: settings.footprint_extensions.show_naked_pocs,
+        show_stacked_imbalance_zones: settings.footprint_extensions.show_stacked_imbalance_zones,
+        show_unfinished_auctions: settings.footprint_extensions.show_unfinished_auctions,
+        show_extended_summary: settings.show_extended_summary,
         ..FootprintVisualOptions::default()
     }
 }

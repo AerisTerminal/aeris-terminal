@@ -22,6 +22,7 @@ use crate::{
     endpoints::{BINANCE_FUTURES_REST_URL, BINANCE_SPOT_FALLBACK_REST_URL, BINANCE_SPOT_REST_URL},
     identity::BinanceMarketKind,
     meta::{BinanceCatalog, decode_exchange_info, decode_ticker_volumes},
+    trades::decode_rest_agg_trades,
 };
 
 /// Bounds for one Binance REST request.
@@ -138,6 +139,91 @@ impl BinanceHttpClient {
             }
         };
         decode_depth_snapshot(&bytes)
+    }
+
+    /// Fetches up to `max_pages` (capped at 5) recent 1,000-trade pages from `/aggTrades`
+    /// in chronological order to backfill footprints, CVD, and big trades on subscription.
+    ///
+    /// # Errors
+    /// Returns an error on cancellation, transport failure, or malformed payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_recent_agg_trades(
+        &mut self,
+        kind: BinanceMarketKind,
+        wire_symbol: &str,
+        instrument_id: &str,
+        entitlement_id: &str,
+        session_generation: u64,
+        next_sequence: &mut u64,
+        received_unix_nanos: i64,
+        max_pages: usize,
+        config: BinanceHttpConfig,
+        stop: &Arc<AtomicBool>,
+    ) -> CryptoResult<Vec<(u64, aeris_market_data::MarketTrade)>> {
+        let pages = max_pages.clamp(1, 5);
+        let mut by_id = std::collections::BTreeMap::new();
+        let mut next_from_id: Option<u64> = None;
+
+        for _ in 0..pages {
+            if stop.load(Ordering::Acquire) {
+                return Err(CryptoError::Transport(
+                    "binance aggTrades backfill request was cancelled".to_string(),
+                ));
+            }
+            let query = match next_from_id {
+                Some(from_id) => format!("symbol={wire_symbol}&fromId={from_id}&limit=1000"),
+                None => format!("symbol={wire_symbol}&limit=1000"),
+            };
+            self.http.set_cancellation(stop);
+            let bytes = match kind {
+                BinanceMarketKind::UsdmPerp => {
+                    let url = format!("{BINANCE_FUTURES_REST_URL}/fapi/v1/aggTrades?{query}");
+                    get_with_agent(self.http.agent(), &url, config)?
+                }
+                BinanceMarketKind::Spot => {
+                    let primary = format!("{BINANCE_SPOT_REST_URL}/api/v3/aggTrades?{query}");
+                    if let Ok(bytes) = get_with_agent(self.http.agent(), &primary, config) {
+                        bytes
+                    } else {
+                        let fallback =
+                            format!("{BINANCE_SPOT_FALLBACK_REST_URL}/api/v3/aggTrades?{query}");
+                        get_with_agent(self.http.agent(), &fallback, config)?
+                    }
+                }
+            };
+            let decoded = decode_rest_agg_trades(
+                &bytes,
+                instrument_id,
+                entitlement_id,
+                session_generation,
+                next_sequence,
+                received_unix_nanos,
+            )?;
+            let Some(earliest_id) = decoded.iter().map(|(id, _)| *id).min() else {
+                break;
+            };
+            let page_len = decoded.len();
+            for (id, trade) in decoded {
+                by_id.insert(id, trade);
+            }
+            if page_len < 1_000 || earliest_id == 0 {
+                break;
+            }
+            let prev_from = earliest_id.saturating_sub(1_000);
+            if next_from_id == Some(prev_from) {
+                break;
+            }
+            next_from_id = Some(prev_from);
+        }
+
+        // Re-sequence chronologically so source_sequence is strictly increasing.
+        let mut out = Vec::with_capacity(by_id.len());
+        for (id, mut trade) in by_id {
+            *next_sequence = next_sequence.saturating_add(1).max(1);
+            trade.metadata.source_sequence = *next_sequence;
+            out.push((id, trade));
+        }
+        Ok(out)
     }
 }
 

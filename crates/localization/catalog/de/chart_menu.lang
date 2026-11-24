@@ -235,3 +235,8 @@ show_developing_description = Zeigt, wie sich Point of Control und Value Area in
 extend_naked_levels = Naked Levels verlängern
 extend_naked_levels_description = Verlängert jeden Point of Control und jede Value-Area-Grenze, bis ein späterer Kurs sie berührt.
 session_profile_note = Wird auf Kerzen-, Balken- und Heikin-Ashi-Charts aus den Handelssitzungen des Instruments gezeichnet.
+
+footprint_naked_pocs = Ungetestete POCs
+footprint_stacked_zones = Gestapelte Imbalance-Zonen
+footprint_unfinished_auctions = Unvollständige Auktionen
+footprint_extended_stats = Erweiterte Balkenstatistik

@@ -1197,6 +1197,7 @@ fn run_realtime(
         let mut sockets = VenueSockets::default();
         let mut last_ping = Instant::now();
         let mut dedup: TradeDedupRing<String> = TradeDedupRing::new(8_192);
+        let mut backfilled_trades: BTreeSet<String> = BTreeSet::new();
         let mut seq: u64 = 0;
         let mut demand_dirty = true;
 
@@ -1250,6 +1251,19 @@ fn run_realtime(
                 // Reconcile each constituent venue socket (best-effort: one venue down never blocks others).
                 sockets.close_all();
                 connect_constituent_venues(&states, stop, &mut sockets);
+                backfill_aggregated_trades(
+                    &demand,
+                    &states,
+                    &mut backfilled_trades,
+                    &mut binance_http,
+                    &mut dedup,
+                    sink,
+                    events,
+                    wake,
+                    stop,
+                    generation,
+                    &mut seq,
+                );
                 last_ping = Instant::now();
                 demand_dirty = false;
             }
@@ -1500,6 +1514,84 @@ fn drain_socket(slot: &mut Option<MarketSocket>, mut on_text: impl FnMut(&str)) 
                 }
                 return;
             }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
+fn backfill_aggregated_trades(
+    demand: &CryptoDemand,
+    states: &BTreeMap<String, AggregatedInstrumentState>,
+    backfilled: &mut BTreeSet<String>,
+    binance_http: &mut BinanceHttpClient,
+    dedup: &mut TradeDedupRing<String>,
+    sink: ProviderEventSink,
+    events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
+    wake: &ProviderCoordinatorWake,
+    stop: &Arc<AtomicBool>,
+    generation: u64,
+    seq: &mut u64,
+) {
+    const BACKFILL_PAGES: usize = 5;
+    const CHUNK_SIZE: usize = 500;
+    backfilled.retain(|sym| demand.trades.iter().any(|t| t.provider_symbol == *sym));
+    for inst in &demand.trades {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        if !backfilled.insert(inst.provider_symbol.clone()) {
+            continue;
+        }
+        let Some(state) = states.get(&inst.provider_symbol) else {
+            continue;
+        };
+        let Some((kind, wire_symbol)) = &state.meta.binance else {
+            continue;
+        };
+        let Ok(trades) = binance_http.fetch_recent_agg_trades(
+            *kind,
+            wire_symbol,
+            &state.meta.instrument_id,
+            AGGREGATED_ENTITLEMENT_ID,
+            generation,
+            seq,
+            now_unix_nanos(),
+            BACKFILL_PAGES,
+            BinanceHttpConfig::default(),
+            stop,
+        ) else {
+            continue;
+        };
+        let mut batch = Vec::with_capacity(CHUNK_SIZE);
+        for (agg_id, raw_trade) in trades {
+            let dedup_key = format!("bin:{agg_id}");
+            if dedup.insert(dedup_key) {
+                *seq = seq.saturating_add(1).max(1);
+                batch.push(restamp_trade(
+                    raw_trade,
+                    "bin",
+                    &state.meta.instrument_id,
+                    generation,
+                    *seq,
+                ));
+                if batch.len() >= CHUNK_SIZE {
+                    emit_data(
+                        sink,
+                        events,
+                        CryptoRealtimeEvent::Trades(generation, std::mem::take(&mut batch)),
+                        wake,
+                    );
+                }
+            }
+        }
+        if !batch.is_empty() {
+            emit_data(
+                sink,
+                events,
+                CryptoRealtimeEvent::Trades(generation, batch),
+                wake,
+            );
         }
     }
 }

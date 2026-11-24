@@ -235,3 +235,8 @@ show_developing_description = Shows how the point of control and value area move
 extend_naked_levels = Extend naked levels
 extend_naked_levels_description = Extends each point of control and value-area edge until a later price touches it.
 session_profile_note = Drawn on candle, bar and Heikin Ashi charts from the instrument's trading sessions.
+
+footprint_naked_pocs = Naked POCs
+footprint_stacked_zones = Stacked imbalance zones
+footprint_unfinished_auctions = Unfinished auctions
+footprint_extended_stats = Extended bar stats

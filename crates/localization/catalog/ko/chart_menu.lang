@@ -235,3 +235,8 @@ show_developing_description = 각 프로파일에서 컨트롤 포인트와 가�
 extend_naked_levels = 미체결 레벨 연장
 extend_naked_levels_description = 이후 가격이 닿을 때까지 각 컨트롤 포인트와 가치 영역 경계를 연장합니다.
 session_profile_note = 종목의 거래 세션을 기준으로 캔들, 바, 하이킨 아시 차트에 그려집니다.
+
+footprint_naked_pocs = 미테스트 POC
+footprint_stacked_zones = 누적 불균형 구간
+footprint_unfinished_auctions = 미완료 경매
+footprint_extended_stats = 확장 봉 통계

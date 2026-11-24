@@ -481,6 +481,7 @@ pub(super) fn restored_order_flow_settings(
             .depth_heatmap
             .map(|visible| DepthHeatmapSettings { visible }),
         ticks_per_row: settings.ticks_per_row,
+        ..OrderFlowSettings::default()
     })
 }
 

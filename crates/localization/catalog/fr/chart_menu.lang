@@ -236,3 +236,8 @@ show_developing_description = Montre l’évolution du point de contrôle et de 
 extend_naked_levels = Prolonger les niveaux vierges
 extend_naked_levels_description = Prolonge chaque point de contrôle et bord de zone de valeur jusqu’à ce qu’un prix ultérieur le touche.
 session_profile_note = Dessiné sur les graphiques en bougies, en barres et Heikin Ashi à partir des séances de l’instrument.
+
+footprint_naked_pocs = POC non testés
+footprint_stacked_zones = Zones de déséquilibre empilé
+footprint_unfinished_auctions = Enchères inachevées
+footprint_extended_stats = Statistiques étendues par barre
