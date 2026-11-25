@@ -381,6 +381,24 @@ fn chart_legend_row(
         .into_any_element()
 }
 
+impl LegendItem {
+    pub(super) const fn settings_request(self) -> Option<ChartSettingsRequest> {
+        match self {
+            Self::Study { study_id, .. } => Some(ChartSettingsRequest::Study(study_id)),
+            Self::BigTrades => Some(ChartSettingsRequest::BigTrades),
+            Self::Volume => Some(ChartSettingsRequest::Volume),
+            Self::OrderFlow(OrderFlowStudy::CumulativeDelta) => {
+                Some(ChartSettingsRequest::CumulativeDelta)
+            }
+            Self::OrderFlow(OrderFlowStudy::Delta) => Some(ChartSettingsRequest::DeltaHistogram),
+            Self::OrderBookDepth => Some(ChartSettingsRequest::OrderBookDepth),
+            Self::OpenInterest => Some(ChartSettingsRequest::OpenInterest),
+            Self::SessionProfile(kind) => Some(ChartSettingsRequest::SessionProfile(kind)),
+            Self::Asset | Self::VolumeProfile | Self::DepthHeatmap | Self::Indicator(_) => None,
+        }
+    }
+}
+
 fn legend_row_controls(
     chart: &Entity<AerisChartView>,
     row: &LegendRow,
@@ -405,17 +423,7 @@ fn legend_row_controls(
         .items_center()
         .gap_1()
         .child(visibility);
-    if row.settings_available
-        && matches!(
-            row.item,
-            LegendItem::Study { .. }
-                | LegendItem::BigTrades
-                | LegendItem::Volume
-                | LegendItem::OrderFlow(_)
-                | LegendItem::OrderBookDepth
-                | LegendItem::SessionProfile(_)
-        )
-    {
+    if row.settings_available && row.item.settings_request().is_some() {
         controls = controls.child(
             legend_control(chart, row.item, LegendControl::Settings, palette)
                 .invisible()
@@ -513,26 +521,7 @@ fn legend_control(
         .on_click(move |_, _, cx| {
             action_chart.update(cx, |chart, chart_cx| {
                 if matches!(control, LegendControl::Settings) {
-                    let request = match item {
-                        LegendItem::Study { study_id, .. } => {
-                            Some(ChartSettingsRequest::Study(study_id))
-                        }
-                        LegendItem::BigTrades => Some(ChartSettingsRequest::BigTrades),
-                        LegendItem::Volume => Some(ChartSettingsRequest::Volume),
-                        LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta) => {
-                            Some(ChartSettingsRequest::CumulativeDelta)
-                        }
-                        LegendItem::OrderFlow(OrderFlowStudy::Delta) => {
-                            Some(ChartSettingsRequest::DeltaHistogram)
-                        }
-                        LegendItem::OrderBookDepth => Some(ChartSettingsRequest::OrderBookDepth),
-                        LegendItem::OpenInterest => Some(ChartSettingsRequest::OpenInterest),
-                        LegendItem::SessionProfile(kind) => {
-                            Some(ChartSettingsRequest::SessionProfile(kind))
-                        }
-                        _ => None,
-                    };
-                    if let Some(request) = request {
+                    if let Some(request) = item.settings_request() {
                         chart_cx.emit(ChartHostEvent::Settings(request));
                     }
                     return;

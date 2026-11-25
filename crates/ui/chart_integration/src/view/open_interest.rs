@@ -196,6 +196,10 @@ mod tests {
             .expect("open interest legend row");
         assert!(oi_row.pane > 0);
         assert!(oi_row.settings_available);
+        assert_eq!(
+            oi_row.item.settings_request(),
+            Some(crate::view::ChartSettingsRequest::OpenInterest)
+        );
         assert_eq!(oi_row.values.len(), 4);
 
         // Switching across Bars, Line, Area, and back to Candles updates the series in place.
