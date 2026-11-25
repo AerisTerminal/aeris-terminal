@@ -391,6 +391,7 @@ fn indicator_template_menu_row(
                         template.favorite,
                         theme,
                     )
+                    .on_secondary_surface()
                     .on_click(move |_, _, cx| {
                         star.update(cx, |terminal, terminal_cx| {
                             terminal.toggle_indicator_template_favorite(index, terminal_cx);

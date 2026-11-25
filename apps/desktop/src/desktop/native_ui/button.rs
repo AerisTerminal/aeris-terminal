@@ -321,7 +321,6 @@ impl ButtonFlags {
     const SKIP_TAB_STOP: u16 = 1 << 8;
     const TEXT_TOGGLE: u16 = 1 << 9;
     const TABULAR_NUMERALS: u16 = 1 << 10;
-    const SHARES_CONTAINER_HOVER: u16 = 1 << 11;
     const ON_SECONDARY_SURFACE: u16 = 1 << 12;
 
     const fn has(self, flag: u16) -> bool {
@@ -505,14 +504,6 @@ impl Button {
     /// never jitters as the digits change.
     pub(crate) fn tabular_numerals(mut self) -> Self {
         self.flags.set(ButtonFlags::TABULAR_NUMERALS, true);
-        self
-    }
-
-    /// For a control inside a hover-tracked row: the pointer over the button still counts as
-    /// over the row, so the row keeps its hover and a menu that closes when the pointer leaves
-    /// stays open. Presses and clicks remain the button's own.
-    pub(crate) fn shares_container_hover(mut self) -> Self {
-        self.flags.set(ButtonFlags::SHARES_CONTAINER_HOVER, true);
         self
     }
 
@@ -878,9 +869,7 @@ impl RenderOnce for Button {
 
         let button = self
             .base
-            .when(!flags.has(ButtonFlags::SHARES_CONTAINER_HOVER), |button| {
-                button.occlude()
-            })
+            .occlude()
             .when_some(aria_label, BaseButton::accessibility_label)
             .selected(flags.has(ButtonFlags::SELECTED))
             .disabled(flags.has(ButtonFlags::DISABLED))

@@ -65,6 +65,11 @@ pub(super) fn chrome_overlay_layer(
             interval_popup: compact_panel,
             surface: if menu_overlay {
                 ChromeOverlaySurface::Frameless
+            } else if matches!(
+                overlay,
+                ChromeOverlay::Instrument | ChromeOverlay::Indicator | ChromeOverlay::Accounts
+            ) {
+                ChromeOverlaySurface::Primary
             } else {
                 ChromeOverlaySurface::Floating
             },
@@ -359,10 +364,12 @@ pub(super) struct ChromeOverlayPanelStyle {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ChromeOverlaySurface {
-    /// The content is one or more `MenuPanel`s that draw their own surface.
+    /// The content is one or more `MenuPanel`s that draw their own `surface-secondary` surface.
     Frameless,
-    /// Every other overlay (the quick timeframe popup, the symbol and indicator menus and
-    /// floating panels such as Accounts): the secondary `popover_surface`.
+    /// Full searchable menus and workspace overlays (Symbol menu, Indicator menu, Accounts):
+    /// the primary `surface` with a 1px `border` edge.
+    Primary,
+    /// Compact popups (such as the quick timeframe popup): the secondary `popover_surface`.
     Floating,
 }
 
@@ -384,6 +391,7 @@ pub(super) fn chrome_overlay_panel(
         .flex_none()
         .map(|panel| match style.surface {
             ChromeOverlaySurface::Frameless => panel.max_h_full(),
+            ChromeOverlaySurface::Primary => primary_overlay_surface(panel, theme, radius),
             ChromeOverlaySurface::Floating => popover_surface(panel, theme, radius),
         })
         .when(style.interval_popup && !frameless, |panel| {
@@ -1001,8 +1009,8 @@ pub(super) fn timeframe_overlay_row(
     })
 }
 
-/// The row's own star target. It handles the press itself so starring a timeframe neither
-/// selects it nor closes the menu.
+/// The row's own star target. It handles hover and press independently so hovering the star
+/// highlights only the star button (not the row) while keeping the timeframe flyout open.
 fn timeframe_favorite_star(
     app: &Entity<WorkspaceSurface>,
     interval: ChartInterval,
@@ -1011,13 +1019,28 @@ fn timeframe_favorite_star(
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let toggle = app.clone();
-    super::chrome_menu::favorite_star_button(("timeframe_favorite_star", index), favorite, theme)
-        .debug_selector(|| "timeframe_favorite_star".into())
-        .on_press(move |_, _, cx| {
-            toggle.update(cx, |_, app_cx| {
-                app_cx.emit(TimeframeFavoriteToggledEvent(interval));
+    let hover_app = app.clone();
+    div()
+        .id(("timeframe_favorite_star_region", index))
+        .on_hover(move |hovered, window, cx| {
+            hover_app.update(cx, |app, app_cx| {
+                app.hover_timeframe_menu_region(*hovered, window, app_cx);
             });
         })
+        .child(
+            super::chrome_menu::favorite_star_button(
+                ("timeframe_favorite_star", index),
+                favorite,
+                theme,
+            )
+            .on_secondary_surface()
+            .debug_selector(|| "timeframe_favorite_star".into())
+            .on_press(move |_, _, cx| {
+                toggle.update(cx, |_, app_cx| {
+                    app_cx.emit(TimeframeFavoriteToggledEvent(interval));
+                });
+            }),
+        )
 }
 
 #[derive(Clone, Copy)]

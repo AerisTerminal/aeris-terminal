@@ -45,7 +45,7 @@ pub(super) fn chrome_menu_extent(
 }
 
 /// The symbol and indicator menu body. The chrome overlay panel around it draws the
-/// `surface-secondary` floating-layer surface, so the body has no fill of its own.
+/// primary `surface` floating-layer surface, so the body has no fill of its own.
 pub(super) fn chrome_menu_surface(
     colors: &aeris_design_system::ThemeColors,
     extent: ChromeMenuExtent,
@@ -179,8 +179,6 @@ pub(super) fn favorite_star_button(
         Icon::new(HugeIcon::Star.path())
     };
     Button::new(id, theme)
-        .shares_container_hover()
-        .on_secondary_surface()
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .icon(star)

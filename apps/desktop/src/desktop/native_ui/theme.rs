@@ -157,9 +157,9 @@ pub(crate) fn platform_border_width(theme: &AerisTheme) -> Pixels {
     px(theme.dimensions.border_width)
 }
 
-/// Floating-layer chrome (dialogs, popovers, toasts, hints, floating panels and every menu,
-/// dropdown, context menu, flyout and select menu): the Theme System `surface-secondary` fill
-/// with a 1px `border-secondary` edge, in every theme.
+/// Floating-layer chrome (dropdowns, context menus, flyouts, select menus, popovers, toasts,
+/// and hints): the Theme System `surface-secondary` fill with a 1px `border-secondary` edge,
+/// in every theme.
 pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
     let colors = &theme.colors;
     element
@@ -167,6 +167,21 @@ pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius:
         .border(platform_border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
+}
+
+/// Modal dialogs, the Accounts panel, and the searchable Symbol/Indicator menus: the Theme System
+/// primary `surface` fill with a 1px `border` edge, in every theme.
+pub(crate) fn primary_overlay_surface<E: Styled>(
+    element: E,
+    theme: &AerisTheme,
+    radius: Pixels,
+) -> E {
+    let colors = &theme.colors;
+    element
+        .rounded(radius)
+        .border(platform_border_width(theme))
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
 }
 
 /// Projects `Aeris`'s semantic design contract into the unstyled Base

@@ -295,7 +295,10 @@ impl MenuRow {
             kind,
             scale: MenuScale::BASE,
             theme: *theme,
-            resting_fill: theme.colors.surface_secondary,
+            resting_fill: match kind {
+                RowKind::Compact => theme.colors.surface_secondary,
+                RowKind::SearchResult => theme.colors.surface,
+            },
             label: label.into(),
             leading_icon: None,
             leading: None,

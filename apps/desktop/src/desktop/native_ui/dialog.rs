@@ -24,7 +24,7 @@ use gpui::{
 use super::{
     button::{Button, ButtonVariant, close_button},
     platform_font_weight,
-    theme::{gpui_color, platform_border_width, popover_surface},
+    theme::{gpui_color, platform_border_width, primary_overlay_surface},
 };
 
 type DialogHandler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -359,7 +359,7 @@ impl RenderOnce for Dialog {
             .children(self.children);
         let movable = self.movable;
         let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
-        let panel = popover_surface(div().id("dialog_panel"), &theme, radius)
+        let panel = primary_overlay_surface(div().id("dialog_panel"), &theme, radius)
             .w(self.size.width())
             .map(|panel| match (self.max_height, movable.is_some()) {
                 (Some(height), _) => panel.max_h(height),
