@@ -234,7 +234,7 @@ fn panel_title_bar(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> impl I
         .pl_4()
         .pr_2()
         .border_b(platform_border_width(theme))
-        .border_color(gpui_color(colors.border_secondary))
+        .border_color(gpui_color(colors.border))
         .cursor(FLOATING_PANEL_MOVE_CURSOR)
         .on_drag(AccountsPanelMoveDrag, move |drag, offset, _, cx| {
             grab.update(cx, |surface, _| {
@@ -279,7 +279,7 @@ fn panel_sidebar(
         .children(AccountsTab::ALL.into_iter().map(|tab| {
             let select = app.clone();
             Tab::new(("accounts_panel_tab", tab as usize), theme)
-                .sidebar_on_secondary()
+                .sidebar()
                 .selected(selected == tab)
                 .gap_2()
                 .on_click(move |_, window, cx| {
@@ -310,7 +310,7 @@ fn panel_sidebar(
         .flex_col()
         .p_2()
         .border_r(platform_border_width(theme))
-        .border_color(gpui_color(colors.border_secondary))
+        .border_color(gpui_color(colors.border))
         .child(tabs)
         .child(
             div()

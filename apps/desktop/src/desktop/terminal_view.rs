@@ -1380,7 +1380,6 @@ fn workspace_tab(
         .chrome(resting_fill, selected_fill)
         .selected(selected)
         .w(px(width))
-        .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .flex_none()
         .flex()
         .items_center()
@@ -1392,7 +1391,7 @@ fn workspace_tab(
         .aria_position_in_set(index + 1)
         .aria_size_of_set(state.workspace_count)
         .when_some(state.drag_translation, |tab, translation| {
-            tab.relative().left(px(translation)).shadow_md()
+            tab.relative().left(px(translation))
         })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             mouse_focus.focus(window, cx);
@@ -1490,9 +1489,9 @@ pub(super) fn workspace_tab_strip(
         .min_w_0()
         .flex_none()
         .flex()
-        .items_center()
-        .gap_0p5()
-        .pl_2()
+        .items_end()
+        .gap(px(tab_strip::WORKSPACE_TAB_GAP))
+        .pl(px(tab_strip::WORKSPACE_TAB_STRIP_PADDING_LEFT))
         .overflow_x_hidden()
         .role(Role::TabList)
         .aria_label(tr!(panels::WORKSPACES))
@@ -1553,16 +1552,21 @@ fn workspace_tab_strip_end(
     theme: &AerisTheme,
 ) -> [AnyElement; 2] {
     [
-        chrome_tooltip(
-            "add_workspace",
-            tr!(panels::NEW_TAB),
-            workspace_add_button(terminal.clone(), add_enabled, theme),
-            theme,
-        )
-        .into_any_element(),
+        div()
+            .flex_none()
+            .pl(px(6.0))
+            .mb(px(8.0))
+            .child(chrome_tooltip(
+                "add_workspace",
+                tr!(panels::NEW_TAB),
+                workspace_add_button(terminal.clone(), add_enabled, theme),
+                theme,
+            ))
+            .into_any_element(),
         div()
             .id("workspace_tab_drop_target")
             .h(px(chart_chrome::CHART_CONTROL_SIZE))
+            .mb(px(4.0))
             .min_w(px(16.0))
             .into_any_element(),
     ]
@@ -1577,7 +1581,6 @@ fn start_page_tab(terminal: &Entity<TerminalApp>, shown: bool, theme: &AerisThem
     Tab::new("start_page_tab", theme)
         .chrome(resting_fill, selected_fill)
         .selected(shown)
-        .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .flex_none()
         .flex()
         .items_center()

@@ -331,6 +331,7 @@ pub(super) fn workspace_title_bar(
         ))
         .child(app_navigation_button(terminal, state.app_view, &theme));
     div()
+        .relative()
         .w_full()
         .h(px(WORKSPACE_TITLE_BAR_HEIGHT))
         .flex_none()
@@ -338,6 +339,15 @@ pub(super) fn workspace_title_bar(
         .items_center()
         .bg(gpui_color(title_bar_fill(&theme)))
         .when(cfg!(target_os = "macos"), |bar| bar.pl(px(80.0)))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(platform_border_width(&theme))
+                .bg(gpui_color(theme.colors.border)),
+        )
         .child(
             div()
                 .h_full()

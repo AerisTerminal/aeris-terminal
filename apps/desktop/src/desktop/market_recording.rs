@@ -781,7 +781,6 @@ fn session_chooser(
                         theme,
                     )
                     .variant(ButtonVariant::Ghost)
-                    .on_secondary_surface()
                     .button_size(ButtonSize::Sm)
                     .tabular_numerals()
                     .icon(header_icon(HugeIcon::Play))
@@ -847,7 +846,6 @@ fn recording_row(
         .child(
             Button::new(("market_recording_replay", index), theme)
                 .variant(ButtonVariant::Ghost)
-                .on_secondary_surface()
                 .icon(header_icon(HugeIcon::Play))
                 .label(tr!(shell::MARKET_RECORDING_OPEN_REPLAY))
                 .aria_label(tr!(

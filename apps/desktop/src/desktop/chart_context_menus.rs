@@ -993,7 +993,7 @@ fn chart_settings_panel(
     let colors = theme.colors;
     let dismiss_overlays = terminal.clone();
     let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
-    popover_surface(div().id("chart_settings_menu"), theme, radius)
+    primary_overlay_surface(div().id("chart_settings_menu"), theme, radius)
         .absolute()
         .left(bounds.origin.x)
         .top(bounds.origin.y)
@@ -1043,7 +1043,7 @@ fn chart_settings_title_bar(
         .items_center()
         .justify_between()
         .border_b(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border_secondary))
+        .border_color(gpui_color(colors.border))
         .cursor(FLOATING_PANEL_MOVE_CURSOR)
         .on_mouse_down(MouseButton::Left, move |event, _, cx| {
             grab_terminal.update(cx, |terminal, _| {
@@ -1253,7 +1253,7 @@ fn chart_settings_sidebar(
     .children(ChartSettingsSection::ALL.into_iter().map(|section| {
         let terminal = terminal.clone();
         Tab::new(("chart_settings_section", section as usize), theme)
-            .sidebar_on_secondary()
+            .sidebar()
             .selected(selected == section)
             .gap_2()
             .on_click(move |_, _, cx| {
@@ -1274,7 +1274,7 @@ fn chart_settings_sidebar(
         .flex_col()
         .p_2()
         .border_r(px(theme.dimensions.border_width))
-        .border_color(gpui_color(theme.colors.border_secondary))
+        .border_color(gpui_color(theme.colors.border))
         .child(sections)
         .child(
             div()

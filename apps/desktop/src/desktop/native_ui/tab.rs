@@ -8,9 +8,9 @@ use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
 };
 use gpui::{
-    AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, Orientation,
-    ParentElement, Pixels, RenderOnce, SharedString, Stateful, StyleRefinement, Styled, Window,
-    div, prelude::*, px,
+    AnyElement, App, Bounds, Div, ElementId, InteractiveElement, Interactivity, IntoElement,
+    Orientation, ParentElement, PathBuilder, Pixels, RenderOnce, SharedString, Stateful,
+    StyleRefinement, Styled, Window, canvas, div, point, prelude::*, px,
 };
 use gpui_base::Button as BaseButton;
 
@@ -41,6 +41,16 @@ const TRACK_SELECTED_BORDER_ALPHA: f32 = 0.7;
 const SIDEBAR_TAB_GAP: Pixels = px(2.0);
 /// Sidebar sections are a comfortable 36 px click target that grows with a scaled panel.
 const SIDEBAR_TAB_HEIGHT: f32 = 36.0;
+/// Attached browser-style chrome tab geometry (sits flush to the bottom edge of the 42px title bar).
+const CHROME_TAB_ACTIVE_HEIGHT: f32 = 37.0;
+const CHROME_TAB_ACTIVE_PADDING_BOTTOM: f32 = 3.0;
+const CHROME_TAB_INACTIVE_HEIGHT: f32 = 32.0;
+const CHROME_TAB_INACTIVE_BOTTOM_MARGIN: f32 = 4.0;
+const CHROME_TAB_TOP_RADIUS: f32 = 10.0;
+const CHROME_TAB_FLARE_RADIUS: f32 = 9.0;
+const CHROME_TAB_INACTIVE_RADIUS: f32 = 8.0;
+/// Cubic Bezier handle length for a true quarter-circle arc: `4/3 * (sqrt(2) - 1)`.
+const QUARTER_CIRCLE_KAPPA: f32 = 0.552_284_75;
 
 fn tab_radius() -> Pixels {
     px(f32::from(RadiusToken::Full.logical_pixels()))
@@ -156,7 +166,7 @@ enum TabSurface {
         selected: ThemeColor,
     },
     /// A full-width section in a [`TabList::sidebar`].
-    Sidebar { secondary: bool },
+    Sidebar,
 }
 
 /// Theme System tab colors for one selection state. Unselected tabs keep a transparent
@@ -215,18 +225,12 @@ fn track_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColors {
     }
 }
 
-/// Sidebar sections rest without a fill, take `hover-bg` (`hover-bg-secondary` on floating
-/// layers) on hover and stay on `active-bg` (`active-bg-secondary` on floating layers) while
+/// Sidebar sections rest without a fill, take `hover-bg` on hover and stay on `active-bg` while
 /// selected.
-fn sidebar_tab_colors(theme: &AerisTheme, selected: bool, secondary: bool) -> SegmentedTabColors {
+fn sidebar_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColors {
     let colors = theme.colors;
-    let active_fill = if secondary {
-        colors.active_bg_secondary
-    } else {
-        colors.active_bg
-    };
     SegmentedTabColors {
-        fill: selected.then_some(active_fill),
+        fill: selected.then_some(colors.active_bg),
         border: None,
         text: if selected {
             colors.text_default
@@ -283,19 +287,13 @@ impl Tab {
 
     /// Renders a section of a [`TabList::sidebar`] on `--surface`.
     pub(crate) const fn sidebar(mut self) -> Self {
-        self.surface = TabSurface::Sidebar { secondary: false };
+        self.surface = TabSurface::Sidebar;
         self
     }
 
-    /// Renders a section of a [`TabList::sidebar`] inside a floating `--surface-secondary` layer
-    /// (such as Chart Settings or Accounts & Connections).
-    pub(crate) const fn sidebar_on_secondary(mut self) -> Self {
-        self.surface = TabSurface::Sidebar { secondary: true };
-        self
-    }
-
-    /// Renders a workspace document tab on window chrome: it rests on `resting` and is raised
-    /// onto `selected` when active. Callers own its size.
+    /// Renders an attached workspace document tab on window chrome: unselected tabs rest flat on
+    /// `resting` and the selected tab merges seamlessly into `selected` below with concave
+    /// bottom flares. Callers own its width.
     pub(crate) const fn chrome(mut self, resting: ThemeColor, selected: ThemeColor) -> Self {
         self.surface = TabSurface::Chrome { resting, selected };
         self
@@ -335,11 +333,6 @@ impl RenderOnce for Tab {
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .cursor_pointer();
         let border_width = platform_border_width(&self.theme);
-        let radius = match self.surface {
-            TabSurface::Segmented => px(0.0),
-            TabSurface::Track | TabSurface::Chrome { .. } => tab_radius(),
-            TabSurface::Sidebar { .. } => sidebar_tab_radius(),
-        };
         let mut tab = match self.surface {
             TabSurface::Segmented => {
                 let state = segmented_tab_colors(&self.theme, selected);
@@ -371,13 +364,8 @@ impl RenderOnce for Tab {
                     .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary)))
             }
             TabSurface::Track => render_track_tab(tab, &self.theme, selected, border_width),
-            TabSurface::Sidebar { secondary } => {
-                let state = sidebar_tab_colors(&self.theme, selected, secondary);
-                let hover_fill = if secondary {
-                    colors.hover_bg_secondary
-                } else {
-                    colors.hover_bg
-                };
+            TabSurface::Sidebar => {
+                let state = sidebar_tab_colors(&self.theme, selected);
                 // The base button centers its content; section labels read from the leading edge.
                 tab.w_full()
                     .flex()
@@ -392,7 +380,7 @@ impl RenderOnce for Tab {
                     .text_color(gpui_color(state.text))
                     .when(!selected, |tab| {
                         tab.hover(move |tab| {
-                            tab.bg(gpui_color(hover_fill))
+                            tab.bg(gpui_color(colors.hover_bg))
                                 .text_color(gpui_color(state.hover_text))
                         })
                     })
@@ -401,35 +389,185 @@ impl RenderOnce for Tab {
             TabSurface::Chrome {
                 resting,
                 selected: selected_fill,
-            } => tab
-                .border(border_width)
-                .border_color(gpui_color(if selected { colors.border } else { resting }))
-                .bg(gpui_color(if selected { selected_fill } else { resting }))
-                .text_color(gpui_color(if selected {
-                    colors.text_default
-                } else {
-                    colors.text_secondary
-                }))
-                .when(!selected, |tab| {
-                    let hover_fill = if resting == colors.surface_secondary {
-                        colors.hover_bg_secondary
-                    } else {
-                        colors.hover_bg.over(resting)
-                    };
-                    tab.hover(move |tab| {
-                        tab.bg(gpui_color(hover_fill))
-                            .text_color(gpui_color(colors.text_default))
-                    })
-                })
-                .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary))),
+            } => render_chrome_tab(
+                tab,
+                &self.theme,
+                selected,
+                resting,
+                selected_fill,
+                border_width,
+            ),
         }
         .children(self.children);
         tab.style().refine(&self.style);
         // Radius is component-owned: callers can size and lay out a tab, but an underlined tab
-        // stays square, a chrome tab the canonical 999px pill and a sidebar section
-        // `--radius-default`.
-        tab.rounded(radius)
+        // stays square, a track tab is a 999px pill, a sidebar section `--radius-default`, and a
+        // chrome tab uses attached top/hover radii rather than a full pill.
+        match self.surface {
+            TabSurface::Segmented => tab.rounded(px(0.0)),
+            TabSurface::Track => tab.rounded(tab_radius()),
+            TabSurface::Sidebar => tab.rounded(sidebar_tab_radius()),
+            TabSurface::Chrome { .. } if selected => tab
+                .rounded_tl(px(CHROME_TAB_TOP_RADIUS))
+                .rounded_tr(px(CHROME_TAB_TOP_RADIUS))
+                .rounded_bl(px(0.0))
+                .rounded_br(px(0.0)),
+            TabSurface::Chrome { .. } => tab.rounded(px(CHROME_TAB_INACTIVE_RADIUS)),
+        }
     }
+}
+
+fn render_chrome_tab(
+    tab: BaseButton,
+    theme: &AerisTheme,
+    selected: bool,
+    resting: ThemeColor,
+    selected_fill: ThemeColor,
+    border_width: Pixels,
+) -> BaseButton {
+    let colors = theme.colors;
+    if selected {
+        tab.relative()
+            .h(px(CHROME_TAB_ACTIVE_HEIGHT))
+            .pb(px(CHROME_TAB_ACTIVE_PADDING_BOTTOM))
+            .bg(gpui::transparent_black())
+            .text_color(gpui_color(colors.text_default))
+            .focus_visible(move |tab| {
+                tab.border_t(border_width)
+                    .border_l(border_width)
+                    .border_r(border_width)
+                    .border_color(gpui_color(colors.ring_primary))
+            })
+            .child(attached_chrome_tab_backdrop(
+                selected_fill,
+                colors.border,
+                border_width,
+            ))
+    } else {
+        let hover_fill = if resting == colors.surface_secondary {
+            colors.hover_bg_secondary
+        } else {
+            colors.hover_bg.over(resting)
+        };
+        tab.h(px(CHROME_TAB_INACTIVE_HEIGHT))
+            .mb(px(CHROME_TAB_INACTIVE_BOTTOM_MARGIN))
+            .border(border_width)
+            .border_color(gpui::transparent_black())
+            .bg(gpui::transparent_black())
+            .text_color(gpui_color(colors.text_secondary))
+            .hover(move |tab| {
+                tab.bg(gpui_color(hover_fill))
+                    .text_color(gpui_color(colors.text_default))
+            })
+            .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary)))
+    }
+}
+
+/// Paints the active attached chrome tab as one unified vector silhouette (rounded top corners,
+/// straight vertical sides, and concave bottom flares) so the fill seamlessly merges into the
+/// primary surface below and the border stroke flows continuously into the title bar hairline.
+fn attached_chrome_tab_backdrop(
+    fill_color: ThemeColor,
+    border_color: ThemeColor,
+    border_width: Pixels,
+) -> impl IntoElement {
+    let flare = px(CHROME_TAB_FLARE_RADIUS);
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            paint_attached_chrome_tab(window, bounds, fill_color, border_color, border_width);
+        },
+    )
+    .absolute()
+    .left(-flare)
+    .right(-flare)
+    .top_0()
+    .bottom_0()
+}
+
+fn paint_attached_chrome_tab(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    fill_color: ThemeColor,
+    border_color: ThemeColor,
+    border_width: Pixels,
+) {
+    let left = f32::from(bounds.left());
+    let right = f32::from(bounds.right());
+    let top = f32::from(bounds.top());
+    let bottom = f32::from(bounds.bottom());
+    let bw = f32::from(border_width);
+    let half = bw * 0.5;
+    let xl = left + CHROME_TAB_FLARE_RADIUS + half;
+    let xr = right - CHROME_TAB_FLARE_RADIUS - half;
+    let yt = top + half;
+    let yb = bottom - half;
+    let body_w = (xr - xl).max(0.0);
+    let body_h = (yb - yt).max(0.0);
+    if body_w <= 0.0 || body_h <= 0.0 {
+        return;
+    }
+    let rb = CHROME_TAB_FLARE_RADIUS.min(body_h * 0.5);
+    let rt = CHROME_TAB_TOP_RADIUS
+        .min(body_w * 0.5)
+        .min((body_h - rb).max(0.0));
+
+    let mut fill_path = PathBuilder::fill();
+    fill_path.move_to(point(px(xl - rb), px(bottom)));
+    fill_path.line_to(point(px(xl - rb), px(yb)));
+    trace_attached_chrome_tab_outline(&mut fill_path, xl, xr, yt, yb, rt, rb);
+    fill_path.line_to(point(px(xr + rb), px(bottom)));
+    fill_path.close();
+    if let Ok(path) = fill_path.build() {
+        window.paint_path(path, gpui_color(fill_color));
+    }
+
+    let mut stroke_path = PathBuilder::stroke(border_width);
+    stroke_path.move_to(point(px(xl - rb), px(yb)));
+    trace_attached_chrome_tab_outline(&mut stroke_path, xl, xr, yt, yb, rt, rb);
+    if let Ok(path) = stroke_path.build() {
+        window.paint_path(path, gpui_color(border_color));
+    }
+}
+
+fn trace_attached_chrome_tab_outline(
+    path: &mut PathBuilder,
+    xl: f32,
+    xr: f32,
+    yt: f32,
+    yb: f32,
+    rt: f32,
+    rb: f32,
+) {
+    let kb = rb * QUARTER_CIRCLE_KAPPA;
+    let kt = rt * QUARTER_CIRCLE_KAPPA;
+    // Left concave bottom flare: horizontal tangent at (xl - rb, yb) -> vertical at (xl, yb - rb).
+    path.cubic_bezier_to(
+        point(px(xl), px(yb - rb)),
+        point(px(xl - rb + kb), px(yb)),
+        point(px(xl), px(yb - rb + kb)),
+    );
+    path.line_to(point(px(xl), px(yt + rt)));
+    // Top-left convex corner.
+    path.cubic_bezier_to(
+        point(px(xl + rt), px(yt)),
+        point(px(xl), px(yt + rt - kt)),
+        point(px(xl + rt - kt), px(yt)),
+    );
+    path.line_to(point(px(xr - rt), px(yt)));
+    // Top-right convex corner.
+    path.cubic_bezier_to(
+        point(px(xr), px(yt + rt)),
+        point(px(xr - rt + kt), px(yt)),
+        point(px(xr), px(yt + rt - kt)),
+    );
+    path.line_to(point(px(xr), px(yb - rb)));
+    // Right concave bottom flare: vertical tangent at (xr, yb - rb) -> horizontal at (xr + rb, yb).
+    path.cubic_bezier_to(
+        point(px(xr + rb), px(yb)),
+        point(px(xr), px(yb - rb + kb)),
+        point(px(xr + rb - kb), px(yb)),
+    );
 }
 
 fn render_track_tab(
@@ -523,15 +661,12 @@ mod tests {
     fn sidebar_sections_fill_only_while_selected() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let colors = theme.colors;
-            let resting = sidebar_tab_colors(&theme, false, false);
+            let resting = sidebar_tab_colors(&theme, false);
             assert_eq!(resting.fill, None);
             assert_eq!(resting.text, colors.text_secondary);
-            let selected = sidebar_tab_colors(&theme, true, false);
+            let selected = sidebar_tab_colors(&theme, true);
             assert_eq!(selected.fill, Some(colors.active_bg));
             assert_eq!(selected.text, colors.text_default);
-            let selected_secondary = sidebar_tab_colors(&theme, true, true);
-            assert_eq!(selected_secondary.fill, Some(colors.active_bg_secondary));
-            assert_eq!(selected_secondary.text, colors.text_default);
         }
     }
 

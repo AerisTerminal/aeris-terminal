@@ -274,7 +274,7 @@ use native_ui::{
     tab::{Tab, TabList},
     theme::{
         PanelEdges, base_theme, field_border, field_surface, gpui_color, panel_corners,
-        panel_focus_border, platform_border_width, popover_surface,
+        panel_focus_border, platform_border_width, popover_surface, primary_overlay_surface,
     },
     tooltip::{TooltipSpec, with_tooltip},
 };

@@ -8,9 +8,9 @@ use std::ops::{Index, IndexMut};
 use super::WorkspaceTab;
 
 /// Space between neighboring tabs in the rendered strip.
-const WORKSPACE_TAB_GAP: f32 = 2.0;
-/// Space between the strip's left edge and its first tab.
-const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
+pub(super) const WORKSPACE_TAB_GAP: f32 = 6.0;
+/// Space between the strip's left edge and its first tab (leaves room for the active tab's left flare).
+pub(super) const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 12.0;
 
 /// A tab drag in progress: the dragged tab, where the pointer grabbed it and the last pointer
 /// position the strip reported.
@@ -601,7 +601,7 @@ mod tests {
             TabDragMove::Unchanged
         );
         assert_eq!(
-            tabs.move_drag(1, 60.0, 0.0, &widths),
+            tabs.move_drag(1, WORKSPACE_TAB_STRIP_PADDING_LEFT + 52.0, 0.0, &widths),
             TabDragMove::Moved,
             "the grab point defaults to the tab's middle"
         );
