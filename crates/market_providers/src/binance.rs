@@ -139,6 +139,9 @@ pub(crate) fn provider_spec(
         },
         run_realtime,
     )
+    .with_open_interest(Arc::new(
+        aeris_binance_market_adapter::open_interest::fetch_open_interest,
+    ))
 }
 
 pub(crate) fn binance_candle_interval(period: BarPeriod) -> Result<String, String> {

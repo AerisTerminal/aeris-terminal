@@ -149,6 +149,7 @@ legend_session_volume_profile = セッション価格帯別出来高
 legend_big_trades = 大口約定
 legend_order_book = 板
 legend_depth_heatmap = 板ヒートマップ
+legend_open_interest = 建玉
 legend_loading = 読み込み中
 legend_hide = 非表示
 legend_show = 表示

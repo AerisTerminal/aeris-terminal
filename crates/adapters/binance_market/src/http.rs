@@ -334,7 +334,7 @@ pub fn fetch_catalog(config: BinanceHttpConfig) -> CryptoResult<BinanceCatalog> 
     Ok(BinanceCatalog::from_instruments(instruments))
 }
 
-fn get_with_agent(
+pub(crate) fn get_with_agent(
     agent: &ureq::Agent,
     url: &str,
     config: BinanceHttpConfig,

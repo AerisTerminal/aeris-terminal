@@ -5,6 +5,7 @@ order_flow_delta_histogram = Delta 柱状图
 order_flow_big_trades = 大单成交
 order_flow_book_on_chart = 图表订单簿（DOM）
 order_flow_depth_heatmap = 深度热力图（订单簿历史）
+order_flow_open_interest = 持仓量
 minimum_volume_invalid = 最小成交量必须是大于零的数字
 length_range_invalid = 长度必须是 {min} 到 {max} 之间的整数
 chart_restore_failed_title = 无法恢复图表设置

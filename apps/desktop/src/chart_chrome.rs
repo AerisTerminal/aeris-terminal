@@ -448,12 +448,13 @@ impl TimeframeFavorites {
 
 /// Favorite identifiers of the order-flow indicators, in the indicator menu's order. The
 /// chart indicators use their durable workspace identifiers.
-pub const ORDER_FLOW_FAVORITE_IDENTIFIERS: [&str; 5] = [
+pub const ORDER_FLOW_FAVORITE_IDENTIFIERS: [&str; 6] = [
     "order_flow.cumulative_delta",
     "order_flow.delta",
     "order_flow.big_trades",
     "order_flow.order_book_depth",
     "order_flow.depth_heatmap",
+    "order_flow.open_interest",
 ];
 
 const _: () = assert!(

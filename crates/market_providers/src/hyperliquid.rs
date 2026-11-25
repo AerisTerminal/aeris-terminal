@@ -96,6 +96,9 @@ pub(crate) fn provider_spec(
         realtime_enabled,
         Box::new(start_hyperliquid_runtime),
     )
+    .with_open_interest(Arc::new(
+        aeris_hyperliquid_market_adapter::open_interest::fetch_open_interest,
+    ))
 }
 
 const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {

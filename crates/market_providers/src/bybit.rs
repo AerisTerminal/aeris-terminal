@@ -137,6 +137,9 @@ pub(crate) fn provider_spec(
         },
         run_realtime,
     )
+    .with_open_interest(Arc::new(
+        aeris_bybit_market_adapter::open_interest::fetch_open_interest,
+    ))
 }
 
 fn bybit_candle_interval(period: BarPeriod) -> Result<String, String> {

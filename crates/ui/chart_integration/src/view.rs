@@ -478,6 +478,8 @@ pub struct OrderFlowSettings {
     /// Recorded resting-book history drawn as a price by time heatmap under the price series;
     /// `None` while the indicator is not added.
     pub depth_heatmap: Option<DepthHeatmapSettings>,
+    /// Historical and live open-interest sub-pane; `None` while the indicator is not added.
+    pub open_interest: Option<OpenInterestSettings>,
     /// Instrument ticks per footprint row. Zero selects an automatic row size from recent bar
     /// ranges so cells stay legible on every timeframe.
     pub ticks_per_row: u32,
@@ -498,6 +500,7 @@ impl Default for OrderFlowSettings {
             big_trades: None,
             order_book_depth: None,
             depth_heatmap: None,
+            open_interest: None,
             ticks_per_row: 0,
             footprint_extensions: FootprintExtensions::default(),
             show_extended_summary: false,
@@ -588,6 +591,18 @@ pub struct DepthHeatmapSettings {
 }
 
 impl Default for DepthHeatmapSettings {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+/// Durable open-interest sub-pane settings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OpenInterestSettings {
+    pub visible: bool,
+}
+
+impl Default for OpenInterestSettings {
     fn default() -> Self {
         Self { visible: true }
     }
@@ -1122,6 +1137,7 @@ pub struct AerisChartView {
     order_flow_state: Option<OrderFlowChartState>,
     order_book_depth_state: Option<OrderBookDepthState>,
     depth_heatmap_state: Option<DepthHeatmapState>,
+    open_interest_state: OpenInterestChartState,
     product_bars: ProductPriceBars,
     legend_options: ChartLegendOptions,
     /// Host content placed under the symbol legend row, such as the trading host's order
@@ -1234,6 +1250,7 @@ impl AerisChartView {
             order_flow_state: None,
             order_book_depth_state: None,
             depth_heatmap_state: None,
+            open_interest_state: OpenInterestChartState::default(),
             product_bars: ProductPriceBars::default(),
             legend_options: ChartLegendOptions::default(),
             legend_accessory: None,
@@ -1349,6 +1366,7 @@ impl AerisChartView {
             order_flow_state: None,
             order_book_depth_state: None,
             depth_heatmap_state: None,
+            open_interest_state: OpenInterestChartState::default(),
             product_bars,
             legend_options: ChartLegendOptions::default(),
             legend_accessory: None,
@@ -2846,6 +2864,8 @@ mod order_book_depth;
 use order_book_depth::OrderBookDepthState;
 mod depth_heatmap;
 use depth_heatmap::DepthHeatmapState;
+mod open_interest;
+use open_interest::{OPEN_INTEREST_STUDY_ID, OpenInterestChartState};
 mod order_flow;
 mod palette;
 pub use palette::{ChartAxisAppearance, ChartThemeDefaults};

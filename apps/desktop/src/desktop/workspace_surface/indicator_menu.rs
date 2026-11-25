@@ -11,15 +11,17 @@ pub(in crate::desktop) enum OrderFlowMenuStudy {
     BigTrades,
     OrderBookDepth,
     DepthHeatmap,
+    OpenInterest,
 }
 
 impl OrderFlowMenuStudy {
-    pub(in crate::desktop) const ALL: [Self; 5] = [
+    pub(in crate::desktop) const ALL: [Self; 6] = [
         Self::CumulativeDelta,
         Self::Delta,
         Self::BigTrades,
         Self::OrderBookDepth,
         Self::DepthHeatmap,
+        Self::OpenInterest,
     ];
 
     pub(in crate::desktop) fn label(self) -> &'static str {
@@ -29,12 +31,16 @@ impl OrderFlowMenuStudy {
             Self::BigTrades => tr!(workspace::ORDER_FLOW_BIG_TRADES),
             Self::OrderBookDepth => tr!(workspace::ORDER_FLOW_BOOK_ON_CHART),
             Self::DepthHeatmap => tr!(workspace::ORDER_FLOW_DEPTH_HEATMAP),
+            Self::OpenInterest => tr!(workspace::ORDER_FLOW_OPEN_INTEREST),
         }
     }
 
-    /// Whether the study is built from trade prints rather than the resting book.
+    /// Whether the study is built from trade prints rather than the resting book or exchange stats.
     pub(in crate::desktop) const fn needs_trades(self) -> bool {
-        !matches!(self, Self::OrderBookDepth | Self::DepthHeatmap)
+        !matches!(
+            self,
+            Self::OrderBookDepth | Self::DepthHeatmap | Self::OpenInterest
+        )
     }
 
     const fn favorite_identifier(self) -> &'static str {
@@ -44,6 +50,7 @@ impl OrderFlowMenuStudy {
             Self::BigTrades => 2,
             Self::OrderBookDepth => 3,
             Self::DepthHeatmap => 4,
+            Self::OpenInterest => 5,
         };
         chart_chrome::ORDER_FLOW_FAVORITE_IDENTIFIERS[index]
     }

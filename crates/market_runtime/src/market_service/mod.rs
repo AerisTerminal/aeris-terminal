@@ -240,6 +240,8 @@ struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
     shutdown_wake: SyncSender<Command>,
     provider_presentations: Vec<ProviderPresentationDescriptor>,
+    open_interest_sources: BTreeMap<&'static str, Arc<aeris_provider_spi::OpenInterestSource>>,
+    open_interest_cache: Mutex<OpenInterestCache>,
     provider_auth: provider_auth::ProviderAuthRegistry,
     broker_venue_runners: Mutex<broker_venue::BrokerVenueRunnerRegistry>,
     attached_broker_venues: Mutex<BTreeSet<(String, String)>>,
@@ -253,8 +255,60 @@ struct MarketRuntime {
     recording_replays: Arc<recording::RecordingReplays>,
 }
 
+/// Bounded in-process TTL cache for provider open-interest series so multiple panes sharing an
+/// instrument and timeframe reuse one fetch.
+const OPEN_INTEREST_CACHE_CAPACITY: usize = 64;
+const OPEN_INTEREST_CACHE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct OpenInterestCacheKey {
+    provider: String,
+    instrument_id: String,
+    period: aeris_market_data::BarPeriod,
+}
+
+#[derive(Default)]
+struct OpenInterestCache {
+    entries: BTreeMap<OpenInterestCacheKey, (Instant, Vec<aeris_provider_spi::OpenInterestSample>)>,
+}
+
+impl OpenInterestCache {
+    fn get(
+        &self,
+        key: &OpenInterestCacheKey,
+        now: Instant,
+    ) -> Option<Vec<aeris_provider_spi::OpenInterestSample>> {
+        let (fetched_at, samples) = self.entries.get(key)?;
+        if now.saturating_duration_since(*fetched_at) <= OPEN_INTEREST_CACHE_TTL {
+            Some(samples.clone())
+        } else {
+            None
+        }
+    }
+
+    fn insert(
+        &mut self,
+        key: OpenInterestCacheKey,
+        now: Instant,
+        samples: Vec<aeris_provider_spi::OpenInterestSample>,
+    ) {
+        if self.entries.len() >= OPEN_INTEREST_CACHE_CAPACITY && !self.entries.contains_key(&key) {
+            if let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (fetched_at, _))| *fetched_at)
+                .map(|(candidate, _)| candidate.clone())
+            {
+                self.entries.remove(&oldest_key);
+            }
+        }
+        self.entries.insert(key, (now, samples));
+    }
+}
+
 struct MarketServiceProviders {
     presentations: Vec<ProviderPresentationDescriptor>,
+    open_interest_sources: BTreeMap<&'static str, Arc<aeris_provider_spi::OpenInterestSource>>,
 }
 
 impl Drop for MarketRuntime {
@@ -1249,6 +1303,7 @@ fn recording_replay_supported_period(period: BarPeriod) -> Result<(), String> {
 pub struct ProviderRuntimeSpec {
     pub descriptor: ProviderDescriptor,
     pub(super) history: Option<Box<dyn HistorySource>>,
+    pub(super) open_interest: Option<Arc<aeris_provider_spi::OpenInterestSource>>,
     pub realtime_enabled: bool,
     pub(super) starter: ProviderRuntimeStarter,
 }
@@ -1265,9 +1320,20 @@ impl ProviderRuntimeSpec {
         Self {
             descriptor,
             history,
+            open_interest: None,
             realtime_enabled,
             starter,
         }
+    }
+
+    /// Registers an optional provider-neutral open-interest fetcher for this provider.
+    #[must_use]
+    pub fn with_open_interest(
+        mut self,
+        source: Arc<aeris_provider_spi::OpenInterestSource>,
+    ) -> Self {
+        self.open_interest = Some(source);
+        self
     }
 
     /// The replay starter supplies its own history source from the recordings.
@@ -1275,6 +1341,7 @@ impl ProviderRuntimeSpec {
         Self {
             descriptor: RECORDING_REPLAY_DESCRIPTOR,
             history: None,
+            open_interest: None,
             realtime_enabled: true,
             starter: Box::new(recording::start_replay_runtime),
         }

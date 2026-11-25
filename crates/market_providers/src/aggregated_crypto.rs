@@ -336,6 +336,7 @@ pub(crate) fn provider_spec(
     };
     let cat_for_cat = Arc::clone(&shared_catalog);
     let cat_for_rt = Arc::clone(&shared_catalog);
+    let cat_for_oi = Arc::clone(&shared_catalog);
     let seeds_for_rt = Arc::clone(&shared_seeds);
     crypto_provider_spec(
         AGGREGATED_DESCRIPTOR,
@@ -367,6 +368,236 @@ pub(crate) fn provider_spec(
             );
         },
     )
+    .with_open_interest(Arc::new(move |request, stop| {
+        fetch_aggregated_open_interest(&cat_for_oi, request, stop)
+    }))
+}
+
+/// Fetches historical and live open interest from all constituent perpetual exchanges in parallel
+/// (Binance USD-M + Bybit Linear + OKX Swap) and sums base-coin contracts at every shared bar
+/// timestamp. Spot instruments return an empty series.
+fn fetch_aggregated_open_interest(
+    catalog: &SharedAggregatedCatalog,
+    request: &aeris_provider_spi::OpenInterestRequest,
+    stop: &Arc<AtomicBool>,
+) -> Result<Vec<aeris_provider_spi::OpenInterestSample>, String> {
+    if stop.load(Ordering::Acquire) {
+        return Err("Aggregated open interest request was cancelled".to_string());
+    }
+    let symbol = request.instrument.provider_symbol.as_str();
+    if symbol.starts_with("spot:") {
+        return Ok(Vec::new());
+    }
+
+    let (binance_sym, bybit_sym, okx_sym) = {
+        let guard = catalog
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(inst) = guard.get(symbol) {
+            if inst.key.kind != CryptoMarketKind::Perp {
+                return Ok(Vec::new());
+            }
+            (
+                inst.binance
+                    .as_ref()
+                    .filter(|(k, _)| *k == BinanceMarketKind::UsdmPerp)
+                    .map(|(_, s)| s.clone()),
+                inst.bybit
+                    .as_ref()
+                    .filter(|(k, _)| *k == BybitMarketKind::Linear)
+                    .map(|(_, s)| s.clone()),
+                inst.okx
+                    .as_ref()
+                    .filter(|(k, _, _)| *k == OkxMarketKind::Swap)
+                    .map(|(_, s, _)| s.clone()),
+            )
+        } else if let Some(pair) = symbol.strip_prefix("perp:")
+            && let Some((base, quote)) = pair.split_once('-')
+        {
+            // Cold-start fallback before the aggregated catalog finishes its first build.
+            (
+                Some(format!("{base}{quote}")),
+                Some(format!("{base}{quote}")),
+                Some(format!("{base}-{quote}-SWAP")),
+            )
+        } else {
+            return Ok(Vec::new());
+        }
+    };
+
+    let period = request.period;
+    let maximum_points = request.maximum_points;
+    let (binance_oi, bybit_oi, okx_oi) = std::thread::scope(|scope| {
+        let b_task = binance_sym.as_deref().map(|sym| {
+            scope.spawn(move || {
+                aeris_binance_market_adapter::open_interest::fetch_usdm_open_interest(
+                    sym,
+                    period,
+                    maximum_points,
+                    stop,
+                )
+                .ok()
+            })
+        });
+        let y_task = bybit_sym.as_deref().map(|sym| {
+            scope.spawn(move || {
+                aeris_bybit_market_adapter::open_interest::fetch_linear_open_interest(
+                    sym,
+                    period,
+                    maximum_points,
+                    stop,
+                )
+                .ok()
+            })
+        });
+        let o_task = okx_sym.as_deref().map(|sym| {
+            scope.spawn(move || {
+                aeris_okx_market_adapter::open_interest::fetch_swap_open_interest(
+                    sym,
+                    period,
+                    maximum_points,
+                    stop,
+                )
+                .ok()
+            })
+        });
+        (
+            b_task
+                .and_then(|t| t.join().ok().flatten())
+                .unwrap_or_default(),
+            y_task
+                .and_then(|t| t.join().ok().flatten())
+                .unwrap_or_default(),
+            o_task
+                .and_then(|t| t.join().ok().flatten())
+                .unwrap_or_default(),
+        )
+    });
+
+    if stop.load(Ordering::Acquire) {
+        return Err("Aggregated open interest request was cancelled".to_string());
+    }
+
+    Ok(merge_venue_open_interest(&[binance_oi, bybit_oi, okx_oi]))
+}
+
+/// Combines per-venue open-interest series into one aggregated base-coin series.
+/// Only timestamps where every active venue has data (within the common overlapping span) are
+/// summed when multiple venues have history, preventing sudden step cliffs where a shorter-history
+/// exchange (such as OKX's 100-bar cap) starts or stops.
+fn merge_venue_open_interest(
+    venues: &[Vec<aeris_provider_spi::OpenInterestSample>],
+) -> Vec<aeris_provider_spi::OpenInterestSample> {
+    let active: Vec<BTreeMap<i64, aeris_provider_spi::OpenInterestSample>> = venues
+        .iter()
+        .filter(|series| !series.is_empty())
+        .map(|series| {
+            series
+                .iter()
+                .copied()
+                .map(|sample| (sample.timestamp_unix_nanos, sample))
+                .collect()
+        })
+        .collect();
+    if active.is_empty() {
+        return Vec::new();
+    }
+    if active.len() == 1 {
+        return active[0].values().copied().collect();
+    }
+
+    // Collect the union of timestamps starting from the latest first-timestamp across venues
+    // that have substantial overlap, so all venues contribute continuously without cliff artifacts.
+    let mut all_timestamps = BTreeSet::new();
+    for map in &active {
+        for &ts in map.keys() {
+            all_timestamps.insert(ts);
+        }
+    }
+    let common_start = active
+        .iter()
+        .filter_map(|map| map.keys().next().copied())
+        .max()
+        .unwrap_or(i64::MIN);
+
+    let mut last_seen: Vec<Option<aeris_provider_spi::OpenInterestSample>> =
+        vec![None; active.len()];
+    let mut merged = Vec::new();
+    for ts in all_timestamps {
+        for (idx, map) in active.iter().enumerate() {
+            if let Some(&sample) = map.get(&ts) {
+                last_seen[idx] = Some(sample);
+            }
+        }
+        if ts < common_start {
+            continue;
+        }
+        if last_seen.iter().all(Option::is_some) {
+            let mut total_contracts = 0.0;
+            let mut total_usd = 0.0;
+            let mut all_have_usd = true;
+            for sample in last_seen.iter().flatten() {
+                total_contracts += sample.contracts;
+                if let Some(usd) = sample.notional_usd {
+                    total_usd += usd;
+                } else {
+                    all_have_usd = false;
+                }
+            }
+            merged.push(aeris_provider_spi::OpenInterestSample {
+                timestamp_unix_nanos: ts,
+                contracts: total_contracts,
+                notional_usd: all_have_usd.then_some(total_usd),
+            });
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod open_interest_tests {
+    use super::merge_venue_open_interest;
+    use aeris_provider_spi::OpenInterestSample;
+
+    #[test]
+    fn sums_overlapping_venues_without_history_start_cliff() {
+        let binance = vec![
+            OpenInterestSample {
+                timestamp_unix_nanos: 1_000,
+                contracts: 100.0,
+                notional_usd: Some(6_000_000.0),
+            },
+            OpenInterestSample {
+                timestamp_unix_nanos: 2_000,
+                contracts: 110.0,
+                notional_usd: Some(6_600_000.0),
+            },
+            OpenInterestSample {
+                timestamp_unix_nanos: 3_000,
+                contracts: 120.0,
+                notional_usd: Some(7_200_000.0),
+            },
+        ];
+        let okx = vec![
+            OpenInterestSample {
+                timestamp_unix_nanos: 2_000,
+                contracts: 30.0,
+                notional_usd: Some(1_800_000.0),
+            },
+            OpenInterestSample {
+                timestamp_unix_nanos: 3_000,
+                contracts: 35.0,
+                notional_usd: Some(2_100_000.0),
+            },
+        ];
+        let merged = merge_venue_open_interest(&[binance, okx]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].timestamp_unix_nanos, 2_000);
+        assert!((merged[0].contracts - 140.0).abs() < 1e-6);
+        assert!((merged[0].notional_usd.expect("usd") - 8_400_000.0).abs() < 1.0);
+        assert_eq!(merged[1].timestamp_unix_nanos, 3_000);
+        assert!((merged[1].contracts - 155.0).abs() < 1e-6);
+    }
 }
 
 fn record_forming_seed(

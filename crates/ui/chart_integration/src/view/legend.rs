@@ -29,6 +29,7 @@ pub(super) enum LegendItem {
     BigTrades,
     OrderBookDepth,
     DepthHeatmap,
+    OpenInterest,
     SessionProfile(SessionProfileKind),
 }
 
@@ -57,6 +58,7 @@ impl LegendItem {
             Self::BigTrades => 1_u64 << 60,
             Self::OrderBookDepth => 1_u64 << 59,
             Self::DepthHeatmap => 1_u64 << 58,
+            Self::OpenInterest => 1_u64 << 56,
             Self::SessionProfile(kind) => (1_u64 << 57) | kind as u64,
         }
     }

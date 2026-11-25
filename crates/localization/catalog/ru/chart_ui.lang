@@ -149,6 +149,7 @@ legend_session_volume_profile = Профиль объёма сессии
 legend_big_trades = Крупные сделки
 legend_order_book = Стакан
 legend_depth_heatmap = Тепловая карта глубины
+legend_open_interest = Открытый интерес
 legend_loading = Загрузка
 legend_hide = Скрыть
 legend_show = Показать

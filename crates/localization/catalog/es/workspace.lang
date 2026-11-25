@@ -5,6 +5,7 @@ order_flow_delta_histogram = Histograma de delta
 order_flow_big_trades = Grandes operaciones
 order_flow_book_on_chart = Libro de órdenes en el gráfico (DOM)
 order_flow_depth_heatmap = Mapa de calor de profundidad (historial del libro)
+order_flow_open_interest = Interés abierto
 minimum_volume_invalid = El volumen mínimo debe ser un número mayor que cero
 length_range_invalid = La longitud debe ser un número entero de {min} a {max}
 chart_restore_failed_title = No se pudo restaurar la configuración del gráfico

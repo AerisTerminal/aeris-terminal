@@ -32,6 +32,9 @@ pub use super::{
     TradeDemandPolicy, history_instrument_from_install, recording_replay_descriptor,
     try_send_catalog_control,
 };
+pub use aeris_provider_spi::{
+    MAXIMUM_OPEN_INTEREST_POINTS, OpenInterestRequest, OpenInterestSample, OpenInterestSource,
+};
 
 /// Projects a registered [`ProviderDescriptor`] into the desktop-facing
 /// [`PublishedProviderDescriptor`].

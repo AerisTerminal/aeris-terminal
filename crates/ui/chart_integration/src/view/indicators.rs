@@ -185,6 +185,7 @@ impl AerisChartView {
             || self.order_flow_settings.big_trades.is_some()
             || self.order_flow_settings.order_book_depth.is_some()
             || self.order_flow_settings.depth_heatmap.is_some()
+            || self.order_flow_settings.open_interest.is_some()
             || self.has_session_profiles()
     }
     /// Removes every indicator as one undo step. The product-owned price and volume series stay
@@ -218,6 +219,7 @@ impl AerisChartView {
         cleared |= self.remove_big_trades();
         cleared |= self.remove_order_book_depth();
         cleared |= self.remove_depth_heatmap();
+        cleared |= self.remove_open_interest();
         cleared |= self.remove_every_session_profile();
         cleared
     }
@@ -337,6 +339,13 @@ impl AerisChartView {
             let title = tr!(chart_ui::LEGEND_DEPTH_HEATMAP);
             insert_price_pane_legend_row(&mut rows, item, title, heatmap.visible, false);
         }
+        if let Some(oi) = self.order_flow_settings.open_interest
+            && !self.has_open_interest_series()
+        {
+            let item = LegendItem::OpenInterest;
+            let title = tr!(chart_ui::LEGEND_OPEN_INTEREST);
+            insert_price_pane_legend_row(&mut rows, item, title, oi.visible, false);
+        }
         let session_profiles = self.session_profile_legend_rows().collect::<Vec<_>>();
         for (item, title, visible) in session_profiles {
             insert_price_pane_legend_row(&mut rows, item, title, visible, true);
@@ -373,6 +382,9 @@ impl AerisChartView {
         }
         if item == LegendItem::DepthHeatmap {
             return self.set_depth_heatmap_visible(visible);
+        }
+        if item == LegendItem::OpenInterest {
+            return self.set_open_interest_visible(visible);
         }
         if let LegendItem::SessionProfile(kind) = item {
             return self.set_session_profile_visible(kind, visible);
@@ -425,6 +437,7 @@ impl AerisChartView {
             | LegendItem::BigTrades
             | LegendItem::OrderBookDepth
             | LegendItem::DepthHeatmap
+            | LegendItem::OpenInterest
             | LegendItem::SessionProfile(_) => {
                 unreachable!("study, order-flow and session profile visibility handled above")
             }
@@ -453,6 +466,7 @@ impl AerisChartView {
             LegendItem::BigTrades => return self.remove_big_trades(),
             LegendItem::OrderBookDepth => return self.remove_order_book_depth(),
             LegendItem::DepthHeatmap => return self.remove_depth_heatmap(),
+            LegendItem::OpenInterest => return self.remove_open_interest(),
             LegendItem::SessionProfile(kind) => return self.remove_session_profile(kind),
             LegendItem::VolumeProfile => self.remove_volume_profile(),
             LegendItem::Asset | LegendItem::Study { .. } => false,
@@ -730,6 +744,9 @@ fn legend_row(
         }
         FinancialLegendIdentity::Host(_) => return None,
         FinancialLegendIdentity::Indicator(binding) => LegendItem::Indicator(binding),
+        FinancialLegendIdentity::ExternalStudy(study_id) if study_id == OPEN_INTEREST_STUDY_ID => {
+            LegendItem::OpenInterest
+        }
         FinancialLegendIdentity::ExternalStudy(study_id) => LegendItem::Study {
             study_id,
             series_id: row.first_series_id,

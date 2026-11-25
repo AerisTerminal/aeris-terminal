@@ -1110,6 +1110,7 @@ mod tests {
                 ask_color: "#EF5350".to_string(),
             }),
             depth_heatmap: Some(false),
+            open_interest: Some(true),
         }
     }
 

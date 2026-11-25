@@ -23,6 +23,7 @@ pub mod history;
 mod http;
 mod identity;
 mod meta;
+pub mod open_interest;
 pub mod screen;
 mod statistics;
 mod trades;

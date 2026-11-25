@@ -22,6 +22,7 @@ pub(crate) use test_shims::{hyperliquid_display_depth, hyperliquid_realtime, rit
 
 pub use aeris_provider_spi::{
     ConnectionDescriptor, ConnectionId, ConnectionIdError, CredentialSource, DEFAULT_CONNECTION_ID,
+    MAXIMUM_OPEN_INTEREST_POINTS, OpenInterestRequest, OpenInterestSample, OpenInterestSource,
     PendingAgreement,
 };
 pub use cadence::{

@@ -5,6 +5,7 @@ order_flow_delta_histogram = डेल्टा हिस्टोग्रा�
 order_flow_big_trades = बड़े ट्रेड
 order_flow_book_on_chart = चार्ट पर ऑर्डर बुक (DOM)
 order_flow_depth_heatmap = डेप्थ हीटमैप (बुक हिस्ट्री)
+order_flow_open_interest = ओपन इंटरेस्ट
 minimum_volume_invalid = न्यूनतम वॉल्यूम शून्य से बड़ी संख्या होनी चाहिए
 length_range_invalid = लंबाई {min} से {max} तक की पूर्ण संख्या होनी चाहिए
 chart_restore_failed_title = चार्ट सेटिंग्स बहाल नहीं हो सकीं

@@ -453,6 +453,94 @@ impl MarketService {
     pub fn provider_presentations(&self) -> Vec<ProviderPresentationDescriptor> {
         self.runtime.provider_presentations.clone()
     }
+
+    /// Returns whether `provider` registered an open-interest source.
+    #[must_use]
+    pub fn supports_open_interest(&self, provider: &str) -> bool {
+        self.runtime.open_interest_sources.contains_key(provider)
+    }
+
+    /// Fetches historical and current open interest for one installed instrument and chart
+    /// interval through its registered provider source, reusing the runtime's bounded TTL cache.
+    ///
+    /// # Errors
+    /// Returns an error when the interval cannot be resolved for the provider or the upstream
+    /// fetcher fails. Providers without an open-interest source return an empty list.
+    pub fn fetch_open_interest(
+        &self,
+        instrument: &InstallProviderInstrument,
+        interval: aeris_market_data::ChartInterval,
+        maximum_points: usize,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<Vec<aeris_provider_spi::OpenInterestSample>, String> {
+        let Some(source) = self
+            .runtime
+            .open_interest_sources
+            .get(instrument.provider.as_str())
+            .cloned()
+        else {
+            return Ok(Vec::new());
+        };
+        if stop.load(Ordering::Acquire) || self.runtime.shutdown.load(Ordering::Acquire) {
+            return Err("open interest request cancelled".to_string());
+        }
+        let presentation = self
+            .runtime
+            .provider_presentations
+            .iter()
+            .find(|descriptor| descriptor.id == instrument.provider)
+            .ok_or_else(|| format!("unknown provider {}", instrument.provider))?;
+        let series_key = crate::resolve_series_key(instrument, interval, presentation)
+            .map_err(|error| error.to_string())?;
+        let cache_key = super::OpenInterestCacheKey {
+            provider: instrument.provider.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            period: series_key.period,
+        };
+        let now = Instant::now();
+        if let Some(cached) = self
+            .runtime
+            .open_interest_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&cache_key, now)
+        {
+            return Ok(cached);
+        }
+        let request = aeris_provider_spi::OpenInterestRequest {
+            instrument: super::history_instrument_from_install(instrument),
+            period: series_key.period,
+            maximum_points: maximum_points
+                .clamp(1, aeris_provider_spi::MAXIMUM_OPEN_INTEREST_POINTS),
+        };
+        let raw = source(&request, stop)?;
+        if stop.load(Ordering::Acquire) || self.runtime.shutdown.load(Ordering::Acquire) {
+            return Err("open interest request cancelled".to_string());
+        }
+        let mut by_timestamp = BTreeMap::new();
+        for sample in raw {
+            if sample.contracts.is_finite() && sample.contracts >= 0.0 {
+                let notional_usd = sample
+                    .notional_usd
+                    .filter(|value| value.is_finite() && *value >= 0.0);
+                by_timestamp.insert(
+                    sample.timestamp_unix_nanos,
+                    aeris_provider_spi::OpenInterestSample {
+                        timestamp_unix_nanos: sample.timestamp_unix_nanos,
+                        contracts: sample.contracts,
+                        notional_usd,
+                    },
+                );
+            }
+        }
+        let samples = by_timestamp.into_values().collect::<Vec<_>>();
+        self.runtime
+            .open_interest_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(cache_key, Instant::now(), samples.clone());
+        Ok(samples)
+    }
 }
 
 /// Composition-root builder for [`MarketService`].
@@ -548,6 +636,15 @@ impl MarketService {
             .iter()
             .map(|provider| *provider.descriptor.presentation)
             .collect();
+        let open_interest_sources = providers
+            .iter()
+            .filter_map(|provider| {
+                provider
+                    .open_interest
+                    .as_ref()
+                    .map(|source| (provider.descriptor.id, Arc::clone(source)))
+            })
+            .collect();
         let descriptors = providers
             .iter()
             .map(|provider| provider.descriptor)
@@ -606,6 +703,7 @@ impl MarketService {
             broker_venue_runners,
             MarketServiceProviders {
                 presentations: provider_presentations,
+                open_interest_sources,
             },
             RuntimeChannels {
                 releases: quote_releases,
@@ -667,6 +765,7 @@ impl MarketService {
         let shutdown_wake = commands.clone();
         let MarketServiceProviders {
             presentations: provider_presentations,
+            open_interest_sources,
         } = providers;
         Self {
             commands,
@@ -674,6 +773,8 @@ impl MarketService {
                 shutdown,
                 shutdown_wake,
                 provider_presentations,
+                open_interest_sources,
+                open_interest_cache: Mutex::new(super::OpenInterestCache::default()),
                 provider_auth,
                 broker_venue_runners: Mutex::new(broker_venue_runners),
                 attached_broker_venues: Mutex::new(BTreeSet::new()),

@@ -150,6 +150,9 @@ pub(crate) fn provider_spec(
             run_realtime(controls, events, stop, ws_gen, wake, &ct_vals_rt);
         },
     )
+    .with_open_interest(Arc::new(
+        aeris_okx_market_adapter::open_interest::fetch_open_interest,
+    ))
 }
 
 fn okx_candle_interval(period: BarPeriod) -> Result<String, String> {

@@ -725,6 +725,9 @@ pub struct WorkspaceOrderFlowSettingsState {
     /// The depth heatmap; absent when the indicator is not added, otherwise whether it is shown.
     #[prost(bool, optional, tag = "14")]
     pub depth_heatmap: Option<bool>,
+    /// The open-interest sub-pane; absent when the indicator is not added, otherwise whether it is shown.
+    #[prost(bool, optional, tag = "15")]
+    pub open_interest: Option<bool>,
 }
 
 /// An empty color follows the chart default.

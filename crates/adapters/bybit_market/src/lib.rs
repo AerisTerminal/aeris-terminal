@@ -11,6 +11,7 @@ pub mod history;
 pub mod http;
 pub mod identity;
 pub mod meta;
+pub mod open_interest;
 pub mod trades;
 pub mod ws;
 

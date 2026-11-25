@@ -49,6 +49,9 @@ impl OrderFlowIndicatorEdit {
         if before.depth_heatmap.is_some() != after.depth_heatmap.is_some() {
             current.depth_heatmap = target.depth_heatmap;
         }
+        if before.open_interest.is_some() != after.open_interest.is_some() {
+            current.open_interest = target.open_interest;
+        }
         current
     }
 }

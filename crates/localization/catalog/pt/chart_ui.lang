@@ -149,6 +149,7 @@ legend_session_volume_profile = Perfil de volume da sessão
 legend_big_trades = Grandes negócios
 legend_order_book = Livro de ofertas
 legend_depth_heatmap = Mapa de calor de profundidade
+legend_open_interest = Contratos em aberto
 legend_loading = Carregando
 legend_hide = Ocultar
 legend_show = Mostrar

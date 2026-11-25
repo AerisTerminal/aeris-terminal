@@ -172,7 +172,11 @@ pub fn fetch_catalog(config: OkxHttpConfig) -> CryptoResult<OkxCatalog> {
     Ok(OkxCatalog::from_instruments(instruments))
 }
 
-fn get_with_agent(agent: &ureq::Agent, url: &str, config: OkxHttpConfig) -> CryptoResult<Vec<u8>> {
+pub(crate) fn get_with_agent(
+    agent: &ureq::Agent,
+    url: &str,
+    config: OkxHttpConfig,
+) -> CryptoResult<Vec<u8>> {
     let mut response = agent
         .get(url)
         .config()

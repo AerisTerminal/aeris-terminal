@@ -5,8 +5,8 @@ use super::super::{
     ChartStudyInputStream, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
     ChartStudyScaleTarget, ChartStudyThresholdRegion, CumulativeDeltaReset,
     CumulativeDeltaSettings, CumulativeDeltaStyle, DeltaHistogramSettings, DepthHeatmapSettings,
-    FootprintDisplayMode, MarketStream, OrderBookDepthSettings, OrderFlowSettings,
-    RejectedSavedPresentation, SessionProfileKind, SessionProfileSettings,
+    FootprintDisplayMode, MarketStream, OpenInterestSettings, OrderBookDepthSettings,
+    OrderFlowSettings, RejectedSavedPresentation, SessionProfileKind, SessionProfileSettings,
     SessionVolumeProfileSettings, StreamRequirements, StudyPaneTarget, StudyPlotKind,
     StudyPointStyle, StudyScaleTarget, StudyThresholdRegion, ToPrimitive, TpoCells, TpoSettings,
     VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
@@ -327,6 +327,7 @@ pub(super) fn persisted_order_flow_settings(
         big_trades: settings.big_trades.map(persisted_big_trades),
         order_book_depth: settings.order_book_depth.map(|book| book.visible),
         depth_heatmap: settings.depth_heatmap.map(|heatmap| heatmap.visible),
+        open_interest: settings.open_interest.map(|oi| oi.visible),
         cumulative_delta_style: match settings.cumulative_delta.style {
             CumulativeDeltaStyle::Line => 0,
             CumulativeDeltaStyle::Candles => 1,
@@ -480,6 +481,9 @@ pub(super) fn restored_order_flow_settings(
         depth_heatmap: settings
             .depth_heatmap
             .map(|visible| DepthHeatmapSettings { visible }),
+        open_interest: settings
+            .open_interest
+            .map(|visible| OpenInterestSettings { visible }),
         ticks_per_row: settings.ticks_per_row,
         ..OrderFlowSettings::default()
     })

@@ -5,6 +5,7 @@ order_flow_delta_histogram = Гистограмма дельты
 order_flow_big_trades = Крупные сделки
 order_flow_book_on_chart = Стакан на графике (DOM)
 order_flow_depth_heatmap = Тепловая карта глубины (история стакана)
+order_flow_open_interest = Открытый интерес
 minimum_volume_invalid = Минимальный объём должен быть числом больше нуля
 length_range_invalid = Длина должна быть целым числом от {min} до {max}
 chart_restore_failed_title = Не удалось восстановить настройки графика

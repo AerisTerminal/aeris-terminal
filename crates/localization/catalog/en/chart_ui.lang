@@ -149,6 +149,7 @@ legend_session_volume_profile = Session Volume Profile
 legend_big_trades = Big Trades
 legend_order_book = Order Book
 legend_depth_heatmap = Depth Heatmap
+legend_open_interest = Open Interest
 legend_loading = Loading
 legend_hide = Hide
 legend_show = Show

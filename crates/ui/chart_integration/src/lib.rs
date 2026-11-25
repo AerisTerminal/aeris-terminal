@@ -69,10 +69,10 @@ pub use view::{
     ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeDefaults, ChartType,
     CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle, DeltaHistogramSettings,
     DepthHeatmapSettings, DrawingsLockSummary, FootprintDisplayMode, InvalidOrderFlowSettings,
-    OrderBookDepthSettings, OrderFlowAggregation, OrderFlowApplyError, OrderFlowDefaultColors,
-    OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade, PriceAxisMenuAction,
-    PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings, VolumeDefaultColors,
-    VolumePlacement, VolumeSettings, chart_color_hex, drawing_color_hex,
+    OpenInterestSettings, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowApplyError,
+    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade,
+    PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind, VolumeAverageSettings,
+    VolumeDefaultColors, VolumePlacement, VolumeSettings, chart_color_hex, drawing_color_hex,
 };
 pub use view::{
     ChartTradingSession, SessionProfileKind, SessionProfileSettings, SessionVolumeProfileSettings,

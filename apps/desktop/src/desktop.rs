@@ -141,11 +141,11 @@ use aeris_chart_integration::{
     ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
     ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle,
     DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, DepthHeatmapSettings, FootprintDisplayMode,
-    MAXIMUM_STUDY_LINE_WIDTH, OrderBookDepthSettings, OrderFlowAggregation, OrderFlowApplyError,
-    OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange, OrderFlowTrade,
-    PriceAxisMenuAction, PriceAxisMenuState, SessionProfileKind, SessionProfileSettings,
-    SessionVolumeProfileSettings, TpoCells, TpoSettings, VolumeAverageKind, VolumeAverageSettings,
-    VolumeDefaultColors, VolumePlacement, VolumeSettings, chart_color_hex,
+    MAXIMUM_STUDY_LINE_WIDTH, OpenInterestSettings, OrderBookDepthSettings, OrderFlowAggregation,
+    OrderFlowApplyError, OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange,
+    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, SessionProfileKind,
+    SessionProfileSettings, SessionVolumeProfileSettings, TpoCells, TpoSettings, VolumeAverageKind,
+    VolumeAverageSettings, VolumeDefaultColors, VolumePlacement, VolumeSettings, chart_color_hex,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource};
 use aeris_contracts::{
@@ -910,10 +910,35 @@ struct ObservedChart {
     selected_drawing: Option<ChartDrawingId>,
 }
 
+/// Bounded, cancellable background refresh loop for one pane's Open Interest sub-pane.
+#[derive(Default)]
+struct OpenInterestRefreshState {
+    active_key: Option<(String, String, ChartInterval)>,
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    task: Option<Task<()>>,
+}
+
+impl OpenInterestRefreshState {
+    fn cancel(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.task = None;
+        self.active_key = None;
+    }
+}
+
+impl Drop for OpenInterestRefreshState {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
 struct WorkspaceSurface {
     chart: Option<Entity<AerisChartView>>,
     order_book: Entity<ReadOnlyOrderBookView>,
     order_flow: order_flow_presenter::OrderFlowPresenter,
+    open_interest_refresh: OpenInterestRefreshState,
     context_panel: context_panel_controller::ContextPanelController,
     /// The trader's selected IANA chart time zone. The surface owns it so every chart this
     /// pane creates (restore, symbol or timeframe swap) and every save use the same value.

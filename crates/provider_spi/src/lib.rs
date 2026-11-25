@@ -12,6 +12,7 @@ pub mod connection;
 pub mod fault;
 pub mod history;
 pub mod instrument;
+pub mod open_interest;
 pub mod presentation;
 
 pub use auth::{
@@ -35,6 +36,9 @@ pub use history::{
 pub use instrument::{
     ResolvedContractMetadata, ResolvedInstrumentClass, ResolvedProviderInstrument,
     ResolvedSessionHours,
+};
+pub use open_interest::{
+    MAXIMUM_OPEN_INTEREST_POINTS, OpenInterestRequest, OpenInterestSample, OpenInterestSource,
 };
 pub use presentation::{
     ProviderAttribution, ProviderCatalogSymbol, ProviderConnectionKind, ProviderDailyBarCadence,

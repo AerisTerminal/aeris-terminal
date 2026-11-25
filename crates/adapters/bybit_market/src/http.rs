@@ -199,7 +199,7 @@ fn extract_next_cursor(bytes: &[u8]) -> Option<String> {
         .filter(|c| !c.trim().is_empty())
 }
 
-fn get_with_agent(
+pub(crate) fn get_with_agent(
     agent: &ureq::Agent,
     url: &str,
     config: BybitHttpConfig,
