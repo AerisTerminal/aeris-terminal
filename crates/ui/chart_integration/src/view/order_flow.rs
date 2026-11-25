@@ -104,6 +104,7 @@ impl AerisChartView {
             let _ = self
                 .engine
                 .set_external_study_visible(super::OPEN_INTEREST_STUDY_ID, oi.visible);
+            self.invalidate_series_layout();
         } else {
             self.clear_open_interest();
         }

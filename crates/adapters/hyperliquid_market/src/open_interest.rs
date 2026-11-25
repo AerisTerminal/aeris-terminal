@@ -49,6 +49,8 @@ pub fn fetch_open_interest(
     Ok(vec![OpenInterestSample {
         timestamp_unix_nanos: align_bucket(now_nanos, request.period),
         contracts,
+        high_contracts: Some(contracts),
+        low_contracts: Some(contracts),
         notional_usd,
     }])
 }

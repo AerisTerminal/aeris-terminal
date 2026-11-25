@@ -196,6 +196,8 @@ fn decode_open_interest_history(bytes: &[u8]) -> Result<Vec<OpenInterestSample>,
             out.push(OpenInterestSample {
                 timestamp_unix_nanos,
                 contracts,
+                high_contracts: Some(contracts),
+                low_contracts: Some(contracts),
                 notional_usd,
             });
         }
@@ -233,6 +235,8 @@ fn decode_current_open_interest(bytes: &[u8]) -> Result<OpenInterestSample, Stri
     Ok(OpenInterestSample {
         timestamp_unix_nanos,
         contracts,
+        high_contracts: Some(contracts),
+        low_contracts: Some(contracts),
         notional_usd,
     })
 }

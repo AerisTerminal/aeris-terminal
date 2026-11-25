@@ -4580,9 +4580,15 @@ impl WorkspaceSurface {
                     break;
                 }
                 if let Ok(samples) = result {
-                    let points: Vec<(i64, f64)> = samples
+                    let points: Vec<aeris_chart_integration::ChartOpenInterestBar> = samples
                         .into_iter()
-                        .map(|sample| (sample.timestamp_unix_nanos, sample.contracts))
+                        .map(|sample| aeris_chart_integration::ChartOpenInterestBar {
+                            timestamp_unix_nanos: sample.timestamp_unix_nanos,
+                            open: None,
+                            high: sample.high_contracts,
+                            low: sample.low_contracts,
+                            close: sample.contracts,
+                        })
                         .collect();
                     let still_open = this.update(cx, |surface, surface_cx| {
                         let Some(chart) = surface.chart.clone() else {

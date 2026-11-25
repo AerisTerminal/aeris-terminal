@@ -66,7 +66,7 @@ pub fn fetch_linear_open_interest(
     let interval = bybit_oi_interval(period);
     let target = maximum_points.clamp(1, BYBIT_OI_PAGE_LIMIT * BYBIT_OI_MAX_PAGES);
 
-    let mut by_bucket = BTreeMap::new();
+    let mut raw_samples = Vec::new();
     let mut cursor: Option<String> = None;
 
     for _ in 0..BYBIT_OI_MAX_PAGES {
@@ -74,7 +74,7 @@ pub fn fetch_linear_open_interest(
             return Err("Bybit open interest request was cancelled".to_string());
         }
         let page_limit = target
-            .saturating_sub(by_bucket.len())
+            .saturating_sub(raw_samples.len())
             .clamp(1, BYBIT_OI_PAGE_LIMIT);
         let url = match &cursor {
             Some(c) => format!(
@@ -89,17 +89,43 @@ pub fn fetch_linear_open_interest(
         if samples.is_empty() {
             break;
         }
-        for sample in samples {
-            let bucket = align_bucket(sample.timestamp_unix_nanos, period);
-            by_bucket.entry(bucket).or_insert(OpenInterestSample {
-                timestamp_unix_nanos: bucket,
-                ..sample
-            });
-        }
-        if by_bucket.len() >= target || next_cursor.is_none() {
+        raw_samples.extend(samples);
+        if raw_samples.len() >= target || next_cursor.is_none() {
             break;
         }
         cursor = next_cursor;
+    }
+
+    // Sort oldest-first so folding each bar bucket leaves the latest sub-bar sample as close
+    // while tracking genuine intra-bar high/low wicks.
+    raw_samples.sort_by_key(|sample| sample.timestamp_unix_nanos);
+    let mut by_bucket: BTreeMap<i64, OpenInterestSample> = BTreeMap::new();
+    for sample in raw_samples {
+        let bucket = align_bucket(sample.timestamp_unix_nanos, period);
+        by_bucket
+            .entry(bucket)
+            .and_modify(|existing| {
+                existing.contracts = sample.contracts;
+                existing.high_contracts = Some(
+                    existing
+                        .high_contracts
+                        .unwrap_or(existing.contracts)
+                        .max(sample.contracts),
+                );
+                existing.low_contracts = Some(
+                    existing
+                        .low_contracts
+                        .unwrap_or(existing.contracts)
+                        .min(sample.contracts),
+                );
+            })
+            .or_insert(OpenInterestSample {
+                timestamp_unix_nanos: bucket,
+                contracts: sample.contracts,
+                high_contracts: Some(sample.contracts),
+                low_contracts: Some(sample.contracts),
+                notional_usd: None,
+            });
     }
 
     Ok(by_bucket.into_values().collect())
@@ -109,15 +135,15 @@ fn bybit_oi_interval(period: BarPeriod) -> &'static str {
     let seconds = period
         .duration_nanos()
         .map_or(86_400, |nanos| nanos / 1_000_000_000);
-    if seconds <= 300 {
+    if seconds <= 1_800 {
         "5min"
-    } else if seconds <= 900 {
+    } else if seconds <= 3_600 {
         "15min"
-    } else if seconds <= 1_800 {
-        "30min"
     } else if seconds <= 7_200 {
-        "1h"
+        "30min"
     } else if seconds <= 43_200 {
+        "1h"
+    } else if seconds <= 86_400 {
         "4h"
     } else {
         "1d"
@@ -176,6 +202,8 @@ fn decode_open_interest_page(
             out.push(OpenInterestSample {
                 timestamp_unix_nanos,
                 contracts,
+                high_contracts: Some(contracts),
+                low_contracts: Some(contracts),
                 notional_usd: None,
             });
         }

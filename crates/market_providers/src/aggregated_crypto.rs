@@ -534,10 +534,14 @@ fn merge_venue_open_interest(
         }
         if last_seen.iter().all(Option::is_some) {
             let mut total_contracts = 0.0;
+            let mut total_high = 0.0;
+            let mut total_low = 0.0;
             let mut total_usd = 0.0;
             let mut all_have_usd = true;
             for sample in last_seen.iter().flatten() {
                 total_contracts += sample.contracts;
+                total_high += sample.high_contracts.unwrap_or(sample.contracts);
+                total_low += sample.low_contracts.unwrap_or(sample.contracts);
                 if let Some(usd) = sample.notional_usd {
                     total_usd += usd;
                 } else {
@@ -547,6 +551,8 @@ fn merge_venue_open_interest(
             merged.push(aeris_provider_spi::OpenInterestSample {
                 timestamp_unix_nanos: ts,
                 contracts: total_contracts,
+                high_contracts: Some(total_high.max(total_contracts)),
+                low_contracts: Some(total_low.min(total_contracts)),
                 notional_usd: all_have_usd.then_some(total_usd),
             });
         }
@@ -565,16 +571,22 @@ mod open_interest_tests {
             OpenInterestSample {
                 timestamp_unix_nanos: 1_000,
                 contracts: 100.0,
+                high_contracts: Some(105.0),
+                low_contracts: Some(98.0),
                 notional_usd: Some(6_000_000.0),
             },
             OpenInterestSample {
                 timestamp_unix_nanos: 2_000,
                 contracts: 110.0,
+                high_contracts: Some(115.0),
+                low_contracts: Some(104.0),
                 notional_usd: Some(6_600_000.0),
             },
             OpenInterestSample {
                 timestamp_unix_nanos: 3_000,
                 contracts: 120.0,
+                high_contracts: Some(122.0),
+                low_contracts: Some(110.0),
                 notional_usd: Some(7_200_000.0),
             },
         ];
@@ -582,11 +594,15 @@ mod open_interest_tests {
             OpenInterestSample {
                 timestamp_unix_nanos: 2_000,
                 contracts: 30.0,
+                high_contracts: Some(32.0),
+                low_contracts: Some(29.0),
                 notional_usd: Some(1_800_000.0),
             },
             OpenInterestSample {
                 timestamp_unix_nanos: 3_000,
                 contracts: 35.0,
+                high_contracts: Some(36.0),
+                low_contracts: Some(31.0),
                 notional_usd: Some(2_100_000.0),
             },
         ];

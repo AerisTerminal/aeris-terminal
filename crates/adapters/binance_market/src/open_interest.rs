@@ -93,15 +93,11 @@ pub fn fetch_usdm_open_interest(
 
     let mut by_bucket = BTreeMap::new();
     let hist_bytes = hist_res.map_err(|error| error.to_string())?;
-    for sample in decode_open_interest_history(&hist_bytes)? {
+    let mut hist_samples = decode_open_interest_history(&hist_bytes)?;
+    hist_samples.sort_by_key(|sample| sample.timestamp_unix_nanos);
+    for sample in hist_samples {
         let bucket = align_bucket(sample.timestamp_unix_nanos, period);
-        by_bucket.insert(
-            bucket,
-            OpenInterestSample {
-                timestamp_unix_nanos: bucket,
-                ..sample
-            },
-        );
+        fold_bucket_sample(&mut by_bucket, bucket, sample);
     }
 
     if let Ok(live_bytes) = live_res
@@ -116,11 +112,14 @@ pub fn fetch_usdm_open_interest(
                 None
             }
         });
-        by_bucket.insert(
+        fold_bucket_sample(
+            &mut by_bucket,
             bucket,
             OpenInterestSample {
                 timestamp_unix_nanos: bucket,
                 contracts: live.contracts,
+                high_contracts: Some(live.contracts),
+                low_contracts: Some(live.contracts),
                 notional_usd,
             },
         );
@@ -129,28 +128,53 @@ pub fn fetch_usdm_open_interest(
     Ok(by_bucket.into_values().collect())
 }
 
+fn fold_bucket_sample(
+    by_bucket: &mut BTreeMap<i64, OpenInterestSample>,
+    bucket: i64,
+    sample: OpenInterestSample,
+) {
+    let sample_high = sample.high_contracts.unwrap_or(sample.contracts);
+    let sample_low = sample.low_contracts.unwrap_or(sample.contracts);
+    by_bucket
+        .entry(bucket)
+        .and_modify(|existing| {
+            let prev_high = existing.high_contracts.unwrap_or(existing.contracts);
+            let prev_low = existing.low_contracts.unwrap_or(existing.contracts);
+            existing.contracts = sample.contracts;
+            existing.high_contracts = Some(prev_high.max(sample_high).max(sample.contracts));
+            existing.low_contracts = Some(prev_low.min(sample_low).min(sample.contracts));
+            if sample.notional_usd.is_some() {
+                existing.notional_usd = sample.notional_usd;
+            }
+        })
+        .or_insert(OpenInterestSample {
+            timestamp_unix_nanos: bucket,
+            contracts: sample.contracts,
+            high_contracts: Some(sample_high.max(sample.contracts)),
+            low_contracts: Some(sample_low.min(sample.contracts)),
+            notional_usd: sample.notional_usd,
+        });
+}
+
+/// Picks one step finer than the chart interval where Binance supports it so higher-timeframe
+/// Open Interest candles capture real intra-bar high/low wicks without sacrificing Binance's
+/// 30-day history window.
 fn binance_oi_period(period: BarPeriod) -> &'static str {
     let seconds = period
         .duration_nanos()
         .map_or(86_400, |nanos| nanos / 1_000_000_000);
-    if seconds <= 300 {
+    if seconds <= 1_800 {
         "5m"
-    } else if seconds <= 900 {
-        "15m"
-    } else if seconds <= 1_800 {
-        "30m"
     } else if seconds <= 3_600 {
-        "1h"
+        "15m"
     } else if seconds <= 7_200 {
-        "2h"
-    } else if seconds <= 14_400 {
-        "4h"
+        "30m"
     } else if seconds <= 21_600 {
-        "6h"
+        "1h"
     } else if seconds <= 43_200 {
-        "12h"
+        "2h"
     } else {
-        "1d"
+        "4h"
     }
 }
 
@@ -187,6 +211,8 @@ fn decode_open_interest_history(bytes: &[u8]) -> Result<Vec<OpenInterestSample>,
             out.push(OpenInterestSample {
                 timestamp_unix_nanos,
                 contracts,
+                high_contracts: Some(contracts),
+                low_contracts: Some(contracts),
                 notional_usd,
             });
         }
@@ -219,6 +245,8 @@ fn decode_current_open_interest(bytes: &[u8]) -> Result<OpenInterestSample, Stri
     Ok(OpenInterestSample {
         timestamp_unix_nanos,
         contracts,
+        high_contracts: Some(contracts),
+        low_contracts: Some(contracts),
         notional_usd: None,
     })
 }
@@ -243,5 +271,28 @@ mod tests {
         let current = decode_current_open_interest(live).expect("decode live");
         assert!((current.contracts - 98_419.19).abs() < 1e-6);
         assert_eq!(current.timestamp_unix_nanos, 1_795_606_774_322_000_000);
+    }
+
+    #[test]
+    fn folds_sub_bar_samples_into_intraday_high_low_wicks() {
+        let mut by_bucket = BTreeMap::new();
+        let bucket = 3_600 * 1_000_000_000;
+        for (idx, contracts) in [100.0, 118.5, 92.25, 105.0].into_iter().enumerate() {
+            fold_bucket_sample(
+                &mut by_bucket,
+                bucket,
+                OpenInterestSample {
+                    timestamp_unix_nanos: bucket + (idx as i64) * 900 * 1_000_000_000,
+                    contracts,
+                    high_contracts: Some(contracts),
+                    low_contracts: Some(contracts),
+                    notional_usd: None,
+                },
+            );
+        }
+        let sample = by_bucket.get(&bucket).expect("folded bucket");
+        assert_eq!(sample.contracts, 105.0);
+        assert_eq!(sample.high_contracts, Some(118.5));
+        assert_eq!(sample.low_contracts, Some(92.25));
     }
 }

@@ -520,6 +520,12 @@ impl MarketService {
         let mut by_timestamp = BTreeMap::new();
         for sample in raw {
             if sample.contracts.is_finite() && sample.contracts >= 0.0 {
+                let high_contracts = sample
+                    .high_contracts
+                    .filter(|value| value.is_finite() && *value >= 0.0);
+                let low_contracts = sample
+                    .low_contracts
+                    .filter(|value| value.is_finite() && *value >= 0.0);
                 let notional_usd = sample
                     .notional_usd
                     .filter(|value| value.is_finite() && *value >= 0.0);
@@ -528,6 +534,8 @@ impl MarketService {
                     aeris_provider_spi::OpenInterestSample {
                         timestamp_unix_nanos: sample.timestamp_unix_nanos,
                         contracts: sample.contracts,
+                        high_contracts,
+                        low_contracts,
                         notional_usd,
                     },
                 );

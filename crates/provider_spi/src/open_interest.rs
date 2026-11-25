@@ -15,8 +15,12 @@ pub const MAXIMUM_OPEN_INTEREST_POINTS: usize = 500;
 pub struct OpenInterestSample {
     /// Bar-aligned UTC timestamp in Unix nanoseconds.
     pub timestamp_unix_nanos: i64,
-    /// Open interest in base-asset contracts / coins (e.g. BTC).
+    /// Closing open interest in base-asset contracts / coins (e.g. BTC).
     pub contracts: f64,
+    /// Intra-bar highest observed open interest in contracts when sub-bar samples exist.
+    pub high_contracts: Option<f64>,
+    /// Intra-bar lowest observed open interest in contracts when sub-bar samples exist.
+    pub low_contracts: Option<f64>,
     /// Open interest valued in quote USD when supplied by the exchange.
     pub notional_usd: Option<f64>,
 }
