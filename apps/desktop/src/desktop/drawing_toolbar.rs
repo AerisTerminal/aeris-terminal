@@ -1312,6 +1312,7 @@ fn drawing_favorite_star(
         Icon::new(HugeIcon::Star.path())
     };
     Button::new(("drawing_favorite_star", row), theme)
+        .on_secondary_surface()
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .icon(star)

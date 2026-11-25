@@ -180,6 +180,7 @@ pub(super) fn favorite_star_button(
     };
     Button::new(id, theme)
         .shares_container_hover()
+        .on_secondary_surface()
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .icon(star)
