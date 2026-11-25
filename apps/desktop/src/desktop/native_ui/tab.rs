@@ -42,15 +42,17 @@ const SIDEBAR_TAB_GAP: Pixels = px(2.0);
 /// Sidebar sections are a comfortable 36 px click target that grows with a scaled panel.
 const SIDEBAR_TAB_HEIGHT: f32 = 36.0;
 /// Attached browser-style chrome tab geometry (sits flush to the bottom edge of the 42px title bar).
-/// Top corners stay tighter than the sweeping concave bottom flares, matching the Chrome/Aside
-/// radius hierarchy (`top = 10.5px`, `bottom flare = 14.5px`, `inactive hover = 8px`).
+/// Active and inactive tabs share the exact same outer box, padding and border width so switching
+/// tabs never shifts icons, text, percentage change or close buttons. Top corners stay tighter than
+/// the sweeping concave bottom flares (`top = 10.5px`, `bottom flare = 14.5px`, `inactive hover = 8px`).
 const CHROME_TAB_ACTIVE_HEIGHT: f32 = 39.0;
 const CHROME_TAB_ACTIVE_PADDING_BOTTOM: f32 = 3.0;
-const CHROME_TAB_INACTIVE_HEIGHT: f32 = 32.0;
-const CHROME_TAB_INACTIVE_BOTTOM_MARGIN: f32 = 5.0;
+const CHROME_TAB_INACTIVE_TOP_INSET: f32 = 2.0;
+const CHROME_TAB_INACTIVE_BOTTOM_INSET: f32 = 5.0;
 const CHROME_TAB_TOP_RADIUS: f32 = 10.5;
 const CHROME_TAB_FLARE_RADIUS: f32 = 14.5;
 const CHROME_TAB_INACTIVE_RADIUS: f32 = 8.0;
+const CHROME_TAB_GROUP: &str = "aeris_chrome_tab";
 /// Cubic Bezier handle length for a true quarter-circle arc: `4/3 * (sqrt(2) - 1)`.
 const QUARTER_CIRCLE_KAPPA: f32 = 0.552_284_75;
 
@@ -428,18 +430,18 @@ fn render_chrome_tab(
     border_width: Pixels,
 ) -> BaseButton {
     let colors = theme.colors;
+    // Active and inactive chrome tabs keep identical outer dimensions, padding and border width
+    // so switching selection or focusing a tab never shifts its content horizontally or vertically.
+    let tab = tab
+        .relative()
+        .h(px(CHROME_TAB_ACTIVE_HEIGHT))
+        .pb(px(CHROME_TAB_ACTIVE_PADDING_BOTTOM))
+        .border(border_width)
+        .border_color(gpui::transparent_black())
+        .bg(gpui::transparent_black())
+        .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary)));
     if selected {
-        tab.relative()
-            .h(px(CHROME_TAB_ACTIVE_HEIGHT))
-            .pb(px(CHROME_TAB_ACTIVE_PADDING_BOTTOM))
-            .bg(gpui::transparent_black())
-            .text_color(gpui_color(colors.text_default))
-            .focus_visible(move |tab| {
-                tab.border_t(border_width)
-                    .border_l(border_width)
-                    .border_r(border_width)
-                    .border_color(gpui_color(colors.ring_primary))
-            })
+        tab.text_color(gpui_color(colors.text_default))
             .child(attached_chrome_tab_backdrop(
                 resting,
                 selected_fill,
@@ -452,18 +454,29 @@ fn render_chrome_tab(
         } else {
             colors.hover_bg.over(resting)
         };
-        tab.h(px(CHROME_TAB_INACTIVE_HEIGHT))
-            .mb(px(CHROME_TAB_INACTIVE_BOTTOM_MARGIN))
-            .border(border_width)
-            .border_color(gpui::transparent_black())
-            .bg(gpui::transparent_black())
+        tab.group(CHROME_TAB_GROUP)
             .text_color(gpui_color(colors.text_secondary))
-            .hover(move |tab| {
-                tab.bg(gpui_color(hover_fill))
-                    .text_color(gpui_color(colors.text_default))
-            })
-            .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary)))
+            .hover(move |tab| tab.text_color(gpui_color(colors.text_default)))
+            .child(inactive_chrome_tab_hover_backdrop(hover_fill, border_width))
     }
+}
+
+/// Floating hover pill inside an inactive chrome tab, positioned above the title-bar hairline so
+/// it never touches an adjacent active tab's concave flare and never shifts the tab's content box.
+fn inactive_chrome_tab_hover_backdrop(
+    hover_fill: ThemeColor,
+    border_width: Pixels,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(-border_width)
+        .right(-border_width)
+        .top(px(CHROME_TAB_INACTIVE_TOP_INSET) - border_width)
+        .bottom(px(CHROME_TAB_INACTIVE_BOTTOM_INSET) - border_width)
+        .rounded(px(CHROME_TAB_INACTIVE_RADIUS))
+        .group_hover(CHROME_TAB_GROUP, move |style| {
+            style.bg(gpui_color(hover_fill))
+        })
 }
 
 /// Paints the active attached chrome tab as one unified vector silhouette (rounded top corners,
@@ -475,7 +488,9 @@ fn attached_chrome_tab_backdrop(
     border_color: ThemeColor,
     border_width: Pixels,
 ) -> impl IntoElement {
-    let flare = px(CHROME_TAB_FLARE_RADIUS);
+    // Inset past the tab's 1px transparent border box so the backdrop aligns flush with the tab's
+    // outer bounds (`y = 3..42`) and extends by `CHROME_TAB_FLARE_RADIUS` beyond its outer walls.
+    let horizontal_bleed = px(CHROME_TAB_FLARE_RADIUS) + border_width;
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -490,10 +505,10 @@ fn attached_chrome_tab_backdrop(
         },
     )
     .absolute()
-    .left(-flare)
-    .right(-flare)
-    .top_0()
-    .bottom_0()
+    .left(-horizontal_bleed)
+    .right(-horizontal_bleed)
+    .top(-border_width)
+    .bottom(-border_width)
 }
 
 fn paint_attached_chrome_tab(
@@ -744,7 +759,8 @@ mod tests {
             ) -> impl IntoElement {
                 let theme = AerisTheme::dark();
                 let captured = self.bounds.clone();
-                let flare = px(super::CHROME_TAB_FLARE_RADIUS);
+                let border_width = super::platform_border_width(&theme);
+                let horizontal_bleed = px(super::CHROME_TAB_FLARE_RADIUS) + border_width;
                 div().w(px(400.0)).h(px(42.0)).flex().items_end().child(
                     Tab::new("probe_tab", &theme)
                         .chrome(theme.colors.surface_secondary, theme.colors.surface)
@@ -758,10 +774,10 @@ mod tests {
                                 |_, (), _, _| {},
                             )
                             .absolute()
-                            .left(-flare)
-                            .right(-flare)
-                            .top_0()
-                            .bottom_0(),
+                            .left(-horizontal_bleed)
+                            .right(-horizontal_bleed)
+                            .top(-border_width)
+                            .bottom(-border_width),
                         ),
                 )
             }
@@ -784,6 +800,99 @@ mod tests {
             (f32::from(bounds.size.height) - super::CHROME_TAB_ACTIVE_HEIGHT).abs() < 0.5,
             "unexpected backdrop height: {:?}",
             bounds.size.height
+        );
+        assert!(
+            (f32::from(bounds.bottom()) - 42.0).abs() < 0.5,
+            "backdrop must attach flush to bottom of 42px title bar: {:?}",
+            bounds.bottom()
+        );
+    }
+
+    #[gpui::test]
+    fn selected_and_unselected_chrome_tabs_align_content_without_shift(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use gpui::{Bounds, Context, Pixels, Render, Window, canvas, div, prelude::*, px};
+
+        struct Probe {
+            active_content: Rc<RefCell<Option<Bounds<Pixels>>>>,
+            inactive_content: Rc<RefCell<Option<Bounds<Pixels>>>>,
+        }
+
+        impl Render for Probe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let theme = AerisTheme::dark();
+                let active_slot = self.active_content.clone();
+                let inactive_slot = self.inactive_content.clone();
+                let tab_probe =
+                    |id: &'static str,
+                     selected: bool,
+                     slot: Rc<RefCell<Option<Bounds<Pixels>>>>| {
+                        Tab::new(id, &theme)
+                            .chrome(theme.colors.surface_secondary, theme.colors.surface)
+                            .selected(selected)
+                            .w(px(180.0))
+                            .flex()
+                            .items_center()
+                            .px_3()
+                            .child(
+                                div().flex_1().h(px(16.0)).relative().child(
+                                    canvas(
+                                        move |bounds, _, _| {
+                                            *slot.borrow_mut() = Some(bounds);
+                                        },
+                                        |_, (), _, _| {},
+                                    )
+                                    .size_full(),
+                                ),
+                            )
+                    };
+                div()
+                    .w(px(440.0))
+                    .h(px(42.0))
+                    .flex()
+                    .items_end()
+                    .gap(px(8.0))
+                    .child(tab_probe("active_tab", true, active_slot))
+                    .child(tab_probe("inactive_tab", false, inactive_slot))
+            }
+        }
+
+        let active_content = Rc::new(RefCell::new(None));
+        let inactive_content = Rc::new(RefCell::new(None));
+        let active_capture = active_content.clone();
+        let inactive_capture = inactive_content.clone();
+        let (_view, cx) = cx.add_window_view(move |_, _| Probe {
+            active_content: active_capture,
+            inactive_content: inactive_capture,
+        });
+        cx.refresh().unwrap();
+        let active = active_content.borrow().expect("active content bounds");
+        let inactive = inactive_content.borrow().expect("inactive content bounds");
+        assert!(
+            (f32::from(active.origin.y) - f32::from(inactive.origin.y)).abs() < 0.01,
+            "vertical shift between active ({:?}) and inactive ({:?})",
+            active.origin.y,
+            inactive.origin.y
+        );
+        assert!(
+            (f32::from(active.size.width) - f32::from(inactive.size.width)).abs() < 0.01,
+            "width shift between active ({:?}) and inactive ({:?})",
+            active.size.width,
+            inactive.size.width
+        );
+        let expected_x_delta = 180.0 + 8.0;
+        let actual_x_delta = f32::from(inactive.origin.x) - f32::from(active.origin.x);
+        assert!(
+            (actual_x_delta - expected_x_delta).abs() < 0.01,
+            "horizontal shift between active and inactive: expected delta {expected_x_delta}, got {actual_x_delta}"
         );
     }
 }
