@@ -574,6 +574,15 @@ fn dispatch_crypto_catalog(
     }
 }
 
+/// Normalizes USD-pegged stablecoin quotes (`USDT`, `USDC`, etc.) to `"USD"` for practice-account
+/// contract currency compatibility, matching `hyperliquid_realtime`.
+fn normalized_contract_currency(quote_asset: &str) -> String {
+    match quote_asset.to_ascii_uppercase().as_str() {
+        "USD" | "USDT" | "USDC" | "FDUSD" | "USDE" | "DAI" => "USD".to_string(),
+        _ => quote_asset.to_string(),
+    }
+}
+
 /// Builds standard [`ProviderContractMetadata`] for a fixed-tick linear crypto perpetual or spot instrument.
 ///
 /// Fixed-tick venues leave `price_significant_figures` and `price_max_decimals` unset so
@@ -590,7 +599,7 @@ pub(crate) fn crypto_contract_metadata(
     ProviderContractMetadata {
         point_value: Some(1),
         point_value_scale: Some(0),
-        currency: Some(quote_asset.to_string()),
+        currency: Some(normalized_contract_currency(quote_asset)),
         order_quantity_increment,
         instrument_class: Some(if is_spot {
             aeris_contracts::ProviderInstrumentClass::CryptoSpot
@@ -836,7 +845,7 @@ mod tests {
                     InstrumentDecimal::try_new(tick_size_fixed, 8).expect("fixed tick")
                 )
             );
-            assert_eq!(terms.currency, "USDT");
+            assert_eq!(terms.currency, "USD");
             assert_eq!(terms.route.provider_id, provider);
         }
     }
