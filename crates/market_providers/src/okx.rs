@@ -30,18 +30,18 @@ use aeris_market_runtime::{
 };
 use aeris_okx_market_adapter::{
     OKX_BUSINESS_WS_URL, OKX_PUBLIC_WS_URL, OkxBookApplyOutcome, OkxBookState, OkxCatalog,
-    OkxHttpClient, OkxHttpConfig, OkxMarketKind, OkxWsEvent, build_ping, build_subscribe,
-    build_unsubscribe, decode_books, decode_live_candle, decode_trades, fetch_catalog,
-    okx_interval_for_period, parse_provider_symbol, parse_ws_frame, period_for_okx_interval,
+    OkxHttpClient, OkxMarketKind, OkxWsEvent, build_ping, build_subscribe, build_unsubscribe,
+    decode_books, decode_live_candle, decode_trades, okx_interval_for_period,
+    parse_provider_symbol, parse_ws_frame, period_for_okx_interval,
 };
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
 use crate::crypto_runtime::{
     CATALOG_POLL_INTERVAL, CATALOG_REFRESH_INTERVAL, CONNECT_TIMEOUT, CryptoCatalogControl,
     CryptoCatalogEvent, CryptoDemand, CryptoHistorySource, CryptoInstrumentDemand,
-    CryptoRealtimeControl, CryptoRealtimeEvent, READ_TIMEOUT, build_install_instrument,
-    crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos, publish_catalog_event,
-    reject_catalog,
+    CryptoRealtimeControl, CryptoRealtimeEvent, READ_TIMEOUT, SharedCryptoCatalogs,
+    build_install_instrument, crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos,
+    publish_catalog_event, reject_catalog,
 };
 
 pub(crate) const OKX_PUBLIC_ACCOUNT_ID: &str = "okx-public";
@@ -121,7 +121,10 @@ const OKX_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     recovers_silence: true,
 };
 
-pub(crate) fn provider_spec(realtime_enabled: bool) -> ProviderRuntimeSpec {
+pub(crate) fn provider_spec(
+    realtime_enabled: bool,
+    shared_catalogs: Arc<SharedCryptoCatalogs>,
+) -> ProviderRuntimeSpec {
     let ct_vals: Arc<RwLock<BTreeMap<String, i64>>> = Arc::new(RwLock::new(BTreeMap::new()));
     let ct_vals_cat = Arc::clone(&ct_vals);
     let ct_vals_rt = Arc::clone(&ct_vals);
@@ -134,7 +137,14 @@ pub(crate) fn provider_spec(realtime_enabled: bool) -> ProviderRuntimeSpec {
         "OKX live session is recovering",
         okx_interval_for_period,
         move |controls, events, ws_gen, stop| {
-            run_catalog(controls, events, ws_gen, stop, &ct_vals_cat);
+            run_catalog(
+                controls,
+                events,
+                ws_gen,
+                stop,
+                &ct_vals_cat,
+                &shared_catalogs,
+            );
         },
         move |controls, events, stop, ws_gen, wake| {
             run_realtime(controls, events, stop, ws_gen, wake, &ct_vals_rt);
@@ -163,11 +173,22 @@ fn run_catalog(
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
     ct_vals: &RwLock<BTreeMap<String, i64>>,
+    shared_catalogs: &SharedCryptoCatalogs,
 ) {
-    let mut catalog: Option<OkxCatalog> = None;
+    let mut catalog: Option<Arc<OkxCatalog>> = None;
     let mut fetched_at: Option<Instant> = None;
     let mut selection_generation: u64 = 0;
     let mut next_refresh = Instant::now();
+
+    // Warm the public catalog on startup so the symbol browser populates instantly.
+    if !stop.load(Ordering::Acquire)
+        && let Ok(loaded) = shared_catalogs.get_or_fetch_okx(false)
+    {
+        update_ct_vals(ct_vals, &loaded);
+        catalog = Some(loaded);
+        fetched_at = Some(Instant::now());
+        next_refresh = Instant::now() + CATALOG_REFRESH_INTERVAL;
+    }
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -183,7 +204,7 @@ fn run_catalog(
         match controls.recv_timeout(wait) {
             Ok(CryptoCatalogControl::Search(search)) => {
                 if catalog.is_none() {
-                    match fetch_catalog(OkxHttpConfig::default()) {
+                    match shared_catalogs.get_or_fetch_okx(false) {
                         Ok(loaded) => {
                             update_ct_vals(ct_vals, &loaded);
                             catalog = Some(loaded);
@@ -225,7 +246,7 @@ fn run_catalog(
             }
             Ok(CryptoCatalogControl::Select(select)) => {
                 if catalog.is_none() {
-                    match fetch_catalog(OkxHttpConfig::default()) {
+                    match shared_catalogs.get_or_fetch_okx(false) {
                         Ok(loaded) => {
                             update_ct_vals(ct_vals, &loaded);
                             catalog = Some(loaded);
@@ -297,7 +318,7 @@ fn run_catalog(
             next_refresh = next_refresh.max(at + CATALOG_REFRESH_INTERVAL);
         }
         if catalog.is_some() && Instant::now() >= next_refresh {
-            match fetch_catalog(OkxHttpConfig::default()) {
+            match shared_catalogs.get_or_fetch_okx(true) {
                 Ok(loaded) => {
                     update_ct_vals(ct_vals, &loaded);
                     catalog = Some(loaded);

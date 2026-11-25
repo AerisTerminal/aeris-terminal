@@ -16,7 +16,7 @@ use aeris_binance_market_adapter::{
     BinanceCatalog, BinanceHttpClient, BinanceHttpConfig, BinanceMarketKind, BinanceOrderBookSync,
     BinanceWsEvent, binance_interval_for_period, book::BookSyncOutcome, build_subscribe,
     build_unsubscribe, decode_agg_trade, decode_book_ticker, decode_depth_update,
-    decode_live_candle, fetch_catalog, parse_provider_symbol, parse_ws_frame,
+    decode_live_candle, parse_provider_symbol, parse_ws_frame,
 };
 use aeris_crypto_common::{CryptoError, CryptoResult, TradeDedupRing};
 use aeris_market_data::BarPeriod;
@@ -40,9 +40,9 @@ use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 use crate::crypto_runtime::{
     CATALOG_POLL_INTERVAL, CATALOG_REFRESH_INTERVAL, CONNECT_TIMEOUT, CryptoCatalogControl,
     CryptoCatalogEvent, CryptoDemand, CryptoHistorySource, CryptoInstrumentDemand,
-    CryptoRealtimeControl, CryptoRealtimeEvent, READ_TIMEOUT, build_install_instrument,
-    crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos, publish_catalog_event,
-    reject_catalog,
+    CryptoRealtimeControl, CryptoRealtimeEvent, READ_TIMEOUT, SharedCryptoCatalogs,
+    build_install_instrument, crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos,
+    publish_catalog_event, reject_catalog,
 };
 
 pub(crate) const BINANCE_PUBLIC_ACCOUNT_ID: &str = "binance-public";
@@ -122,7 +122,10 @@ const BINANCE_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     recovers_silence: true,
 };
 
-pub(crate) fn provider_spec(realtime_enabled: bool) -> ProviderRuntimeSpec {
+pub(crate) fn provider_spec(
+    realtime_enabled: bool,
+    shared_catalogs: Arc<SharedCryptoCatalogs>,
+) -> ProviderRuntimeSpec {
     crypto_provider_spec(
         BINANCE_DESCRIPTOR,
         CryptoHistorySource::Binance(BinanceHttpClient::default()),
@@ -131,7 +134,9 @@ pub(crate) fn provider_spec(realtime_enabled: bool) -> ProviderRuntimeSpec {
         PROVIDER_WORKER_NAME,
         "Binance live session is recovering",
         binance_interval_for_period,
-        run_catalog,
+        move |controls, events, ws_gen, stop| {
+            run_catalog(controls, events, ws_gen, stop, &shared_catalogs);
+        },
         run_realtime,
     )
 }
@@ -154,11 +159,21 @@ fn run_catalog(
     events: &CatalogPublisher<CryptoCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
+    shared_catalogs: &SharedCryptoCatalogs,
 ) {
-    let mut catalog: Option<BinanceCatalog> = None;
+    let mut catalog: Option<Arc<BinanceCatalog>> = None;
     let mut fetched_at: Option<Instant> = None;
     let mut selection_generation: u64 = 0;
     let mut next_refresh = Instant::now();
+
+    // Warm the public catalog on startup so the symbol browser populates instantly.
+    if !stop.load(Ordering::Acquire)
+        && let Ok(loaded) = shared_catalogs.get_or_fetch_binance(false)
+    {
+        catalog = Some(loaded);
+        fetched_at = Some(Instant::now());
+        next_refresh = Instant::now() + CATALOG_REFRESH_INTERVAL;
+    }
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -174,7 +189,7 @@ fn run_catalog(
         match controls.recv_timeout(wait) {
             Ok(CryptoCatalogControl::Search(search)) => {
                 if catalog.is_none() {
-                    match fetch_catalog(BinanceHttpConfig::default()) {
+                    match shared_catalogs.get_or_fetch_binance(false) {
                         Ok(loaded) => {
                             catalog = Some(loaded);
                             fetched_at = Some(Instant::now());
@@ -215,7 +230,7 @@ fn run_catalog(
             }
             Ok(CryptoCatalogControl::Select(select)) => {
                 if catalog.is_none() {
-                    match fetch_catalog(BinanceHttpConfig::default()) {
+                    match shared_catalogs.get_or_fetch_binance(false) {
                         Ok(loaded) => {
                             catalog = Some(loaded);
                             fetched_at = Some(Instant::now());
@@ -286,7 +301,7 @@ fn run_catalog(
             next_refresh = next_refresh.max(at + CATALOG_REFRESH_INTERVAL);
         }
         if catalog.is_some() && Instant::now() >= next_refresh {
-            match fetch_catalog(BinanceHttpConfig::default()) {
+            match shared_catalogs.get_or_fetch_binance(true) {
                 Ok(loaded) => {
                     catalog = Some(loaded);
                     fetched_at = Some(Instant::now());

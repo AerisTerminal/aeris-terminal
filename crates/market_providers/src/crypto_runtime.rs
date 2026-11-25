@@ -574,6 +574,82 @@ fn dispatch_crypto_catalog(
     }
 }
 
+/// Runtime-scoped shared catalog cache for public crypto venues so `binance`, `bybit`, `okx`,
+/// and `crypto_agg` never duplicate exchange catalog HTTP fetches.
+#[derive(Default)]
+pub(crate) struct SharedCryptoCatalogs {
+    binance: std::sync::Mutex<Option<(Instant, Arc<aeris_binance_market_adapter::BinanceCatalog>)>>,
+    bybit: std::sync::Mutex<Option<(Instant, Arc<aeris_bybit_market_adapter::BybitCatalog>)>>,
+    okx: std::sync::Mutex<Option<(Instant, Arc<aeris_okx_market_adapter::OkxCatalog>)>>,
+}
+
+const SHARED_CATALOG_TTL: Duration = Duration::from_mins(15);
+
+impl SharedCryptoCatalogs {
+    pub(crate) fn get_or_fetch_binance(
+        &self,
+        force_refresh: bool,
+    ) -> CryptoResult<Arc<aeris_binance_market_adapter::BinanceCatalog>> {
+        let mut guard = self
+            .binance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !force_refresh
+            && let Some((at, catalog)) = guard.as_ref()
+            && at.elapsed() < SHARED_CATALOG_TTL
+        {
+            return Ok(Arc::clone(catalog));
+        }
+        let loaded = Arc::new(aeris_binance_market_adapter::fetch_catalog(
+            aeris_binance_market_adapter::BinanceHttpConfig::default(),
+        )?);
+        *guard = Some((Instant::now(), Arc::clone(&loaded)));
+        Ok(loaded)
+    }
+
+    pub(crate) fn get_or_fetch_bybit(
+        &self,
+        force_refresh: bool,
+    ) -> CryptoResult<Arc<aeris_bybit_market_adapter::BybitCatalog>> {
+        let mut guard = self
+            .bybit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !force_refresh
+            && let Some((at, catalog)) = guard.as_ref()
+            && at.elapsed() < SHARED_CATALOG_TTL
+        {
+            return Ok(Arc::clone(catalog));
+        }
+        let loaded = Arc::new(aeris_bybit_market_adapter::fetch_catalog(
+            aeris_bybit_market_adapter::BybitHttpConfig::default(),
+        )?);
+        *guard = Some((Instant::now(), Arc::clone(&loaded)));
+        Ok(loaded)
+    }
+
+    pub(crate) fn get_or_fetch_okx(
+        &self,
+        force_refresh: bool,
+    ) -> CryptoResult<Arc<aeris_okx_market_adapter::OkxCatalog>> {
+        let mut guard = self
+            .okx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !force_refresh
+            && let Some((at, catalog)) = guard.as_ref()
+            && at.elapsed() < SHARED_CATALOG_TTL
+        {
+            return Ok(Arc::clone(catalog));
+        }
+        let loaded = Arc::new(aeris_okx_market_adapter::fetch_catalog(
+            aeris_okx_market_adapter::OkxHttpConfig::default(),
+        )?);
+        *guard = Some((Instant::now(), Arc::clone(&loaded)));
+        Ok(loaded)
+    }
+}
+
 /// Normalizes USD-pegged stablecoin quotes (`USDT`, `USDC`, etc.) to `"USD"` for practice-account
 /// contract currency compatibility, matching `hyperliquid_realtime`.
 fn normalized_contract_currency(quote_asset: &str) -> String {

@@ -90,45 +90,28 @@ pub fn fetch_catalog(config: BybitHttpConfig) -> CryptoResult<BybitCatalog> {
     let mut instruments = Vec::new();
     let mut errors = Vec::new();
 
-    for kind in [BybitMarketKind::Linear, BybitMarketKind::Spot] {
-        let volumes = get_with_agent(
-            agent,
-            &format!(
-                "{BYBIT_REST_URL}/v5/market/tickers?category={}",
-                kind.category()
-            ),
-            config,
+    let (linear_result, spot_result) = std::thread::scope(|scope| {
+        let linear_task =
+            scope.spawn(|| fetch_segment_catalog(agent, BybitMarketKind::Linear, config));
+        let spot_task = scope.spawn(|| fetch_segment_catalog(agent, BybitMarketKind::Spot, config));
+        (
+            linear_task.join().unwrap_or_else(|_| {
+                Err(CryptoError::Transport(
+                    "bybit linear catalog worker panicked".to_string(),
+                ))
+            }),
+            spot_task.join().unwrap_or_else(|_| {
+                Err(CryptoError::Transport(
+                    "bybit spot catalog worker panicked".to_string(),
+                ))
+            }),
         )
-        .map(|bytes| decode_ticker_volumes(&bytes))
-        .unwrap_or_default();
+    });
 
-        let mut cursor: Option<String> = None;
-        for _ in 0..8 {
-            let url = match &cursor {
-                Some(c) => format!(
-                    "{BYBIT_REST_URL}/v5/market/instruments-info?category={}&limit=1000&cursor={c}",
-                    kind.category()
-                ),
-                None => format!(
-                    "{BYBIT_REST_URL}/v5/market/instruments-info?category={}&limit=1000",
-                    kind.category()
-                ),
-            };
-            match get_with_agent(agent, &url, config)
-                .and_then(|bytes| decode_instruments_page(&bytes, kind, &volumes))
-            {
-                Ok((mut page, next)) => {
-                    instruments.append(&mut page);
-                    cursor = next;
-                    if cursor.is_none() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    errors.push(error);
-                    break;
-                }
-            }
+    for result in [linear_result, spot_result] {
+        match result {
+            Ok(mut items) => instruments.append(&mut items),
+            Err(error) => errors.push(error),
         }
     }
 
@@ -138,6 +121,82 @@ pub fn fetch_catalog(config: BybitHttpConfig) -> CryptoResult<BybitCatalog> {
         }));
     }
     Ok(BybitCatalog::from_instruments(instruments))
+}
+
+fn fetch_segment_catalog(
+    agent: &ureq::Agent,
+    kind: BybitMarketKind,
+    config: BybitHttpConfig,
+) -> CryptoResult<Vec<crate::BybitInstrument>> {
+    let (volumes, pages) = std::thread::scope(|scope| {
+        let tickers_task = scope.spawn(|| {
+            get_with_agent(
+                agent,
+                &format!(
+                    "{BYBIT_REST_URL}/v5/market/tickers?category={}",
+                    kind.category()
+                ),
+                config,
+            )
+            .map(|bytes| decode_ticker_volumes(&bytes))
+            .unwrap_or_default()
+        });
+        let info_task = scope.spawn(|| {
+            let mut raw_pages = Vec::new();
+            let mut cursor: Option<String> = None;
+            for _ in 0..8 {
+                let url = match &cursor {
+                    Some(c) => format!(
+                        "{BYBIT_REST_URL}/v5/market/instruments-info?category={}&limit=1000&cursor={c}",
+                        kind.category()
+                    ),
+                    None => format!(
+                        "{BYBIT_REST_URL}/v5/market/instruments-info?category={}&limit=1000",
+                        kind.category()
+                    ),
+                };
+                let bytes = get_with_agent(agent, &url, config)?;
+                let next = extract_next_cursor(&bytes);
+                raw_pages.push(bytes);
+                cursor = next;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            Ok::<Vec<Vec<u8>>, CryptoError>(raw_pages)
+        });
+        (
+            tickers_task.join().unwrap_or_default(),
+            info_task.join().unwrap_or_else(|_| {
+                Err(CryptoError::Transport(
+                    "bybit instruments worker panicked".to_string(),
+                ))
+            }),
+        )
+    });
+    let mut out = Vec::new();
+    for bytes in pages? {
+        let (mut page, _) = decode_instruments_page(&bytes, kind, &volumes)?;
+        out.append(&mut page);
+    }
+    Ok(out)
+}
+
+fn extract_next_cursor(bytes: &[u8]) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        result: Option<ResultBody>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ResultBody {
+        next_page_cursor: Option<String>,
+    }
+    serde_json::from_slice::<Envelope>(bytes)
+        .ok()
+        .and_then(|e| e.result)
+        .and_then(|r| r.next_page_cursor)
+        .filter(|c| !c.trim().is_empty())
 }
 
 fn get_with_agent(

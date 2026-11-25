@@ -52,6 +52,7 @@ pub fn market_service_builder() -> MarketServiceBuilder {
     let rithmic_revision = rithmic_realtime::RithmicLoginRevision::default();
     let rithmic_login = Arc::new(rithmic::RithmicLogin::new(rithmic_revision.clone()));
     let broker_revision = rithmic_login.revision.clone();
+    let shared_crypto_catalogs = Arc::new(crypto_runtime::SharedCryptoCatalogs::default());
     MarketService::builder()
         .register_provider(rithmic::provider_spec(
             Box::new(rithmic::LiveRithmicHistory),
@@ -62,10 +63,22 @@ pub fn market_service_builder() -> MarketServiceBuilder {
             Box::<hyperliquid::LiveHyperliquidHistory>::default(),
             true,
         ))
-        .register_provider(binance::provider_spec(true))
-        .register_provider(bybit::provider_spec(true))
-        .register_provider(okx::provider_spec(true))
-        .register_provider(aggregated_crypto::provider_spec(true))
+        .register_provider(binance::provider_spec(
+            true,
+            Arc::clone(&shared_crypto_catalogs),
+        ))
+        .register_provider(bybit::provider_spec(
+            true,
+            Arc::clone(&shared_crypto_catalogs),
+        ))
+        .register_provider(okx::provider_spec(
+            true,
+            Arc::clone(&shared_crypto_catalogs),
+        ))
+        .register_provider(aggregated_crypto::provider_spec(
+            true,
+            shared_crypto_catalogs,
+        ))
         .with_recording_replay()
         .register_auth(
             rithmic::RITHMIC_DESCRIPTOR.id,

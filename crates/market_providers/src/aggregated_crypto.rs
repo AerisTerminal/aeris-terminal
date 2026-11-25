@@ -29,8 +29,8 @@ use aeris_binance_market_adapter::{
     period_for_binance_interval,
 };
 use aeris_bybit_market_adapter::{
-    BYBIT_LINEAR_WS_URL, BYBIT_SPOT_WS_URL, BybitBookState, BybitHttpClient, BybitHttpConfig,
-    BybitMarketKind, BybitWsEvent,
+    BYBIT_LINEAR_WS_URL, BYBIT_SPOT_WS_URL, BybitBookState, BybitHttpClient, BybitMarketKind,
+    BybitWsEvent,
 };
 use aeris_crypto_common::{
     BookLevelUpdate, CanonicalCryptoKey, CryptoError, CryptoMarketKind, CryptoResult,
@@ -58,8 +58,7 @@ use aeris_market_runtime::{
     },
 };
 use aeris_okx_market_adapter::{
-    OKX_PUBLIC_WS_URL, OkxBookApplyOutcome, OkxBookState, OkxHttpClient, OkxHttpConfig,
-    OkxMarketKind, OkxWsEvent,
+    OKX_PUBLIC_WS_URL, OkxBookApplyOutcome, OkxBookState, OkxHttpClient, OkxMarketKind, OkxWsEvent,
 };
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 use aeris_provider_spi::HistoryInstrument;
@@ -67,8 +66,9 @@ use aeris_provider_spi::HistoryInstrument;
 use crate::crypto_runtime::{
     CATALOG_POLL_INTERVAL, CATALOG_REFRESH_INTERVAL, CONNECT_TIMEOUT, CryptoCatalogControl,
     CryptoCatalogEvent, CryptoDemand, CryptoHistorySource, CryptoRealtimeControl,
-    CryptoRealtimeEvent, READ_TIMEOUT, build_install_instrument, crypto_provider_spec, emit_data,
-    emit_lifecycle, now_unix_nanos, publish_catalog_event, reject_catalog,
+    CryptoRealtimeEvent, READ_TIMEOUT, SharedCryptoCatalogs, build_install_instrument,
+    crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos, publish_catalog_event,
+    reject_catalog,
 };
 
 pub(crate) const AGGREGATED_ACCOUNT_ID: &str = "crypto-agg-public";
@@ -319,7 +319,10 @@ pub(crate) type SharedAggregatedCatalog = Arc<RwLock<AggregatedCatalog>>;
 pub(crate) type SharedFormingSeeds = Arc<RwLock<BTreeMap<(String, String), MarketBar>>>;
 const MAXIMUM_FORMING_SEEDS: usize = 128;
 
-pub(crate) fn provider_spec(realtime_enabled: bool) -> ProviderRuntimeSpec {
+pub(crate) fn provider_spec(
+    realtime_enabled: bool,
+    shared_catalogs: Arc<SharedCryptoCatalogs>,
+) -> ProviderRuntimeSpec {
     let shared_catalog: SharedAggregatedCatalog =
         Arc::new(RwLock::new(AggregatedCatalog::default()));
     let shared_seeds: SharedFormingSeeds = Arc::new(RwLock::new(BTreeMap::new()));
@@ -343,7 +346,14 @@ pub(crate) fn provider_spec(realtime_enabled: bool) -> ProviderRuntimeSpec {
         "Aggregated crypto session is recovering",
         binance_interval_for_period,
         move |controls, events, ws_gen, stop| {
-            run_catalog(controls, events, ws_gen, stop, &cat_for_cat);
+            run_catalog(
+                controls,
+                events,
+                ws_gen,
+                stop,
+                &cat_for_cat,
+                &shared_catalogs,
+            );
         },
         move |controls, events, stop, ws_gen, wake| {
             run_realtime(
@@ -479,21 +489,23 @@ pub(crate) fn fetch_aggregated_history(
 }
 
 #[allow(clippy::too_many_lines)]
-fn fetch_combined_catalog() -> CryptoResult<AggregatedCatalog> {
+fn fetch_combined_catalog(
+    shared_catalogs: &SharedCryptoCatalogs,
+    force_refresh: bool,
+) -> CryptoResult<AggregatedCatalog> {
     let (binance, bybit, okx, hyperliquid) = thread::scope(|scope| {
-        let h_bin = scope.spawn(|| {
-            aeris_binance_market_adapter::fetch_catalog(BinanceHttpConfig::default()).ok()
+        let binance_task = scope.spawn(|| shared_catalogs.get_or_fetch_binance(force_refresh).ok());
+        let bybit_task = scope.spawn(|| shared_catalogs.get_or_fetch_bybit(force_refresh).ok());
+        let okx_task = scope.spawn(|| shared_catalogs.get_or_fetch_okx(force_refresh).ok());
+        let hl_task = scope.spawn(|| {
+            aeris_hyperliquid_market_adapter::fetch_meta_bundle(HyperliquidHttpConfig::default())
+                .ok()
         });
-        let h_byb = scope
-            .spawn(|| aeris_bybit_market_adapter::fetch_catalog(BybitHttpConfig::default()).ok());
-        let h_okx =
-            scope.spawn(|| aeris_okx_market_adapter::fetch_catalog(OkxHttpConfig::default()).ok());
-        let h_hl = scope.spawn(|| aeris_hyperliquid_market_adapter::fetch_meta_bundle(HyperliquidHttpConfig::default()).ok());
         (
-            h_bin.join().ok().flatten(),
-            h_byb.join().ok().flatten(),
-            h_okx.join().ok().flatten(),
-            h_hl.join().ok().flatten(),
+            binance_task.join().ok().flatten(),
+            bybit_task.join().ok().flatten(),
+            okx_task.join().ok().flatten(),
+            hl_task.join().ok().flatten(),
         )
     });
 
@@ -615,10 +627,23 @@ fn run_catalog(
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
     shared: &SharedAggregatedCatalog,
+    shared_catalogs: &SharedCryptoCatalogs,
 ) {
     let mut fetched_at: Option<Instant> = None;
     let mut selection_generation: u64 = 0;
     let mut next_refresh = Instant::now();
+
+    // Warm the combined catalog on startup (reusing individual venue caches) so the symbol browser
+    // populates instantly without duplicate HTTP fetches.
+    if !stop.load(Ordering::Acquire)
+        && let Ok(loaded) = fetch_combined_catalog(shared_catalogs, false)
+    {
+        if let Ok(mut guard) = shared.write() {
+            *guard = loaded;
+        }
+        fetched_at = Some(Instant::now());
+        next_refresh = Instant::now() + CATALOG_REFRESH_INTERVAL;
+    }
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -635,7 +660,7 @@ fn run_catalog(
         match controls.recv_timeout(wait) {
             Ok(CryptoCatalogControl::Search(search)) => {
                 if !is_loaded {
-                    match fetch_combined_catalog() {
+                    match fetch_combined_catalog(shared_catalogs, false) {
                         Ok(loaded) => {
                             if let Ok(mut guard) = shared.write() {
                                 *guard = loaded;
@@ -678,7 +703,7 @@ fn run_catalog(
             }
             Ok(CryptoCatalogControl::Select(select)) => {
                 if !is_loaded {
-                    match fetch_combined_catalog() {
+                    match fetch_combined_catalog(shared_catalogs, false) {
                         Ok(loaded) => {
                             if let Ok(mut guard) = shared.write() {
                                 *guard = loaded;
@@ -759,7 +784,7 @@ fn run_catalog(
             next_refresh = next_refresh.max(at + CATALOG_REFRESH_INTERVAL);
         }
         if is_loaded && Instant::now() >= next_refresh {
-            match fetch_combined_catalog() {
+            match fetch_combined_catalog(shared_catalogs, true) {
                 Ok(loaded) => {
                     if let Ok(mut guard) = shared.write() {
                         *guard = loaded;

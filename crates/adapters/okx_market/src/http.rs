@@ -91,31 +91,76 @@ pub fn fetch_catalog(config: OkxHttpConfig) -> CryptoResult<OkxCatalog> {
     let mut instruments = Vec::new();
     let mut errors = Vec::new();
 
-    for kind in [OkxMarketKind::Swap, OkxMarketKind::Spot] {
-        let volumes = get_with_agent(
-            agent,
-            &format!(
-                "{OKX_REST_URL}/api/v5/market/tickers?instType={}",
-                kind.inst_type()
-            ),
-            config,
+    let (swap_tickers, swap_info, spot_tickers, spot_info) = std::thread::scope(|scope| {
+        let swap_tickers_task = scope.spawn(|| {
+            get_with_agent(
+                agent,
+                &format!(
+                    "{OKX_REST_URL}/api/v5/market/tickers?instType={}",
+                    OkxMarketKind::Swap.inst_type()
+                ),
+                config,
+            )
+            .map(|bytes| decode_ticker_volumes(&bytes, OkxMarketKind::Swap))
+            .unwrap_or_default()
+        });
+        let swap_info_task = scope.spawn(|| {
+            get_with_agent(
+                agent,
+                &format!(
+                    "{OKX_REST_URL}/api/v5/public/instruments?instType={}",
+                    OkxMarketKind::Swap.inst_type()
+                ),
+                config,
+            )
+        });
+        let spot_tickers_task = scope.spawn(|| {
+            get_with_agent(
+                agent,
+                &format!(
+                    "{OKX_REST_URL}/api/v5/market/tickers?instType={}",
+                    OkxMarketKind::Spot.inst_type()
+                ),
+                config,
+            )
+            .map(|bytes| decode_ticker_volumes(&bytes, OkxMarketKind::Spot))
+            .unwrap_or_default()
+        });
+        let spot_info_task = scope.spawn(|| {
+            get_with_agent(
+                agent,
+                &format!(
+                    "{OKX_REST_URL}/api/v5/public/instruments?instType={}",
+                    OkxMarketKind::Spot.inst_type()
+                ),
+                config,
+            )
+        });
+        (
+            swap_tickers_task.join().unwrap_or_default(),
+            swap_info_task.join().unwrap_or_else(|_| {
+                Err(CryptoError::Transport(
+                    "okx swap instruments worker panicked".to_string(),
+                ))
+            }),
+            spot_tickers_task.join().unwrap_or_default(),
+            spot_info_task.join().unwrap_or_else(|_| {
+                Err(CryptoError::Transport(
+                    "okx spot instruments worker panicked".to_string(),
+                ))
+            }),
         )
-        .map(|bytes| decode_ticker_volumes(&bytes, kind))
-        .unwrap_or_default();
+    });
 
-        match get_with_agent(
-            agent,
-            &format!(
-                "{OKX_REST_URL}/api/v5/public/instruments?instType={}",
-                kind.inst_type()
-            ),
-            config,
-        )
-        .and_then(|bytes| decode_instruments(&bytes, kind, &volumes))
-        {
-            Ok(mut items) => instruments.append(&mut items),
-            Err(error) => errors.push(error),
-        }
+    match swap_info.and_then(|bytes| decode_instruments(&bytes, OkxMarketKind::Swap, &swap_tickers))
+    {
+        Ok(mut items) => instruments.append(&mut items),
+        Err(error) => errors.push(error),
+    }
+    match spot_info.and_then(|bytes| decode_instruments(&bytes, OkxMarketKind::Spot, &spot_tickers))
+    {
+        Ok(mut items) => instruments.append(&mut items),
+        Err(error) => errors.push(error),
     }
 
     if instruments.is_empty() {

@@ -13,9 +13,9 @@ use std::{
 
 use aeris_bybit_market_adapter::{
     BYBIT_LINEAR_WS_URL, BYBIT_SPOT_WS_URL, BybitBookState, BybitCatalog, BybitHttpClient,
-    BybitHttpConfig, BybitMarketKind, BybitWsEvent, build_ping, build_subscribe, build_unsubscribe,
+    BybitMarketKind, BybitWsEvent, build_ping, build_subscribe, build_unsubscribe,
     bybit_interval_for_period, decode_live_candle, decode_orderbook, decode_public_trades,
-    fetch_catalog, parse_provider_symbol, parse_ws_frame,
+    parse_provider_symbol, parse_ws_frame,
 };
 use aeris_crypto_common::{CryptoError, CryptoResult, TradeDedupRing};
 use aeris_market_data::BarPeriod;
@@ -39,9 +39,9 @@ use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 use crate::crypto_runtime::{
     CATALOG_POLL_INTERVAL, CATALOG_REFRESH_INTERVAL, CONNECT_TIMEOUT, CryptoCatalogControl,
     CryptoCatalogEvent, CryptoDemand, CryptoHistorySource, CryptoInstrumentDemand,
-    CryptoRealtimeControl, CryptoRealtimeEvent, READ_TIMEOUT, build_install_instrument,
-    crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos, publish_catalog_event,
-    reject_catalog,
+    CryptoRealtimeControl, CryptoRealtimeEvent, READ_TIMEOUT, SharedCryptoCatalogs,
+    build_install_instrument, crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos,
+    publish_catalog_event, reject_catalog,
 };
 
 pub(crate) const BYBIT_PUBLIC_ACCOUNT_ID: &str = "bybit-public";
@@ -120,7 +120,10 @@ const BYBIT_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     recovers_silence: true,
 };
 
-pub(crate) fn provider_spec(realtime_enabled: bool) -> ProviderRuntimeSpec {
+pub(crate) fn provider_spec(
+    realtime_enabled: bool,
+    shared_catalogs: Arc<SharedCryptoCatalogs>,
+) -> ProviderRuntimeSpec {
     crypto_provider_spec(
         BYBIT_DESCRIPTOR,
         CryptoHistorySource::Bybit(BybitHttpClient::default()),
@@ -129,7 +132,9 @@ pub(crate) fn provider_spec(realtime_enabled: bool) -> ProviderRuntimeSpec {
         PROVIDER_WORKER_NAME,
         "Bybit live session is recovering",
         bybit_interval_for_period,
-        run_catalog,
+        move |controls, events, ws_gen, stop| {
+            run_catalog(controls, events, ws_gen, stop, &shared_catalogs);
+        },
         run_realtime,
     )
 }
@@ -152,11 +157,21 @@ fn run_catalog(
     events: &CatalogPublisher<CryptoCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
+    shared_catalogs: &SharedCryptoCatalogs,
 ) {
-    let mut catalog: Option<BybitCatalog> = None;
+    let mut catalog: Option<Arc<BybitCatalog>> = None;
     let mut fetched_at: Option<Instant> = None;
     let mut selection_generation: u64 = 0;
     let mut next_refresh = Instant::now();
+
+    // Warm the public catalog on startup so the symbol browser populates instantly.
+    if !stop.load(Ordering::Acquire)
+        && let Ok(loaded) = shared_catalogs.get_or_fetch_bybit(false)
+    {
+        catalog = Some(loaded);
+        fetched_at = Some(Instant::now());
+        next_refresh = Instant::now() + CATALOG_REFRESH_INTERVAL;
+    }
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -172,7 +187,7 @@ fn run_catalog(
         match controls.recv_timeout(wait) {
             Ok(CryptoCatalogControl::Search(search)) => {
                 if catalog.is_none() {
-                    match fetch_catalog(BybitHttpConfig::default()) {
+                    match shared_catalogs.get_or_fetch_bybit(false) {
                         Ok(loaded) => {
                             catalog = Some(loaded);
                             fetched_at = Some(Instant::now());
@@ -213,7 +228,7 @@ fn run_catalog(
             }
             Ok(CryptoCatalogControl::Select(select)) => {
                 if catalog.is_none() {
-                    match fetch_catalog(BybitHttpConfig::default()) {
+                    match shared_catalogs.get_or_fetch_bybit(false) {
                         Ok(loaded) => {
                             catalog = Some(loaded);
                             fetched_at = Some(Instant::now());
@@ -284,7 +299,7 @@ fn run_catalog(
             next_refresh = next_refresh.max(at + CATALOG_REFRESH_INTERVAL);
         }
         if catalog.is_some() && Instant::now() >= next_refresh {
-            match fetch_catalog(BybitHttpConfig::default()) {
+            match shared_catalogs.get_or_fetch_bybit(true) {
                 Ok(loaded) => {
                     catalog = Some(loaded);
                     fetched_at = Some(Instant::now());
