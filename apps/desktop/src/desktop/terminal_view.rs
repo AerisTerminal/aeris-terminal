@@ -1554,8 +1554,8 @@ fn workspace_tab_strip_end(
     [
         div()
             .flex_none()
-            .pl(px(6.0))
-            .mb(px(8.0))
+            .pl(px(12.0))
+            .mb(px(9.0))
             .child(chrome_tooltip(
                 "add_workspace",
                 tr!(panels::NEW_TAB),
@@ -1566,7 +1566,7 @@ fn workspace_tab_strip_end(
         div()
             .id("workspace_tab_drop_target")
             .h(px(chart_chrome::CHART_CONTROL_SIZE))
-            .mb(px(4.0))
+            .mb(px(5.0))
             .min_w(px(16.0))
             .into_any_element(),
     ]

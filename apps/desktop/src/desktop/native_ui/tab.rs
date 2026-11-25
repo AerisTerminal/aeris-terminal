@@ -10,7 +10,7 @@ use aeris_design_system::{
 use gpui::{
     AnyElement, App, Bounds, Div, ElementId, InteractiveElement, Interactivity, IntoElement,
     Orientation, ParentElement, PathBuilder, Pixels, RenderOnce, SharedString, Stateful,
-    StyleRefinement, Styled, Window, canvas, div, point, prelude::*, px,
+    StyleRefinement, Styled, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use gpui_base::Button as BaseButton;
 
@@ -42,12 +42,14 @@ const SIDEBAR_TAB_GAP: Pixels = px(2.0);
 /// Sidebar sections are a comfortable 36 px click target that grows with a scaled panel.
 const SIDEBAR_TAB_HEIGHT: f32 = 36.0;
 /// Attached browser-style chrome tab geometry (sits flush to the bottom edge of the 42px title bar).
-const CHROME_TAB_ACTIVE_HEIGHT: f32 = 37.0;
+/// Top corners stay tighter than the sweeping concave bottom flares, matching the Chrome/Aside
+/// radius hierarchy (`top = 10.5px`, `bottom flare = 14.5px`, `inactive hover = 8px`).
+const CHROME_TAB_ACTIVE_HEIGHT: f32 = 39.0;
 const CHROME_TAB_ACTIVE_PADDING_BOTTOM: f32 = 3.0;
 const CHROME_TAB_INACTIVE_HEIGHT: f32 = 32.0;
-const CHROME_TAB_INACTIVE_BOTTOM_MARGIN: f32 = 4.0;
-const CHROME_TAB_TOP_RADIUS: f32 = 10.0;
-const CHROME_TAB_FLARE_RADIUS: f32 = 9.0;
+const CHROME_TAB_INACTIVE_BOTTOM_MARGIN: f32 = 5.0;
+const CHROME_TAB_TOP_RADIUS: f32 = 10.5;
+const CHROME_TAB_FLARE_RADIUS: f32 = 14.5;
 const CHROME_TAB_INACTIVE_RADIUS: f32 = 8.0;
 /// Cubic Bezier handle length for a true quarter-circle arc: `4/3 * (sqrt(2) - 1)`.
 const QUARTER_CIRCLE_KAPPA: f32 = 0.552_284_75;
@@ -439,6 +441,7 @@ fn render_chrome_tab(
                     .border_color(gpui_color(colors.ring_primary))
             })
             .child(attached_chrome_tab_backdrop(
+                resting,
                 selected_fill,
                 colors.border,
                 border_width,
@@ -467,6 +470,7 @@ fn render_chrome_tab(
 /// straight vertical sides, and concave bottom flares) so the fill seamlessly merges into the
 /// primary surface below and the border stroke flows continuously into the title bar hairline.
 fn attached_chrome_tab_backdrop(
+    resting_fill: ThemeColor,
     fill_color: ThemeColor,
     border_color: ThemeColor,
     border_width: Pixels,
@@ -475,7 +479,14 @@ fn attached_chrome_tab_backdrop(
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
-            paint_attached_chrome_tab(window, bounds, fill_color, border_color, border_width);
+            paint_attached_chrome_tab(
+                window,
+                bounds,
+                resting_fill,
+                fill_color,
+                border_color,
+                border_width,
+            );
         },
     )
     .absolute()
@@ -488,6 +499,7 @@ fn attached_chrome_tab_backdrop(
 fn paint_attached_chrome_tab(
     window: &mut Window,
     bounds: Bounds<Pixels>,
+    resting_fill: ThemeColor,
     fill_color: ThemeColor,
     border_color: ThemeColor,
     border_width: Pixels,
@@ -512,6 +524,20 @@ fn paint_attached_chrome_tab(
         .min(body_w * 0.5)
         .min((body_h - rb).max(0.0));
 
+    // Clear the title bar's flat bottom hairline across the tab and its flares before drawing
+    // the concave skirt so the hairline never shows as a flat shelf under the curves or
+    // double-blends with the vector stroke.
+    let join_bleed = 0.5;
+    let clear_left = xl - rb - join_bleed;
+    let clear_right = xr + rb + join_bleed;
+    window.paint_quad(fill(
+        Bounds::new(
+            point(px(clear_left), px(bottom - bw)),
+            size(px((clear_right - clear_left).max(0.0)), border_width),
+        ),
+        gpui_color(resting_fill),
+    ));
+
     let mut fill_path = PathBuilder::fill();
     fill_path.move_to(point(px(xl - rb), px(bottom)));
     fill_path.line_to(point(px(xl - rb), px(yb)));
@@ -523,8 +549,10 @@ fn paint_attached_chrome_tab(
     }
 
     let mut stroke_path = PathBuilder::stroke(border_width);
-    stroke_path.move_to(point(px(xl - rb), px(yb)));
+    stroke_path.move_to(point(px(clear_left), px(yb)));
+    stroke_path.line_to(point(px(xl - rb), px(yb)));
     trace_attached_chrome_tab_outline(&mut stroke_path, xl, xr, yt, yb, rt, rb);
+    stroke_path.line_to(point(px(clear_right), px(yb)));
     if let Ok(path) = stroke_path.build() {
         window.paint_path(path, gpui_color(border_color));
     }
@@ -682,6 +710,80 @@ mod tests {
                 resting: theme.colors.surface_secondary,
                 selected: theme.colors.surface,
             }
+        );
+    }
+
+    #[test]
+    fn attached_chrome_tab_radius_hierarchy_sweeps_wider_at_the_base() {
+        assert!(super::CHROME_TAB_FLARE_RADIUS > super::CHROME_TAB_TOP_RADIUS);
+        assert!(super::CHROME_TAB_TOP_RADIUS > super::CHROME_TAB_INACTIVE_RADIUS);
+        assert!(
+            super::CHROME_TAB_FLARE_RADIUS + super::CHROME_TAB_TOP_RADIUS
+                < super::CHROME_TAB_ACTIVE_HEIGHT
+        );
+    }
+
+    #[gpui::test]
+    fn attached_chrome_tab_backdrop_extends_beyond_tab_walls_for_flares(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use gpui::{Context, Render, Window, canvas, div, prelude::*, px};
+
+        struct Probe {
+            bounds: Rc<RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
+        }
+
+        impl Render for Probe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let theme = AerisTheme::dark();
+                let captured = self.bounds.clone();
+                let flare = px(super::CHROME_TAB_FLARE_RADIUS);
+                div().w(px(400.0)).h(px(42.0)).flex().items_end().child(
+                    Tab::new("probe_tab", &theme)
+                        .chrome(theme.colors.surface_secondary, theme.colors.surface)
+                        .selected(true)
+                        .w(px(180.0))
+                        .child(
+                            canvas(
+                                move |bounds, _, _| {
+                                    *captured.borrow_mut() = Some(bounds);
+                                },
+                                |_, (), _, _| {},
+                            )
+                            .absolute()
+                            .left(-flare)
+                            .right(-flare)
+                            .top_0()
+                            .bottom_0(),
+                        ),
+                )
+            }
+        }
+
+        let captured = Rc::new(RefCell::new(None));
+        let probe_bounds = captured.clone();
+        let (_view, cx) = cx.add_window_view(move |_, _| Probe {
+            bounds: probe_bounds,
+        });
+        cx.refresh().unwrap();
+        let bounds = captured.borrow().expect("backdrop canvas must paint");
+        assert!(
+            (f32::from(bounds.size.width) - (180.0 + 2.0 * super::CHROME_TAB_FLARE_RADIUS)).abs()
+                < 0.5,
+            "unexpected backdrop width: {:?}",
+            bounds.size.width
+        );
+        assert!(
+            (f32::from(bounds.size.height) - super::CHROME_TAB_ACTIVE_HEIGHT).abs() < 0.5,
+            "unexpected backdrop height: {:?}",
+            bounds.size.height
         );
     }
 }

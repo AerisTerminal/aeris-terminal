@@ -321,7 +321,7 @@ pub(super) fn workspace_title_bar(
         .flex()
         .items_center()
         .pl_4()
-        .pr_2()
+        .pr_1()
         .gap_2()
         .child(account_avatar_button(
             terminal,
