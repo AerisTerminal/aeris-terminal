@@ -3,6 +3,7 @@ members = [
     "apps/desktop",
     "crates/adapters/binance_market",
     "crates/adapters/bybit_market",
+    "crates/adapters/coinbase_market",
     "crates/adapters/hyperliquid_market",
     "crates/adapters/okx_market",
     "crates/adapters/rithmic_protocol",
@@ -101,11 +102,11 @@ unicode-segmentation = "=1.13.3"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "c7bea343838f42b4c14151393e41f0bbe033c95e", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c7bea343838f42b4c14151393e41f0bbe033c95e", default-features = false, features = ["font-kit", "wayland", "x11"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "1b2ebf5a8ace0431bb271e4320b951cdcd889252", version = "=0.3.0" }
-aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "1b2ebf5a8ace0431bb271e4320b951cdcd889252", version = "=0.3.0" }
-aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "1b2ebf5a8ace0431bb271e4320b951cdcd889252", version = "=0.3.0" }
-aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "1b2ebf5a8ace0431bb271e4320b951cdcd889252", version = "=0.3.0", features = ["gpui-backend"] }
-aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "1b2ebf5a8ace0431bb271e4320b951cdcd889252", version = "=0.3.0" }
+aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "c995259cf00570d1f7120619a96a6cf55e606879", version = "=0.3.0" }
+aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "c995259cf00570d1f7120619a96a6cf55e606879", version = "=0.3.0" }
+aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "c995259cf00570d1f7120619a96a6cf55e606879", version = "=0.3.0" }
+aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "c995259cf00570d1f7120619a96a6cf55e606879", version = "=0.3.0", features = ["gpui-backend"] }
+aeris_charts_native = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "c995259cf00570d1f7120619a96a6cf55e606879", version = "=0.3.0" }
 
 [profile.release]
 codegen-units = 1

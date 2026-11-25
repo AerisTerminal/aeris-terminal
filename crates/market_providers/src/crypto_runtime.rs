@@ -1,5 +1,5 @@
 //! Shared runtime plumbing for public cryptocurrency exchange providers
-//! (Binance, Bybit, OKX, and the Aggregated multi-venue feed).
+//! (Binance, Bybit, OKX, Coinbase, and the Aggregated multi-venue feed).
 
 use std::{
     collections::BTreeSet,
@@ -14,7 +14,7 @@ use std::{
 
 use aeris_contracts::{InstallProviderInstrument, ProviderContractMetadata};
 use aeris_crypto_common::{
-    CryptoError, CryptoResult, NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE,
+    CryptoError, CryptoResult, LiquidationLedger, NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE,
 };
 use aeris_market_data::{BarPeriod, DepthSnapshot, MarketBar, MarketTrade, TopOfBookQuote};
 use aeris_market_engine::{
@@ -59,6 +59,16 @@ pub(crate) struct CryptoInstrumentDemand {
 pub(crate) struct CryptoCandleDemand {
     pub instrument: CryptoInstrumentDemand,
     pub interval: String,
+}
+
+/// Shared bounded live liquidation ledgers across standalone perpetual providers and the
+/// aggregated multi-venue feed so live liquidations captured on any session are immediately
+/// available everywhere without duplicating WebSocket traffic.
+#[derive(Default)]
+pub(crate) struct SharedLiquidationLedgers {
+    pub binance: Arc<LiquidationLedger>,
+    pub bybit: Arc<LiquidationLedger>,
+    pub okx: Arc<LiquidationLedger>,
 }
 
 /// Complete desired subscription set for one crypto provider.
@@ -142,6 +152,7 @@ pub(crate) enum CryptoRealtimeEvent {
 pub(crate) fn crypto_demand_from_provider(
     demand: &ProviderDemand,
     interval_for_period: fn(BarPeriod) -> CryptoResult<&'static str>,
+    bars_from_trades: bool,
 ) -> CryptoDemand {
     let mut candles = BTreeSet::new();
     let mut trades = BTreeSet::new();
@@ -195,7 +206,9 @@ pub(crate) fn crypto_demand_from_provider(
             price_scale,
             quantity_scale,
         };
-        if requested.streams.contains(MarketStream::Trades) {
+        if requested.streams.contains(MarketStream::Trades)
+            || (bars_from_trades && requested.streams.contains(MarketStream::Bars))
+        {
             trades.insert(mapping.clone());
         }
         if requested.streams.contains(MarketStream::Quotes)
@@ -268,6 +281,7 @@ pub(crate) struct CryptoSession {
     pub controls: SyncSender<CryptoRealtimeControl>,
     pub history: SyncSender<HistoryRequest>,
     pub interval_for_period: fn(BarPeriod) -> CryptoResult<&'static str>,
+    pub bars_from_trades: bool,
 }
 
 impl ProviderSession for CryptoSession {
@@ -281,7 +295,8 @@ impl ProviderSession for CryptoSession {
     }
 
     fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
-        let projected = crypto_demand_from_provider(demand, self.interval_for_period);
+        let projected =
+            crypto_demand_from_provider(demand, self.interval_for_period, self.bars_from_trades);
         try_control(&self.controls, CryptoRealtimeControl::Subscribe(projected))
     }
 
@@ -300,19 +315,24 @@ impl ProviderSession for CryptoSession {
     }
 }
 
-/// Shared [`HistorySource`] dispatching to Binance, Bybit, OKX, or Aggregated history.
+/// Clients owned by the aggregated crypto history fetcher.
+pub(crate) struct AggregatedHistorySource {
+    pub catalog: crate::aggregated_crypto::SharedAggregatedCatalog,
+    pub forming_seeds: crate::aggregated_crypto::SharedFormingSeeds,
+    pub binance: aeris_binance_market_adapter::BinanceHttpClient,
+    pub bybit: aeris_bybit_market_adapter::BybitHttpClient,
+    pub okx: aeris_okx_market_adapter::OkxHttpClient,
+    pub coinbase: aeris_coinbase_market_adapter::CoinbaseHttpClient,
+    pub hyperliquid: aeris_hyperliquid_market_adapter::HyperliquidHttpClient,
+}
+
+/// Shared [`HistorySource`] dispatching to Binance, Bybit, OKX, Coinbase, or Aggregated history.
 pub(crate) enum CryptoHistorySource {
     Binance(aeris_binance_market_adapter::BinanceHttpClient),
     Bybit(aeris_bybit_market_adapter::BybitHttpClient),
     Okx(aeris_okx_market_adapter::OkxHttpClient),
-    Aggregated {
-        catalog: crate::aggregated_crypto::SharedAggregatedCatalog,
-        forming_seeds: crate::aggregated_crypto::SharedFormingSeeds,
-        binance: aeris_binance_market_adapter::BinanceHttpClient,
-        bybit: aeris_bybit_market_adapter::BybitHttpClient,
-        okx: aeris_okx_market_adapter::OkxHttpClient,
-        hyperliquid: aeris_hyperliquid_market_adapter::HyperliquidHttpClient,
-    },
+    Coinbase(aeris_coinbase_market_adapter::CoinbaseHttpClient),
+    Aggregated(Box<AggregatedHistorySource>),
 }
 
 impl HistorySource for CryptoHistorySource {
@@ -351,20 +371,23 @@ impl HistorySource for CryptoHistorySource {
                 &request.stop,
             )
             .map_err(CryptoError::into_message),
-            Self::Aggregated {
-                catalog,
-                forming_seeds,
-                binance,
-                bybit,
-                okx,
-                hyperliquid,
-            } => crate::aggregated_crypto::fetch_aggregated_history(
-                catalog,
-                forming_seeds,
-                binance,
-                bybit,
-                okx,
-                hyperliquid,
+            Self::Coinbase(client) => aeris_coinbase_market_adapter::history::fetch(
+                client,
+                &request.series,
+                provider_gen,
+                &instrument,
+                request.req_window(),
+                &request.stop,
+            )
+            .map_err(CryptoError::into_message),
+            Self::Aggregated(agg) => crate::aggregated_crypto::fetch_aggregated_history(
+                &agg.catalog,
+                &agg.forming_seeds,
+                &mut agg.binance,
+                &mut agg.bybit,
+                &mut agg.okx,
+                &mut agg.coinbase,
+                &mut agg.hyperliquid,
                 request,
                 &instrument,
                 provider_gen,
@@ -514,6 +537,8 @@ where
     }
 
     let provider_id = descriptor.id;
+    let bars_from_trades =
+        descriptor.capabilities.live_model == aeris_market_runtime::plugin::LiveModel::TradeBuilt;
     let realtime = enabled.then(|| {
         ProviderRealtimeChannels::new(
             move |history| {
@@ -521,6 +546,7 @@ where
                     controls: realtime_controls.clone(),
                     history: history.clone(),
                     interval_for_period,
+                    bars_from_trades,
                 })
             },
             move || {
@@ -575,12 +601,14 @@ fn dispatch_crypto_catalog(
 }
 
 /// Runtime-scoped shared catalog cache for public crypto venues so `binance`, `bybit`, `okx`,
-/// and `crypto_agg` never duplicate exchange catalog HTTP fetches.
+/// `coinbase`, and `crypto_agg` never duplicate exchange catalog HTTP fetches.
 #[derive(Default)]
 pub(crate) struct SharedCryptoCatalogs {
     binance: std::sync::Mutex<Option<(Instant, Arc<aeris_binance_market_adapter::BinanceCatalog>)>>,
     bybit: std::sync::Mutex<Option<(Instant, Arc<aeris_bybit_market_adapter::BybitCatalog>)>>,
     okx: std::sync::Mutex<Option<(Instant, Arc<aeris_okx_market_adapter::OkxCatalog>)>>,
+    coinbase:
+        std::sync::Mutex<Option<(Instant, Arc<aeris_coinbase_market_adapter::CoinbaseCatalog>)>>,
 }
 
 const SHARED_CATALOG_TTL: Duration = Duration::from_mins(15);
@@ -644,6 +672,27 @@ impl SharedCryptoCatalogs {
         }
         let loaded = Arc::new(aeris_okx_market_adapter::fetch_catalog(
             aeris_okx_market_adapter::OkxHttpConfig::default(),
+        )?);
+        *guard = Some((Instant::now(), Arc::clone(&loaded)));
+        Ok(loaded)
+    }
+
+    pub(crate) fn get_or_fetch_coinbase(
+        &self,
+        force_refresh: bool,
+    ) -> CryptoResult<Arc<aeris_coinbase_market_adapter::CoinbaseCatalog>> {
+        let mut guard = self
+            .coinbase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !force_refresh
+            && let Some((at, catalog)) = guard.as_ref()
+            && at.elapsed() < SHARED_CATALOG_TTL
+        {
+            return Ok(Arc::clone(catalog));
+        }
+        let loaded = Arc::new(aeris_coinbase_market_adapter::fetch_catalog(
+            aeris_coinbase_market_adapter::CoinbaseHttpConfig::default(),
         )?);
         *guard = Some((Instant::now(), Arc::clone(&loaded)));
         Ok(loaded)

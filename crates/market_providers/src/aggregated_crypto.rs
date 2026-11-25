@@ -1,7 +1,8 @@
 //! Aggregated multi-exchange cryptocurrency market-data provider.
 //!
 //! Combines Binance (USDT-M Perps & Spot), Bybit (Linear & Spot), OKX
-//! (Perpetual Swaps & Spot), and Hyperliquid (Perps) into one unified feed:
+//! (Perpetual Swaps & Spot), Coinbase (Spot & unified USD/USDC book), and
+//! Hyperliquid (Perps) into one unified feed:
 //! - **Aggregated Trades**: streams every fill from all active constituent
 //!   venues in base-asset units, powering combined footprints, CVD, tape,
 //!   sweeps, and volume profiles.
@@ -9,7 +10,7 @@
 //!   all healthy venues via tick-bucketed summation (`merge_books`), dropping
 //!   disconnected or stale venues automatically.
 //! - **History**: fetches covering history from Binance with automatic
-//!   failover to Bybit -> OKX -> Hyperliquid.
+//!   failover to Bybit -> OKX -> Coinbase -> Hyperliquid.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -32,9 +33,14 @@ use aeris_bybit_market_adapter::{
     BYBIT_LINEAR_WS_URL, BYBIT_SPOT_WS_URL, BybitBookState, BybitHttpClient, BybitMarketKind,
     BybitWsEvent,
 };
+use aeris_coinbase_market_adapter::{
+    COINBASE_WS_URL, CoinbaseBookApplyOutcome, CoinbaseBookState, CoinbaseHttpClient,
+    CoinbaseHttpConfig, CoinbaseWsEvent,
+};
 use aeris_crypto_common::{
     BookLevelUpdate, CanonicalCryptoKey, CryptoError, CryptoMarketKind, CryptoResult,
-    LocalOrderBook, TradeDedupRing, merge_books,
+    LiquidationBucket, LiquidationLedger, LocalOrderBook, TradeDedupRing,
+    bucket_liquidation_events, merge_books,
 };
 use aeris_hyperliquid_market_adapter::{
     HYPERLIQUID_WS_URL, HyperliquidHttpClient, HyperliquidHttpConfig, HyperliquidMarketKind,
@@ -66,9 +72,9 @@ use aeris_provider_spi::HistoryInstrument;
 use crate::crypto_runtime::{
     CATALOG_POLL_INTERVAL, CATALOG_REFRESH_INTERVAL, CONNECT_TIMEOUT, CryptoCatalogControl,
     CryptoCatalogEvent, CryptoDemand, CryptoHistorySource, CryptoRealtimeControl,
-    CryptoRealtimeEvent, READ_TIMEOUT, SharedCryptoCatalogs, build_install_instrument,
-    crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos, publish_catalog_event,
-    reject_catalog,
+    CryptoRealtimeEvent, READ_TIMEOUT, SharedCryptoCatalogs, SharedLiquidationLedgers,
+    build_install_instrument, crypto_provider_spec, emit_data, emit_lifecycle, now_unix_nanos,
+    publish_catalog_event, reject_catalog,
 };
 
 pub(crate) const AGGREGATED_ACCOUNT_ID: &str = "crypto-agg-public";
@@ -82,7 +88,10 @@ const VENUE_STALE_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const RESYNC_COOLDOWN: Duration = Duration::from_secs(2);
 const ONE_FIXED: i64 = 100_000_000;
-const MAXIMUM_AGGREGATED_BOOK_LEVELS: usize = 1_000;
+/// Maximum aggregated book levels published per side. Keeps the combined outer price span
+/// across Binance (1,000), Bybit (500), OKX (400), and Coinbase (1,000) without trimming deep
+/// resting walls before chart-side row aggregation.
+const MAXIMUM_AGGREGATED_BOOK_LEVELS: usize = 2_000;
 const MAX_FRAMES_PER_POLL: usize = 16;
 const DRAIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
 
@@ -169,6 +178,7 @@ pub(crate) struct AggregatedInstrument {
     pub binance: Option<(BinanceMarketKind, String)>,
     pub bybit: Option<(BybitMarketKind, String)>,
     pub okx: Option<(OkxMarketKind, String, i64)>,
+    pub coinbase: Option<String>,
     pub hyperliquid: Option<String>,
 }
 
@@ -177,11 +187,12 @@ impl AggregatedInstrument {
         usize::from(self.binance.is_some())
             + usize::from(self.bybit.is_some())
             + usize::from(self.okx.is_some())
+            + usize::from(self.coinbase.is_some())
             + usize::from(self.hyperliquid.is_some())
     }
 
     fn venue_label(&self) -> String {
-        let mut names = Vec::with_capacity(4);
+        let mut names = Vec::with_capacity(5);
         if self.binance.is_some() {
             names.push("Binance");
         }
@@ -190,6 +201,9 @@ impl AggregatedInstrument {
         }
         if self.okx.is_some() {
             names.push("OKX");
+        }
+        if self.coinbase.is_some() {
+            names.push("Coinbase");
         }
         if self.hyperliquid.is_some() {
             names.push("Hyperliquid");
@@ -322,21 +336,26 @@ const MAXIMUM_FORMING_SEEDS: usize = 128;
 pub(crate) fn provider_spec(
     realtime_enabled: bool,
     shared_catalogs: Arc<SharedCryptoCatalogs>,
+    shared_liquidations: Arc<SharedLiquidationLedgers>,
 ) -> ProviderRuntimeSpec {
     let shared_catalog: SharedAggregatedCatalog =
         Arc::new(RwLock::new(AggregatedCatalog::default()));
     let shared_seeds: SharedFormingSeeds = Arc::new(RwLock::new(BTreeMap::new()));
-    let history = CryptoHistorySource::Aggregated {
-        catalog: Arc::clone(&shared_catalog),
-        forming_seeds: Arc::clone(&shared_seeds),
-        binance: BinanceHttpClient::default(),
-        bybit: BybitHttpClient::default(),
-        okx: OkxHttpClient::default(),
-        hyperliquid: HyperliquidHttpClient::default(),
-    };
+    let history =
+        CryptoHistorySource::Aggregated(Box::new(crate::crypto_runtime::AggregatedHistorySource {
+            catalog: Arc::clone(&shared_catalog),
+            forming_seeds: Arc::clone(&shared_seeds),
+            binance: BinanceHttpClient::default(),
+            bybit: BybitHttpClient::default(),
+            okx: OkxHttpClient::default(),
+            coinbase: CoinbaseHttpClient::default(),
+            hyperliquid: HyperliquidHttpClient::default(),
+        }));
     let cat_for_cat = Arc::clone(&shared_catalog);
     let cat_for_rt = Arc::clone(&shared_catalog);
     let cat_for_oi = Arc::clone(&shared_catalog);
+    let cat_for_liq = Arc::clone(&shared_catalog);
+    let liq_for_rt = Arc::clone(&shared_liquidations);
     let seeds_for_rt = Arc::clone(&shared_seeds);
     crypto_provider_spec(
         AGGREGATED_DESCRIPTOR,
@@ -365,12 +384,146 @@ pub(crate) fn provider_spec(
                 wake,
                 &cat_for_rt,
                 &seeds_for_rt,
+                &liq_for_rt,
             );
         },
     )
     .with_open_interest(Arc::new(move |request, stop| {
         fetch_aggregated_open_interest(&cat_for_oi, request, stop)
     }))
+    .with_liquidations(Arc::new(move |request, stop| {
+        fetch_aggregated_liquidations(&cat_for_liq, &shared_liquidations, request, stop)
+    }))
+}
+
+type AggregatedPerpVenues = (Option<String>, Option<String>, Option<(String, f64)>);
+
+fn resolve_aggregated_perp_venues(
+    catalog: &SharedAggregatedCatalog,
+    symbol: &str,
+) -> Option<AggregatedPerpVenues> {
+    let guard = catalog
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(inst) = guard.get(symbol) {
+        if inst.key.kind != CryptoMarketKind::Perp {
+            return None;
+        }
+        return Some((
+            inst.binance
+                .as_ref()
+                .filter(|(k, _)| *k == BinanceMarketKind::UsdmPerp)
+                .map(|(_, s)| s.clone()),
+            inst.bybit
+                .as_ref()
+                .filter(|(k, _)| *k == BybitMarketKind::Linear)
+                .map(|(_, s)| s.clone()),
+            inst.okx
+                .as_ref()
+                .filter(|(k, _, _)| *k == OkxMarketKind::Swap)
+                .map(|(_, s, ct)| {
+                    (
+                        s.clone(),
+                        aeris_okx_market_adapter::liquidations::ct_val_scale(*ct),
+                    )
+                }),
+        ));
+    }
+    let pair = symbol.strip_prefix("perp:")?;
+    let (base, quote) = pair.split_once('-')?;
+    Some((
+        Some(format!("{base}{quote}")),
+        Some(format!("{base}{quote}")),
+        Some((format!("{base}-{quote}-SWAP"), 1.0)),
+    ))
+}
+
+/// Combines bar-aligned liquidation volumes across Binance USD-M, Bybit Linear, and OKX Swap
+/// (live WebSocket ledgers plus OKX public REST historical backfill). Each venue is deduplicated
+/// and bucketed independently before summing per bar timestamp so simultaneous fills across
+/// exchanges are never dropped. Spot instruments return an empty series.
+fn fetch_aggregated_liquidations(
+    catalog: &SharedAggregatedCatalog,
+    ledgers: &SharedLiquidationLedgers,
+    request: &aeris_provider_spi::LiquidationRequest,
+    stop: &Arc<AtomicBool>,
+) -> Result<Vec<aeris_provider_spi::LiquidationSample>, String> {
+    if stop.load(Ordering::Acquire) {
+        return Err("Aggregated liquidations request was cancelled".to_string());
+    }
+    let symbol = request.instrument.provider_symbol.as_str();
+    if symbol.starts_with("spot:") {
+        return Ok(Vec::new());
+    }
+    let Some((binance_sym, bybit_sym, okx_sym_ct)) =
+        resolve_aggregated_perp_venues(catalog, symbol)
+    else {
+        return Ok(Vec::new());
+    };
+
+    let period = request.period;
+    let maximum_points = request.maximum_points;
+    let mut combined: BTreeMap<i64, LiquidationBucket> = BTreeMap::new();
+    let mut merge_buckets = |buckets: Vec<LiquidationBucket>| {
+        for bucket in buckets {
+            let entry = combined
+                .entry(bucket.timestamp_unix_nanos)
+                .or_insert_with(|| LiquidationBucket {
+                    timestamp_unix_nanos: bucket.timestamp_unix_nanos,
+                    ..LiquidationBucket::default()
+                });
+            entry.long_usd += bucket.long_usd;
+            entry.short_usd += bucket.short_usd;
+            entry.long_contracts += bucket.long_contracts;
+            entry.short_contracts += bucket.short_contracts;
+        }
+    };
+
+    if let Some(sym) = binance_sym.as_deref() {
+        merge_buckets(
+            ledgers
+                .binance
+                .snapshot_buckets(sym, period, maximum_points),
+        );
+    }
+    if let Some(sym) = bybit_sym.as_deref() {
+        merge_buckets(ledgers.bybit.snapshot_buckets(sym, period, maximum_points));
+    }
+    if let Some((inst_id, ct_val)) = okx_sym_ct.as_ref() {
+        let mut okx_events = ledgers.okx.events_for(inst_id);
+        if let Ok(rest_events) =
+            aeris_okx_market_adapter::liquidations::fetch_swap_liquidations_rest(
+                inst_id, *ct_val, stop,
+            )
+        {
+            okx_events.extend(rest_events);
+        }
+        merge_buckets(bucket_liquidation_events(
+            &okx_events,
+            period,
+            maximum_points,
+        ));
+    }
+
+    if stop.load(Ordering::Acquire) {
+        return Err("Aggregated liquidations request was cancelled".to_string());
+    }
+
+    let mut out: Vec<aeris_provider_spi::LiquidationSample> = combined
+        .into_values()
+        .map(|bucket| aeris_provider_spi::LiquidationSample {
+            timestamp_unix_nanos: bucket.timestamp_unix_nanos,
+            long_usd: bucket.long_usd,
+            short_usd: bucket.short_usd,
+            long_contracts: bucket.long_contracts,
+            short_contracts: bucket.short_contracts,
+        })
+        .collect();
+    if out.len() > maximum_points {
+        let keep_from = out.len() - maximum_points;
+        out.drain(..keep_from);
+    }
+    Ok(out)
 }
 
 /// Fetches historical and live open interest from all constituent perpetual exchanges in parallel
@@ -651,6 +804,7 @@ pub(crate) fn fetch_aggregated_history(
     binance: &mut BinanceHttpClient,
     bybit: &mut BybitHttpClient,
     okx: &mut OkxHttpClient,
+    coinbase: &mut CoinbaseHttpClient,
     hyperliquid: &mut HyperliquidHttpClient,
     request: &HistoryRequest,
     installed: &HistoryInstrument,
@@ -715,6 +869,21 @@ pub(crate) fn fetch_aggregated_history(
             return Ok(snap);
         }
     }
+    if let Some(product_id) = &agg.coinbase {
+        base.provider = "coinbase".to_string();
+        base.provider_symbol = format!("spot:{product_id}");
+        if let Ok(snap) = aeris_coinbase_market_adapter::history::fetch(
+            coinbase,
+            &request.series,
+            provider_gen,
+            &base,
+            request.req_window(),
+            &request.stop,
+        ) {
+            record_forming_seed(forming_seeds, request, installed, &snap);
+            return Ok(snap);
+        }
+    }
     if let Some(coin) = &agg.hyperliquid {
         base.provider = "hyperliquid".to_string();
         base.provider_symbol.clone_from(coin);
@@ -740,10 +909,12 @@ fn fetch_combined_catalog(
     shared_catalogs: &SharedCryptoCatalogs,
     force_refresh: bool,
 ) -> CryptoResult<AggregatedCatalog> {
-    let (binance, bybit, okx, hyperliquid) = thread::scope(|scope| {
+    let (binance, bybit, okx, coinbase, hyperliquid) = thread::scope(|scope| {
         let binance_task = scope.spawn(|| shared_catalogs.get_or_fetch_binance(force_refresh).ok());
         let bybit_task = scope.spawn(|| shared_catalogs.get_or_fetch_bybit(force_refresh).ok());
         let okx_task = scope.spawn(|| shared_catalogs.get_or_fetch_okx(force_refresh).ok());
+        let coinbase_task =
+            scope.spawn(|| shared_catalogs.get_or_fetch_coinbase(force_refresh).ok());
         let hl_task = scope.spawn(|| {
             aeris_hyperliquid_market_adapter::fetch_meta_bundle(HyperliquidHttpConfig::default())
                 .ok()
@@ -752,6 +923,7 @@ fn fetch_combined_catalog(
             binance_task.join().ok().flatten(),
             bybit_task.join().ok().flatten(),
             okx_task.join().ok().flatten(),
+            coinbase_task.join().ok().flatten(),
             hl_task.join().ok().flatten(),
         )
     });
@@ -775,6 +947,7 @@ fn fetch_combined_catalog(
                     binance: None,
                     bybit: None,
                     okx: None,
+                    coinbase: None,
                     hyperliquid: None,
                 });
             entry.binance = Some((item.kind, item.wire_symbol.clone()));
@@ -803,6 +976,7 @@ fn fetch_combined_catalog(
                     binance: None,
                     bybit: None,
                     okx: None,
+                    coinbase: None,
                     hyperliquid: None,
                 });
             entry.bybit = Some((item.kind, item.wire_symbol.clone()));
@@ -831,6 +1005,7 @@ fn fetch_combined_catalog(
                     binance: None,
                     bybit: None,
                     okx: None,
+                    coinbase: None,
                     hyperliquid: None,
                 });
             entry.okx = Some((item.kind, item.inst_id.clone(), item.ct_val_fixed));
@@ -839,6 +1014,53 @@ fn fetch_combined_catalog(
                 .saturating_add(item.volume_24h_quote);
             entry.tick_size_fixed = entry.tick_size_fixed.max(item.tick_size_fixed);
             entry.price_decimals = entry.price_decimals.min(item.price_decimals);
+        }
+    }
+
+    // Coinbase spot pairs join exact quote-currency keys (`USDT` / `USDC`). For USD spot pairs
+    // whose matching engine also aliases `<BASE>-USDC` on a unified 1:1 USD/USDC order book,
+    // route that canonical streaming product ID into the `<BASE>-USDC-SPOT` aggregated key.
+    if let Some(cat) = coinbase {
+        for item in cat.instruments() {
+            let usdc_alias = format!("{}-USDC", item.base_asset);
+            let agg_key = if matches!(item.quote_asset.as_str(), "USDC" | "USDT") {
+                Some(item.canonical_key())
+            } else if item.quote_asset == "USD"
+                && item.alias_to.iter().any(|alias| alias == &usdc_alias)
+            {
+                Some(CanonicalCryptoKey::new(
+                    &item.base_asset,
+                    "USDC",
+                    CryptoMarketKind::Spot,
+                ))
+            } else {
+                None
+            };
+            if let Some(key) = agg_key {
+                let entry = grouped
+                    .entry(key.clone())
+                    .or_insert_with(|| AggregatedInstrument {
+                        provider_symbol: key.to_string(),
+                        instrument_id: key.aggregated_instrument_id(),
+                        display_symbol: key.display_symbol(),
+                        key,
+                        price_decimals: item.price_decimals,
+                        quantity_decimals: item.quantity_decimals,
+                        tick_size_fixed: item.tick_size_fixed,
+                        combined_volume_24h: 0,
+                        binance: None,
+                        bybit: None,
+                        okx: None,
+                        coinbase: None,
+                        hyperliquid: None,
+                    });
+                entry.coinbase = Some(item.product_id.clone());
+                entry.combined_volume_24h = entry
+                    .combined_volume_24h
+                    .saturating_add(item.volume_24h_quote);
+                entry.tick_size_fixed = entry.tick_size_fixed.max(item.tick_size_fixed);
+                entry.price_decimals = entry.price_decimals.min(item.price_decimals);
+            }
         }
     }
 
@@ -1246,6 +1468,8 @@ struct AggregatedInstrumentState {
     bybit_updated_at: Option<Instant>,
     okx_book: OkxBookState,
     okx_updated_at: Option<Instant>,
+    coinbase_book: CoinbaseBookState,
+    coinbase_updated_at: Option<Instant>,
     hl_book: LocalOrderBook,
     hl_updated_at: Option<Instant>,
     live_bars: BTreeMap<String, AggregatedLiveBar>,
@@ -1268,6 +1492,8 @@ impl AggregatedInstrumentState {
             bybit_updated_at: None,
             okx_book: OkxBookState::new(),
             okx_updated_at: None,
+            coinbase_book: CoinbaseBookState::new(),
+            coinbase_updated_at: None,
             hl_book: LocalOrderBook::new(20),
             hl_updated_at: None,
             live_bars: BTreeMap::new(),
@@ -1373,7 +1599,7 @@ impl AggregatedInstrumentState {
     }
 
     fn healthy_books(&self, now: Instant) -> Vec<&LocalOrderBook> {
-        let mut out = Vec::with_capacity(4);
+        let mut out = Vec::with_capacity(5);
         if self.binance_book.is_synced()
             && self
                 .binance_updated_at
@@ -1394,6 +1620,13 @@ impl AggregatedInstrumentState {
                 .is_some_and(|t| now.saturating_duration_since(t) <= VENUE_STALE_TIMEOUT)
         {
             out.push(self.okx_book.local_book());
+        }
+        if self.coinbase_book.is_synced()
+            && self
+                .coinbase_updated_at
+                .is_some_and(|t| now.saturating_duration_since(t) <= VENUE_STALE_TIMEOUT)
+        {
+            out.push(self.coinbase_book.local_book());
         }
         if self.hl_book.is_synced()
             && self
@@ -1422,7 +1655,7 @@ fn restamp_trade(
     trade
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn run_realtime(
     controls: &Receiver<CryptoRealtimeControl>,
     events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
@@ -1431,9 +1664,11 @@ fn run_realtime(
     wake: &ProviderCoordinatorWake,
     shared_catalog: &SharedAggregatedCatalog,
     shared_seeds: &SharedFormingSeeds,
+    shared_liquidations: &SharedLiquidationLedgers,
 ) {
     let mut demand = CryptoDemand::default();
     let mut binance_http = BinanceHttpClient::default();
+    let mut coinbase_http = CoinbaseHttpClient::default();
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -1533,6 +1768,7 @@ fn run_realtime(
                     &states,
                     &mut backfilled_trades,
                     &mut binance_http,
+                    &mut coinbase_http,
                     &mut dedup,
                     sink,
                     events,
@@ -1593,6 +1829,7 @@ fn run_realtime(
                             text,
                             &mut states,
                             &mut binance_http,
+                            &shared_liquidations.binance,
                             &mut dedup,
                             sink,
                             events,
@@ -1617,6 +1854,7 @@ fn run_realtime(
                             kind,
                             text,
                             &mut states,
+                            &shared_liquidations.bybit,
                             &mut dedup,
                             sink,
                             events,
@@ -1635,6 +1873,7 @@ fn run_realtime(
                     poll_okx_agg(
                         text,
                         &mut states,
+                        &shared_liquidations.okx,
                         &mut dedup,
                         sink,
                         events,
@@ -1645,7 +1884,24 @@ fn run_realtime(
                 });
             }
 
-            // 4. Hyperliquid
+            // 4. Coinbase Spot
+            if sockets.coinbase.is_some() {
+                any_socket = true;
+                drain_socket(&mut sockets.coinbase, |text| {
+                    poll_coinbase_agg(
+                        text,
+                        &mut states,
+                        &mut dedup,
+                        sink,
+                        events,
+                        wake,
+                        generation,
+                        &mut seq,
+                    );
+                });
+            }
+
+            // 5. Hyperliquid
             if sockets.hl.is_some() {
                 any_socket = true;
                 drain_socket(&mut sockets.hl, |text| {
@@ -1750,6 +2006,7 @@ struct VenueSockets {
     byb_lin: Option<MarketSocket>,
     byb_spot: Option<MarketSocket>,
     okx: Option<MarketSocket>,
+    coinbase: Option<MarketSocket>,
     hl: Option<MarketSocket>,
 }
 
@@ -1762,6 +2019,7 @@ impl VenueSockets {
             &mut self.byb_lin,
             &mut self.byb_spot,
             &mut self.okx,
+            &mut self.coinbase,
             &mut self.hl,
         ] {
             if let Some(mut sock) = slot.take() {
@@ -1802,6 +2060,7 @@ fn backfill_aggregated_trades(
     states: &BTreeMap<String, AggregatedInstrumentState>,
     backfilled: &mut BTreeSet<String>,
     binance_http: &mut BinanceHttpClient,
+    coinbase_http: &mut CoinbaseHttpClient,
     dedup: &mut TradeDedupRing<String>,
     sink: ProviderEventSink,
     events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
@@ -1811,6 +2070,7 @@ fn backfill_aggregated_trades(
     seq: &mut u64,
 ) {
     const BACKFILL_PAGES: usize = 5;
+    const COINBASE_BACKFILL_LIMIT: usize = 500;
     const CHUNK_SIZE: usize = 500;
     backfilled.retain(|sym| demand.trades.iter().any(|t| t.provider_symbol == *sym));
     for inst in &demand.trades {
@@ -1823,42 +2083,78 @@ fn backfill_aggregated_trades(
         let Some(state) = states.get(&inst.provider_symbol) else {
             continue;
         };
-        let Some((kind, wire_symbol)) = &state.meta.binance else {
-            continue;
-        };
-        let Ok(trades) = binance_http.fetch_recent_agg_trades(
-            *kind,
-            wire_symbol,
-            &state.meta.instrument_id,
-            AGGREGATED_ENTITLEMENT_ID,
-            generation,
-            seq,
-            now_unix_nanos(),
-            BACKFILL_PAGES,
-            BinanceHttpConfig::default(),
-            stop,
-        ) else {
-            continue;
-        };
         let mut batch = Vec::with_capacity(CHUNK_SIZE);
-        for (agg_id, raw_trade) in trades {
-            let dedup_key = format!("bin:{agg_id}");
-            if dedup.insert(dedup_key) {
-                *seq = seq.saturating_add(1).max(1);
-                batch.push(restamp_trade(
-                    raw_trade,
-                    "bin",
-                    &state.meta.instrument_id,
-                    generation,
-                    *seq,
-                ));
-                if batch.len() >= CHUNK_SIZE {
-                    emit_data(
-                        sink,
-                        events,
-                        CryptoRealtimeEvent::Trades(generation, std::mem::take(&mut batch)),
-                        wake,
-                    );
+        let mut fetched_primary = false;
+        if let Some((kind, wire_symbol)) = &state.meta.binance
+            && let Ok(trades) = binance_http.fetch_recent_agg_trades(
+                *kind,
+                wire_symbol,
+                &state.meta.instrument_id,
+                AGGREGATED_ENTITLEMENT_ID,
+                generation,
+                seq,
+                now_unix_nanos(),
+                BACKFILL_PAGES,
+                BinanceHttpConfig::default(),
+                stop,
+            )
+        {
+            fetched_primary = !trades.is_empty();
+            for (agg_id, raw_trade) in trades {
+                let dedup_key = format!("bin:{agg_id}");
+                if dedup.insert(dedup_key) {
+                    *seq = seq.saturating_add(1).max(1);
+                    batch.push(restamp_trade(
+                        raw_trade,
+                        "bin",
+                        &state.meta.instrument_id,
+                        generation,
+                        *seq,
+                    ));
+                    if batch.len() >= CHUNK_SIZE {
+                        emit_data(
+                            sink,
+                            events,
+                            CryptoRealtimeEvent::Trades(generation, std::mem::take(&mut batch)),
+                            wake,
+                        );
+                    }
+                }
+            }
+        }
+        if !fetched_primary
+            && let Some(product_id) = &state.meta.coinbase
+            && let Ok(trades) = coinbase_http.fetch_recent_trades(
+                product_id,
+                &state.meta.instrument_id,
+                AGGREGATED_ENTITLEMENT_ID,
+                generation,
+                seq,
+                now_unix_nanos(),
+                COINBASE_BACKFILL_LIMIT,
+                CoinbaseHttpConfig::default(),
+                stop,
+            )
+        {
+            for (trade_id, raw_trade) in trades {
+                let dedup_key = format!("cb:{product_id}:{trade_id}");
+                if dedup.insert(dedup_key) {
+                    *seq = seq.saturating_add(1).max(1);
+                    batch.push(restamp_trade(
+                        raw_trade,
+                        "cb",
+                        &state.meta.instrument_id,
+                        generation,
+                        *seq,
+                    ));
+                    if batch.len() >= CHUNK_SIZE {
+                        emit_data(
+                            sink,
+                            events,
+                            CryptoRealtimeEvent::Trades(generation, std::mem::take(&mut batch)),
+                            wake,
+                        );
+                    }
                 }
             }
         }
@@ -1885,14 +2181,17 @@ fn connect_constituent_venues(
     let mut byb_lin_topics = Vec::new();
     let mut byb_spot_topics = Vec::new();
     let mut okx_args = Vec::new();
+    let mut cb_products = BTreeSet::new();
     let mut hl_coins = Vec::new();
 
+    let mut okx_has_swap = false;
     for state in states.values() {
         if let Some((kind, sym)) = &state.meta.binance {
             let lower = sym.to_ascii_lowercase();
             match kind {
                 BinanceMarketKind::UsdmPerp => {
                     bin_fut_market_streams.push(format!("{lower}@aggTrade"));
+                    bin_fut_market_streams.push(format!("{lower}@forceOrder"));
                     bin_fut_public_streams.push(format!("{lower}@depth@100ms"));
                 }
                 BinanceMarketKind::Spot => {
@@ -1908,14 +2207,26 @@ fn connect_constituent_venues(
             };
             target.push(format!("publicTrade.{sym}"));
             target.push(format!("orderbook.{depth}.{sym}"));
+            if *kind == BybitMarketKind::Linear {
+                target.push(format!("allLiquidation.{sym}"));
+            }
         }
-        if let Some((_, inst_id, _)) = &state.meta.okx {
+        if let Some((kind, inst_id, _)) = &state.meta.okx {
             okx_args.push(("trades".to_string(), inst_id.clone()));
             okx_args.push(("books".to_string(), inst_id.clone()));
+            if *kind == OkxMarketKind::Swap {
+                okx_has_swap = true;
+            }
+        }
+        if let Some(product_id) = &state.meta.coinbase {
+            cb_products.insert(product_id.clone());
         }
         if let Some(coin) = &state.meta.hyperliquid {
             hl_coins.push(coin.clone());
         }
+    }
+    if okx_has_swap {
+        okx_args.push(("liquidation-orders".to_string(), "SWAP".to_string()));
     }
 
     if !bin_fut_market_streams.is_empty()
@@ -1979,6 +2290,30 @@ fn connect_constituent_venues(
     {
         sockets.okx = Some(sock);
     }
+    if !cb_products.is_empty() {
+        let products: Vec<String> = cb_products.into_iter().collect();
+        if let Ok((mut sock, _)) = MarketSocket::connect(COINBASE_WS_URL, CONNECT_TIMEOUT, stop)
+            && sock
+                .send_text(&aeris_coinbase_market_adapter::build_subscribe(
+                    "heartbeats",
+                    &[],
+                ))
+                .is_ok()
+            && sock
+                .send_text(&aeris_coinbase_market_adapter::build_subscribe(
+                    "market_trades",
+                    &products,
+                ))
+                .is_ok()
+            && sock
+                .send_text(&aeris_coinbase_market_adapter::build_subscribe(
+                    "level2", &products,
+                ))
+                .is_ok()
+        {
+            sockets.coinbase = Some(sock);
+        }
+    }
     if !hl_coins.is_empty()
         && let Ok((mut sock, _)) = MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop)
     {
@@ -2009,6 +2344,7 @@ fn poll_binance_agg(
     text: &str,
     states: &mut BTreeMap<String, AggregatedInstrumentState>,
     http: &mut BinanceHttpClient,
+    liquidation_ledger: &LiquidationLedger,
     dedup: &mut TradeDedupRing<String>,
     sink: ProviderEventSink,
     events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
@@ -2093,6 +2429,11 @@ fn poll_binance_agg(
                 }
             }
         }
+        BinanceWsEvent::ForceOrder(raw) => {
+            if let Ok((sym, event)) = aeris_binance_market_adapter::decode_force_order(&raw) {
+                liquidation_ledger.record(&sym, event);
+            }
+        }
         _ => {}
     }
 }
@@ -2102,6 +2443,7 @@ fn poll_bybit_agg(
     kind: BybitMarketKind,
     text: &str,
     states: &mut BTreeMap<String, AggregatedInstrumentState>,
+    liquidation_ledger: &LiquidationLedger,
     dedup: &mut TradeDedupRing<String>,
     sink: ProviderEventSink,
     events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
@@ -2169,6 +2511,13 @@ fn poll_bybit_agg(
                 state.book_dirty = true;
             }
         }
+        BybitWsEvent::Liquidations { symbol, data } => {
+            if let Ok(events) = aeris_bybit_market_adapter::decode_liquidations(&data) {
+                for event in events {
+                    liquidation_ledger.record(&symbol, event);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -2177,6 +2526,7 @@ fn poll_bybit_agg(
 fn poll_okx_agg(
     text: &str,
     states: &mut BTreeMap<String, AggregatedInstrumentState>,
+    liquidation_ledger: &LiquidationLedger,
     dedup: &mut TradeDedupRing<String>,
     sink: ProviderEventSink,
     events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
@@ -2248,7 +2598,125 @@ fn poll_okx_agg(
                 }
             }
         }
+        OkxWsEvent::Liquidations { data } => {
+            if let Ok(decoded) =
+                aeris_okx_market_adapter::decode_ws_liquidations(&data, &|inst_id| {
+                    states
+                        .values()
+                        .find_map(|s| {
+                            s.meta
+                                .okx
+                                .as_ref()
+                                .filter(|(_, id, _)| id.eq_ignore_ascii_case(inst_id))
+                                .map(|(_, _, ct)| {
+                                    aeris_okx_market_adapter::liquidations::ct_val_scale(*ct)
+                                })
+                        })
+                        .unwrap_or(1.0)
+                })
+            {
+                for (inst_id, event) in decoded {
+                    liquidation_ledger.record(&inst_id, event);
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_coinbase_agg(
+    text: &str,
+    states: &mut BTreeMap<String, AggregatedInstrumentState>,
+    dedup: &mut TradeDedupRing<String>,
+    sink: ProviderEventSink,
+    events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
+    wake: &ProviderCoordinatorWake,
+    generation: u64,
+    seq: &mut u64,
+) {
+    let Ok(parsed) = aeris_coinbase_market_adapter::parse_ws_frame(text) else {
+        return;
+    };
+    let received_nanos = now_unix_nanos();
+    match parsed {
+        CoinbaseWsEvent::MarketTrades {
+            events: raw_events, ..
+        } => {
+            let Ok(decoded) = aeris_coinbase_market_adapter::decode_ws_trades(
+                &raw_events,
+                |product_id| {
+                    states
+                        .values()
+                        .find(|s| s.meta.coinbase.as_deref() == Some(product_id))
+                        .map(|s| {
+                            (
+                                s.meta.instrument_id.clone(),
+                                AGGREGATED_ENTITLEMENT_ID.to_string(),
+                            )
+                        })
+                },
+                generation,
+                seq,
+                received_nanos,
+            ) else {
+                return;
+            };
+            let mut per_instrument: BTreeMap<String, Vec<MarketTrade>> = BTreeMap::new();
+            for (product_id, trade_id, trade) in decoded {
+                if dedup.insert(format!("cb:{product_id}:{trade_id}")) {
+                    *seq = seq.saturating_add(1).max(1);
+                    let instrument_id = trade.metadata.instrument_id.clone();
+                    let stamped = restamp_trade(trade, "cb", &instrument_id, generation, *seq);
+                    per_instrument.entry(product_id).or_default().push(stamped);
+                }
+            }
+            for (product_id, fresh) in per_instrument {
+                if let Some(state) = states
+                    .values_mut()
+                    .find(|s| s.meta.coinbase.as_deref() == Some(product_id.as_str()))
+                {
+                    for trade in &fresh {
+                        state.record_trade(trade, sink, events, wake, generation);
+                    }
+                    emit_data(
+                        sink,
+                        events,
+                        CryptoRealtimeEvent::Trades(generation, fresh),
+                        wake,
+                    );
+                }
+            }
+        }
+        CoinbaseWsEvent::L2Data {
+            timestamp_nanos,
+            events: raw_events,
+            ..
+        } => {
+            let fallback_ts = if timestamp_nanos > 0 {
+                timestamp_nanos
+            } else {
+                received_nanos
+            };
+            let Ok(msgs) =
+                aeris_coinbase_market_adapter::decode_l2_events(&raw_events, fallback_ts)
+            else {
+                return;
+            };
+            for msg in msgs {
+                if let Some(state) = states
+                    .values_mut()
+                    .find(|s| s.meta.coinbase.as_deref() == Some(msg.product_id.as_str()))
+                    && state.coinbase_book.apply(&msg) == CoinbaseBookApplyOutcome::Updated
+                {
+                    state.coinbase_updated_at = Some(Instant::now());
+                    state.book_dirty = true;
+                }
+            }
+        }
+        CoinbaseWsEvent::Heartbeat { .. }
+        | CoinbaseWsEvent::Subscriptions
+        | CoinbaseWsEvent::Ignored => {}
     }
 }
 
@@ -2438,5 +2906,44 @@ mod tests {
             (cur.open, cur.high, cur.low, cur.close, cur.volume),
             (60_611, 60_660, 60_610, 60_641, 158)
         );
+    }
+
+    #[test]
+    fn aggregated_instrument_includes_coinbase_in_venue_count_and_label() {
+        let key = CanonicalCryptoKey::new("BTC", "USDC", CryptoMarketKind::Spot);
+        let inst = AggregatedInstrument {
+            provider_symbol: key.to_string(),
+            instrument_id: key.aggregated_instrument_id(),
+            display_symbol: key.display_symbol(),
+            key,
+            price_decimals: 2,
+            quantity_decimals: 8,
+            tick_size_fixed: 1_000_000,
+            combined_volume_24h: 1_000_000,
+            binance: Some((BinanceMarketKind::Spot, "BTCUSDC".to_string())),
+            bybit: None,
+            okx: None,
+            coinbase: Some("BTC-USD".to_string()),
+            hyperliquid: None,
+        };
+        assert_eq!(inst.venue_count(), 2);
+        assert_eq!(inst.venue_label(), "Binance + Coinbase");
+    }
+
+    #[test]
+    #[ignore = "drives live public Binance, Bybit, OKX, Coinbase, and Hyperliquid catalogs"]
+    fn live_aggregated_catalog_includes_coinbase_in_btc_spot_feeds() {
+        let shared = SharedCryptoCatalogs::default();
+        let catalog = fetch_combined_catalog(&shared, false).expect("combined catalog");
+        let unified_spot = catalog
+            .get("BTC-USDC-SPOT")
+            .expect("BTC-USDC-SPOT in aggregated catalog");
+        assert_eq!(unified_spot.coinbase.as_deref(), Some("BTC-USD"));
+        assert!(unified_spot.venue_count() >= 2);
+        let tether_spot = catalog
+            .get("BTC-USDT-SPOT")
+            .expect("BTC-USDT-SPOT in aggregated catalog");
+        assert_eq!(tether_spot.coinbase.as_deref(), Some("BTC-USDT"));
+        assert!(tether_spot.venue_count() >= 2);
     }
 }

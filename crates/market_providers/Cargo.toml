@@ -13,6 +13,7 @@ probe = ["aeris_market_runtime/probe"]
 [dependencies]
 aeris_binance_market_adapter = { path = "../adapters/binance_market" }
 aeris_bybit_market_adapter = { path = "../adapters/bybit_market" }
+aeris_coinbase_market_adapter = { path = "../adapters/coinbase_market" }
 aeris_contracts = { path = "../contracts" }
 aeris_crypto_common = { path = "../crypto_common" }
 aeris_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }

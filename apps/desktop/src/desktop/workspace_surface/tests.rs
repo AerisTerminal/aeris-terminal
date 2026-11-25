@@ -192,6 +192,8 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
         depth_heatmap: None,
         open_interest: None,
         open_interest_options: None,
+        liquidations: None,
+        liquidations_options: None,
     };
     let restored = restored_order_flow_settings(&legacy).expect("legacy settings restore");
     assert!(!restored.show_cumulative_delta);
@@ -234,6 +236,22 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
         let restored = restored_order_flow_settings(&persisted).expect("open interest restores");
         assert_eq!(restored.open_interest, oi);
     }
+    for visible in [true, false] {
+        let liq = Some(LiquidationsSettings {
+            visible,
+            style: LiquidationStyle::Stacked,
+            unit: LiquidationUnit::Contracts,
+            long_color: ChartColor::from_hex("#FF1744"),
+            short_color: ChartColor::from_hex("#00C853"),
+        });
+        let persisted = persisted_order_flow_settings(OrderFlowSettings {
+            liquidations: liq,
+            ..OrderFlowSettings::default()
+        });
+        assert_eq!(persisted.liquidations, Some(visible));
+        let restored = restored_order_flow_settings(&persisted).expect("liquidations restores");
+        assert_eq!(restored.liquidations, liq);
+    }
 }
 
 #[test]
@@ -254,6 +272,8 @@ fn retired_footprint_trade_bubbles_restore_without_big_trades() {
         depth_heatmap: None,
         open_interest: None,
         open_interest_options: None,
+        liquidations: None,
+        liquidations_options: None,
     }
     .encode_to_vec();
     // Tag 4 (varint) enabled the footprint trade bubbles; tag 5 (fixed64) held their threshold.

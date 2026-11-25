@@ -17,6 +17,8 @@ pub enum BinanceWsEvent {
     BookTicker(Box<serde_json::value::RawValue>),
     /// Live candlestick (`<sym>@kline_<iv>`).
     Kline(Box<serde_json::value::RawValue>),
+    /// Forced liquidation order (`<sym>@forceOrder`).
+    ForceOrder(Box<serde_json::value::RawValue>),
     /// Ignored or unrecognized non-error message.
     Ignored,
 }
@@ -72,6 +74,9 @@ pub fn parse_ws_frame(text: &str) -> CryptoResult<BinanceWsEvent> {
         }
         if stream.contains("@kline_") {
             return Ok(BinanceWsEvent::Kline(data));
+        }
+        if stream.ends_with("@forceOrder") {
+            return Ok(BinanceWsEvent::ForceOrder(data));
         }
         return Ok(BinanceWsEvent::Ignored);
     }

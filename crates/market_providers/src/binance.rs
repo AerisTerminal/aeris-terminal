@@ -16,9 +16,9 @@ use aeris_binance_market_adapter::{
     BinanceCatalog, BinanceHttpClient, BinanceHttpConfig, BinanceMarketKind, BinanceOrderBookSync,
     BinanceWsEvent, binance_interval_for_period, book::BookSyncOutcome, build_subscribe,
     build_unsubscribe, decode_agg_trade, decode_book_ticker, decode_depth_update,
-    decode_live_candle, parse_provider_symbol, parse_ws_frame,
+    decode_force_order, decode_live_candle, parse_provider_symbol, parse_ws_frame,
 };
-use aeris_crypto_common::{CryptoError, CryptoResult, TradeDedupRing};
+use aeris_crypto_common::{CryptoError, CryptoResult, LiquidationLedger, TradeDedupRing};
 use aeris_market_data::BarPeriod;
 use aeris_market_engine::{
     MarketStream, ProviderCapabilities as EngineProviderCapabilities, StreamRequirements,
@@ -125,7 +125,9 @@ const BINANCE_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
 pub(crate) fn provider_spec(
     realtime_enabled: bool,
     shared_catalogs: Arc<SharedCryptoCatalogs>,
+    liquidation_ledger: Arc<LiquidationLedger>,
 ) -> ProviderRuntimeSpec {
+    let liq_for_rt = Arc::clone(&liquidation_ledger);
     crypto_provider_spec(
         BINANCE_DESCRIPTOR,
         CryptoHistorySource::Binance(BinanceHttpClient::default()),
@@ -137,11 +139,20 @@ pub(crate) fn provider_spec(
         move |controls, events, ws_gen, stop| {
             run_catalog(controls, events, ws_gen, stop, &shared_catalogs);
         },
-        run_realtime,
+        move |controls, events, stop, ws_gen, wake| {
+            run_realtime(controls, events, stop, ws_gen, wake, &liq_for_rt);
+        },
     )
     .with_open_interest(Arc::new(
         aeris_binance_market_adapter::open_interest::fetch_open_interest,
     ))
+    .with_liquidations(Arc::new(move |request, stop| {
+        aeris_binance_market_adapter::liquidations::fetch_liquidations(
+            &liquidation_ledger,
+            request,
+            stop,
+        )
+    }))
 }
 
 pub(crate) fn binance_candle_interval(period: BarPeriod) -> Result<String, String> {
@@ -407,6 +418,25 @@ impl SegmentSocket {
                     streams.insert(format!("{}@aggTrade", sym.wire_symbol.to_ascii_lowercase()));
                 }
             }
+            if self.kind == BinanceMarketKind::UsdmPerp {
+                for inst in demand
+                    .candles
+                    .iter()
+                    .map(|c| &c.instrument)
+                    .chain(&demand.trades)
+                    .chain(&demand.quotes)
+                    .chain(&demand.books)
+                {
+                    if let Ok(sym) = parse_provider_symbol(&inst.provider_symbol)
+                        && sym.kind == BinanceMarketKind::UsdmPerp
+                    {
+                        streams.insert(format!(
+                            "{}@forceOrder",
+                            sym.wire_symbol.to_ascii_lowercase()
+                        ));
+                    }
+                }
+            }
         }
         if self.role.carries_public_streams() {
             for q in &demand.quotes {
@@ -499,6 +529,7 @@ fn run_realtime(
     stop: &Arc<AtomicBool>,
     ws_generation: &Arc<AtomicU64>,
     wake: &ProviderCoordinatorWake,
+    liquidation_ledger: &LiquidationLedger,
 ) {
     let mut demand = CryptoDemand::default();
     let mut http = BinanceHttpClient::default();
@@ -623,7 +654,16 @@ fn run_realtime(
                     Ok(MarketSocketEvent::Text(text)) => {
                         seg.last_activity = Instant::now();
                         handle_binance_frame(
-                            seg, &text, &demand, &mut http, sink, events, wake, stop, generation,
+                            seg,
+                            &text,
+                            &demand,
+                            &mut http,
+                            liquidation_ledger,
+                            sink,
+                            events,
+                            wake,
+                            stop,
+                            generation,
                             &mut seq,
                         );
                     }
@@ -754,6 +794,7 @@ fn handle_binance_frame(
     text: &str,
     demand: &CryptoDemand,
     http: &mut BinanceHttpClient,
+    liquidation_ledger: &LiquidationLedger,
     sink: ProviderEventSink,
     events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
     wake: &ProviderCoordinatorWake,
@@ -923,6 +964,11 @@ fn handle_binance_frame(
                         }
                     }
                 }
+            }
+        }
+        BinanceWsEvent::ForceOrder(raw) => {
+            if let Ok((sym, event)) = decode_force_order(&raw) {
+                liquidation_ledger.record(&sym, event);
             }
         }
         BinanceWsEvent::Ack | BinanceWsEvent::Ignored => {}

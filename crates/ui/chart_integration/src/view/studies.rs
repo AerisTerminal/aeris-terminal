@@ -2,6 +2,7 @@
 
 use super::{
     AerisChartView, ChartStudyInputRequirements, ChartStudyOutputDescriptor, ChartStudyOutputError,
+    LIQUIDATIONS_STUDY_ID, OPEN_INTEREST_STUDY_ID,
 };
 use aeris_charts_engine::IndicatorOutputStyle;
 use aeris_charts_render::color::Color;
@@ -143,6 +144,10 @@ impl AerisChartView {
     /// Restores every study's host-chosen style after the engine restyles its series.
     pub(super) fn reapply_study_styles(&mut self) {
         for output in self.engine.external_study_outputs() {
+            if output.study_id == OPEN_INTEREST_STUDY_ID || output.study_id == LIQUIDATIONS_STUDY_ID
+            {
+                continue;
+            }
             self.apply_study_style(output.study_id, output.output_index);
         }
     }

@@ -23,6 +23,26 @@ const OPEN_INTEREST_STYLE_CHOICES: [(Text, OpenInterestStyle); 4] = [
     (chart_ui::CHART_TYPE_AREA, OpenInterestStyle::Area),
 ];
 
+const LIQUIDATION_STYLE_CHOICES: [(Text, LiquidationStyle); 3] = [
+    (
+        chart_menu::LIQUIDATIONS_STYLE_SPLIT,
+        LiquidationStyle::Split,
+    ),
+    (
+        chart_menu::LIQUIDATIONS_STYLE_STACKED,
+        LiquidationStyle::Stacked,
+    ),
+    (chart_menu::LIQUIDATIONS_STYLE_NET, LiquidationStyle::Net),
+];
+
+const LIQUIDATION_UNIT_CHOICES: [(Text, LiquidationUnit); 2] = [
+    (chart_menu::LIQUIDATIONS_UNIT_USD, LiquidationUnit::Usd),
+    (
+        chart_menu::LIQUIDATIONS_UNIT_CONTRACTS,
+        LiquidationUnit::Contracts,
+    ),
+];
+
 const RESET_CHOICES: [(Text, CumulativeDeltaReset); 2] = [
     (
         chart_menu::RESET_EACH_SESSION,
@@ -38,6 +58,7 @@ pub(super) enum OrderFlowIndicator {
     DeltaHistogram,
     OrderBook,
     OpenInterest,
+    Liquidations,
 }
 
 impl OrderFlowIndicator {
@@ -47,6 +68,7 @@ impl OrderFlowIndicator {
             Self::DeltaHistogram => tr!(chart_menu::DELTA_HISTOGRAM_TITLE),
             Self::OrderBook => tr!(chart_menu::ORDER_BOOK_TITLE),
             Self::OpenInterest => tr!(chart_menu::OPEN_INTEREST_TITLE),
+            Self::Liquidations => tr!(chart_menu::LIQUIDATIONS_TITLE),
         }
     }
 
@@ -56,6 +78,7 @@ impl OrderFlowIndicator {
             Self::DeltaHistogram => tr!(chart_menu::DELTA_HISTOGRAM_REMOVED),
             Self::OrderBook => tr!(chart_menu::ORDER_BOOK_REMOVED),
             Self::OpenInterest => tr!(chart_menu::OPEN_INTEREST_REMOVED),
+            Self::Liquidations => tr!(chart_menu::LIQUIDATIONS_REMOVED),
         }
     }
 }
@@ -66,6 +89,7 @@ pub(super) enum OrderFlowDialogDraft {
     DeltaHistogram(DeltaHistogramSettings),
     OrderBook(OrderBookDraft),
     OpenInterest(OpenInterestSettings),
+    Liquidations(LiquidationsSettings),
 }
 
 impl OrderFlowDialogDraft {
@@ -75,6 +99,7 @@ impl OrderFlowDialogDraft {
             Self::DeltaHistogram(_) => OrderFlowIndicator::DeltaHistogram,
             Self::OrderBook(_) => OrderFlowIndicator::OrderBook,
             Self::OpenInterest(_) => OrderFlowIndicator::OpenInterest,
+            Self::Liquidations(_) => OrderFlowIndicator::Liquidations,
         }
     }
 
@@ -98,6 +123,10 @@ impl OrderFlowDialogDraft {
             (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestLine) => draft.line_color,
             (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestUp) => draft.up_color,
             (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestDown) => draft.down_color,
+            (Self::Liquidations(draft), OrderFlowColorTarget::LiquidationShort) => {
+                draft.short_color
+            }
+            (Self::Liquidations(draft), OrderFlowColorTarget::LiquidationLong) => draft.long_color,
             _ => None,
         }
     }
@@ -136,6 +165,12 @@ impl OrderFlowDialogDraft {
             }
             (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestDown) => {
                 Some(&mut draft.down_color)
+            }
+            (Self::Liquidations(draft), OrderFlowColorTarget::LiquidationShort) => {
+                Some(&mut draft.short_color)
+            }
+            (Self::Liquidations(draft), OrderFlowColorTarget::LiquidationLong) => {
+                Some(&mut draft.long_color)
             }
             _ => None,
         }
@@ -290,10 +325,12 @@ impl OrderFlowDialogState {
             }
             OrderFlowColorTarget::CumulativeDeltaUp
             | OrderFlowColorTarget::Bid
-            | OrderFlowColorTarget::OpenInterestUp => &defaults.bullish,
+            | OrderFlowColorTarget::OpenInterestUp
+            | OrderFlowColorTarget::LiquidationShort => &defaults.bullish,
             OrderFlowColorTarget::CumulativeDeltaDown
             | OrderFlowColorTarget::Ask
-            | OrderFlowColorTarget::OpenInterestDown => &defaults.bearish,
+            | OrderFlowColorTarget::OpenInterestDown
+            | OrderFlowColorTarget::LiquidationLong => &defaults.bearish,
             OrderFlowColorTarget::DeltaPositive => &defaults.delta_positive,
             OrderFlowColorTarget::DeltaNegative => &defaults.delta_negative,
         }
@@ -313,6 +350,8 @@ pub(super) enum OrderFlowColorTarget {
     OpenInterestLine,
     OpenInterestUp,
     OpenInterestDown,
+    LiquidationShort,
+    LiquidationLong,
 }
 
 impl OrderFlowColorTarget {
@@ -325,6 +364,8 @@ impl OrderFlowColorTarget {
             Self::DeltaNegative => tr!(chart_menu::NEGATIVE_DELTA),
             Self::Bid => tr!(chart_menu::BIDS),
             Self::Ask => tr!(chart_menu::ASKS),
+            Self::LiquidationShort => tr!(chart_menu::LIQUIDATIONS_SHORT),
+            Self::LiquidationLong => tr!(chart_menu::LIQUIDATIONS_LONG),
         }
     }
 }
@@ -357,6 +398,13 @@ fn applied_order_flow_settings(
         OrderFlowDialogDraft::OpenInterest(draft) => {
             let shown = current.open_interest.ok_or_else(removed)?;
             settings.open_interest = Some(OpenInterestSettings {
+                visible: shown.visible,
+                ..*draft
+            });
+        }
+        OrderFlowDialogDraft::Liquidations(draft) => {
+            let shown = current.liquidations.ok_or_else(removed)?;
+            settings.liquidations = Some(LiquidationsSettings {
                 visible: shown.visible,
                 ..*draft
             });
@@ -394,6 +442,14 @@ fn restored_order_flow_settings(
                 settings.open_interest = Some(OpenInterestSettings {
                     visible: shown.visible,
                     ..oi
+                });
+            }
+        }
+        OrderFlowIndicator::Liquidations => {
+            if let (Some(liq), Some(shown)) = (original.liquidations, current.liquidations) {
+                settings.liquidations = Some(LiquidationsSettings {
+                    visible: shown.visible,
+                    ..liq
                 });
             }
         }
@@ -453,6 +509,9 @@ impl WorkspaceSurface {
             OrderFlowIndicator::OpenInterest => settings
                 .open_interest
                 .map(OrderFlowDialogDraft::OpenInterest),
+            OrderFlowIndicator::Liquidations => settings
+                .liquidations
+                .map(OrderFlowDialogDraft::Liquidations),
         };
         let Some(draft) = draft else {
             Self::post_indicator_failure(
@@ -474,7 +533,8 @@ impl WorkspaceSurface {
             .collect(),
             OrderFlowDialogDraft::CumulativeDelta(_)
             | OrderFlowDialogDraft::DeltaHistogram(_)
-            | OrderFlowDialogDraft::OpenInterest(_) => Vec::new(),
+            | OrderFlowDialogDraft::OpenInterest(_)
+            | OrderFlowDialogDraft::Liquidations(_) => Vec::new(),
         };
         self.open_indicator_settings_dialog(
             IndicatorSettingsDialog::OrderFlow(OrderFlowDialogState {
@@ -560,6 +620,35 @@ impl WorkspaceSurface {
         {
             draft.style = style;
             dialog.color_picker = None;
+            self.preview_order_flow_dialog(cx);
+        }
+    }
+
+    pub(super) fn set_order_flow_dialog_liquidation_style(
+        &mut self,
+        style: LiquidationStyle,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.order_flow_dialog_mut()
+            && let OrderFlowDialogDraft::Liquidations(draft) = &mut dialog.draft
+            && draft.style != style
+        {
+            draft.style = style;
+            dialog.color_picker = None;
+            self.preview_order_flow_dialog(cx);
+        }
+    }
+
+    pub(super) fn set_order_flow_dialog_liquidation_unit(
+        &mut self,
+        unit: LiquidationUnit,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.order_flow_dialog_mut()
+            && let OrderFlowDialogDraft::Liquidations(draft) = &mut dialog.draft
+            && draft.unit != unit
+        {
+            draft.unit = unit;
             self.preview_order_flow_dialog(cx);
         }
     }
@@ -674,6 +763,12 @@ impl WorkspaceSurface {
                 *draft = OpenInterestSettings {
                     visible: draft.visible,
                     ..OpenInterestSettings::default()
+                };
+            }
+            OrderFlowDialogDraft::Liquidations(draft) => {
+                *draft = LiquidationsSettings {
+                    visible: draft.visible,
+                    ..LiquidationsSettings::default()
                 };
             }
         }
@@ -970,6 +1065,73 @@ fn open_interest_groups(
     ]
 }
 
+fn liquidations_groups(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &OrderFlowDialogState,
+    draft: &LiquidationsSettings,
+    theme: &AerisTheme,
+) -> [AnyElement; 2] {
+    let style = SettingDropdown {
+        menu: "liquidations_style",
+        label: tr!(chart_menu::STYLE),
+        open_menu: dialog.menu.as_deref(),
+        enabled: true,
+        choices: dropdown_choices(&LIQUIDATION_STYLE_CHOICES, |style| draft.style == style),
+    }
+    .render(
+        app,
+        WorkspaceSurface::set_order_flow_dialog_liquidation_style,
+        theme,
+    );
+    let unit = SettingDropdown {
+        menu: "liquidations_unit",
+        label: tr!(chart_menu::LIQUIDATIONS_UNIT),
+        open_menu: dialog.menu.as_deref(),
+        enabled: true,
+        choices: dropdown_choices(&LIQUIDATION_UNIT_CHOICES, |unit| draft.unit == unit),
+    }
+    .render(
+        app,
+        WorkspaceSurface::set_order_flow_dialog_liquidation_unit,
+        theme,
+    );
+    [
+        settings_group(
+            tr!(chart_menu::DISPLAY),
+            [
+                setting_row(
+                    tr!(chart_menu::STYLE),
+                    tr!(chart_menu::LIQUIDATIONS_STYLE_DESCRIPTION),
+                    style,
+                    theme,
+                ),
+                setting_row(
+                    tr!(chart_menu::LIQUIDATIONS_UNIT),
+                    tr!(chart_menu::LIQUIDATIONS_UNIT_DESCRIPTION),
+                    unit,
+                    theme,
+                ),
+            ],
+            theme,
+        ),
+        settings_group(
+            tr!(chart_menu::COLORS),
+            [colors_row(
+                app,
+                dialog,
+                tr!(chart_menu::COLORS),
+                tr!(chart_menu::LIQUIDATIONS_COLORS_DESCRIPTION),
+                &[
+                    OrderFlowColorTarget::LiquidationShort,
+                    OrderFlowColorTarget::LiquidationLong,
+                ],
+                theme,
+            )],
+            theme,
+        ),
+    ]
+}
+
 fn order_flow_dialog_groups(
     app: &Entity<WorkspaceSurface>,
     dialog: &OrderFlowDialogState,
@@ -999,6 +1161,9 @@ fn order_flow_dialog_groups(
         }
         OrderFlowDialogDraft::OpenInterest(draft) => {
             open_interest_groups(app, dialog, draft, theme).into()
+        }
+        OrderFlowDialogDraft::Liquidations(draft) => {
+            liquidations_groups(app, dialog, draft, theme).into()
         }
     }
 }

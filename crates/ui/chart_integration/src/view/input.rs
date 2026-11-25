@@ -286,7 +286,14 @@ impl AerisChartView {
         }
         let cleared_legend = event.keystroke.key == "escape" && self.clear_active_legend_item();
         let editing = self.engine.drawing_text_edit().is_some();
-        let handled = self.input.key_down(&mut self.engine, event, cx);
+        let mut handled = self.input.key_down(&mut self.engine, event, cx);
+        if !handled
+            && !editing
+            && matches!(event.keystroke.key.as_str(), "delete" | "backspace")
+            && self.engine.selected_depth_profile().is_some()
+        {
+            handled = self.remove_selected_chart_object(cx);
+        }
         if handled || cleared_legend {
             if editing {
                 window.prevent_default();

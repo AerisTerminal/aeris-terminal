@@ -23,6 +23,10 @@ pub enum BybitWsEvent {
         symbol: String,
         data: Box<serde_json::value::RawValue>,
     },
+    Liquidations {
+        symbol: String,
+        data: Box<serde_json::value::RawValue>,
+    },
     Ignored,
 }
 
@@ -89,6 +93,11 @@ pub fn parse_ws_frame(text: &str) -> CryptoResult<BybitWsEvent> {
             && let Some((_, symbol)) = rest.split_once('.')
         {
             return Ok(BybitWsEvent::Kline {
+                symbol: symbol.to_ascii_uppercase(),
+                data,
+            });
+        } else if let Some(symbol) = topic.strip_prefix("allLiquidation.") {
+            return Ok(BybitWsEvent::Liquidations {
                 symbol: symbol.to_ascii_uppercase(),
                 data,
             });

@@ -242,6 +242,8 @@ struct MarketRuntime {
     provider_presentations: Vec<ProviderPresentationDescriptor>,
     open_interest_sources: BTreeMap<&'static str, Arc<aeris_provider_spi::OpenInterestSource>>,
     open_interest_cache: Mutex<OpenInterestCache>,
+    liquidation_sources: BTreeMap<&'static str, Arc<aeris_provider_spi::LiquidationSource>>,
+    liquidation_cache: Mutex<LiquidationCache>,
     provider_auth: provider_auth::ProviderAuthRegistry,
     broker_venue_runners: Mutex<broker_venue::BrokerVenueRunnerRegistry>,
     attached_broker_venues: Mutex<BTreeSet<(String, String)>>,
@@ -309,6 +311,51 @@ impl OpenInterestCache {
 struct MarketServiceProviders {
     presentations: Vec<ProviderPresentationDescriptor>,
     open_interest_sources: BTreeMap<&'static str, Arc<aeris_provider_spi::OpenInterestSource>>,
+    liquidation_sources: BTreeMap<&'static str, Arc<aeris_provider_spi::LiquidationSource>>,
+}
+
+/// Bounded short-TTL cache for provider liquidation series so multiple panes sharing an
+/// instrument and timeframe share one fetch while live WebSocket updates surface promptly.
+const LIQUIDATION_CACHE_CAPACITY: usize = 64;
+const LIQUIDATION_CACHE_TTL: Duration = Duration::from_secs(4);
+
+#[derive(Default)]
+struct LiquidationCache {
+    entries: BTreeMap<OpenInterestCacheKey, (Instant, Vec<aeris_provider_spi::LiquidationSample>)>,
+}
+
+impl LiquidationCache {
+    fn get(
+        &self,
+        key: &OpenInterestCacheKey,
+        now: Instant,
+    ) -> Option<Vec<aeris_provider_spi::LiquidationSample>> {
+        let (fetched_at, samples) = self.entries.get(key)?;
+        if now.saturating_duration_since(*fetched_at) <= LIQUIDATION_CACHE_TTL {
+            Some(samples.clone())
+        } else {
+            None
+        }
+    }
+
+    fn insert(
+        &mut self,
+        key: OpenInterestCacheKey,
+        now: Instant,
+        samples: Vec<aeris_provider_spi::LiquidationSample>,
+    ) {
+        if self.entries.len() >= LIQUIDATION_CACHE_CAPACITY
+            && !self.entries.contains_key(&key)
+            && let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (fetched_at, _))| *fetched_at)
+                .map(|(candidate, _)| candidate.clone())
+        {
+            self.entries.remove(&oldest_key);
+        }
+        self.entries.insert(key, (now, samples));
+    }
 }
 
 impl Drop for MarketRuntime {
@@ -1304,6 +1351,7 @@ pub struct ProviderRuntimeSpec {
     pub descriptor: ProviderDescriptor,
     pub(super) history: Option<Box<dyn HistorySource>>,
     pub(super) open_interest: Option<Arc<aeris_provider_spi::OpenInterestSource>>,
+    pub(super) liquidations: Option<Arc<aeris_provider_spi::LiquidationSource>>,
     pub realtime_enabled: bool,
     pub(super) starter: ProviderRuntimeStarter,
 }
@@ -1321,6 +1369,7 @@ impl ProviderRuntimeSpec {
             descriptor,
             history,
             open_interest: None,
+            liquidations: None,
             realtime_enabled,
             starter,
         }
@@ -1336,12 +1385,20 @@ impl ProviderRuntimeSpec {
         self
     }
 
+    /// Registers an optional provider-neutral liquidation fetcher for this provider.
+    #[must_use]
+    pub fn with_liquidations(mut self, source: Arc<aeris_provider_spi::LiquidationSource>) -> Self {
+        self.liquidations = Some(source);
+        self
+    }
+
     /// The replay starter supplies its own history source from the recordings.
     pub(super) fn recording_replay() -> Self {
         Self {
             descriptor: RECORDING_REPLAY_DESCRIPTOR,
             history: None,
             open_interest: None,
+            liquidations: None,
             realtime_enabled: true,
             starter: Box::new(recording::start_replay_runtime),
         }

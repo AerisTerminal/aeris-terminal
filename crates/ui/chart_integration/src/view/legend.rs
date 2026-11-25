@@ -30,6 +30,7 @@ pub(super) enum LegendItem {
     OrderBookDepth,
     DepthHeatmap,
     OpenInterest,
+    Liquidations,
     SessionProfile(SessionProfileKind),
 }
 
@@ -59,6 +60,7 @@ impl LegendItem {
             Self::OrderBookDepth => 1_u64 << 59,
             Self::DepthHeatmap => 1_u64 << 58,
             Self::OpenInterest => 1_u64 << 56,
+            Self::Liquidations => 1_u64 << 55,
             Self::SessionProfile(kind) => (1_u64 << 57) | kind as u64,
         }
     }
@@ -131,7 +133,8 @@ const LEGEND_VIEW_OFF_ICON: &str = "aeris/icons/ui/view-off.svg";
 const LEGEND_SETTINGS_ICON: &str = "aeris/icons/ui/settings.svg";
 const LEGEND_REMOVE_ICON: &str = "aeris/icons/ui/close.svg";
 const LEGEND_LOADING_ICON: &str = "aeris/icons/ui/loader.svg";
-const LEGEND_COLLAPSE_ICON: &str = "aeris/icons/ui/chevron-down.svg";
+const LEGEND_COLLAPSE_DOWN_ICON: &str = "aeris/icons/ui/chevron-down.svg";
+const LEGEND_COLLAPSE_UP_ICON: &str = "aeris/icons/ui/chevron-up.svg";
 /// One rotation of the legend's loading glyph.
 const LEGEND_LOADING_PERIOD: Duration = Duration::from_millis(700);
 
@@ -271,15 +274,14 @@ fn indicator_legend_toggle(
         tr!(chart_ui::LEGEND_COLLAPSE_INDICATORS)
     };
     let glyph = svg()
-        .path(LEGEND_COLLAPSE_ICON)
+        .path(if collapsed {
+            LEGEND_COLLAPSE_DOWN_ICON
+        } else {
+            LEGEND_COLLAPSE_UP_ICON
+        })
         .size(px(12.0))
         .flex_none()
         .text_color(palette.text);
-    let glyph = if collapsed {
-        glyph
-    } else {
-        glyph.with_transformation(Transformation::rotate(percentage(0.5)))
-    };
     div()
         .id("chart_legend_indicator_toggle")
         .flex_none()
@@ -439,6 +441,7 @@ impl LegendItem {
             Self::OrderFlow(OrderFlowStudy::Delta) => Some(ChartSettingsRequest::DeltaHistogram),
             Self::OrderBookDepth => Some(ChartSettingsRequest::OrderBookDepth),
             Self::OpenInterest => Some(ChartSettingsRequest::OpenInterest),
+            Self::Liquidations => Some(ChartSettingsRequest::Liquidations),
             Self::SessionProfile(kind) => Some(ChartSettingsRequest::SessionProfile(kind)),
             Self::Asset | Self::VolumeProfile | Self::DepthHeatmap | Self::Indicator(_) => None,
         }
@@ -597,7 +600,21 @@ fn legend_control(
                     if chart.active_legend_item == Some(item) {
                         chart.clear_active_legend_item();
                     }
-                    chart.remove_legend_indicator(item)
+                    let removed = chart.remove_legend_indicator(item);
+                    if removed
+                        && matches!(
+                            item,
+                            LegendItem::OrderFlow(_)
+                                | LegendItem::BigTrades
+                                | LegendItem::OrderBookDepth
+                                | LegendItem::DepthHeatmap
+                                | LegendItem::OpenInterest
+                                | LegendItem::Liquidations
+                        )
+                    {
+                        chart_cx.emit(ChartHostEvent::OrderFlowSettingsChanged);
+                    }
+                    removed
                 } else {
                     let LegendControl::Visibility(visible) = control else {
                         return;

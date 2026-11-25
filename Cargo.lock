@@ -195,7 +195,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_core"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1b2ebf5a8ace0431bb271e4320b951cdcd889252#1b2ebf5a8ace0431bb271e4320b951cdcd889252"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c995259cf00570d1f7120619a96a6cf55e606879#c995259cf00570d1f7120619a96a6cf55e606879"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -206,7 +206,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_engine"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1b2ebf5a8ace0431bb271e4320b951cdcd889252#1b2ebf5a8ace0431bb271e4320b951cdcd889252"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c995259cf00570d1f7120619a96a6cf55e606879#c995259cf00570d1f7120619a96a6cf55e606879"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_indicators",
@@ -218,7 +218,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_indicators"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1b2ebf5a8ace0431bb271e4320b951cdcd889252#1b2ebf5a8ace0431bb271e4320b951cdcd889252"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c995259cf00570d1f7120619a96a6cf55e606879#c995259cf00570d1f7120619a96a6cf55e606879"
 dependencies = [
  "serde",
 ]
@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_native"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1b2ebf5a8ace0431bb271e4320b951cdcd889252#1b2ebf5a8ace0431bb271e4320b951cdcd889252"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c995259cf00570d1f7120619a96a6cf55e606879#c995259cf00570d1f7120619a96a6cf55e606879"
 dependencies = [
  "ab_glyph",
  "aeris_charts_core",
@@ -239,7 +239,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1b2ebf5a8ace0431bb271e4320b951cdcd889252#1b2ebf5a8ace0431bb271e4320b951cdcd889252"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c995259cf00570d1f7120619a96a6cf55e606879#c995259cf00570d1f7120619a96a6cf55e606879"
 dependencies = [
  "aeris_charts_core",
 ]
@@ -247,7 +247,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render_gpui"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1b2ebf5a8ace0431bb271e4320b951cdcd889252#1b2ebf5a8ace0431bb271e4320b951cdcd889252"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c995259cf00570d1f7120619a96a6cf55e606879#c995259cf00570d1f7120619a96a6cf55e606879"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_engine",
@@ -255,6 +255,21 @@ dependencies = [
  "gpui",
  "image",
  "smallvec",
+]
+
+[[package]]
+name = "aeris_coinbase_market_adapter"
+version = "1.13.1"
+dependencies = [
+ "aeris_crypto_common",
+ "aeris_market_data",
+ "aeris_platform_runtime",
+ "aeris_provider_history",
+ "aeris_provider_spi",
+ "chrono",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -375,6 +390,7 @@ version = "1.13.1"
 dependencies = [
  "aeris_binance_market_adapter",
  "aeris_bybit_market_adapter",
+ "aeris_coinbase_market_adapter",
  "aeris_contracts",
  "aeris_crypto_common",
  "aeris_hyperliquid_market_adapter",

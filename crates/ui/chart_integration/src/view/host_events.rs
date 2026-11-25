@@ -1,6 +1,6 @@
 //! Requests the chart sends to its host, and the selection removal that can raise one.
 
-use super::{AerisChartView, ChartSettingsRequest};
+use super::{AerisChartView, ChartSettingsRequest, LIQUIDATIONS_STUDY_ID, OPEN_INTEREST_STUDY_ID};
 use aeris_charts_engine::HostEditId;
 use gpui::{Context, Pixels, Point, SharedString};
 
@@ -49,6 +49,9 @@ pub(super) enum SelectionRemoval {
     Protected,
     /// The chart removed the object itself.
     Removed,
+    /// The chart removed an order-flow / built-in study through durable `OrderFlowSettings`;
+    /// the host follows through [`ChartHostEvent::OrderFlowSettingsChanged`].
+    OrderFlowRemoved,
     /// A runtime-managed study, which only its host can remove.
     Study(u64),
 }
@@ -57,20 +60,30 @@ impl SelectionRemoval {
     pub(super) const fn host_event(self) -> Option<ChartHostEvent> {
         match self {
             Self::Study(study_id) => Some(ChartHostEvent::RemoveStudy(study_id)),
+            Self::OrderFlowRemoved => Some(ChartHostEvent::OrderFlowSettingsChanged),
             Self::Protected | Self::Removed => None,
         }
     }
 }
 
 impl AerisChartView {
+    fn is_protected_series(&self, series: u32) -> bool {
+        series == 0
+            || series == self.product_series.volume
+            || series == self.product_series.price_bars
+            || self.footprint_series_id() == Some(series)
+    }
+
     /// Returns whether the current chart-object selection can be deleted by product chrome.
     #[must_use]
     pub fn has_deletable_selection(&self) -> bool {
         self.engine.selected_drawing().is_some()
+            || self.engine.selected_volume_profile_indicator().is_some()
+            || self.engine.selected_depth_profile().is_some()
             || self
                 .engine
                 .selected_series()
-                .is_some_and(|series| series != 0)
+                .is_some_and(|series| !self.is_protected_series(series))
     }
 
     /// Removes the selected drawing or native Aeris Charts indicator; a selected runtime-managed
@@ -90,6 +103,24 @@ impl AerisChartView {
             self.cancel_drawing();
             return SelectionRemoval::Removed;
         }
+        if let Some(id) = self.engine.selected_volume_profile_indicator() {
+            self.engine.set_selected_volume_profile_indicator(None);
+            if self.engine.remove_native_primitive(id) {
+                self.volume_profile_removed(id);
+                self.invalidate_series_layout();
+                self.mark_user_state_changed();
+                return SelectionRemoval::Removed;
+            }
+            return SelectionRemoval::Protected;
+        }
+        if self.engine.selected_depth_profile().is_some() {
+            self.engine.set_selected_depth_profile(None);
+            return if self.remove_order_book_depth() {
+                SelectionRemoval::OrderFlowRemoved
+            } else {
+                SelectionRemoval::Protected
+            };
+        }
         let Some(series) = self.engine.selected_series() else {
             return SelectionRemoval::Protected;
         };
@@ -100,23 +131,34 @@ impl AerisChartView {
         removal
     }
 
-    /// Removes one selected product series. Studies are runtime-owned and only their host can
-    /// remove them; the price series, the footprint presentation and the product volume weights
-    /// and price bars are protected.
+    /// Removes one selected product series. Runtime studies are runtime-owned and only their host
+    /// can remove them; built-in external studies (Open Interest, Liquidations) and order-flow
+    /// sub-panes (CVD, Delta) remove through durable `OrderFlowSettings`; the price series, the
+    /// footprint presentation and the product volume weights and price bars are protected.
     pub(super) fn remove_series_selection(&mut self, series: u32) -> SelectionRemoval {
-        if series == 0
-            || series == self.product_series.volume
-            || series == self.product_series.price_bars
-            || self.footprint_series_id() == Some(series)
-        {
+        if self.is_protected_series(series) {
             return SelectionRemoval::Protected;
         }
         if let Some(study_id) = self.engine.external_study_for_series(series) {
+            if study_id == OPEN_INTEREST_STUDY_ID {
+                return if self.remove_open_interest() {
+                    SelectionRemoval::OrderFlowRemoved
+                } else {
+                    SelectionRemoval::Protected
+                };
+            }
+            if study_id == LIQUIDATIONS_STUDY_ID {
+                return if self.remove_liquidations() {
+                    SelectionRemoval::OrderFlowRemoved
+                } else {
+                    SelectionRemoval::Protected
+                };
+            }
             return SelectionRemoval::Study(study_id);
         }
         if let Some(study) = self.order_flow_study_for_series(series) {
             return if self.remove_order_flow_study(study) {
-                SelectionRemoval::Removed
+                SelectionRemoval::OrderFlowRemoved
             } else {
                 SelectionRemoval::Protected
             };

@@ -86,6 +86,7 @@ impl AerisChartView {
             return Ok(false);
         }
         let book_changed = self.order_flow_settings.order_book_depth != settings.order_book_depth;
+        let previous_liquidations = self.order_flow_settings.liquidations;
         self.order_flow_settings = settings;
         if settings.order_book_depth.is_some_and(|book| book.visible) {
             if book_changed {
@@ -104,6 +105,11 @@ impl AerisChartView {
             self.sync_open_interest_settings(oi);
         } else {
             self.clear_open_interest();
+        }
+        if let Some(liq) = settings.liquidations {
+            self.sync_liquidations_settings(previous_liquidations, liq);
+        } else {
+            self.clear_liquidations();
         }
         self.reconfigure_order_flow();
         self.mark_user_state_changed();
@@ -615,6 +621,22 @@ fn order_flow_trade(trade: &OrderFlowTrade) -> Result<FootprintTrade, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_footprint_display_mode_is_profile() {
+        assert_eq!(
+            FootprintDisplayMode::default(),
+            FootprintDisplayMode::ProfileInBar
+        );
+        assert_eq!(
+            OrderFlowSettings::default().display_mode,
+            FootprintDisplayMode::ProfileInBar
+        );
+        assert_eq!(
+            cell_mode(OrderFlowSettings::default().display_mode),
+            FootprintCellMode::ProfileInBar
+        );
+    }
 
     #[test]
     fn footprint_time_bars_share_the_price_series_bar_opens() {

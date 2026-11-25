@@ -12,6 +12,7 @@ pub mod endpoints;
 pub mod history;
 pub mod http;
 pub mod identity;
+pub mod liquidations;
 pub mod meta;
 pub mod open_interest;
 pub mod trades;
@@ -29,6 +30,7 @@ pub use http::{OkxHttpClient, OkxHttpConfig, fetch_catalog};
 pub use identity::{
     OkxInstrument, OkxMarketKind, OkxSymbolRef, instrument_id_for, parse_provider_symbol,
 };
+pub use liquidations::decode_ws_liquidations;
 pub use meta::OkxCatalog;
 pub use trades::decode_trades;
 pub use ws::{OkxWsEvent, build_ping, build_subscribe, build_unsubscribe, parse_ws_frame};

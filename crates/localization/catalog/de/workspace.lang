@@ -6,6 +6,7 @@ order_flow_big_trades = Große Trades
 order_flow_book_on_chart = Orderbuch im Chart (DOM)
 order_flow_depth_heatmap = Markttiefe-Heatmap (Orderbuch-Historie)
 order_flow_open_interest = Open Interest
+order_flow_liquidations = Liquidationen
 minimum_volume_invalid = Das Mindestvolumen muss eine Zahl größer als null sein
 length_range_invalid = Die Länge muss eine ganze Zahl von {min} bis {max} sein
 chart_restore_failed_title = Chart-Einstellungen konnten nicht wiederhergestellt werden

@@ -172,6 +172,7 @@ fn all_scope() -> (
             ProviderId("binance"),
             ProviderId("bybit"),
             ProviderId("okx"),
+            ProviderId("coinbase"),
             ProviderId("crypto_agg"),
         ],
         "every provider at once"

@@ -7,6 +7,7 @@ order_flow_big_trades = Gros trades
 order_flow_book_on_chart = Carnet d'ordres sur le graphique (DOM)
 order_flow_depth_heatmap = Carte de chaleur de la profondeur (historique du carnet)
 order_flow_open_interest = Intérêt ouvert
+order_flow_liquidations = Liquidations
 minimum_volume_invalid = Le volume minimum doit être un nombre supérieur à zéro
 length_range_invalid = La longueur doit être un nombre entier de {min} à {max}
 chart_restore_failed_title = Les paramètres du graphique n'ont pas pu être restaurés

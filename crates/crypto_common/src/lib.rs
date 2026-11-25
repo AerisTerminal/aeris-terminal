@@ -13,6 +13,7 @@ pub mod canonical;
 pub mod decimal;
 pub mod error;
 pub mod history;
+pub mod liquidations;
 pub mod trades;
 
 pub use book::{
@@ -27,4 +28,7 @@ pub use decimal::{
 };
 pub use error::{CryptoError, CryptoResult};
 pub use history::{bar_period_millis, history_window, history_window_for_range};
+pub use liquidations::{
+    LiquidationBucket, LiquidationEvent, LiquidationLedger, bucket_liquidation_events,
+};
 pub use trades::TradeDedupRing;

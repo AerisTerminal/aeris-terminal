@@ -6,6 +6,7 @@ order_flow_big_trades = Big trades
 order_flow_book_on_chart = Order book on chart (DOM)
 order_flow_depth_heatmap = Depth heatmap (book history)
 order_flow_open_interest = Open interest (OI)
+order_flow_liquidations = Liquidations
 minimum_volume_invalid = Minimum volume must be a number greater than zero
 length_range_invalid = Length must be a whole number from {min} to {max}
 chart_restore_failed_title = Chart settings could not be restored

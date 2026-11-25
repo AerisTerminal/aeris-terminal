@@ -5,11 +5,12 @@ use super::super::{
     ChartStudyInputStream, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
     ChartStudyScaleTarget, ChartStudyThresholdRegion, CumulativeDeltaReset,
     CumulativeDeltaSettings, CumulativeDeltaStyle, DeltaHistogramSettings, DepthHeatmapSettings,
-    FootprintDisplayMode, MarketStream, OpenInterestSettings, OpenInterestStyle,
-    OrderBookDepthSettings, OrderFlowSettings, RejectedSavedPresentation, SessionProfileKind,
-    SessionProfileSettings, SessionVolumeProfileSettings, StreamRequirements, StudyPaneTarget,
-    StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudyThresholdRegion, ToPrimitive, TpoCells,
-    TpoSettings, VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
+    FootprintDisplayMode, LiquidationStyle, LiquidationUnit, LiquidationsSettings, MarketStream,
+    OpenInterestSettings, OpenInterestStyle, OrderBookDepthSettings, OrderFlowSettings,
+    RejectedSavedPresentation, SessionProfileKind, SessionProfileSettings,
+    SessionVolumeProfileSettings, StreamRequirements, StudyPaneTarget, StudyPlotKind,
+    StudyPointStyle, StudyScaleTarget, StudyThresholdRegion, ToPrimitive, TpoCells, TpoSettings,
+    VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
     WorkspaceBigTradesState, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
     WorkspaceChartLegendState, WorkspaceChartState, WorkspaceCumulativeDeltaState,
     WorkspaceDeltaHistogramState, WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState,
@@ -341,6 +342,22 @@ pub(super) fn persisted_order_flow_settings(
                 down_color: persisted_chart_color(oi.down_color),
             }
         }),
+        liquidations: settings.liquidations.map(|liq| liq.visible),
+        liquidations_options: settings.liquidations.map(|liq| {
+            aeris_contracts::WorkspaceLiquidationsState {
+                style: match liq.style {
+                    LiquidationStyle::Split => 0,
+                    LiquidationStyle::Stacked => 1,
+                    LiquidationStyle::Net => 2,
+                },
+                unit: match liq.unit {
+                    LiquidationUnit::Usd => 0,
+                    LiquidationUnit::Contracts => 1,
+                },
+                long_color: persisted_chart_color(liq.long_color),
+                short_color: persisted_chart_color(liq.short_color),
+            }
+        }),
         cumulative_delta_style: match settings.cumulative_delta.style {
             CumulativeDeltaStyle::Line => 0,
             CumulativeDeltaStyle::Candles => 1,
@@ -479,6 +496,35 @@ fn restored_open_interest(
     })
 }
 
+/// Older workspaces carry no liquidations style/unit/color options and restore split USD histograms.
+fn restored_liquidations(
+    visible: bool,
+    state: Option<&aeris_contracts::WorkspaceLiquidationsState>,
+) -> Option<LiquidationsSettings> {
+    let Some(state) = state else {
+        return Some(LiquidationsSettings {
+            visible,
+            ..LiquidationsSettings::default()
+        });
+    };
+    Some(LiquidationsSettings {
+        visible,
+        style: match state.style {
+            0 => LiquidationStyle::Split,
+            1 => LiquidationStyle::Stacked,
+            2 => LiquidationStyle::Net,
+            _ => return None,
+        },
+        unit: match state.unit {
+            0 => LiquidationUnit::Usd,
+            1 => LiquidationUnit::Contracts,
+            _ => return None,
+        },
+        long_color: restored_chart_color(&state.long_color).ok()?,
+        short_color: restored_chart_color(&state.short_color).ok()?,
+    })
+}
+
 pub(super) fn restored_order_flow_settings(
     settings: &WorkspaceOrderFlowSettingsState,
 ) -> Option<OrderFlowSettings> {
@@ -511,6 +557,13 @@ pub(super) fn restored_order_flow_settings(
         )?),
         None => None,
     };
+    let liquidations = match settings.liquidations {
+        Some(visible) => Some(restored_liquidations(
+            visible,
+            settings.liquidations_options.as_ref(),
+        )?),
+        None => None,
+    };
     Some(OrderFlowSettings {
         display_mode,
         show_cumulative_delta: settings.study_visibility_revision >= 1
@@ -528,6 +581,7 @@ pub(super) fn restored_order_flow_settings(
             .depth_heatmap
             .map(|visible| DepthHeatmapSettings { visible }),
         open_interest,
+        liquidations,
         ticks_per_row: settings.ticks_per_row,
         ..OrderFlowSettings::default()
     })

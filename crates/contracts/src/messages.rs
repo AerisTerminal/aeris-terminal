@@ -732,6 +732,28 @@ pub struct WorkspaceOrderFlowSettingsState {
     /// workspaces, which drew candles in the chart's default colors.
     #[prost(message, optional, tag = "16")]
     pub open_interest_options: Option<WorkspaceOpenInterestState>,
+    /// The liquidations sub-pane; absent when the indicator is not added, otherwise whether it is shown.
+    #[prost(bool, optional, tag = "17")]
+    pub liquidations: Option<bool>,
+    /// Liquidations style, unit, and color overrides while tag 17 records the indicator; absent in
+    /// older workspaces, which default to split USD histograms in theme colors.
+    #[prost(message, optional, tag = "18")]
+    pub liquidations_options: Option<WorkspaceLiquidationsState>,
+}
+
+/// An empty color follows the chart default.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceLiquidationsState {
+    /// 0 split, 1 stacked, 2 net.
+    #[prost(uint32, tag = "1")]
+    pub style: u32,
+    /// 0 USD notional, 1 base contracts.
+    #[prost(uint32, tag = "2")]
+    pub unit: u32,
+    #[prost(string, tag = "3")]
+    pub long_color: String,
+    #[prost(string, tag = "4")]
+    pub short_color: String,
 }
 
 /// An empty color follows the chart default.

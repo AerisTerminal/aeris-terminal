@@ -2,7 +2,9 @@ use super::{AerisChartView, ChartColor, OrderBookDepthSettings, OrderFlowSetting
 use aeris_charts_engine::{DepthLevel, DepthOptions, DepthProfileOptions, DepthSnapshot};
 
 /// Levels kept per side of the drawn book; deeper levels of a larger book are dropped.
-const MAX_LEVELS_PER_SIDE: usize = 1_024;
+/// Matches the runtime's canonical 4,096-level bound so zoomed-out bucketing never discards
+/// real resting liquidity before merging.
+const MAX_LEVELS_PER_SIDE: usize = 4_096;
 
 /// The bars draw only the current book. A fixed snapshot time keeps the engine from rolling
 /// depth history buckets the chart never shows.
@@ -184,5 +186,56 @@ fn depth_profile_options(settings: OrderBookDepthSettings) -> DepthProfileOption
         ask_rgba: settings.ask_color.map(rgba),
         opacity: f32::from(settings.opacity_percent) / 100.0,
         show_sizes: settings.show_sizes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{ChartHostEvent, SelectionRemoval};
+    use super::*;
+
+    #[test]
+    fn deleting_selected_order_book_depth_removes_through_order_flow_settings() {
+        let mut chart = AerisChartView::new();
+        chart
+            .set_order_flow_settings(OrderFlowSettings {
+                order_book_depth: Some(OrderBookDepthSettings::default()),
+                ..OrderFlowSettings::default()
+            })
+            .expect("enable order book depth");
+        chart
+            .apply_order_book_depth(
+                "TEST-USD",
+                0.5,
+                vec![DepthLevel {
+                    price: 100.0,
+                    size: 5.0,
+                    order_count: None,
+                }],
+                vec![DepthLevel {
+                    price: 100.5,
+                    size: 4.0,
+                    order_count: None,
+                }],
+            )
+            .expect("apply depth snapshot");
+
+        let profile_id = chart
+            .order_book_depth_state
+            .as_ref()
+            .expect("depth profile installed")
+            .profile;
+        assert!(chart.engine.set_selected_depth_profile(Some(profile_id)));
+        assert!(chart.has_deletable_selection());
+
+        let removal = chart.remove_selection();
+        assert_eq!(removal, SelectionRemoval::OrderFlowRemoved);
+        assert_eq!(
+            removal.host_event(),
+            Some(ChartHostEvent::OrderFlowSettingsChanged)
+        );
+        assert_eq!(chart.engine.selected_depth_profile(), None);
+        assert_eq!(chart.order_flow_settings().order_book_depth, None);
+        assert!(chart.order_book_depth_state.is_none());
     }
 }

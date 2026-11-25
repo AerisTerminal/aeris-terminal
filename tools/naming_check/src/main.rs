@@ -2614,6 +2614,7 @@ mod tests {
             }
             "aeris_binance_market_adapter"
             | "aeris_bybit_market_adapter"
+            | "aeris_coinbase_market_adapter"
             | "aeris_hyperliquid_market_adapter"
             | "aeris_okx_market_adapter"
             | "aeris_rithmic_protocol_adapter" => CrateLayer::Adapter,

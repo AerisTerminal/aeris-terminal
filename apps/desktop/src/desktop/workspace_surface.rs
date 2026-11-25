@@ -164,6 +164,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         order_book: init.order_book,
         order_flow: OrderFlowPresenter::default(),
         open_interest_refresh: OpenInterestRefreshState::default(),
+        liquidations_refresh: OpenInterestRefreshState::default(),
         context_panel: init.context_panel,
         chart_time_zone: init.chart_time_zone,
         pending_chart_sync_events: VecDeque::new(),
@@ -1997,6 +1998,7 @@ impl WorkspaceSurface {
         }
         self.apply_order_book_to_chart(cx);
         self.sync_open_interest(cx);
+        self.sync_liquidations(cx);
         self.synchronize_runtime_studies(cx);
         self.resume_carried_bar_replay(carried_replay, cx);
     }
@@ -3878,6 +3880,7 @@ impl WorkspaceSurface {
         self.chart_state = ChartState::Loading;
         self.sync_order_book_demand(cx);
         self.open_interest_refresh.cancel();
+        self.liquidations_refresh.cancel();
         cx.notify();
     }
 
@@ -4504,6 +4507,12 @@ impl WorkspaceSurface {
                     ..settings.open_interest.unwrap_or_default()
                 });
             }
+            OrderFlowMenuStudy::Liquidations => {
+                settings.liquidations = Some(LiquidationsSettings {
+                    visible: true,
+                    ..settings.liquidations.unwrap_or_default()
+                });
+            }
         }
         self.set_chart_order_flow_settings(settings, cx);
         true
@@ -4521,6 +4530,7 @@ impl WorkspaceSurface {
         self.sync_order_book_demand(cx);
         self.apply_order_book_to_chart(cx);
         self.sync_open_interest(cx);
+        self.sync_liquidations(cx);
         cx.notify();
     }
 
@@ -4622,6 +4632,106 @@ impl WorkspaceSurface {
         self.open_interest_refresh.active_key = Some(key);
         self.open_interest_refresh.stop = Some(stop);
         self.open_interest_refresh.task = Some(task);
+    }
+
+    /// Starts, updates, or cancels the pane's bounded background Liquidations refresh loop so the
+    /// sub-pane stays synced across symbol switches, timeframe changes, and live exchange updates.
+    pub(super) fn sync_liquidations(&mut self, cx: &mut Context<Self>) {
+        const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+        let enabled = self
+            .chart
+            .as_ref()
+            .is_some_and(|chart| chart.read(cx).order_flow_settings().liquidations.is_some());
+        let Some(product) = self.product.clone().filter(|_| enabled) else {
+            self.liquidations_refresh.cancel();
+            return;
+        };
+        let market = self.lifecycle.market().clone();
+        if !market.supports_liquidations(&product.provider) {
+            self.liquidations_refresh.cancel();
+            if let Some(chart) = &self.chart {
+                chart.update(cx, |chart, chart_cx| {
+                    if chart.clear_liquidations() {
+                        chart_cx.notify();
+                    }
+                });
+            }
+            return;
+        }
+        let interval = self.interval;
+        let key = (
+            product.provider.clone(),
+            product.instrument_id.clone(),
+            interval,
+        );
+        if self.liquidations_refresh.active_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.liquidations_refresh.cancel();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loop_stop = Arc::clone(&stop);
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                if loop_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                let fetch_market = market.clone();
+                let fetch_product = product.clone();
+                let fetch_stop = Arc::clone(&loop_stop);
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        fetch_market.fetch_liquidations(
+                            &fetch_product,
+                            interval,
+                            aeris_market_runtime::MAXIMUM_LIQUIDATION_POINTS,
+                            &fetch_stop,
+                        )
+                    })
+                    .await;
+                if loop_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                if let Ok(samples) = result {
+                    let points: Vec<aeris_chart_integration::ChartLiquidationSample> = samples
+                        .into_iter()
+                        .map(|sample| aeris_chart_integration::ChartLiquidationSample {
+                            timestamp_unix_nanos: sample.timestamp_unix_nanos,
+                            long_usd: sample.long_usd,
+                            short_usd: sample.short_usd,
+                            long_contracts: sample.long_contracts,
+                            short_contracts: sample.short_contracts,
+                        })
+                        .collect();
+                    let still_open = this.update(cx, |surface, surface_cx| {
+                        let Some(chart) = surface.chart.clone() else {
+                            return false;
+                        };
+                        let still_same = surface.product.as_ref().is_some_and(|current| {
+                            current.provider == product.provider
+                                && current.instrument_id == product.instrument_id
+                                && surface.interval == interval
+                        });
+                        if !still_same {
+                            return false;
+                        }
+                        chart.update(surface_cx, |chart, chart_cx| {
+                            if chart.apply_liquidations(&points) {
+                                chart_cx.notify();
+                            }
+                        });
+                        true
+                    });
+                    if !matches!(still_open, Ok(true)) {
+                        break;
+                    }
+                }
+                cx.background_executor().timer(REFRESH_INTERVAL).await;
+            }
+        });
+        self.liquidations_refresh.active_key = Some(key);
+        self.liquidations_refresh.stop = Some(stop);
+        self.liquidations_refresh.task = Some(task);
     }
 
     /// Applies `settings` through the chart, returning whether the chart holds them now.

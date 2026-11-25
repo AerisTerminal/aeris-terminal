@@ -6,6 +6,7 @@ order_flow_big_trades = 大口約定
 order_flow_book_on_chart = チャート上の板（DOM）
 order_flow_depth_heatmap = 板ヒートマップ（板の履歴）
 order_flow_open_interest = 建玉（オープンインタレスト）
+order_flow_liquidations = 清算
 minimum_volume_invalid = 最小出来高は 0 より大きい数値で入力してください
 length_range_invalid = 長さは {min} から {max} までの整数で入力してください
 chart_restore_failed_title = チャート設定を復元できませんでした

@@ -26,7 +26,7 @@ use aeris_charts_engine::{
 };
 pub use aeris_charts_engine::{
     BigTradesFilter, BigTradesIntensity, BigTradesSize, CumulativeDeltaStyle,
-    DepthLevel as ChartDepthLevel, OpenInterestStyle,
+    DepthLevel as ChartDepthLevel, LiquidationStyle, OpenInterestStyle,
 };
 pub use aeris_charts_engine::{
     ExternalStudyError as ChartStudyOutputError,
@@ -440,10 +440,10 @@ pub enum ChartType {
 /// Renderer-neutral footprint variants persisted by the host.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FootprintDisplayMode {
-    #[default]
     BidAsk,
     Total,
     Delta,
+    #[default]
     ProfileInBar,
     VolumeLadder,
     HorizontalImbalance,
@@ -480,6 +480,8 @@ pub struct OrderFlowSettings {
     pub depth_heatmap: Option<DepthHeatmapSettings>,
     /// Historical and live open-interest sub-pane; `None` while the indicator is not added.
     pub open_interest: Option<OpenInterestSettings>,
+    /// Bar-aligned long/short liquidations sub-pane; `None` while the indicator is not added.
+    pub liquidations: Option<LiquidationsSettings>,
     /// Instrument ticks per footprint row. Zero selects an automatic row size from recent bar
     /// ranges so cells stay legible on every timeframe.
     pub ticks_per_row: u32,
@@ -492,7 +494,7 @@ pub struct OrderFlowSettings {
 impl Default for OrderFlowSettings {
     fn default() -> Self {
         Self {
-            display_mode: FootprintDisplayMode::BidAsk,
+            display_mode: FootprintDisplayMode::ProfileInBar,
             show_cumulative_delta: false,
             cumulative_delta: CumulativeDeltaSettings::default(),
             show_delta_histogram: false,
@@ -501,6 +503,7 @@ impl Default for OrderFlowSettings {
             order_book_depth: None,
             depth_heatmap: None,
             open_interest: None,
+            liquidations: None,
             ticks_per_row: 0,
             footprint_extensions: FootprintExtensions::default(),
             show_extended_summary: false,
@@ -616,6 +619,40 @@ impl Default for OpenInterestSettings {
             line_color: None,
             up_color: None,
             down_color: None,
+        }
+    }
+}
+
+/// Volume unit displayed by the Liquidations sub-pane.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LiquidationUnit {
+    /// Quote USD notional liquidated (`contracts * price`).
+    #[default]
+    Usd,
+    /// Base-asset contracts liquidated.
+    Contracts,
+}
+
+/// Durable liquidations sub-pane settings. Unset colors follow the active chart theme:
+/// bullish/up for short liquidations (forced buys) and bearish/down for long liquidations
+/// (forced sells).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiquidationsSettings {
+    pub visible: bool,
+    pub style: LiquidationStyle,
+    pub unit: LiquidationUnit,
+    pub long_color: Option<ChartColor>,
+    pub short_color: Option<ChartColor>,
+}
+
+impl Default for LiquidationsSettings {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            style: LiquidationStyle::Split,
+            unit: LiquidationUnit::Usd,
+            long_color: None,
+            short_color: None,
         }
     }
 }
@@ -767,6 +804,7 @@ pub enum ChartSettingsRequest {
     DeltaHistogram,
     OrderBookDepth,
     OpenInterest,
+    Liquidations,
     SessionProfile(SessionProfileKind),
     /// One drawing, by its Aeris Charts identity.
     Drawing(DrawingId),
@@ -1151,6 +1189,7 @@ pub struct AerisChartView {
     order_book_depth_state: Option<OrderBookDepthState>,
     depth_heatmap_state: Option<DepthHeatmapState>,
     open_interest_state: OpenInterestChartState,
+    liquidations_state: LiquidationsChartState,
     product_bars: ProductPriceBars,
     legend_options: ChartLegendOptions,
     /// Legend row pinned open by clicking it, so its controls stay steadily visible and clickable
@@ -1267,6 +1306,7 @@ impl AerisChartView {
             order_book_depth_state: None,
             depth_heatmap_state: None,
             open_interest_state: OpenInterestChartState::default(),
+            liquidations_state: LiquidationsChartState::default(),
             product_bars: ProductPriceBars::default(),
             legend_options: ChartLegendOptions::default(),
             active_legend_item: None,
@@ -1384,6 +1424,7 @@ impl AerisChartView {
             order_book_depth_state: None,
             depth_heatmap_state: None,
             open_interest_state: OpenInterestChartState::default(),
+            liquidations_state: LiquidationsChartState::default(),
             product_bars,
             legend_options: ChartLegendOptions::default(),
             active_legend_item: None,
@@ -2885,6 +2926,9 @@ mod depth_heatmap;
 use depth_heatmap::DepthHeatmapState;
 mod open_interest;
 use open_interest::{OPEN_INTEREST_STUDY_ID, OpenInterestChartState};
+mod liquidations;
+pub use liquidations::ChartLiquidationSample;
+use liquidations::{LIQUIDATIONS_STUDY_ID, LiquidationsChartState};
 mod order_flow;
 mod palette;
 pub use palette::{ChartAxisAppearance, ChartThemeDefaults};

@@ -12,6 +12,7 @@ pub mod connection;
 pub mod fault;
 pub mod history;
 pub mod instrument;
+pub mod liquidations;
 pub mod open_interest;
 pub mod presentation;
 
@@ -36,6 +37,9 @@ pub use history::{
 pub use instrument::{
     ResolvedContractMetadata, ResolvedInstrumentClass, ResolvedProviderInstrument,
     ResolvedSessionHours,
+};
+pub use liquidations::{
+    LiquidationRequest, LiquidationSample, LiquidationSource, MAXIMUM_LIQUIDATION_POINTS,
 };
 pub use open_interest::{
     MAXIMUM_OPEN_INTEREST_POINTS, OpenInterestRequest, OpenInterestSample, OpenInterestSource,

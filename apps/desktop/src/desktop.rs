@@ -141,12 +141,12 @@ use aeris_chart_integration::{
     ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
     ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle,
     DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, DepthHeatmapSettings, FootprintDisplayMode,
-    MAXIMUM_STUDY_LINE_WIDTH, OpenInterestSettings, OpenInterestStyle, OrderBookDepthSettings,
-    OrderFlowAggregation, OrderFlowApplyError, OrderFlowDefaultColors, OrderFlowSettings,
-    OrderFlowTapeChange, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
-    SessionProfileKind, SessionProfileSettings, SessionVolumeProfileSettings, TpoCells,
-    TpoSettings, VolumeAverageKind, VolumeAverageSettings, VolumeDefaultColors, VolumePlacement,
-    VolumeSettings, chart_color_hex,
+    LiquidationStyle, LiquidationUnit, LiquidationsSettings, MAXIMUM_STUDY_LINE_WIDTH,
+    OpenInterestSettings, OpenInterestStyle, OrderBookDepthSettings, OrderFlowAggregation,
+    OrderFlowApplyError, OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange,
+    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, SessionProfileKind,
+    SessionProfileSettings, SessionVolumeProfileSettings, TpoCells, TpoSettings, VolumeAverageKind,
+    VolumeAverageSettings, VolumeDefaultColors, VolumePlacement, VolumeSettings, chart_color_hex,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource};
 use aeris_contracts::{
@@ -940,6 +940,7 @@ struct WorkspaceSurface {
     order_book: Entity<ReadOnlyOrderBookView>,
     order_flow: order_flow_presenter::OrderFlowPresenter,
     open_interest_refresh: OpenInterestRefreshState,
+    liquidations_refresh: OpenInterestRefreshState,
     context_panel: context_panel_controller::ContextPanelController,
     /// The trader's selected IANA chart time zone. The surface owns it so every chart this
     /// pane creates (restore, symbol or timeframe swap) and every save use the same value.
@@ -2858,6 +2859,7 @@ fn legend_settings_request(request: ChartSettingsRequest) -> Option<LegendSettin
         ChartSettingsRequest::DeltaHistogram => order_flow(OrderFlowIndicator::DeltaHistogram),
         ChartSettingsRequest::OrderBookDepth => order_flow(OrderFlowIndicator::OrderBook),
         ChartSettingsRequest::OpenInterest => order_flow(OrderFlowIndicator::OpenInterest),
+        ChartSettingsRequest::Liquidations => order_flow(OrderFlowIndicator::Liquidations),
         ChartSettingsRequest::SessionProfile(kind) => {
             Some(LegendSettingsRequest::SessionProfile(kind))
         }

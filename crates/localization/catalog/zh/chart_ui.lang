@@ -150,6 +150,7 @@ legend_big_trades = 大单成交
 legend_order_book = 订单簿
 legend_depth_heatmap = 深度热力图
 legend_open_interest = 持仓量
+legend_liquidations = 爆仓
 legend_loading = 加载中
 legend_hide = 隐藏
 legend_show = 显示

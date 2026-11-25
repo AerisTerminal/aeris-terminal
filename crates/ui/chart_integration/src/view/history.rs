@@ -52,6 +52,9 @@ impl OrderFlowIndicatorEdit {
         if before.open_interest.is_some() != after.open_interest.is_some() {
             current.open_interest = target.open_interest;
         }
+        if before.liquidations.is_some() != after.liquidations.is_some() {
+            current.liquidations = target.liquidations;
+        }
         current
     }
 }

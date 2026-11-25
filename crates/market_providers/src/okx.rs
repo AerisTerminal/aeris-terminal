@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aeris_crypto_common::{CryptoError, CryptoResult, TradeDedupRing};
+use aeris_crypto_common::{CryptoError, CryptoResult, LiquidationLedger, TradeDedupRing};
 use aeris_market_data::BarPeriod;
 use aeris_market_engine::{
     MarketStream, ProviderCapabilities as EngineProviderCapabilities, StreamRequirements,
@@ -31,8 +31,8 @@ use aeris_market_runtime::{
 use aeris_okx_market_adapter::{
     OKX_BUSINESS_WS_URL, OKX_PUBLIC_WS_URL, OkxBookApplyOutcome, OkxBookState, OkxCatalog,
     OkxHttpClient, OkxMarketKind, OkxWsEvent, build_ping, build_subscribe, build_unsubscribe,
-    decode_books, decode_live_candle, decode_trades, okx_interval_for_period,
-    parse_provider_symbol, parse_ws_frame, period_for_okx_interval,
+    decode_books, decode_live_candle, decode_trades, decode_ws_liquidations,
+    okx_interval_for_period, parse_provider_symbol, parse_ws_frame, period_for_okx_interval,
 };
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
@@ -124,10 +124,13 @@ const OKX_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
 pub(crate) fn provider_spec(
     realtime_enabled: bool,
     shared_catalogs: Arc<SharedCryptoCatalogs>,
+    liquidation_ledger: Arc<LiquidationLedger>,
 ) -> ProviderRuntimeSpec {
     let ct_vals: Arc<RwLock<BTreeMap<String, i64>>> = Arc::new(RwLock::new(BTreeMap::new()));
     let ct_vals_cat = Arc::clone(&ct_vals);
     let ct_vals_rt = Arc::clone(&ct_vals);
+    let ct_vals_liq = Arc::clone(&ct_vals);
+    let liq_for_rt = Arc::clone(&liquidation_ledger);
     crypto_provider_spec(
         OKX_DESCRIPTOR,
         CryptoHistorySource::Okx(OkxHttpClient::default()),
@@ -147,12 +150,28 @@ pub(crate) fn provider_spec(
             );
         },
         move |controls, events, stop, ws_gen, wake| {
-            run_realtime(controls, events, stop, ws_gen, wake, &ct_vals_rt);
+            run_realtime(
+                controls,
+                events,
+                stop,
+                ws_gen,
+                wake,
+                &ct_vals_rt,
+                &liq_for_rt,
+            );
         },
     )
     .with_open_interest(Arc::new(
         aeris_okx_market_adapter::open_interest::fetch_open_interest,
     ))
+    .with_liquidations(Arc::new(move |request, stop| {
+        aeris_okx_market_adapter::liquidations::fetch_liquidations(
+            &liquidation_ledger,
+            &ct_vals_liq,
+            request,
+            stop,
+        )
+    }))
 }
 
 fn okx_candle_interval(period: BarPeriod) -> Result<String, String> {
@@ -430,6 +449,7 @@ fn run_realtime(
     ws_generation: &Arc<AtomicU64>,
     wake: &ProviderCoordinatorWake,
     ct_vals: &RwLock<BTreeMap<String, i64>>,
+    liquidation_ledger: &LiquidationLedger,
 ) {
     let mut demand = CryptoDemand::default();
 
@@ -508,6 +528,20 @@ fn run_realtime(
                         pub_args.insert(("books".to_string(), sym.inst_id));
                     }
                 }
+                let has_swap_demand = demand
+                    .candles
+                    .iter()
+                    .map(|c| &c.instrument)
+                    .chain(&demand.trades)
+                    .chain(&demand.quotes)
+                    .chain(&demand.books)
+                    .any(|inst| {
+                        parse_provider_symbol(&inst.provider_symbol)
+                            .is_ok_and(|sym| sym.kind == OkxMarketKind::Swap)
+                    });
+                if has_swap_demand {
+                    pub_args.insert(("liquidation-orders".to_string(), "SWAP".to_string()));
+                }
                 let mut biz_args = BTreeSet::new();
                 for c in &demand.candles {
                     if let Ok(sym) = parse_provider_symbol(&c.instrument.provider_symbol) {
@@ -555,6 +589,7 @@ fn run_realtime(
                             &text,
                             &demand,
                             ct_vals,
+                            liquidation_ledger,
                             &mut books,
                             &mut trade_dedup,
                             sink,
@@ -618,6 +653,7 @@ fn handle_okx_frame(
     text: &str,
     demand: &CryptoDemand,
     ct_vals: &RwLock<BTreeMap<String, i64>>,
+    liquidation_ledger: &LiquidationLedger,
     books: &mut BTreeMap<String, OkxBookState>,
     trade_dedup: &mut BTreeMap<String, TradeDedupRing<String>>,
     sink: ProviderEventSink,
@@ -768,6 +804,19 @@ fn handle_okx_frame(
                         ),
                         wake,
                     );
+                }
+            }
+        }
+        OkxWsEvent::Liquidations { data } if is_public => {
+            if let Ok(decoded) = decode_ws_liquidations(&data, &|inst_id| {
+                ct_vals
+                    .read()
+                    .ok()
+                    .and_then(|map| map.get(inst_id).copied())
+                    .map_or(1.0, aeris_okx_market_adapter::liquidations::ct_val_scale)
+            }) {
+                for (inst_id, event) in decoded {
+                    liquidation_ledger.record(&inst_id, event);
                 }
             }
         }

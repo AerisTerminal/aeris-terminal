@@ -1117,6 +1117,13 @@ mod tests {
                 up_color: "#00C853".to_string(),
                 down_color: "#FF1744".to_string(),
             }),
+            liquidations: Some(true),
+            liquidations_options: Some(aeris_contracts::WorkspaceLiquidationsState {
+                style: 1,
+                unit: 0,
+                long_color: "#FF1744".to_string(),
+                short_color: "#00C853".to_string(),
+            }),
         }
     }
 

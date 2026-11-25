@@ -150,6 +150,7 @@ legend_big_trades = Gros trades
 legend_order_book = Carnet d'ordres
 legend_depth_heatmap = Carte de chaleur de la profondeur
 legend_open_interest = Intérêt ouvert
+legend_liquidations = Liquidations
 legend_loading = Chargement
 legend_hide = Masquer
 legend_show = Afficher

@@ -23,6 +23,9 @@ pub enum OkxWsEvent {
         interval: String,
         data: Box<serde_json::value::RawValue>,
     },
+    Liquidations {
+        data: Box<serde_json::value::RawValue>,
+    },
     Ignored,
 }
 
@@ -57,7 +60,13 @@ pub fn build_ping() -> String {
 pub fn build_subscribe(args: &[(String, String)]) -> String {
     let entries: Vec<_> = args
         .iter()
-        .map(|(channel, inst_id)| json!({ "channel": channel, "instId": inst_id }))
+        .map(|(channel, inst_id)| {
+            if channel == "liquidation-orders" {
+                json!({ "channel": channel, "instType": inst_id })
+            } else {
+                json!({ "channel": channel, "instId": inst_id })
+            }
+        })
         .collect();
     json!({ "op": "subscribe", "args": entries }).to_string()
 }
@@ -67,7 +76,13 @@ pub fn build_subscribe(args: &[(String, String)]) -> String {
 pub fn build_unsubscribe(args: &[(String, String)]) -> String {
     let entries: Vec<_> = args
         .iter()
-        .map(|(channel, inst_id)| json!({ "channel": channel, "instId": inst_id }))
+        .map(|(channel, inst_id)| {
+            if channel == "liquidation-orders" {
+                json!({ "channel": channel, "instType": inst_id })
+            } else {
+                json!({ "channel": channel, "instId": inst_id })
+            }
+        })
         .collect();
     json!({ "op": "unsubscribe", "args": entries }).to_string()
 }
@@ -96,6 +111,9 @@ pub fn parse_ws_frame(text: &str) -> CryptoResult<OkxWsEvent> {
         }
         if arg.channel == "trades" {
             return Ok(OkxWsEvent::Trades { inst_id, data });
+        }
+        if arg.channel == "liquidation-orders" {
+            return Ok(OkxWsEvent::Liquidations { data });
         }
         if let Some(interval) = arg.channel.strip_prefix("candle") {
             return Ok(OkxWsEvent::Candle {

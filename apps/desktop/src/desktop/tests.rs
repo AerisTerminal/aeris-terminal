@@ -8101,6 +8101,7 @@ fn desktop_provider_labels_come_from_runtime_descriptors() {
     assert_eq!(super::ProviderId("binance").display(), "Binance");
     assert_eq!(super::ProviderId("bybit").display(), "Bybit");
     assert_eq!(super::ProviderId("okx").display(), "OKX");
+    assert_eq!(super::ProviderId("coinbase").display(), "Coinbase");
     assert_eq!(super::ProviderId("crypto_agg").display(), "Aggregated");
     // Every provider id round-trips; an id the build does not expose maps to none.
     for descriptor in aeris_market_providers::published_provider_descriptors() {
@@ -8114,6 +8115,7 @@ fn desktop_provider_labels_come_from_runtime_descriptors() {
         super::ProviderId("binance"),
         super::ProviderId("bybit"),
         super::ProviderId("okx"),
+        super::ProviderId("coinbase"),
         super::ProviderId("crypto_agg"),
     ] {
         assert!(super::provider_chart_types(provider).contains(&super::ChartType::Footprint));

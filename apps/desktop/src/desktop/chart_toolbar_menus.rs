@@ -1020,27 +1020,19 @@ fn timeframe_favorite_star(
 ) -> impl IntoElement + use<> {
     let toggle = app.clone();
     let hover_app = app.clone();
-    div()
-        .id(("timeframe_favorite_star_region", index))
+    super::chrome_menu::favorite_star_button(("timeframe_favorite_star", index), favorite, theme)
+        .on_secondary_surface()
+        .debug_selector(|| "timeframe_favorite_star".into())
         .on_hover(move |hovered, window, cx| {
             hover_app.update(cx, |app, app_cx| {
                 app.hover_timeframe_menu_region(*hovered, window, app_cx);
             });
         })
-        .child(
-            super::chrome_menu::favorite_star_button(
-                ("timeframe_favorite_star", index),
-                favorite,
-                theme,
-            )
-            .on_secondary_surface()
-            .debug_selector(|| "timeframe_favorite_star".into())
-            .on_press(move |_, _, cx| {
-                toggle.update(cx, |_, app_cx| {
-                    app_cx.emit(TimeframeFavoriteToggledEvent(interval));
-                });
-            }),
-        )
+        .on_press(move |_, _, cx| {
+            toggle.update(cx, |_, app_cx| {
+                app_cx.emit(TimeframeFavoriteToggledEvent(interval));
+            });
+        })
 }
 
 #[derive(Clone, Copy)]

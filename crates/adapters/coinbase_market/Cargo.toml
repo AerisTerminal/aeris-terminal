@@ -1,0 +1,21 @@
+[package]
+name = "aeris_coinbase_market_adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aeris_crypto_common = { path = "../../crypto_common" }
+aeris_market_data = { path = "../../domain/market_data" }
+aeris_platform_runtime = { path = "../../platform_runtime" }
+aeris_provider_history = { path = "../../provider_history" }
+aeris_provider_spi = { path = "../../provider_spi" }
+chrono.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+ureq.workspace = true
+
+[lints]
+workspace = true

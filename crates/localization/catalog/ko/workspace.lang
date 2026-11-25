@@ -6,6 +6,7 @@ order_flow_big_trades = 대량 체결
 order_flow_book_on_chart = 차트 호가창(DOM)
 order_flow_depth_heatmap = 호가 히트맵(호가 기록)
 order_flow_open_interest = 미결제약정
+order_flow_liquidations = 청산
 minimum_volume_invalid = 최소 거래량은 0보다 큰 숫자여야 합니다
 length_range_invalid = 기간은 {min}에서 {max} 사이의 정수여야 합니다
 chart_restore_failed_title = 차트 설정을 복원할 수 없음

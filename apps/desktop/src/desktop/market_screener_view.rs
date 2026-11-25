@@ -321,10 +321,13 @@ fn header_cell(
     let colors = theme.colors;
     let active = sort.column == spec.column;
     let indicator = active.then(|| {
-        header_icon(HugeIcon::ChevronDown)
-            .with_size(px(SORT_ICON_SIZE))
-            .color(gpui_color(colors.text_default))
-            .when(!sort.descending, |icon| icon.rotate(0.5))
+        header_icon(if sort.descending {
+            HugeIcon::ChevronDown
+        } else {
+            HugeIcon::ChevronUp
+        })
+        .with_size(px(SORT_ICON_SIZE))
+        .color(gpui_color(colors.text_default))
     });
     let sort_terminal = terminal.clone();
     let direction = if active && sort.descending {

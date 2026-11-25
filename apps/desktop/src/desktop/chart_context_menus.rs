@@ -1811,6 +1811,10 @@ fn footprint_group(
                 ChoiceRow::new("footprint_display", tr!(chart_menu::DISPLAY)),
                 &[
                     mode(
+                        tr!(chart_menu::FOOTPRINT_PROFILE),
+                        FootprintDisplayMode::ProfileInBar,
+                    ),
+                    mode(
                         tr!(chart_menu::FOOTPRINT_BID_ASK),
                         FootprintDisplayMode::BidAsk,
                     ),
@@ -1821,10 +1825,6 @@ fn footprint_group(
                     mode(
                         tr!(chart_menu::FOOTPRINT_DELTA),
                         FootprintDisplayMode::Delta,
-                    ),
-                    mode(
-                        tr!(chart_menu::FOOTPRINT_PROFILE),
-                        FootprintDisplayMode::ProfileInBar,
                     ),
                     mode(
                         tr!(chart_menu::FOOTPRINT_LADDER),

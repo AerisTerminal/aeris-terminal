@@ -14,10 +14,10 @@ use std::{
 use aeris_bybit_market_adapter::{
     BYBIT_LINEAR_WS_URL, BYBIT_SPOT_WS_URL, BybitBookState, BybitCatalog, BybitHttpClient,
     BybitMarketKind, BybitWsEvent, build_ping, build_subscribe, build_unsubscribe,
-    bybit_interval_for_period, decode_live_candle, decode_orderbook, decode_public_trades,
-    parse_provider_symbol, parse_ws_frame,
+    bybit_interval_for_period, decode_liquidations, decode_live_candle, decode_orderbook,
+    decode_public_trades, parse_provider_symbol, parse_ws_frame,
 };
-use aeris_crypto_common::{CryptoError, CryptoResult, TradeDedupRing};
+use aeris_crypto_common::{CryptoError, CryptoResult, LiquidationLedger, TradeDedupRing};
 use aeris_market_data::BarPeriod;
 use aeris_market_engine::{
     MarketStream, ProviderCapabilities as EngineProviderCapabilities, StreamRequirements,
@@ -123,7 +123,9 @@ const BYBIT_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
 pub(crate) fn provider_spec(
     realtime_enabled: bool,
     shared_catalogs: Arc<SharedCryptoCatalogs>,
+    liquidation_ledger: Arc<LiquidationLedger>,
 ) -> ProviderRuntimeSpec {
+    let liq_for_rt = Arc::clone(&liquidation_ledger);
     crypto_provider_spec(
         BYBIT_DESCRIPTOR,
         CryptoHistorySource::Bybit(BybitHttpClient::default()),
@@ -135,11 +137,20 @@ pub(crate) fn provider_spec(
         move |controls, events, ws_gen, stop| {
             run_catalog(controls, events, ws_gen, stop, &shared_catalogs);
         },
-        run_realtime,
+        move |controls, events, stop, ws_gen, wake| {
+            run_realtime(controls, events, stop, ws_gen, wake, &liq_for_rt);
+        },
     )
     .with_open_interest(Arc::new(
         aeris_bybit_market_adapter::open_interest::fetch_open_interest,
     ))
+    .with_liquidations(Arc::new(move |request, stop| {
+        aeris_bybit_market_adapter::liquidations::fetch_liquidations(
+            &liquidation_ledger,
+            request,
+            stop,
+        )
+    }))
 }
 
 fn bybit_candle_interval(period: BarPeriod) -> Result<String, String> {
@@ -387,6 +398,22 @@ impl BybitSegmentSocket {
                 topics.insert(format!("orderbook.{depth}.{}", sym.wire_symbol));
             }
         }
+        if self.kind == BybitMarketKind::Linear {
+            for inst in demand
+                .candles
+                .iter()
+                .map(|c| &c.instrument)
+                .chain(&demand.trades)
+                .chain(&demand.quotes)
+                .chain(&demand.books)
+            {
+                if let Ok(sym) = parse_provider_symbol(&inst.provider_symbol)
+                    && sym.kind == BybitMarketKind::Linear
+                {
+                    topics.insert(format!("allLiquidation.{}", sym.wire_symbol));
+                }
+            }
+        }
         topics
     }
 
@@ -443,6 +470,7 @@ fn run_realtime(
     stop: &Arc<AtomicBool>,
     ws_generation: &Arc<AtomicU64>,
     wake: &ProviderCoordinatorWake,
+    liquidation_ledger: &LiquidationLedger,
 ) {
     let mut demand = CryptoDemand::default();
 
@@ -544,7 +572,15 @@ fn run_realtime(
                     Ok(MarketSocketEvent::Text(text)) => {
                         seg.last_activity = Instant::now();
                         handle_bybit_frame(
-                            seg, &text, &demand, sink, events, wake, generation, &mut seq,
+                            seg,
+                            &text,
+                            &demand,
+                            liquidation_ledger,
+                            sink,
+                            events,
+                            wake,
+                            generation,
+                            &mut seq,
                         );
                     }
                     Ok(MarketSocketEvent::Pong) => {
@@ -599,6 +635,7 @@ fn handle_bybit_frame(
     seg: &mut BybitSegmentSocket,
     text: &str,
     demand: &CryptoDemand,
+    liquidation_ledger: &LiquidationLedger,
     sink: ProviderEventSink,
     events: &SyncSender<Fenced<ProviderTag, CryptoRealtimeEvent>>,
     wake: &ProviderCoordinatorWake,
@@ -729,6 +766,13 @@ fn handle_bybit_frame(
                         ),
                         wake,
                     );
+                }
+            }
+        }
+        BybitWsEvent::Liquidations { symbol, data } => {
+            if let Ok(events) = decode_liquidations(&data) {
+                for event in events {
+                    liquidation_ledger.record(&symbol, event);
                 }
             }
         }

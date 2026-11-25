@@ -249,4 +249,49 @@ mod tests {
         );
         assert_eq!(chart.engine.panes.len(), initial_panes);
     }
+
+    #[test]
+    fn keyboard_delete_of_selected_open_interest_removes_study_without_runtime_error() {
+        let mut chart = AerisChartView::new();
+        assert!(
+            chart
+                .set_order_flow_settings(OrderFlowSettings {
+                    open_interest: Some(OpenInterestSettings::default()),
+                    ..OrderFlowSettings::default()
+                })
+                .expect("enable open interest")
+        );
+        let last_sec = chart.product_bars.last_time().expect("demo chart has bars") as i64;
+        assert!(chart.apply_open_interest(&[OpenInterestBar {
+            timestamp_unix_nanos: last_sec * NANOS_PER_SECOND,
+            open: None,
+            high: Some(10_500.0),
+            low: Some(10_000.0),
+            close: 10_250.0,
+        }]));
+        let series_id = chart
+            .engine
+            .open_interest_series(OPEN_INTEREST_STUDY_ID)
+            .expect("open interest series");
+        chart.engine.set_selected_series(Some(series_id));
+        assert!(chart.has_deletable_selection());
+        assert!(chart.engine.input_key_down(
+            aeris_charts_engine::ChartKey::Delete,
+            aeris_charts_engine::InputModifiers::default(),
+            false,
+            0.0,
+        ));
+        let host_events = chart.process_input_events();
+        assert_eq!(
+            host_events,
+            vec![crate::view::ChartHostEvent::OrderFlowSettingsChanged],
+            "Open Interest Delete must remove through OrderFlowSettings, never emit RemoveStudy(u64::MAX)"
+        );
+        assert_eq!(chart.order_flow_settings().open_interest, None);
+        assert_eq!(
+            chart.engine.open_interest_series(OPEN_INTEREST_STUDY_ID),
+            None
+        );
+        assert_eq!(chart.engine.selected_series(), None);
+    }
 }

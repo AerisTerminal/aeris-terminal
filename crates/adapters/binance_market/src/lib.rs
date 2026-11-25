@@ -11,6 +11,7 @@ pub mod endpoints;
 pub mod history;
 pub mod http;
 pub mod identity;
+pub mod liquidations;
 pub mod meta;
 pub mod open_interest;
 pub mod trades;
@@ -34,6 +35,7 @@ pub use identity::{
     BinanceInstrument, BinanceMarketKind, BinanceSymbolRef, instrument_id_for,
     parse_provider_symbol,
 };
+pub use liquidations::decode_force_order;
 pub use meta::BinanceCatalog;
 pub use trades::decode_agg_trade;
 pub use ws::{BinanceWsEvent, build_subscribe, build_unsubscribe, parse_ws_frame};

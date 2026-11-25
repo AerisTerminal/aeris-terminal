@@ -51,6 +51,7 @@ use super::{
 
 type ClickActivation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type PressActivation = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
+type HoverHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
 
 /// The Theme System `Button` variants, by the same names. See the module table for when to use
 /// each one.
@@ -439,6 +440,7 @@ pub(crate) struct Button {
     loading_icon: Option<Icon>,
     tooltip: Option<TooltipSpec>,
     activation: Option<Activation>,
+    hover: Option<HoverHandler>,
     aria_label: Option<SharedString>,
     flags: ButtonFlags,
 }
@@ -462,6 +464,7 @@ impl Button {
             loading_icon: None,
             tooltip: None,
             activation: None,
+            hover: None,
             aria_label: None,
             flags: ButtonFlags::default(),
         }
@@ -604,6 +607,16 @@ impl Button {
         handler: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.activation = Some(Activation::Press(Rc::new(handler)));
+        self
+    }
+
+    /// Observes pointer entry and exit on the button itself (since `Button` occludes hover from
+    /// ancestor hitboxes).
+    pub(crate) fn on_hover(
+        mut self,
+        handler: impl Fn(&bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.hover = Some(Rc::new(handler));
         self
     }
 
@@ -886,6 +899,16 @@ impl RenderOnce for Button {
         );
         let button = attach_activation(button, self.activation.filter(|_| policy.accepts_input()));
         let mut button = content.attach(button, flags.has(ButtonFlags::TRIGGER));
+        if let Some(hover) = self.hover {
+            let hover_id = ElementId::NamedChild(Arc::new(self.id.clone()), "hover".into());
+            button = button.child(
+                div()
+                    .id(hover_id)
+                    .absolute()
+                    .inset_0()
+                    .on_hover(move |hovered, window, cx| hover(hovered, window, cx)),
+            );
+        }
         button.style().refine(&self.layout);
 
         match self.tooltip {

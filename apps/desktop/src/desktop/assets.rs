@@ -22,6 +22,7 @@ pub enum UiIcon {
     Chart,
     CheckIcon,
     ChevronDown,
+    ChevronUp,
     Copy,
     CopySuccess,
     DataPanel,
@@ -79,7 +80,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 63] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
@@ -90,6 +91,7 @@ impl UiIcon {
         Self::Chart,
         Self::CheckIcon,
         Self::ChevronDown,
+        Self::ChevronUp,
         Self::Copy,
         Self::CopySuccess,
         Self::DataPanel,
@@ -157,6 +159,7 @@ impl UiIcon {
             Self::Chart => "chart.svg",
             Self::CheckIcon => "check.svg",
             Self::ChevronDown => "chevron-down.svg",
+            Self::ChevronUp => "chevron-up.svg",
             Self::Copy => "copy.svg",
             Self::CopySuccess => "copy-success.svg",
             Self::DataPanel => "data-panel.svg",
@@ -443,6 +446,7 @@ pub enum ExchangeLogo {
     Binance,
     Bybit,
     Okx,
+    Coinbase,
     #[default]
     Rithmic,
     Hyperliquid,
@@ -451,12 +455,13 @@ pub enum ExchangeLogo {
 }
 
 impl ExchangeLogo {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Rithmic,
         Self::Hyperliquid,
         Self::Binance,
         Self::Bybit,
         Self::Okx,
+        Self::Coinbase,
         Self::AllProviders,
     ];
 
@@ -469,6 +474,7 @@ impl ExchangeLogo {
             "binance" => Some(Self::Binance),
             "bybit" => Some(Self::Bybit),
             "okx" => Some(Self::Okx),
+            "coinbase" => Some(Self::Coinbase),
             "all-providers" => Some(Self::AllProviders),
             _ => None,
         }
@@ -480,6 +486,7 @@ impl ExchangeLogo {
             Self::Binance => "binance.svg",
             Self::Bybit => "bybit.svg",
             Self::Okx => "okx.svg",
+            Self::Coinbase => "coinbase.svg",
             Self::Rithmic => "rithmic.svg",
             Self::Hyperliquid => "hyperliquid.svg",
             Self::AllProviders => "all-providers.svg",
@@ -635,6 +642,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "chart.svg" => include_bytes!("../../assets/icons/ui/chart.svg"),
         "check.svg" => include_bytes!("../../assets/icons/ui/check.svg"),
         "chevron-down.svg" => include_bytes!("../../assets/icons/ui/chevron-down.svg"),
+        "chevron-up.svg" => include_bytes!("../../assets/icons/ui/chevron-up.svg"),
         "copy.svg" => include_bytes!("../../assets/icons/ui/copy.svg"),
         "download.svg" => include_bytes!("../../assets/icons/ui/download.svg"),
         "copy-success.svg" => include_bytes!("../../assets/icons/ui/copy-success.svg"),
@@ -737,6 +745,9 @@ fn exchange_asset(path: &str) -> Option<&'static [u8]> {
         "binance.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/binance.svg"),
         "bybit.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/bybit.svg"),
         "okx.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/okx.svg"),
+        "coinbase.svg" => {
+            include_bytes!("../../assets/exchange_assets/exchange_logo/coinbase.svg")
+        }
         "rithmic.svg" => include_bytes!("../../assets/exchange_assets/exchange_logo/rithmic.svg"),
         "hyperliquid.svg" => {
             include_bytes!("../../assets/exchange_assets/exchange_logo/hyperliquid.svg")
@@ -1178,6 +1189,7 @@ mod tests {
         assert_eq!(logo_for("binance"), Some(ExchangeLogo::Binance));
         assert_eq!(logo_for("bybit"), Some(ExchangeLogo::Bybit));
         assert_eq!(logo_for("okx"), Some(ExchangeLogo::Okx));
+        assert_eq!(logo_for("coinbase"), Some(ExchangeLogo::Coinbase));
         assert_eq!(logo_for("crypto_agg"), Some(ExchangeLogo::AllProviders));
         assert_eq!(ExchangeLogo::for_logo_key("unknown"), None);
     }

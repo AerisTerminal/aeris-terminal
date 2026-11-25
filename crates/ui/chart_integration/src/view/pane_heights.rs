@@ -15,6 +15,7 @@ pub enum ChartPaneContent {
     CumulativeDelta,
     Delta,
     OpenInterest,
+    Liquidations,
     /// The `occurrence`-th native indicator of this kind, in creation order.
     Indicator {
         indicator: ChartIndicator,
@@ -34,6 +35,7 @@ impl ChartPaneContent {
             Self::CumulativeDelta => "order_flow.cumulative_delta".to_string(),
             Self::Delta => "order_flow.delta".to_string(),
             Self::OpenInterest => "order_flow.open_interest".to_string(),
+            Self::Liquidations => "order_flow.liquidations".to_string(),
             Self::Indicator {
                 indicator,
                 occurrence,
@@ -50,6 +52,7 @@ impl ChartPaneContent {
             "order_flow.cumulative_delta" => return Some(Self::CumulativeDelta),
             "order_flow.delta" => return Some(Self::Delta),
             "order_flow.open_interest" => return Some(Self::OpenInterest),
+            "order_flow.liquidations" => return Some(Self::Liquidations),
             _ => {}
         }
         if let Some(key) = value.strip_prefix("study.") {
@@ -196,6 +199,7 @@ impl AerisChartView {
                 }
                 LegendItem::OrderFlow(OrderFlowStudy::Delta) => Some(ChartPaneContent::Delta),
                 LegendItem::OpenInterest => Some(ChartPaneContent::OpenInterest),
+                LegendItem::Liquidations => Some(ChartPaneContent::Liquidations),
                 LegendItem::Indicator(binding) => indicator_content(&bindings, binding),
                 LegendItem::Study { study_id, .. } => self
                     .pane_heights

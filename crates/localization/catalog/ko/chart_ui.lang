@@ -150,6 +150,7 @@ legend_big_trades = 대량 체결
 legend_order_book = 호가창
 legend_depth_heatmap = 호가 히트맵
 legend_open_interest = 미결제약정
+legend_liquidations = 청산
 legend_loading = 로딩 중
 legend_hide = 숨기기
 legend_show = 표시

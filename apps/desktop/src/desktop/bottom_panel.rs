@@ -1173,8 +1173,11 @@ fn trade_history_expand_button(
     } else {
         tr!(trading::EXPAND_BOTTOM_PANEL)
     };
-    let chevron = header_icon(HugeIcon::ChevronDown);
-    let chevron = if open { chevron } else { chevron.rotate(0.5) };
+    let chevron = header_icon(if open {
+        HugeIcon::ChevronDown
+    } else {
+        HugeIcon::ChevronUp
+    });
     chrome_tooltip(
         "trade_history_expand",
         label,

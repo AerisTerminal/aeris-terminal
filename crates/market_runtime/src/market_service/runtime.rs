@@ -549,6 +549,91 @@ impl MarketService {
             .insert(cache_key, Instant::now(), samples.clone());
         Ok(samples)
     }
+
+    /// Returns whether `provider` registered a liquidation source.
+    #[must_use]
+    pub fn supports_liquidations(&self, provider: &str) -> bool {
+        self.runtime.liquidation_sources.contains_key(provider)
+    }
+
+    /// Fetches bar-aligned liquidation volumes for one installed instrument and chart interval
+    /// through its registered provider source, reusing the runtime's bounded short-TTL cache.
+    ///
+    /// # Errors
+    /// Returns an error when the interval cannot be resolved for the provider or the upstream
+    /// fetcher fails. Providers without a liquidation source return an empty list.
+    pub fn fetch_liquidations(
+        &self,
+        instrument: &InstallProviderInstrument,
+        interval: aeris_market_data::ChartInterval,
+        maximum_points: usize,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<Vec<aeris_provider_spi::LiquidationSample>, String> {
+        let Some(source) = self
+            .runtime
+            .liquidation_sources
+            .get(instrument.provider.as_str())
+            .cloned()
+        else {
+            return Ok(Vec::new());
+        };
+        if stop.load(Ordering::Acquire) || self.runtime.shutdown.load(Ordering::Acquire) {
+            return Err("liquidation request cancelled".to_string());
+        }
+        let presentation = self
+            .runtime
+            .provider_presentations
+            .iter()
+            .find(|descriptor| descriptor.id == instrument.provider)
+            .ok_or_else(|| format!("unknown provider {}", instrument.provider))?;
+        let series_key = crate::resolve_series_key(instrument, interval, presentation)
+            .map_err(|error| error.to_string())?;
+        let cache_key = super::OpenInterestCacheKey {
+            provider: instrument.provider.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            period: series_key.period,
+        };
+        let now = Instant::now();
+        if let Some(cached) = self
+            .runtime
+            .liquidation_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&cache_key, now)
+        {
+            return Ok(cached);
+        }
+        let request = aeris_provider_spi::LiquidationRequest {
+            instrument: super::history_instrument_from_install(instrument),
+            period: series_key.period,
+            maximum_points: maximum_points.clamp(1, aeris_provider_spi::MAXIMUM_LIQUIDATION_POINTS),
+        };
+        let raw = source(&request, stop)?;
+        if stop.load(Ordering::Acquire) || self.runtime.shutdown.load(Ordering::Acquire) {
+            return Err("liquidation request cancelled".to_string());
+        }
+        let mut by_timestamp = BTreeMap::new();
+        for sample in raw {
+            if sample.long_usd.is_finite()
+                && sample.long_usd >= 0.0
+                && sample.short_usd.is_finite()
+                && sample.short_usd >= 0.0
+                && sample.long_contracts.is_finite()
+                && sample.long_contracts >= 0.0
+                && sample.short_contracts.is_finite()
+                && sample.short_contracts >= 0.0
+            {
+                by_timestamp.insert(sample.timestamp_unix_nanos, sample);
+            }
+        }
+        let samples = by_timestamp.into_values().collect::<Vec<_>>();
+        self.runtime
+            .liquidation_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(cache_key, Instant::now(), samples.clone());
+        Ok(samples)
+    }
 }
 
 /// Composition-root builder for [`MarketService`].
@@ -653,6 +738,15 @@ impl MarketService {
                     .map(|source| (provider.descriptor.id, Arc::clone(source)))
             })
             .collect();
+        let liquidation_sources = providers
+            .iter()
+            .filter_map(|provider| {
+                provider
+                    .liquidations
+                    .as_ref()
+                    .map(|source| (provider.descriptor.id, Arc::clone(source)))
+            })
+            .collect();
         let descriptors = providers
             .iter()
             .map(|provider| provider.descriptor)
@@ -712,6 +806,7 @@ impl MarketService {
             MarketServiceProviders {
                 presentations: provider_presentations,
                 open_interest_sources,
+                liquidation_sources,
             },
             RuntimeChannels {
                 releases: quote_releases,
@@ -774,6 +869,7 @@ impl MarketService {
         let MarketServiceProviders {
             presentations: provider_presentations,
             open_interest_sources,
+            liquidation_sources,
         } = providers;
         Self {
             commands,
@@ -783,6 +879,8 @@ impl MarketService {
                 provider_presentations,
                 open_interest_sources,
                 open_interest_cache: Mutex::new(super::OpenInterestCache::default()),
+                liquidation_sources,
+                liquidation_cache: Mutex::new(super::LiquidationCache::default()),
                 provider_auth,
                 broker_venue_runners: Mutex::new(broker_venue_runners),
                 attached_broker_venues: Mutex::new(BTreeSet::new()),

@@ -12,6 +12,7 @@ pub(crate) use aeris_hyperliquid_market_adapter::display_depth as hyperliquid_di
 mod aggregated_crypto;
 mod binance;
 mod bybit;
+mod coinbase;
 mod crypto_runtime;
 mod hyperliquid;
 mod hyperliquid_market_scan;
@@ -39,20 +40,22 @@ const BUILT_IN_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
     binance::BINANCE_DESCRIPTOR,
     bybit::BYBIT_DESCRIPTOR,
     okx::OKX_DESCRIPTOR,
+    coinbase::COINBASE_DESCRIPTOR,
     aggregated_crypto::AGGREGATED_DESCRIPTOR,
     recording_replay_descriptor(),
 ];
 
 /// Returns a [`MarketServiceBuilder`] pre-registered with Aeris Terminal's
-/// built-in providers (Rithmic, Hyperliquid, Binance, Bybit, OKX, Aggregated
-/// Crypto, and local recording replay), Rithmic authentication, and the
-/// Rithmic broker venue runner.
+/// built-in providers (Rithmic, Hyperliquid, Binance, Bybit, OKX, Coinbase,
+/// Aggregated Crypto, and local recording replay), Rithmic authentication, and
+/// the Rithmic broker venue runner.
 #[must_use]
 pub fn market_service_builder() -> MarketServiceBuilder {
     let rithmic_revision = rithmic_realtime::RithmicLoginRevision::default();
     let rithmic_login = Arc::new(rithmic::RithmicLogin::new(rithmic_revision.clone()));
     let broker_revision = rithmic_login.revision.clone();
     let shared_crypto_catalogs = Arc::new(crypto_runtime::SharedCryptoCatalogs::default());
+    let shared_liquidations = Arc::new(crypto_runtime::SharedLiquidationLedgers::default());
     MarketService::builder()
         .register_provider(rithmic::provider_spec(
             Box::new(rithmic::LiveRithmicHistory),
@@ -66,18 +69,26 @@ pub fn market_service_builder() -> MarketServiceBuilder {
         .register_provider(binance::provider_spec(
             true,
             Arc::clone(&shared_crypto_catalogs),
+            Arc::clone(&shared_liquidations.binance),
         ))
         .register_provider(bybit::provider_spec(
             true,
             Arc::clone(&shared_crypto_catalogs),
+            Arc::clone(&shared_liquidations.bybit),
         ))
         .register_provider(okx::provider_spec(
+            true,
+            Arc::clone(&shared_crypto_catalogs),
+            Arc::clone(&shared_liquidations.okx),
+        ))
+        .register_provider(coinbase::provider_spec(
             true,
             Arc::clone(&shared_crypto_catalogs),
         ))
         .register_provider(aggregated_crypto::provider_spec(
             true,
             shared_crypto_catalogs,
+            shared_liquidations,
         ))
         .with_recording_replay()
         .register_auth(
@@ -243,6 +254,15 @@ mod tests {
         assert!(
             okx.get("spot:BTC-USDT").is_some(),
             "OKX Spot BTC-USDT missing"
+        );
+
+        let coinbase = aeris_coinbase_market_adapter::fetch_catalog(
+            aeris_coinbase_market_adapter::CoinbaseHttpConfig::default(),
+        )
+        .expect("coinbase catalog");
+        assert!(
+            coinbase.get("spot:BTC-USD").is_some(),
+            "Coinbase Spot BTC-USD missing"
         );
     }
 }
