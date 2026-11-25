@@ -612,7 +612,7 @@ impl Default for OpenInterestSettings {
     fn default() -> Self {
         Self {
             visible: true,
-            style: OpenInterestStyle::Candles,
+            style: OpenInterestStyle::Line,
             line_color: None,
             up_color: None,
             down_color: None,
@@ -1153,6 +1153,9 @@ pub struct AerisChartView {
     open_interest_state: OpenInterestChartState,
     product_bars: ProductPriceBars,
     legend_options: ChartLegendOptions,
+    /// Legend row pinned open by clicking it, so its controls stay steadily visible and clickable
+    /// without flickering when crosshair values change.
+    active_legend_item: Option<LegendItem>,
     /// Host content placed under the symbol legend row, such as the trading host's order
     /// buttons. The chart only positions it; the host owns its state and behavior.
     legend_accessory: Option<AnyView>,
@@ -1266,6 +1269,7 @@ impl AerisChartView {
             open_interest_state: OpenInterestChartState::default(),
             product_bars: ProductPriceBars::default(),
             legend_options: ChartLegendOptions::default(),
+            active_legend_item: None,
             legend_accessory: None,
             legend_symbol_mark: None,
             session_plan_levels: Vec::new(),
@@ -1382,6 +1386,7 @@ impl AerisChartView {
             open_interest_state: OpenInterestChartState::default(),
             product_bars,
             legend_options: ChartLegendOptions::default(),
+            active_legend_item: None,
             legend_accessory: None,
             legend_symbol_mark: None,
             session_plan_levels: Vec::new(),
@@ -2773,6 +2778,7 @@ impl Render for AerisChartView {
             &entity,
             &self.legend_presentation(),
             &self.legend_panes,
+            self.active_legend_item,
             &self.platform,
             self.asset_loading.is_present(),
             LegendHostContent {

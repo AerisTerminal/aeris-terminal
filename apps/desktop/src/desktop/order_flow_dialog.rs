@@ -17,9 +17,9 @@ const STYLE_CHOICES: [(Text, CumulativeDeltaStyle); 2] = [
 ];
 
 const OPEN_INTEREST_STYLE_CHOICES: [(Text, OpenInterestStyle); 4] = [
+    (chart_menu::LINE, OpenInterestStyle::Line),
     (chart_menu::CANDLES, OpenInterestStyle::Candles),
     (chart_menu::BARS, OpenInterestStyle::Bars),
-    (chart_menu::LINE, OpenInterestStyle::Line),
     (chart_ui::CHART_TYPE_AREA, OpenInterestStyle::Area),
 ];
 

@@ -166,6 +166,7 @@ impl AerisChartView {
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
+        self.clear_active_legend_item();
         cx.emit(ChartHostEvent::Activate);
         self.input.mouse_down(&mut self.engine, event);
         self.after_input(cx);
@@ -184,6 +185,7 @@ impl AerisChartView {
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
+        self.clear_active_legend_item();
         cx.emit(ChartHostEvent::Activate);
         self.input.context_menu(&mut self.engine, event);
         self.after_input(cx);
@@ -282,16 +284,17 @@ impl AerisChartView {
         if self.pointer_suspended() {
             return;
         }
+        let cleared_legend = event.keystroke.key == "escape" && self.clear_active_legend_item();
         let editing = self.engine.drawing_text_edit().is_some();
         let handled = self.input.key_down(&mut self.engine, event, cx);
-        if handled {
+        if handled || cleared_legend {
             if editing {
                 window.prevent_default();
             }
             cx.stop_propagation();
         }
         // An unconsumed key can still change the chart: Escape always drops hover.
-        if handled || self.engine.frame_pending() {
+        if handled || cleared_legend || self.engine.frame_pending() {
             self.after_input(cx);
         }
     }

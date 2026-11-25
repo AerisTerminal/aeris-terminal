@@ -184,7 +184,7 @@ mod tests {
             .iter()
             .find(|series| series.id == series_id && !series.removed)
             .expect("series entry");
-        assert_eq!(entry.kind, SeriesKind::Candlestick);
+        assert_eq!(entry.kind, SeriesKind::Line);
         assert_eq!(entry.price_format.kind, PriceFormatKind::Volume);
         assert!(entry.pane_index > 0);
         assert_eq!(chart.engine.panes.len(), initial_panes + 1);
@@ -200,14 +200,22 @@ mod tests {
             oi_row.item.settings_request(),
             Some(crate::view::ChartSettingsRequest::OpenInterest)
         );
-        assert_eq!(oi_row.values.len(), 4);
+        assert_eq!(oi_row.values.len(), 1);
 
-        // Switching across Bars, Line, Area, and back to Candles updates the series in place.
+        // Clicking a legend row activates it and clicking again deactivates it.
+        chart.toggle_active_legend_item(LegendItem::OpenInterest);
+        assert_eq!(chart.active_legend_item, Some(LegendItem::OpenInterest));
+        chart.toggle_active_legend_item(LegendItem::Asset);
+        assert_eq!(chart.active_legend_item, Some(LegendItem::Asset));
+        chart.toggle_active_legend_item(LegendItem::Asset);
+        assert_eq!(chart.active_legend_item, None);
+
+        // Switching across Candles, Bars, Area, and back to Line updates the series in place.
         for (style, expected_kind) in [
-            (OpenInterestStyle::Bars, SeriesKind::Bar),
-            (OpenInterestStyle::Line, SeriesKind::Line),
-            (OpenInterestStyle::Area, SeriesKind::Area),
             (OpenInterestStyle::Candles, SeriesKind::Candlestick),
+            (OpenInterestStyle::Bars, SeriesKind::Bar),
+            (OpenInterestStyle::Area, SeriesKind::Area),
+            (OpenInterestStyle::Line, SeriesKind::Line),
         ] {
             let mut settings = chart.order_flow_settings();
             settings.open_interest = Some(OpenInterestSettings {

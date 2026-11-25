@@ -155,10 +155,27 @@ pub(super) fn legend_palette(theme: &AerisTheme) -> LegendPalette {
     }
 }
 
+impl AerisChartView {
+    /// Toggles `item` as the click-activated legend row so its action controls stay steadily
+    /// visible and clickable even while crosshair values change.
+    pub(super) fn toggle_active_legend_item(&mut self, item: LegendItem) {
+        if self.active_legend_item == Some(item) {
+            self.active_legend_item = None;
+        } else {
+            self.active_legend_item = Some(item);
+        }
+    }
+
+    pub(super) fn clear_active_legend_item(&mut self) -> bool {
+        self.active_legend_item.take().is_some()
+    }
+}
+
 pub(super) fn chart_legend_layers(
     chart: &Entity<AerisChartView>,
     presentation: &LegendPresentation,
     panes: &[LegendPaneLayout],
+    active_item: Option<LegendItem>,
     theme: &AerisTheme,
     loading: bool,
     host: LegendHostContent<'_>,
@@ -200,6 +217,7 @@ pub(super) fn chart_legend_layers(
                 layer = layer.child(chart_legend_row(
                     chart,
                     row,
+                    active_item == Some(row.item),
                     palette,
                     loading,
                     host.symbol_mark,
@@ -298,12 +316,16 @@ fn indicator_legend_toggle(
 fn chart_legend_row(
     chart: &Entity<AerisChartView>,
     row: &LegendRow,
+    active: bool,
     palette: LegendPalette,
     loading: bool,
     symbol_mark: Option<&AnyView>,
 ) -> AnyElement {
     let group: SharedString = format!("chart-legend-row-{}", row.item.key()).into();
-    let controls = legend_row_controls(chart, row, palette, &group);
+    let controls = legend_row_controls(chart, row, active, palette, &group);
+    let activate_chart = chart.clone();
+    let click_chart = chart.clone();
+    let row_item = row.item;
     let values = if row.visible {
         row.values.clone()
     } else {
@@ -343,14 +365,38 @@ fn chart_legend_row(
         .rounded(px(f32::from(
             aeris_design_system::RadiusToken::Sm.logical_pixels(),
         )))
+        .border(px(palette.border_width))
+        .border_color(if active {
+            gpui::Hsla::from(palette.border)
+        } else {
+            gpui::transparent_black()
+        })
+        .when(active, |style| style.bg(palette.surface))
         .text_xs()
         .text_color(if row.visible {
             palette.text
         } else {
             palette.muted
         })
-        .cursor(CursorStyle::Arrow)
-        .hover(|style| style.bg(palette.hover))
+        .cursor_pointer()
+        .hover(move |style| {
+            style.bg(if active {
+                palette.surface
+            } else {
+                palette.hover
+            })
+        })
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            activate_chart.update(cx, |_, chart_cx| chart_cx.emit(ChartHostEvent::Activate));
+            cx.stop_propagation();
+        })
+        .on_click(move |_, _, cx| {
+            click_chart.update(cx, |chart, chart_cx| {
+                chart.toggle_active_legend_item(row_item);
+                chart_cx.notify();
+            });
+            cx.stop_propagation();
+        })
         .children((loading && row.item == LegendItem::Asset).then(|| legend_loading_glyph(palette)))
         .children(
             symbol_mark
@@ -402,6 +448,7 @@ impl LegendItem {
 fn legend_row_controls(
     chart: &Entity<AerisChartView>,
     row: &LegendRow,
+    active: bool,
     palette: LegendPalette,
     group: &SharedString,
 ) -> impl IntoElement {
@@ -411,7 +458,7 @@ fn legend_row_controls(
         LegendControl::Visibility(row.visible),
         palette,
     )
-    .when(row.visible, |control| {
+    .when(!active && row.visible, |control| {
         control
             .invisible()
             .group_hover(group.clone(), gpui::Styled::visible)
@@ -425,16 +472,26 @@ fn legend_row_controls(
         .child(visibility);
     if row.settings_available && row.item.settings_request().is_some() {
         controls = controls.child(
-            legend_control(chart, row.item, LegendControl::Settings, palette)
-                .invisible()
-                .group_hover(group.clone(), gpui::Styled::visible),
+            legend_control(chart, row.item, LegendControl::Settings, palette).when(
+                !active,
+                |control| {
+                    control
+                        .invisible()
+                        .group_hover(group.clone(), gpui::Styled::visible)
+                },
+            ),
         );
     }
     if row.item != LegendItem::Asset {
         controls = controls.child(
-            legend_control(chart, row.item, LegendControl::Remove, palette)
-                .invisible()
-                .group_hover(group.clone(), gpui::Styled::visible),
+            legend_control(chart, row.item, LegendControl::Remove, palette).when(
+                !active,
+                |control| {
+                    control
+                        .invisible()
+                        .group_hover(group.clone(), gpui::Styled::visible)
+                },
+            ),
         );
     }
     controls
@@ -521,16 +578,25 @@ fn legend_control(
         .on_click(move |_, _, cx| {
             action_chart.update(cx, |chart, chart_cx| {
                 if matches!(control, LegendControl::Settings) {
+                    chart.clear_active_legend_item();
                     if let Some(request) = item.settings_request() {
                         chart_cx.emit(ChartHostEvent::Settings(request));
                     }
+                    chart_cx.notify();
                     return;
                 }
                 if remove && let LegendItem::Study { study_id, .. } = item {
+                    if chart.active_legend_item == Some(item) {
+                        chart.clear_active_legend_item();
+                    }
                     chart_cx.emit(ChartHostEvent::RemoveStudy(study_id));
+                    chart_cx.notify();
                     return;
                 }
                 let changed = if remove {
+                    if chart.active_legend_item == Some(item) {
+                        chart.clear_active_legend_item();
+                    }
                     chart.remove_legend_indicator(item)
                 } else {
                     let LegendControl::Visibility(visible) = control else {
