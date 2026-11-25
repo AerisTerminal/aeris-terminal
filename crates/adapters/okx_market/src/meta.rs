@@ -97,14 +97,25 @@ impl OkxCatalog {
             }
             let sym = item.display_symbol.to_ascii_uppercase();
             let base = item.base_asset.to_ascii_uppercase();
-            if sym == needle || item.inst_id == needle || base == needle {
+            let provider_sym = item.provider_symbol.to_ascii_uppercase();
+            let inst_id = item.instrument_id.to_ascii_uppercase();
+            if sym == needle
+                || item.inst_id == needle
+                || base == needle
+                || provider_sym == needle
+                || inst_id == needle
+            {
                 exact.push(item);
             } else if sym.starts_with(&needle)
                 || item.inst_id.starts_with(&needle)
                 || base.starts_with(&needle)
+                || provider_sym.starts_with(&needle)
             {
                 prefix.push(item);
-            } else if sym.contains(&needle) || item.inst_id.contains(&needle) {
+            } else if sym.contains(&needle)
+                || item.inst_id.contains(&needle)
+                || provider_sym.contains(&needle)
+            {
                 contains.push(item);
             }
         }

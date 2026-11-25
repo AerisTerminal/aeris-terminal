@@ -31,6 +31,8 @@ pub fn binance_interval_for_period(period: BarPeriod) -> CryptoResult<&'static s
             21_600 => Ok("6h"),
             28_800 => Ok("8h"),
             43_200 => Ok("12h"),
+            86_400 => Ok("1d"),
+            259_200 => Ok("3d"),
             _ => Err(CryptoError::Unsupported(format!(
                 "binance does not support {seconds}s candles"
             ))),
@@ -60,8 +62,8 @@ pub fn period_for_binance_interval(interval: &str) -> Option<BarPeriod> {
         "6h" => BarPeriod::time(21_600).ok(),
         "8h" => BarPeriod::time(28_800).ok(),
         "12h" => BarPeriod::time(43_200).ok(),
-        "1d" => BarPeriod::session(1).ok(),
-        "3d" => BarPeriod::session(3).ok(),
+        "1d" => BarPeriod::time(86_400).ok(),
+        "3d" => BarPeriod::time(259_200).ok(),
         "1w" => BarPeriod::week(1).ok(),
         "1M" => BarPeriod::month(1).ok(),
         _ => None,

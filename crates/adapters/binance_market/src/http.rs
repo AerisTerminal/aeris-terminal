@@ -241,46 +241,41 @@ pub fn fetch_catalog(config: BinanceHttpConfig) -> CryptoResult<BinanceCatalog> 
     let mut instruments = Vec::new();
     let mut errors = Vec::new();
 
-    // 1. USDT-M Perpetuals
-    match get_with_agent(
-        agent,
-        &format!("{BINANCE_FUTURES_REST_URL}/fapi/v1/exchangeInfo"),
-        config,
-    ) {
-        Ok(info_bytes) => {
-            let volumes = get_with_agent(
+    let spot_query =
+        "/api/v3/exchangeInfo?permissions=SPOT&symbolStatus=TRADING&showPermissionSets=false";
+    let (fut_info, fut_vol, spot_info, spot_vol) = std::thread::scope(|scope| {
+        let futures_info_task = scope.spawn(|| {
+            get_with_agent(
+                agent,
+                &format!("{BINANCE_FUTURES_REST_URL}/fapi/v1/exchangeInfo"),
+                config,
+            )
+        });
+        let futures_volumes_task = scope.spawn(|| {
+            get_with_agent(
                 agent,
                 &format!("{BINANCE_FUTURES_REST_URL}/fapi/v1/ticker/24hr"),
                 config,
             )
             .map(|bytes| decode_ticker_volumes(&bytes))
-            .unwrap_or_default();
-            match decode_exchange_info(&info_bytes, BinanceMarketKind::UsdmPerp, &volumes) {
-                Ok(mut perps) => instruments.append(&mut perps),
-                Err(error) => errors.push(error),
-            }
-        }
-        Err(error) => errors.push(error),
-    }
-
-    // 2. Spot (with data-api.binance.vision mirror fallback)
-    let spot_query =
-        "/api/v3/exchangeInfo?permissions=SPOT&symbolStatus=TRADING&showPermissionSets=false";
-    let spot_info = get_with_agent(
-        agent,
-        &format!("{BINANCE_SPOT_REST_URL}{spot_query}"),
-        config,
-    )
-    .or_else(|_| {
-        get_with_agent(
-            agent,
-            &format!("{BINANCE_SPOT_FALLBACK_REST_URL}{spot_query}"),
-            config,
-        )
-    });
-    match spot_info {
-        Ok(info_bytes) => {
-            let volumes = get_with_agent(
+            .unwrap_or_default()
+        });
+        let spot_info_task = scope.spawn(|| {
+            get_with_agent(
+                agent,
+                &format!("{BINANCE_SPOT_REST_URL}{spot_query}"),
+                config,
+            )
+            .or_else(|_| {
+                get_with_agent(
+                    agent,
+                    &format!("{BINANCE_SPOT_FALLBACK_REST_URL}{spot_query}"),
+                    config,
+                )
+            })
+        });
+        let spot_volumes_task = scope.spawn(|| {
+            get_with_agent(
                 agent,
                 &format!("{BINANCE_SPOT_REST_URL}/api/v3/ticker/24hr"),
                 config,
@@ -293,8 +288,37 @@ pub fn fetch_catalog(config: BinanceHttpConfig) -> CryptoResult<BinanceCatalog> 
                 )
             })
             .map(|bytes| decode_ticker_volumes(&bytes))
-            .unwrap_or_default();
-            match decode_exchange_info(&info_bytes, BinanceMarketKind::Spot, &volumes) {
+            .unwrap_or_default()
+        });
+        (
+            futures_info_task.join().unwrap_or_else(|_| {
+                Err(CryptoError::Transport(
+                    "binance futures exchangeInfo worker panicked".to_string(),
+                ))
+            }),
+            futures_volumes_task.join().unwrap_or_default(),
+            spot_info_task.join().unwrap_or_else(|_| {
+                Err(CryptoError::Transport(
+                    "binance spot exchangeInfo worker panicked".to_string(),
+                ))
+            }),
+            spot_volumes_task.join().unwrap_or_default(),
+        )
+    });
+
+    match fut_info {
+        Ok(info_bytes) => {
+            match decode_exchange_info(&info_bytes, BinanceMarketKind::UsdmPerp, &fut_vol) {
+                Ok(mut perps) => instruments.append(&mut perps),
+                Err(error) => errors.push(error),
+            }
+        }
+        Err(error) => errors.push(error),
+    }
+
+    match spot_info {
+        Ok(info_bytes) => {
+            match decode_exchange_info(&info_bytes, BinanceMarketKind::Spot, &spot_vol) {
                 Ok(mut spot) => instruments.append(&mut spot),
                 Err(error) => errors.push(error),
             }

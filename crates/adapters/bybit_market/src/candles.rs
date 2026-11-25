@@ -28,6 +28,7 @@ pub fn bybit_interval_for_period(period: BarPeriod) -> CryptoResult<&'static str
             14_400 => Ok("240"),
             21_600 => Ok("360"),
             43_200 => Ok("720"),
+            86_400 => Ok("D"),
             _ => Err(CryptoError::Unsupported(format!(
                 "bybit does not support {seconds}s candles"
             ))),
@@ -55,7 +56,7 @@ pub fn period_for_bybit_interval(interval: &str) -> Option<BarPeriod> {
         "240" => BarPeriod::time(14_400).ok(),
         "360" => BarPeriod::time(21_600).ok(),
         "720" => BarPeriod::time(43_200).ok(),
-        "D" => BarPeriod::session(1).ok(),
+        "D" => BarPeriod::time(86_400).ok(),
         "W" => BarPeriod::week(1).ok(),
         "M" => BarPeriod::month(1).ok(),
         _ => None,

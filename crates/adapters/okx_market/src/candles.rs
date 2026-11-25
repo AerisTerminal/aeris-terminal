@@ -30,6 +30,7 @@ pub fn okx_interval_for_period(period: BarPeriod) -> CryptoResult<&'static str> 
             14_400 => Ok("4H"),
             21_600 => Ok("6H"),
             43_200 => Ok("12H"),
+            86_400 => Ok("1D"),
             _ => Err(CryptoError::Unsupported(format!(
                 "okx does not support {seconds}s candles"
             ))),
@@ -57,7 +58,7 @@ pub fn period_for_okx_interval(interval: &str) -> Option<BarPeriod> {
         "4H" => BarPeriod::time(14_400).ok(),
         "6H" => BarPeriod::time(21_600).ok(),
         "12H" => BarPeriod::time(43_200).ok(),
-        "1D" | "1Dutc" => BarPeriod::session(1).ok(),
+        "1D" | "1Dutc" => BarPeriod::time(86_400).ok(),
         "1W" | "1Wutc" => BarPeriod::week(1).ok(),
         "1M" | "1Mutc" => BarPeriod::month(1).ok(),
         _ => None,

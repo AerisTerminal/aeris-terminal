@@ -256,11 +256,16 @@ impl AggregatedCatalog {
             }
             let sym = item.display_symbol.to_ascii_uppercase();
             let base = item.key.base.to_ascii_uppercase();
-            if sym == needle || base == needle || item.provider_symbol == needle {
+            let provider_sym = item.provider_symbol.to_ascii_uppercase();
+            let inst_id = item.instrument_id.to_ascii_uppercase();
+            if sym == needle || base == needle || provider_sym == needle || inst_id == needle {
                 exact.push(item);
-            } else if sym.starts_with(&needle) || base.starts_with(&needle) {
+            } else if sym.starts_with(&needle)
+                || base.starts_with(&needle)
+                || provider_sym.starts_with(&needle)
+            {
                 prefix.push(item);
-            } else if sym.contains(&needle) || item.provider_symbol.contains(&needle) {
+            } else if sym.contains(&needle) || provider_sym.contains(&needle) {
                 contains.push(item);
             }
         }
