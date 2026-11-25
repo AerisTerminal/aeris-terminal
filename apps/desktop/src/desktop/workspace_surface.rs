@@ -4499,7 +4499,10 @@ impl WorkspaceSurface {
                 settings.depth_heatmap = Some(DepthHeatmapSettings { visible: true });
             }
             OrderFlowMenuStudy::OpenInterest => {
-                settings.open_interest = Some(OpenInterestSettings { visible: true });
+                settings.open_interest = Some(OpenInterestSettings {
+                    visible: true,
+                    ..settings.open_interest.unwrap_or_default()
+                });
             }
         }
         self.set_chart_order_flow_settings(settings, cx);

@@ -101,10 +101,7 @@ impl AerisChartView {
             self.clear_depth_heatmap();
         }
         if let Some(oi) = settings.open_interest {
-            let _ = self
-                .engine
-                .set_external_study_visible(super::OPEN_INTEREST_STUDY_ID, oi.visible);
-            self.invalidate_series_layout();
+            self.sync_open_interest_settings(oi);
         } else {
             self.clear_open_interest();
         }

@@ -5,11 +5,11 @@ use super::super::{
     ChartStudyInputStream, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
     ChartStudyScaleTarget, ChartStudyThresholdRegion, CumulativeDeltaReset,
     CumulativeDeltaSettings, CumulativeDeltaStyle, DeltaHistogramSettings, DepthHeatmapSettings,
-    FootprintDisplayMode, MarketStream, OpenInterestSettings, OrderBookDepthSettings,
-    OrderFlowSettings, RejectedSavedPresentation, SessionProfileKind, SessionProfileSettings,
-    SessionVolumeProfileSettings, StreamRequirements, StudyPaneTarget, StudyPlotKind,
-    StudyPointStyle, StudyScaleTarget, StudyThresholdRegion, ToPrimitive, TpoCells, TpoSettings,
-    VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
+    FootprintDisplayMode, MarketStream, OpenInterestSettings, OpenInterestStyle,
+    OrderBookDepthSettings, OrderFlowSettings, RejectedSavedPresentation, SessionProfileKind,
+    SessionProfileSettings, SessionVolumeProfileSettings, StreamRequirements, StudyPaneTarget,
+    StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudyThresholdRegion, ToPrimitive, TpoCells,
+    TpoSettings, VolumeAverageKind, VolumeAverageSettings, VolumePlacement, VolumeSettings,
     WorkspaceBigTradesState, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
     WorkspaceChartLegendState, WorkspaceChartState, WorkspaceCumulativeDeltaState,
     WorkspaceDeltaHistogramState, WorkspaceOrderBookDepthState, WorkspaceOrderFlowSettingsState,
@@ -328,6 +328,19 @@ pub(super) fn persisted_order_flow_settings(
         order_book_depth: settings.order_book_depth.map(|book| book.visible),
         depth_heatmap: settings.depth_heatmap.map(|heatmap| heatmap.visible),
         open_interest: settings.open_interest.map(|oi| oi.visible),
+        open_interest_options: settings.open_interest.map(|oi| {
+            aeris_contracts::WorkspaceOpenInterestState {
+                style: match oi.style {
+                    OpenInterestStyle::Candles => 0,
+                    OpenInterestStyle::Bars => 1,
+                    OpenInterestStyle::Line => 2,
+                    OpenInterestStyle::Area => 3,
+                },
+                line_color: persisted_chart_color(oi.line_color),
+                up_color: persisted_chart_color(oi.up_color),
+                down_color: persisted_chart_color(oi.down_color),
+            }
+        }),
         cumulative_delta_style: match settings.cumulative_delta.style {
             CumulativeDeltaStyle::Line => 0,
             CumulativeDeltaStyle::Candles => 1,
@@ -440,6 +453,32 @@ fn restored_order_book_depth(
     settings.is_valid().then_some(settings)
 }
 
+/// Older workspaces carry no open-interest style/color options and restore candles in default colors.
+fn restored_open_interest(
+    visible: bool,
+    state: Option<&aeris_contracts::WorkspaceOpenInterestState>,
+) -> Option<OpenInterestSettings> {
+    let Some(state) = state else {
+        return Some(OpenInterestSettings {
+            visible,
+            ..OpenInterestSettings::default()
+        });
+    };
+    Some(OpenInterestSettings {
+        visible,
+        style: match state.style {
+            0 => OpenInterestStyle::Candles,
+            1 => OpenInterestStyle::Bars,
+            2 => OpenInterestStyle::Line,
+            3 => OpenInterestStyle::Area,
+            _ => return None,
+        },
+        line_color: restored_chart_color(&state.line_color).ok()?,
+        up_color: restored_chart_color(&state.up_color).ok()?,
+        down_color: restored_chart_color(&state.down_color).ok()?,
+    })
+}
+
 pub(super) fn restored_order_flow_settings(
     settings: &WorkspaceOrderFlowSettingsState,
 ) -> Option<OrderFlowSettings> {
@@ -465,6 +504,13 @@ pub(super) fn restored_order_flow_settings(
         )?),
         None => None,
     };
+    let open_interest = match settings.open_interest {
+        Some(visible) => Some(restored_open_interest(
+            visible,
+            settings.open_interest_options.as_ref(),
+        )?),
+        None => None,
+    };
     Some(OrderFlowSettings {
         display_mode,
         show_cumulative_delta: settings.study_visibility_revision >= 1
@@ -481,9 +527,7 @@ pub(super) fn restored_order_flow_settings(
         depth_heatmap: settings
             .depth_heatmap
             .map(|visible| DepthHeatmapSettings { visible }),
-        open_interest: settings
-            .open_interest
-            .map(|visible| OpenInterestSettings { visible }),
+        open_interest,
         ticks_per_row: settings.ticks_per_row,
         ..OrderFlowSettings::default()
     })

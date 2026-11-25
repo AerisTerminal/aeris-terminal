@@ -191,6 +191,7 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
         order_book_depth_options: None,
         depth_heatmap: None,
         open_interest: None,
+        open_interest_options: None,
     };
     let restored = restored_order_flow_settings(&legacy).expect("legacy settings restore");
     assert!(!restored.show_cumulative_delta);
@@ -218,7 +219,13 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
         assert_eq!(restored.depth_heatmap, heatmap);
     }
     for visible in [true, false] {
-        let oi = Some(OpenInterestSettings { visible });
+        let oi = Some(OpenInterestSettings {
+            visible,
+            style: OpenInterestStyle::Bars,
+            line_color: ChartColor::from_hex("#2962FF"),
+            up_color: ChartColor::from_hex("#00C853"),
+            down_color: None,
+        });
         let persisted = persisted_order_flow_settings(OrderFlowSettings {
             open_interest: oi,
             ..OrderFlowSettings::default()
@@ -246,6 +253,7 @@ fn retired_footprint_trade_bubbles_restore_without_big_trades() {
         order_book_depth_options: None,
         depth_heatmap: None,
         open_interest: None,
+        open_interest_options: None,
     }
     .encode_to_vec();
     // Tag 4 (varint) enabled the footprint trade bubbles; tag 5 (fixed64) held their threshold.

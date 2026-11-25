@@ -9,11 +9,18 @@ use super::big_trades_dialog::{
 };
 use super::*;
 use crate::desktop::workspace_surface::preview_on_change;
-use aeris_localization::{Text, chart_menu, common, tr};
+use aeris_localization::{Text, chart_menu, chart_ui, common, tr};
 
 const STYLE_CHOICES: [(Text, CumulativeDeltaStyle); 2] = [
     (chart_menu::LINE, CumulativeDeltaStyle::Line),
     (chart_menu::CANDLES, CumulativeDeltaStyle::Candles),
+];
+
+const OPEN_INTEREST_STYLE_CHOICES: [(Text, OpenInterestStyle); 4] = [
+    (chart_menu::CANDLES, OpenInterestStyle::Candles),
+    (chart_menu::BARS, OpenInterestStyle::Bars),
+    (chart_menu::LINE, OpenInterestStyle::Line),
+    (chart_ui::CHART_TYPE_AREA, OpenInterestStyle::Area),
 ];
 
 const RESET_CHOICES: [(Text, CumulativeDeltaReset); 2] = [
@@ -30,6 +37,7 @@ pub(super) enum OrderFlowIndicator {
     CumulativeDelta,
     DeltaHistogram,
     OrderBook,
+    OpenInterest,
 }
 
 impl OrderFlowIndicator {
@@ -38,6 +46,7 @@ impl OrderFlowIndicator {
             Self::CumulativeDelta => tr!(chart_menu::CVD_TITLE),
             Self::DeltaHistogram => tr!(chart_menu::DELTA_HISTOGRAM_TITLE),
             Self::OrderBook => tr!(chart_menu::ORDER_BOOK_TITLE),
+            Self::OpenInterest => tr!(chart_menu::OPEN_INTEREST_TITLE),
         }
     }
 
@@ -46,6 +55,7 @@ impl OrderFlowIndicator {
             Self::CumulativeDelta => tr!(chart_menu::CVD_REMOVED),
             Self::DeltaHistogram => tr!(chart_menu::DELTA_HISTOGRAM_REMOVED),
             Self::OrderBook => tr!(chart_menu::ORDER_BOOK_REMOVED),
+            Self::OpenInterest => tr!(chart_menu::OPEN_INTEREST_REMOVED),
         }
     }
 }
@@ -55,6 +65,7 @@ pub(super) enum OrderFlowDialogDraft {
     CumulativeDelta(CumulativeDeltaSettings),
     DeltaHistogram(DeltaHistogramSettings),
     OrderBook(OrderBookDraft),
+    OpenInterest(OpenInterestSettings),
 }
 
 impl OrderFlowDialogDraft {
@@ -63,6 +74,7 @@ impl OrderFlowDialogDraft {
             Self::CumulativeDelta(_) => OrderFlowIndicator::CumulativeDelta,
             Self::DeltaHistogram(_) => OrderFlowIndicator::DeltaHistogram,
             Self::OrderBook(_) => OrderFlowIndicator::OrderBook,
+            Self::OpenInterest(_) => OrderFlowIndicator::OpenInterest,
         }
     }
 
@@ -83,6 +95,9 @@ impl OrderFlowDialogDraft {
             (Self::DeltaHistogram(draft), OrderFlowColorTarget::DeltaNegative) => draft.down_color,
             (Self::OrderBook(draft), OrderFlowColorTarget::Bid) => draft.settings.bid_color,
             (Self::OrderBook(draft), OrderFlowColorTarget::Ask) => draft.settings.ask_color,
+            (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestLine) => draft.line_color,
+            (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestUp) => draft.up_color,
+            (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestDown) => draft.down_color,
             _ => None,
         }
     }
@@ -112,6 +127,15 @@ impl OrderFlowDialogDraft {
             }
             (Self::OrderBook(draft), OrderFlowColorTarget::Ask) => {
                 Some(&mut draft.settings.ask_color)
+            }
+            (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestLine) => {
+                Some(&mut draft.line_color)
+            }
+            (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestUp) => {
+                Some(&mut draft.up_color)
+            }
+            (Self::OpenInterest(draft), OrderFlowColorTarget::OpenInterestDown) => {
+                Some(&mut draft.down_color)
             }
             _ => None,
         }
@@ -261,13 +285,15 @@ impl OrderFlowDialogState {
     fn default_color(&self, target: OrderFlowColorTarget) -> &str {
         let defaults = &self.defaults;
         match target {
-            OrderFlowColorTarget::CumulativeDeltaLine => &defaults.cumulative_delta_line,
-            OrderFlowColorTarget::CumulativeDeltaUp | OrderFlowColorTarget::Bid => {
-                &defaults.bullish
+            OrderFlowColorTarget::CumulativeDeltaLine | OrderFlowColorTarget::OpenInterestLine => {
+                &defaults.cumulative_delta_line
             }
-            OrderFlowColorTarget::CumulativeDeltaDown | OrderFlowColorTarget::Ask => {
-                &defaults.bearish
-            }
+            OrderFlowColorTarget::CumulativeDeltaUp
+            | OrderFlowColorTarget::Bid
+            | OrderFlowColorTarget::OpenInterestUp => &defaults.bullish,
+            OrderFlowColorTarget::CumulativeDeltaDown
+            | OrderFlowColorTarget::Ask
+            | OrderFlowColorTarget::OpenInterestDown => &defaults.bearish,
             OrderFlowColorTarget::DeltaPositive => &defaults.delta_positive,
             OrderFlowColorTarget::DeltaNegative => &defaults.delta_negative,
         }
@@ -284,14 +310,17 @@ pub(super) enum OrderFlowColorTarget {
     DeltaNegative,
     Bid,
     Ask,
+    OpenInterestLine,
+    OpenInterestUp,
+    OpenInterestDown,
 }
 
 impl OrderFlowColorTarget {
     fn label(self) -> &'static str {
         match self {
-            Self::CumulativeDeltaLine => tr!(chart_menu::LINE),
-            Self::CumulativeDeltaUp => tr!(chart_menu::RISING_CANDLES),
-            Self::CumulativeDeltaDown => tr!(chart_menu::FALLING_CANDLES),
+            Self::CumulativeDeltaLine | Self::OpenInterestLine => tr!(chart_menu::LINE),
+            Self::CumulativeDeltaUp | Self::OpenInterestUp => tr!(chart_menu::RISING_CANDLES),
+            Self::CumulativeDeltaDown | Self::OpenInterestDown => tr!(chart_menu::FALLING_CANDLES),
             Self::DeltaPositive => tr!(chart_menu::POSITIVE_DELTA),
             Self::DeltaNegative => tr!(chart_menu::NEGATIVE_DELTA),
             Self::Bid => tr!(chart_menu::BIDS),
@@ -325,6 +354,13 @@ fn applied_order_flow_settings(
             let book = current.order_book_depth.ok_or_else(removed)?;
             settings.order_book_depth = Some(draft.applied(book, cx)?);
         }
+        OrderFlowDialogDraft::OpenInterest(draft) => {
+            let shown = current.open_interest.ok_or_else(removed)?;
+            settings.open_interest = Some(OpenInterestSettings {
+                visible: shown.visible,
+                ..*draft
+            });
+        }
     }
     Ok(settings)
 }
@@ -350,6 +386,14 @@ fn restored_order_flow_settings(
                 settings.order_book_depth = Some(OrderBookDepthSettings {
                     visible: shown.visible,
                     ..book
+                });
+            }
+        }
+        OrderFlowIndicator::OpenInterest => {
+            if let (Some(oi), Some(shown)) = (original.open_interest, current.open_interest) {
+                settings.open_interest = Some(OpenInterestSettings {
+                    visible: shown.visible,
+                    ..oi
                 });
             }
         }
@@ -406,6 +450,9 @@ impl WorkspaceSurface {
             OrderFlowIndicator::OrderBook => settings
                 .order_book_depth
                 .map(|book| OrderFlowDialogDraft::OrderBook(OrderBookDraft::new(book, window, cx))),
+            OrderFlowIndicator::OpenInterest => settings
+                .open_interest
+                .map(OrderFlowDialogDraft::OpenInterest),
         };
         let Some(draft) = draft else {
             Self::post_indicator_failure(
@@ -425,9 +472,9 @@ impl WorkspaceSurface {
             .into_iter()
             .map(|input| preview_on_change(input, window, cx, Self::preview_order_flow_dialog))
             .collect(),
-            OrderFlowDialogDraft::CumulativeDelta(_) | OrderFlowDialogDraft::DeltaHistogram(_) => {
-                Vec::new()
-            }
+            OrderFlowDialogDraft::CumulativeDelta(_)
+            | OrderFlowDialogDraft::DeltaHistogram(_)
+            | OrderFlowDialogDraft::OpenInterest(_) => Vec::new(),
         };
         self.open_indicator_settings_dialog(
             IndicatorSettingsDialog::OrderFlow(OrderFlowDialogState {
@@ -497,6 +544,21 @@ impl WorkspaceSurface {
         {
             draft.style = style;
             // The style swaps the line swatch for the candle swatches.
+            dialog.color_picker = None;
+            self.preview_order_flow_dialog(cx);
+        }
+    }
+
+    pub(super) fn set_order_flow_dialog_open_interest_style(
+        &mut self,
+        style: OpenInterestStyle,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.order_flow_dialog_mut()
+            && let OrderFlowDialogDraft::OpenInterest(draft) = &mut dialog.draft
+            && draft.style != style
+        {
+            draft.style = style;
             dialog.color_picker = None;
             self.preview_order_flow_dialog(cx);
         }
@@ -608,6 +670,12 @@ impl WorkspaceSurface {
                 *draft = DeltaHistogramSettings::default();
             }
             OrderFlowDialogDraft::OrderBook(draft) => draft.reset(window, cx),
+            OrderFlowDialogDraft::OpenInterest(draft) => {
+                *draft = OpenInterestSettings {
+                    visible: draft.visible,
+                    ..OpenInterestSettings::default()
+                };
+            }
         }
         dialog.color_picker = None;
         self.preview_order_flow_dialog(cx);
@@ -848,6 +916,60 @@ fn order_book_groups(
     ]
 }
 
+fn open_interest_groups(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &OrderFlowDialogState,
+    draft: &OpenInterestSettings,
+    theme: &AerisTheme,
+) -> [AnyElement; 2] {
+    let style = SettingDropdown {
+        menu: "open_interest_style",
+        label: tr!(chart_menu::STYLE),
+        open_menu: dialog.menu.as_deref(),
+        enabled: true,
+        choices: dropdown_choices(&OPEN_INTEREST_STYLE_CHOICES, |style| draft.style == style),
+    }
+    .render(
+        app,
+        WorkspaceSurface::set_order_flow_dialog_open_interest_style,
+        theme,
+    );
+    let colors = match draft.style {
+        OpenInterestStyle::Line | OpenInterestStyle::Area => colors_row(
+            app,
+            dialog,
+            tr!(chart_menu::LINE_COLOR),
+            tr!(chart_menu::OPEN_INTEREST_LINE_COLOR_DESCRIPTION),
+            &[OrderFlowColorTarget::OpenInterestLine],
+            theme,
+        ),
+        OpenInterestStyle::Candles | OpenInterestStyle::Bars => colors_row(
+            app,
+            dialog,
+            tr!(chart_menu::CANDLE_COLORS),
+            tr!(chart_menu::OPEN_INTEREST_CANDLE_COLORS_DESCRIPTION),
+            &[
+                OrderFlowColorTarget::OpenInterestUp,
+                OrderFlowColorTarget::OpenInterestDown,
+            ],
+            theme,
+        ),
+    };
+    [
+        settings_group(
+            tr!(chart_menu::DISPLAY),
+            [setting_row(
+                tr!(chart_menu::STYLE),
+                tr!(chart_menu::OPEN_INTEREST_STYLE_DESCRIPTION),
+                style,
+                theme,
+            )],
+            theme,
+        ),
+        settings_group(tr!(chart_menu::COLORS), [colors], theme),
+    ]
+}
+
 fn order_flow_dialog_groups(
     app: &Entity<WorkspaceSurface>,
     dialog: &OrderFlowDialogState,
@@ -874,6 +996,9 @@ fn order_flow_dialog_groups(
         )],
         OrderFlowDialogDraft::OrderBook(draft) => {
             order_book_groups(app, dialog, draft, theme).into()
+        }
+        OrderFlowDialogDraft::OpenInterest(draft) => {
+            open_interest_groups(app, dialog, draft, theme).into()
         }
     }
 }

@@ -26,7 +26,7 @@ use aeris_charts_engine::{
 };
 pub use aeris_charts_engine::{
     BigTradesFilter, BigTradesIntensity, BigTradesSize, CumulativeDeltaStyle,
-    DepthLevel as ChartDepthLevel,
+    DepthLevel as ChartDepthLevel, OpenInterestStyle,
 };
 pub use aeris_charts_engine::{
     ExternalStudyError as ChartStudyOutputError,
@@ -596,15 +596,27 @@ impl Default for DepthHeatmapSettings {
     }
 }
 
-/// Durable open-interest sub-pane settings.
+/// Durable open-interest sub-pane settings. A color left at `None` follows the chart default:
+/// the chart's bullish/bearish colors for candles and bars, and the default line color for line
+/// and area.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenInterestSettings {
     pub visible: bool,
+    pub style: OpenInterestStyle,
+    pub line_color: Option<ChartColor>,
+    pub up_color: Option<ChartColor>,
+    pub down_color: Option<ChartColor>,
 }
 
 impl Default for OpenInterestSettings {
     fn default() -> Self {
-        Self { visible: true }
+        Self {
+            visible: true,
+            style: OpenInterestStyle::Candles,
+            line_color: None,
+            up_color: None,
+            down_color: None,
+        }
     }
 }
 
@@ -754,6 +766,7 @@ pub enum ChartSettingsRequest {
     CumulativeDelta,
     DeltaHistogram,
     OrderBookDepth,
+    OpenInterest,
     SessionProfile(SessionProfileKind),
     /// One drawing, by its Aeris Charts identity.
     Drawing(DrawingId),

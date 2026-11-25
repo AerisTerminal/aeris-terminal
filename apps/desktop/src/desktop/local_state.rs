@@ -1111,6 +1111,12 @@ mod tests {
             }),
             depth_heatmap: Some(false),
             open_interest: Some(true),
+            open_interest_options: Some(aeris_contracts::WorkspaceOpenInterestState {
+                style: 1,
+                line_color: String::new(),
+                up_color: "#00C853".to_string(),
+                down_color: "#FF1744".to_string(),
+            }),
         }
     }
 

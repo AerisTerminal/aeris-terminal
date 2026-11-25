@@ -526,6 +526,7 @@ fn legend_control(
                             Some(ChartSettingsRequest::DeltaHistogram)
                         }
                         LegendItem::OrderBookDepth => Some(ChartSettingsRequest::OrderBookDepth),
+                        LegendItem::OpenInterest => Some(ChartSettingsRequest::OpenInterest),
                         LegendItem::SessionProfile(kind) => {
                             Some(ChartSettingsRequest::SessionProfile(kind))
                         }

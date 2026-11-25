@@ -728,6 +728,24 @@ pub struct WorkspaceOrderFlowSettingsState {
     /// The open-interest sub-pane; absent when the indicator is not added, otherwise whether it is shown.
     #[prost(bool, optional, tag = "15")]
     pub open_interest: Option<bool>,
+    /// Open-interest style and color overrides while tag 15 records the indicator; absent in older
+    /// workspaces, which drew candles in the chart's default colors.
+    #[prost(message, optional, tag = "16")]
+    pub open_interest_options: Option<WorkspaceOpenInterestState>,
+}
+
+/// An empty color follows the chart default.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceOpenInterestState {
+    /// 0 candles, 1 bars, 2 line, 3 area.
+    #[prost(uint32, tag = "1")]
+    pub style: u32,
+    #[prost(string, tag = "2")]
+    pub line_color: String,
+    #[prost(string, tag = "3")]
+    pub up_color: String,
+    #[prost(string, tag = "4")]
+    pub down_color: String,
 }
 
 /// An empty color follows the chart default.

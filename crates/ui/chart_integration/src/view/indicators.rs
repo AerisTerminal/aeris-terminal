@@ -344,7 +344,7 @@ impl AerisChartView {
         {
             let item = LegendItem::OpenInterest;
             let title = tr!(chart_ui::LEGEND_OPEN_INTEREST);
-            insert_price_pane_legend_row(&mut rows, item, title, oi.visible, false);
+            insert_price_pane_legend_row(&mut rows, item, title, oi.visible, true);
         }
         let session_profiles = self.session_profile_legend_rows().collect::<Vec<_>>();
         for (item, title, visible) in session_profiles {

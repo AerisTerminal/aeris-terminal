@@ -141,11 +141,12 @@ use aeris_chart_integration::{
     ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
     ChartWorkspaceLayout, CumulativeDeltaReset, CumulativeDeltaSettings, CumulativeDeltaStyle,
     DEFAULT_STUDY_LINE_WIDTH, DeltaHistogramSettings, DepthHeatmapSettings, FootprintDisplayMode,
-    MAXIMUM_STUDY_LINE_WIDTH, OpenInterestSettings, OrderBookDepthSettings, OrderFlowAggregation,
-    OrderFlowApplyError, OrderFlowDefaultColors, OrderFlowSettings, OrderFlowTapeChange,
-    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, SessionProfileKind,
-    SessionProfileSettings, SessionVolumeProfileSettings, TpoCells, TpoSettings, VolumeAverageKind,
-    VolumeAverageSettings, VolumeDefaultColors, VolumePlacement, VolumeSettings, chart_color_hex,
+    MAXIMUM_STUDY_LINE_WIDTH, OpenInterestSettings, OpenInterestStyle, OrderBookDepthSettings,
+    OrderFlowAggregation, OrderFlowApplyError, OrderFlowDefaultColors, OrderFlowSettings,
+    OrderFlowTapeChange, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
+    SessionProfileKind, SessionProfileSettings, SessionVolumeProfileSettings, TpoCells,
+    TpoSettings, VolumeAverageKind, VolumeAverageSettings, VolumeDefaultColors, VolumePlacement,
+    VolumeSettings, chart_color_hex,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource};
 use aeris_contracts::{
@@ -2856,6 +2857,7 @@ fn legend_settings_request(request: ChartSettingsRequest) -> Option<LegendSettin
         ChartSettingsRequest::CumulativeDelta => order_flow(OrderFlowIndicator::CumulativeDelta),
         ChartSettingsRequest::DeltaHistogram => order_flow(OrderFlowIndicator::DeltaHistogram),
         ChartSettingsRequest::OrderBookDepth => order_flow(OrderFlowIndicator::OrderBook),
+        ChartSettingsRequest::OpenInterest => order_flow(OrderFlowIndicator::OpenInterest),
         ChartSettingsRequest::SessionProfile(kind) => {
             Some(LegendSettingsRequest::SessionProfile(kind))
         }

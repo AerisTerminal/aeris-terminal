@@ -1,7 +1,8 @@
-//! Thin host bridge forwarding exchange Open Interest bars to Aeris Charts' engine-owned
-//! candlestick Open Interest study (`ChartEngine::set_open_interest`).
+//! Thin host bridge forwarding exchange Open Interest bars and durable style/color settings to
+//! Aeris Charts' engine-owned Open Interest study (`ChartEngine::set_open_interest_with_options`,
+//! `ChartEngine::set_open_interest_options`).
 
-use aeris_charts_engine::OpenInterestBar;
+use aeris_charts_engine::{OpenInterestBar, OpenInterestOptions};
 
 use super::{AerisChartView, OpenInterestSettings, OrderFlowSettings};
 
@@ -14,9 +15,18 @@ pub(super) struct OpenInterestChartState {
     generation: u64,
 }
 
+const fn open_interest_options(settings: OpenInterestSettings) -> OpenInterestOptions {
+    OpenInterestOptions {
+        style: settings.style,
+        line_color: settings.line_color,
+        up_color: settings.up_color,
+        down_color: settings.down_color,
+    }
+}
+
 impl AerisChartView {
-    /// Installs or refreshes the engine-owned Open Interest candlestick sub-pane from bar-aligned
-    /// [`OpenInterestBar`] samples.
+    /// Installs or refreshes the engine-owned Open Interest sub-pane from bar-aligned
+    /// [`OpenInterestBar`] samples, applying the durable style and color settings.
     pub fn apply_open_interest(&mut self, bars: &[OpenInterestBar]) -> bool {
         let Some(settings) = self.order_flow_settings.open_interest else {
             return self.clear_open_interest();
@@ -31,10 +41,12 @@ impl AerisChartView {
         self.open_interest_state.generation =
             self.open_interest_state.generation.wrapping_add(1).max(1);
         let generation = self.open_interest_state.generation;
-        match self
-            .engine
-            .set_open_interest(OPEN_INTEREST_STUDY_ID, generation, bars)
-        {
+        match self.engine.set_open_interest_with_options(
+            OPEN_INTEREST_STUDY_ID,
+            generation,
+            bars,
+            open_interest_options(settings),
+        ) {
             Ok(changed) => {
                 let _ = self
                     .engine
@@ -47,6 +59,20 @@ impl AerisChartView {
                 changed || created
             }
             Err(_) => false,
+        }
+    }
+
+    /// Reconfigures the live Open Interest series' style (candles, bars, line, area), colors, and
+    /// visibility in place without dropping its pane or bar history.
+    pub(super) fn sync_open_interest_settings(&mut self, settings: OpenInterestSettings) {
+        let restyled = self
+            .engine
+            .set_open_interest_options(OPEN_INTEREST_STUDY_ID, open_interest_options(settings));
+        let visibility_changed = self
+            .engine
+            .set_external_study_visible(OPEN_INTEREST_STUDY_ID, settings.visible);
+        if restyled || visibility_changed {
+            self.invalidate_series_layout();
         }
     }
 
@@ -79,16 +105,15 @@ impl AerisChartView {
     }
 
     pub(super) fn set_open_interest_visible(&mut self, visible: bool) -> bool {
-        if self
-            .order_flow_settings
-            .open_interest
-            .is_none_or(|oi| oi.visible == visible)
-        {
+        let Some(current) = self.order_flow_settings.open_interest else {
+            return false;
+        };
+        if current.visible == visible {
             return false;
         }
         let changed = self
             .set_order_flow_settings(OrderFlowSettings {
-                open_interest: Some(OpenInterestSettings { visible }),
+                open_interest: Some(OpenInterestSettings { visible, ..current }),
                 ..self.order_flow_settings
             })
             .unwrap_or(false);
@@ -104,20 +129,20 @@ impl AerisChartView {
 
 #[cfg(test)]
 mod tests {
-    use aeris_charts_engine::{PriceFormatKind, SeriesKind};
+    use aeris_charts_engine::{OpenInterestStyle, PriceFormatKind, SeriesKind};
 
     use super::*;
-    use crate::view::LegendItem;
+    use crate::view::{ChartColor, LegendItem};
 
     const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
     #[test]
-    fn open_interest_delegates_to_engine_candlestick_study_and_legend() {
+    fn open_interest_delegates_to_engine_multi_mode_study_and_legend() {
         let mut chart = AerisChartView::new();
         assert!(
             chart
                 .set_order_flow_settings(OrderFlowSettings {
-                    open_interest: Some(OpenInterestSettings { visible: true }),
+                    open_interest: Some(OpenInterestSettings::default()),
                     ..OrderFlowSettings::default()
                 })
                 .expect("enable open interest")
@@ -170,14 +195,41 @@ mod tests {
             .find(|row| row.item == LegendItem::OpenInterest)
             .expect("open interest legend row");
         assert!(oi_row.pane > 0);
+        assert!(oi_row.settings_available);
         assert_eq!(oi_row.values.len(), 4);
-        assert!(oi_row.values[0].text.starts_with("O "));
-        assert!(oi_row.values[1].text.starts_with("H "));
-        assert!(oi_row.values[2].text.starts_with("L "));
-        assert!(oi_row.values[3].text.starts_with("C "));
 
+        // Switching across Bars, Line, Area, and back to Candles updates the series in place.
+        for (style, expected_kind) in [
+            (OpenInterestStyle::Bars, SeriesKind::Bar),
+            (OpenInterestStyle::Line, SeriesKind::Line),
+            (OpenInterestStyle::Area, SeriesKind::Area),
+            (OpenInterestStyle::Candles, SeriesKind::Candlestick),
+        ] {
+            let mut settings = chart.order_flow_settings();
+            settings.open_interest = Some(OpenInterestSettings {
+                visible: true,
+                style,
+                line_color: ChartColor::from_hex("#2962FF"),
+                up_color: ChartColor::from_hex("#00C853"),
+                down_color: ChartColor::from_hex("#FF1744"),
+            });
+            assert!(chart.set_order_flow_settings(settings).expect("restyle oi"));
+            let entry = chart
+                .engine
+                .series
+                .iter()
+                .find(|series| series.id == series_id && !series.removed)
+                .expect("series stays alive across restyle");
+            assert_eq!(entry.kind, expected_kind);
+        }
+
+        // Visibility toggle preserves style and colors.
         assert!(chart.set_open_interest_visible(false));
         assert_eq!(chart.engine.series_visible(series_id), Some(false));
+        assert_eq!(
+            chart.order_flow_settings().open_interest.unwrap().up_color,
+            ChartColor::from_hex("#00C853")
+        );
         assert!(chart.clear_open_interest());
         assert_eq!(
             chart.engine.open_interest_series(OPEN_INTEREST_STUDY_ID),
