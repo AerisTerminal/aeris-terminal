@@ -650,6 +650,7 @@ impl ToolbarUi<'_> {
 
 fn toolbar_button(id: impl Into<gpui::ElementId>, label: &str, theme: &AerisTheme) -> Button {
     Button::new(id, theme)
+        .on_secondary_surface()
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Default)
         .aria_label(label.to_string())
@@ -1066,6 +1067,7 @@ fn order_button(ui: ToolbarUi<'_>) -> AnyElement {
         .flex()
         .child(
             Button::new("drawing_context_order", ui.theme)
+                .on_secondary_surface()
                 .variant(ButtonVariant::Ghost)
                 .button_size(ButtonSize::Default)
                 .full_width()

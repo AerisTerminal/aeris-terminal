@@ -1254,6 +1254,7 @@ pub(super) fn drawing_favorites_toolbar_layer(
             theme,
             selected,
         )
+        .on_secondary_surface()
         .button_size(ButtonSize::Default)
         .disabled(!enabled)
         .on_click(move |_, _, cx| {
