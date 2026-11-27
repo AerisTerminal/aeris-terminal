@@ -479,7 +479,7 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Add generic semantic levels (`StudyLevelSpec`, `add_level`) and fill-between-series (`StudyFillSpec`, `add_fill`) contracts.
 - [x] Add dynamic background styling (`set_background_color`) and per-bar candle/bar style override series (`set_bar_color`) in transactional `StudyStyleOverlay`.
 - [x] Preserve hard gaps, pane/scale ownership, visibility, value-label behavior, timestamp validation, and bounded point accounting across every new output family.
-- [x] Migrate existing built-ins and wire native `Aeris-charts` rendering for per-point colors (`set_study_output_point_colors`), point markers (`set_study_output_point_markers`), `StepLine` (`LineType::WithSteps`), and per-bar candle colors (`MarketStudyStyleOverlay` -> `set_study_bar_colors`). (Remaining: native `Aeris-charts` fill-between-series and dynamic background tint pass.)
+- [x] Migrate existing built-ins and wire native `Aeris-charts` rendering for per-point colors (`set_study_output_point_colors`), point markers (`set_study_output_point_markers`), `StepLine` (`LineType::WithSteps`), per-bar candle colors (`MarketStudyStyleOverlay` -> `set_study_bar_colors`), dynamic background tints (`Prim::Rect`), horizontal reference levels (`Prim::HLine` + title), and fill-between-series bands (`Prim::BandFill`).
 
 ### Phase G — transactional semantic drawing scene
 
@@ -500,7 +500,7 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Add Session/Time-zone (`StudySession` with `chrono_tz::Tz` validation, tag 10), Timestamp (`i64` Unix nanos, tag 11), and Price (`StudyDecimal`, tag 12) controls.
 - [x] Add Source/Study-output references (`StudySource`, tag 13) without persisting transient runtime IDs.
 - [x] Add deterministic resource resolution (`resolve_market_input`) and full desktop persistence/codec/dialog support; transactional reinitialization (`reinitialize_native_for_consumer`) preserves the previous working study/dependency graph on failure.
-- [x] Wire dedicated native GPUI picker widgets in `study_settings_dialog.rs`: native `ColorPicker` swatch popover for `Color`, and native `SettingDropdown` selectors for `Timeframe` and `Source` (remaining: interactive symbol search & session picker popovers).
+- [x] Wire dedicated native GPUI picker widgets in `study_settings_dialog.rs`: native `ColorPicker` swatch popover for `Color`, and native `SettingDropdown` selectors for `Timeframe`, `Source`, and `Session` presets.
 
 ### Phase I — Pine-class market request and execution context
 

@@ -347,6 +347,73 @@ fn source_control(
     )
 }
 
+fn session_control(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &StudySettingsDialogState,
+    control_id: usize,
+    spec: &StudySettingSpec,
+    enabled: bool,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let current = match dialog
+        .draft_values
+        .get(&spec.identifier)
+        .unwrap_or(&spec.default)
+    {
+        StudySettingValue::Session(session) => session.to_label(),
+        _ => "0930-1600 America/New_York".to_string(),
+    };
+    let menu = format!("study_session_{control_id}");
+    let setting_identifier = spec.identifier.clone();
+    let (label, _) = setting_text(dialog, spec);
+    let mut options: Vec<(String, String)> = vec![
+        (
+            "0930-1600 America/New_York".to_string(),
+            "US RTH (09:30–16:00 NY)".to_string(),
+        ),
+        (
+            "1800-1700 America/Chicago".to_string(),
+            "CME Globex (18:00–17:00 CHI)".to_string(),
+        ),
+        (
+            "0800-1630 Europe/London".to_string(),
+            "London (08:00–16:30 LDN)".to_string(),
+        ),
+        (
+            "0900-1500 Asia/Tokyo".to_string(),
+            "Tokyo (09:00–15:00 TYO)".to_string(),
+        ),
+        (
+            "0000-2359 Etc/UTC".to_string(),
+            "24h UTC (00:00–23:59)".to_string(),
+        ),
+    ];
+    if !options.iter().any(|(val, _)| val == &current) {
+        options.insert(0, (current.clone(), current.clone()));
+    }
+    SettingDropdown {
+        menu: &menu,
+        label: &label,
+        open_menu: dialog.menu.as_deref(),
+        enabled,
+        choices: options
+            .into_iter()
+            .map(|(value, title)| DropdownChoice {
+                label: title.into(),
+                selected: current == value,
+                value,
+            })
+            .collect(),
+    }
+    .render(
+        app,
+        move |surface, selected: String, cx| {
+            surface.select_study_setting_session(&setting_identifier, &selected, cx);
+        },
+        theme,
+    )
+}
+
 fn color_setting_control(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
@@ -462,12 +529,14 @@ fn setting_control(
         StudySettingControl::Source { .. } => {
             source_control(app, dialog, control_id, spec, enabled, theme)
         }
+        StudySettingControl::Session => {
+            session_control(app, dialog, control_id, spec, enabled, theme)
+        }
         StudySettingControl::Integer { .. }
         | StudySettingControl::Decimal { .. }
         | StudySettingControl::Price { .. }
         | StudySettingControl::Text
         | StudySettingControl::Symbol { .. }
-        | StudySettingControl::Session
         | StudySettingControl::Timestamp => {
             text_control(dialog.inputs.get(&spec.identifier), enabled, theme)
         }

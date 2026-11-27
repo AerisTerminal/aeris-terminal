@@ -2873,6 +2873,61 @@ impl WorkspaceSurface {
                 if self.studies.set_bar_colors(overlay.study_id, colors) {
                     self.sync_study_bar_colors_to_chart(cx);
                 }
+                if let Some(chart) = &self.chart {
+                    let bg_colors = overlay
+                        .background_colors
+                        .iter()
+                        .map(|&(ts, color)| (ts, color.to_rgba_u32()))
+                        .collect::<Vec<_>>();
+                    let levels = overlay
+                        .levels
+                        .iter()
+                        .filter_map(|level| {
+                            let value = level.value.mantissa.to_f64()?
+                                / 10_f64.powi(i32::from(level.value.scale));
+                            let style = match level.style {
+                                aeris_market_runtime::study::StudyLineStyle::Solid => {
+                                    aeris_chart_integration::ChartStudyLineStyle::Solid
+                                }
+                                aeris_market_runtime::study::StudyLineStyle::Dashed => {
+                                    aeris_chart_integration::ChartStudyLineStyle::Dashed
+                                }
+                                aeris_market_runtime::study::StudyLineStyle::Dotted => {
+                                    aeris_chart_integration::ChartStudyLineStyle::Dotted
+                                }
+                            };
+                            Some(aeris_chart_integration::ChartStudyLevel {
+                                value,
+                                color_rgba: level.color.to_rgba_u32(),
+                                style,
+                                title: level.title.clone(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let fills = overlay
+                        .fills
+                        .iter()
+                        .map(|fill| aeris_chart_integration::ChartStudyFill {
+                            first_output_index: fill.first_output_index,
+                            second_output_index: fill.second_output_index,
+                            color_rgba: fill.color.to_rgba_u32(),
+                        })
+                        .collect::<Vec<_>>();
+                    chart.update(cx, |chart, chart_cx| {
+                        match chart.set_study_overlay(
+                            overlay.study_id.get(),
+                            bg_colors,
+                            levels,
+                            fills,
+                        ) {
+                            Ok(true) => chart_cx.notify(),
+                            Ok(false) => {}
+                            Err(error) => {
+                                diagnostic!("Aeris study overlay rejected: {error}");
+                            }
+                        }
+                    });
+                }
             }
             aeris_market_runtime::MarketRuntimeEvent::StudySceneDelta(delta) => {
                 if !self
@@ -6640,6 +6695,22 @@ impl WorkspaceSurface {
             dialog
                 .draft_values
                 .insert(identifier.to_string(), StudySettingValue::Source(source));
+            self.preview_study_settings_dialog(cx);
+        }
+    }
+
+    pub(super) fn select_study_setting_session(
+        &mut self,
+        identifier: &str,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = aeris_market_runtime::study::StudySession::parse_label(label)
+            && let Some(dialog) = self.study_settings_dialog_mut()
+        {
+            dialog
+                .draft_values
+                .insert(identifier.to_string(), StudySettingValue::Session(session));
             self.preview_study_settings_dialog(cx);
         }
     }

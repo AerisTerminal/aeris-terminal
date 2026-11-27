@@ -29,9 +29,10 @@ pub use aeris_charts_engine::{
     DepthLevel as ChartDepthLevel, LiquidationStyle, OpenInterestStyle,
 };
 pub use aeris_charts_engine::{
-    ExternalStudyError as ChartStudyOutputError,
+    ExternalStudyError as ChartStudyOutputError, ExternalStudyFill as ChartStudyFill,
     ExternalStudyInputRequirements as ChartStudyInputRequirements,
-    ExternalStudyInputStream as ChartStudyInputStream,
+    ExternalStudyInputStream as ChartStudyInputStream, ExternalStudyLevel as ChartStudyLevel,
+    ExternalStudyLineStyle as ChartStudyLineStyle,
     ExternalStudyOutputDescriptor as ChartStudyOutputDescriptor,
     ExternalStudyPaneTarget as ChartStudyPaneTarget, ExternalStudyPlotKind as ChartStudyPlotKind,
     ExternalStudyPointStyle as ChartStudyPointStyle,

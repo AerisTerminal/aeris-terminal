@@ -291,6 +291,27 @@ impl AerisChartView {
         self.engine.external_study_scene_objects(study_id)
     }
 
+    /// Sets or clears study-owned background tints, horizontal levels, and fill-between-series
+    /// bands through Aeris Charts.
+    ///
+    /// # Errors
+    /// Returns the engine's typed validation or bounded-capacity error without partial mutation.
+    pub fn set_study_overlay(
+        &mut self,
+        study_id: u64,
+        background_colors: Vec<(i64, u32)>,
+        levels: Vec<super::ChartStudyLevel>,
+        fills: Vec<super::ChartStudyFill>,
+    ) -> Result<bool, ChartStudyOutputError> {
+        let changed =
+            self.engine
+                .set_external_study_overlay(study_id, background_colors, levels, fills)?;
+        if changed {
+            self.invalidate_series_frame();
+        }
+        Ok(changed)
+    }
+
     fn apply_study_styles(&mut self, study_id: u64) -> bool {
         let outputs = self
             .engine
