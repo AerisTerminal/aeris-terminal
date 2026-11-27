@@ -24,7 +24,7 @@ use aeris_study_sdk::toolchain::{
 use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
 use aeris_study_sdk::{
     BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyInvalidationPolicy,
-    StudySettings,
+    StudyPaneTarget, StudyPlotKind, StudySettings,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -124,6 +124,51 @@ impl TryFrom<StoredManifest> for StudyProjectManifest {
             .map_err(|error| format!("invalid study manifest: {error:?}"))?;
         Ok(manifest)
     }
+}
+
+/// Parses optional presentation directives from the top comments of a user study:
+/// - `// @pane: separate` (or `// @overlay: false`) -> dedicated oscillator pane below price
+/// - `// @pane: price` (default) -> main price overlay pane
+/// - `// @plot: histogram | columns | stepline | line` (default: `line`)
+#[must_use]
+pub(crate) fn parse_study_source_presentation(source: &str) -> (StudyPaneTarget, StudyPlotKind) {
+    let mut pane = StudyPaneTarget::Price;
+    let mut plot = StudyPlotKind::Line;
+    for raw_line in source.lines().take(32) {
+        let trimmed = raw_line.trim();
+        let Some(comment) = trimmed.strip_prefix("//") else {
+            continue;
+        };
+        let directive = comment.trim().to_ascii_lowercase();
+        if let Some(value) = directive.strip_prefix("@pane:") {
+            match value.trim() {
+                "separate" | "dedicated" | "subpane" | "oscillator" => {
+                    pane = StudyPaneTarget::Dedicated { group: 1 };
+                }
+                "price" | "overlay" => {
+                    pane = StudyPaneTarget::Price;
+                }
+                _ => {}
+            }
+        } else if let Some(value) = directive.strip_prefix("@overlay:") {
+            if value.trim() == "false" {
+                pane = StudyPaneTarget::Dedicated { group: 1 };
+            } else if value.trim() == "true" {
+                pane = StudyPaneTarget::Price;
+            }
+        } else if let Some(value) = directive.strip_prefix("@plot:") {
+            match value.trim() {
+                "histogram" | "hist" => plot = StudyPlotKind::Histogram,
+                "columns" | "bars" => plot = StudyPlotKind::Columns,
+                "stepline" | "step" => plot = StudyPlotKind::StepLine,
+                "circles" | "dots" => plot = StudyPlotKind::Circles,
+                "cross" => plot = StudyPlotKind::Cross,
+                "line" => plot = StudyPlotKind::Line,
+                _ => {}
+            }
+        }
+    }
+    (pane, plot)
 }
 
 /// Computes the canonical lowercase SHA-256 hex digest of an arbitrary byte slice.
@@ -390,11 +435,20 @@ impl StudyProjectStore {
         };
         let compiled = CompiledWasmStudy::from_bytes(&wasm_bytes, StudySandboxLimits::default())
             .map_err(|err| format!("sandbox wasm validation failed: {err}"))?;
-        let display_name = self
+        let loaded_project = self
             .project_dir(&state.identifier)
             .ok()
-            .and_then(|dir| load_one_project(&dir).ok())
-            .map_or_else(|| state.identifier.clone(), |project| project.manifest.name);
+            .and_then(|dir| load_one_project(&dir).ok());
+        let display_name = loaded_project
+            .as_ref()
+            .map_or_else(|| state.identifier.clone(), |p| p.manifest.name.clone());
+        let (pane, plot) = loaded_project
+            .as_ref()
+            .map(|p| p.last_good_source.as_deref().unwrap_or(&p.source))
+            .map_or(
+                (StudyPaneTarget::Price, StudyPlotKind::Line),
+                parse_study_source_presentation,
+            );
         let output_id = state
             .output_identifiers
             .first()
@@ -402,7 +456,11 @@ impl StudyProjectStore {
             .unwrap_or_else(|| "value".to_string());
         let definition = StudyDefinitionBuilder::new(&state.identifier)
             .market(current_series.clone(), StreamRequirements::BARS)
-            .output(StudyOutputBuilder::line(output_id, display_name).build())
+            .output(
+                StudyOutputBuilder::new(output_id, display_name, plot)
+                    .pane(pane)
+                    .build(),
+            )
             .invalidation(StudyInvalidationPolicy::FromFirstChanged)
             .build();
         Ok(NativeStudyRegistration {
@@ -1368,5 +1426,78 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn separate_pane_and_plot_directives_parse_and_compile_advanced_oscillator() {
+        let src = r#"
+// @pane: separate
+// @plot: histogram
+pub fn calculate(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &mut [f64],
+) {
+    let len = 20usize;
+    let n = out.len();
+    let mut delta = vec![0.0; n];
+    for i in 0..n {
+        if i + 1 < len {
+            out[i] = f64::NAN;
+            continue;
+        }
+        let start = i + 1 - len;
+        let mut hh = f64::NEG_INFINITY;
+        let mut ll = f64::INFINITY;
+        let mut sum_c = 0.0;
+        let mut sum_v = 0.0;
+        for j in start..=i {
+            if high[j] > hh { hh = high[j]; }
+            if low[j] < ll { ll = low[j]; }
+            sum_c += close[j];
+            sum_v += volume[j];
+        }
+        let mid = 0.5 * (0.5 * (hh + ll) + sum_c / (len as f64));
+        let avg_v = (sum_v / (len as f64)).max(1e-9);
+        let rel_vol = (volume[i] / avg_v).clamp(0.5, 2.5);
+        let body_bias = if close[i] >= open[i] { 1.0 } else { -1.0 };
+        delta[i] = (close[i] - mid) * rel_vol + 0.0 * body_bias;
+
+        let mut sx = 0.0;
+        let mut sy = 0.0;
+        let mut sxx = 0.0;
+        let mut sxy = 0.0;
+        for k in 0..len {
+            let x = k as f64;
+            let y = delta[start + k];
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+        }
+        let lf = len as f64;
+        let denom = lf * sxx - sx * sx;
+        let slope = if denom.abs() > 1e-12 { (lf * sxy - sx * sy) / denom } else { 0.0 };
+        let intercept = (sy - slope * sx) / lf;
+        out[i] = intercept + slope * (lf - 1.0);
+    }
+}
+"#;
+        let (pane, plot) = parse_study_source_presentation(src);
+        assert_eq!(pane, StudyPaneTarget::Dedicated { group: 1 });
+        assert_eq!(plot, StudyPlotKind::Histogram);
+
+        let artifact = compile_study_source_to_wasm(src).expect("oscillator compiles to wasm");
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::RangeBound, 80, 60);
+        let res = artifact
+            .compiled
+            .execute_columnar(&fixture.bars, StudySandboxLimits::default())
+            .expect("oscillator executes cleanly in wasmi");
+        assert_eq!(res.values.len(), 80);
+        assert!(res.values[0].is_none());
+        assert!(res.values[79].is_some());
     }
 }

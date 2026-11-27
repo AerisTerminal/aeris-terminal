@@ -6642,6 +6642,8 @@ impl WorkspaceSurface {
         identifier: String,
         display_name: String,
         revision: u32,
+        pane: aeris_study_sdk::StudyPaneTarget,
+        plot: aeris_study_sdk::StudyPlotKind,
         compiled: aeris_study_sdk::wasm_runtime::CompiledWasmStudy,
         cx: &mut Context<Self>,
     ) {
@@ -6652,10 +6654,12 @@ impl WorkspaceSurface {
                     aeris_study_sdk::builders::StudyDefinitionBuilder::new(&identifier)
                         .market(series.clone(), aeris_study_sdk::StreamRequirements::BARS)
                         .output(
-                            aeris_study_sdk::builders::StudyOutputBuilder::line(
+                            aeris_study_sdk::builders::StudyOutputBuilder::new(
                                 "value",
                                 &display_name,
+                                plot,
                             )
+                            .pane(pane)
                             .build(),
                         )
                         .invalidation(aeris_study_sdk::StudyInvalidationPolicy::FromFirstChanged)
