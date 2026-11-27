@@ -7150,3 +7150,51 @@ fn bar_replay_playback_steps_reach_the_host_from_the_frame_tick(cx: &mut gpui::T
         "a playback step raised in the frame tick reaches the host"
     );
 }
+
+#[test]
+fn study_point_colors_markers_and_bar_colors_project_to_engine() {
+    let mut chart = AerisChartView::new();
+    let timestamps = [
+        60_i64 * 1_000_000_000,
+        120_i64 * 1_000_000_000,
+        180_i64 * 1_000_000_000,
+    ];
+    let values = [Some(10.0), Some(20.0), Some(30.0)];
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "Signal Dots",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::BARS,
+    };
+
+    assert!(!chart.set_study_output_point_colors(77, 0, Some(vec![0xFF00_00FF])));
+    assert!(!chart.set_study_output_point_markers(77, 0, true));
+
+    assert_eq!(
+        chart.install_study_output(77, 0, descriptor, 1, &timestamps, &values),
+        Ok(true)
+    );
+    assert!(chart.set_study_output_point_markers(77, 0, true));
+    assert!(!chart.set_study_output_point_markers(77, 0, true));
+    assert_eq!(
+        chart
+            .engine
+            .external_study_output_style(77, 0)
+            .map(|style| style.point_markers),
+        Some(true)
+    );
+
+    assert!(chart.set_study_output_point_colors(77, 0, Some(vec![0, 0x22C5_5EFF, 0xEF44_44FF])));
+    assert!(chart.set_study_output_point_colors(77, 0, None));
+
+    let first_bar_ns = chart.engine.series_data(0)[0]
+        .time
+        .saturating_mul(1_000_000_000);
+    assert!(chart.set_study_bar_colors(&[(first_bar_ns, 0x22C5_5EFF)]));
+    assert!(chart.set_study_bar_colors(&[]));
+}

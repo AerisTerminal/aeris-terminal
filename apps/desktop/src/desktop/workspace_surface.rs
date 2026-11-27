@@ -3428,6 +3428,34 @@ impl WorkspaceSurface {
                     if let Some(visible) = visible {
                         chart.set_study_visible(snapshot.study_id.get(), visible);
                     }
+                    let wants_markers = matches!(
+                        snapshot.output.plot,
+                        StudyPlotKind::Circles | StudyPlotKind::Cross
+                    );
+                    chart.set_study_output_point_markers(
+                        snapshot.study_id.get(),
+                        snapshot.output_id.output_index,
+                        wants_markers,
+                    );
+                    if snapshot.output.point_style == StudyPointStyle::PerPoint {
+                        let sparse = snapshot.series.point_colors();
+                        let packed = if sparse.is_empty() {
+                            None
+                        } else {
+                            let mut colors = vec![0u32; snapshot.series.len()];
+                            for (&index, &color) in sparse {
+                                if let Some(slot) = colors.get_mut(index) {
+                                    *slot = color.to_rgba_u32();
+                                }
+                            }
+                            Some(colors)
+                        };
+                        chart.set_study_output_point_colors(
+                            snapshot.study_id.get(),
+                            snapshot.output_id.output_index,
+                            packed,
+                        );
+                    }
                     chart_cx.notify();
                 }
                 Ok(false) => {}

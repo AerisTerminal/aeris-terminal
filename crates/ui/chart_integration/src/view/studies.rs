@@ -124,6 +124,100 @@ impl AerisChartView {
         self.apply_study_styles(study_id)
     }
 
+    /// Sets per-point packed `0xRRGGBBAA` colors (`0` = default) on one external study output.
+    pub fn set_study_output_point_colors(
+        &mut self,
+        study_id: u64,
+        output_index: usize,
+        packed_rgba: Option<Vec<u32>>,
+    ) -> bool {
+        let Some(info) = self
+            .engine
+            .external_study_output_info(study_id, output_index)
+        else {
+            return false;
+        };
+        let changed = self
+            .engine
+            .set_series_point_colors(info.series_id, packed_rgba, None, None);
+        if changed {
+            self.invalidate_series_frame();
+        }
+        changed
+    }
+
+    /// Toggles point markers (circles) on one external study output.
+    pub fn set_study_output_point_markers(
+        &mut self,
+        study_id: u64,
+        output_index: usize,
+        point_markers: bool,
+    ) -> bool {
+        let Some(current) = self
+            .engine
+            .external_study_output_style(study_id, output_index)
+        else {
+            return false;
+        };
+        if current.point_markers == point_markers {
+            return false;
+        }
+        let desired = IndicatorOutputStyle {
+            point_markers,
+            ..current
+        };
+        let changed = self
+            .engine
+            .set_external_study_output_style(study_id, output_index, desired);
+        if changed {
+            self.invalidate_series_frame();
+        }
+        changed
+    }
+
+    /// Applies sparse `(timestamp_unix_nanos, packed_0xRRGGBBAA)` candle color overrides onto the
+    /// chart's primary price series. Passing an empty slice clears all overrides.
+    pub fn set_study_bar_colors(&mut self, bar_colors: &[(i64, u32)]) -> bool {
+        let Some(series_id) = self.primary_series_id_on_scale(0, super::PriceScaleTarget::Right)
+        else {
+            return false;
+        };
+        let packed_rgba = if bar_colors.is_empty() {
+            None
+        } else {
+            let lookup: std::collections::HashMap<i64, u32> = bar_colors
+                .iter()
+                .copied()
+                .filter(|&(_, c)| c != 0)
+                .collect();
+            if lookup.is_empty() {
+                None
+            } else {
+                let data = self.engine.series_data(series_id);
+                let packed = data
+                    .iter()
+                    .map(|point| {
+                        lookup
+                            .get(&point.time.saturating_mul(1_000_000_000))
+                            .copied()
+                            .unwrap_or(0)
+                    })
+                    .collect::<Vec<_>>();
+                Some(packed)
+            }
+        };
+        let changed = self.engine.set_series_point_colors(
+            series_id,
+            packed_rgba.clone(),
+            packed_rgba.clone(),
+            packed_rgba,
+        );
+        if changed {
+            self.invalidate_series_frame();
+        }
+        changed
+    }
+
     /// The color one output paints its line with.
     #[must_use]
     pub fn study_output_color(&self, study_id: u64, output_index: usize) -> Option<String> {
