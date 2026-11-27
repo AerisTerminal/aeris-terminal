@@ -94,7 +94,7 @@ use saved_workspace::{SavedWorkspace, UnsavedEdit, WorkspaceSave, WorkspaceSnaps
 mod session_profile_dialog;
 mod side_panel_dock;
 mod sign_in_gate;
-#[cfg(test)]
+mod study_editor_dialog;
 mod study_editor_store;
 mod study_packages;
 mod study_settings_dialog;
@@ -306,6 +306,7 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
     time::{Duration, Instant},
 };
+use study_editor_dialog::{StudyEditorDialogState, study_editor_dialog_layer};
 use study_settings_dialog::study_settings_dialog_layer;
 use symbol_browser::{
     ExactSymbolMatch, InstrumentMenuAction, InstrumentMenuEntry, InstrumentMenuSelection,
@@ -1195,6 +1196,7 @@ enum LegendSettingsRequest {
 /// The one settings dialog a surface can have open.
 enum IndicatorSettingsDialog {
     Study(StudySettingsDialogState),
+    StudyEditor(StudyEditorDialogState),
     BigTrades(BigTradesDialogState),
     Volume(VolumeDialogState),
     OrderFlow(OrderFlowDialogState),

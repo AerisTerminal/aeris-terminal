@@ -514,6 +514,12 @@ study_lines_description = 每条线的粗细及其颜色，按图例顺序排列
 study_inputs = 输入
 study_style = 样式
 study_settings = 指标设置
+study_editor = 指标编辑器
+study_editor_subtitle = 创建、校验并管理自定义 Rust 指标项目
+study_editor_new_project = 新建项目
+study_editor_validate_save = 校验并保存
+study_editor_revert = 恢复上一有效版本
+study_editor_no_projects = 暂无自定义指标项目。请选择一个模板创建。
 
 ## 绘图上下文工具栏
 drawing_width_px = {width}px

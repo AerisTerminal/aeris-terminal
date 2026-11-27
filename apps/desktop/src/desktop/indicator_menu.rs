@@ -218,6 +218,8 @@ pub(super) fn indicator_dialog_content(
             theme,
         ));
     }
+    let editor_app = app.clone();
+    let editor_terminal = state.templates.terminal.clone();
     chrome_menu_surface(&colors, state.extent)
         .child(chrome_menu_search_header(state.input, theme, app))
         .child(scrollable_menu_body(
@@ -226,6 +228,32 @@ pub(super) fn indicator_dialog_content(
             colors.text_secondary,
             state.extent,
         ))
+        .child(
+            div()
+                .px_2()
+                .py_1p5()
+                .border_t_1()
+                .border_color(gpui_color(colors.border_subtle))
+                .child(
+                    Button::new("open_study_editor", theme)
+                        .variant(ButtonVariant::Ghost)
+                        .button_size(ButtonSize::Sm)
+                        .w_full()
+                        .label(tr!(aeris_localization::panels::STUDY_EDITOR))
+                        .on_click(move |_, window, cx| {
+                            let data_root = editor_terminal
+                                .read(cx)
+                                .saved
+                                .writer()
+                                .map(|writer| writer.data_root().to_path_buf())
+                                .unwrap_or_default();
+                            editor_app.update(cx, |surface, surface_cx| {
+                                surface.close_chrome_overlay(window, surface_cx);
+                                surface.open_study_editor_dialog(data_root, window, surface_cx);
+                            });
+                        }),
+                ),
+        )
 }
 pub(super) const fn native_indicator(kind: chart_chrome::IndicatorKind) -> ChartIndicator {
     match kind {

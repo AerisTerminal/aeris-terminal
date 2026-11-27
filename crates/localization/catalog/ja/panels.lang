@@ -514,6 +514,12 @@ study_lines_description = すべてのラインの太さと、凡例の順に各
 study_inputs = 入力
 study_style = スタイル
 study_settings = スタディ設定
+study_editor = スタディエディタ
+study_editor_subtitle = カスタム Rust スタディプロジェクトの作成・検証・管理
+study_editor_new_project = 新規プロジェクト
+study_editor_validate_save = 検証して保存
+study_editor_revert = 前回の正常版に戻す
+study_editor_no_projects = カスタムスタディプロジェクトはまだありません。テンプレートを選択して作成してください。
 
 ## 描画のコンテキストツールバー
 drawing_width_px = {width}px

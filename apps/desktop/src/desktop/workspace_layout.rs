@@ -301,6 +301,9 @@ fn pane_settings_dialog(
         IndicatorSettingsDialog::Study(dialog) => {
             Some(study_settings_dialog_layer(entity, dialog, theme, cx))
         }
+        IndicatorSettingsDialog::StudyEditor(dialog) => {
+            Some(study_editor_dialog_layer(entity, dialog, theme))
+        }
         IndicatorSettingsDialog::BigTrades(dialog) => {
             Some(big_trades_dialog_layer(entity, dialog, theme))
         }

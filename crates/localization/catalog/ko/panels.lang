@@ -514,6 +514,12 @@ study_lines_description = 모든 선의 두께와 범례 순서에 따른 각 �
 study_inputs = 입력값
 study_style = 스타일
 study_settings = 지표 설정
+study_editor = 지표 편집기
+study_editor_subtitle = 사용자 지정 Rust 지표 프로젝트 생성, 검증 및 관리
+study_editor_new_project = 새 프로젝트
+study_editor_validate_save = 검증 및 저장
+study_editor_revert = 마지막 정상 버전으로 되돌리기
+study_editor_no_projects = 아직 사용자 지정 지표 프로젝트가 없습니다. 템플릿을 선택하여 생성하세요.
 
 ## 드로잉 컨텍스트 툴바
 drawing_width_px = {width}px

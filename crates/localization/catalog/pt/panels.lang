@@ -518,6 +518,12 @@ study_lines_description = Espessura de todas as linhas e a cor de cada uma, na o
 study_inputs = Entradas
 study_style = Estilo
 study_settings = Configurações do estudo
+study_editor = Editor de estudos
+study_editor_subtitle = Crie, valide e gerencie projetos de estudos Rust personalizados
+study_editor_new_project = Novo projeto
+study_editor_validate_save = Validar e salvar
+study_editor_revert = Reverter para última versão válida
+study_editor_no_projects = Nenhum projeto personalizado ainda. Escolha um modelo para criar um.
 
 ## Barra de contexto do desenho
 drawing_width_px = {width}px

@@ -6158,6 +6158,7 @@ impl WorkspaceSurface {
     pub(super) fn cancel_indicator_settings_dialog(&mut self, cx: &mut Context<Self>) {
         match &self.indicator_settings_dialog {
             Some(IndicatorSettingsDialog::Study(_)) => self.close_study_settings_dialog(cx),
+            Some(IndicatorSettingsDialog::StudyEditor(_)) => self.close_study_editor_dialog(cx),
             Some(IndicatorSettingsDialog::BigTrades(_)) => self.close_big_trades_dialog(cx),
             Some(IndicatorSettingsDialog::Volume(_)) => self.close_volume_dialog(cx),
             Some(IndicatorSettingsDialog::OrderFlow(_)) => self.close_order_flow_dialog(cx),
@@ -6179,7 +6180,7 @@ impl WorkspaceSurface {
     ) {
         self.close_drawing_settings_dialog(false, cx);
         let kind = match &dialog {
-            IndicatorSettingsDialog::Study(_) => "study",
+            IndicatorSettingsDialog::Study(_) | IndicatorSettingsDialog::StudyEditor(_) => "study",
             IndicatorSettingsDialog::Volume(_) => "volume_settings",
             IndicatorSettingsDialog::BigTrades(_) => "big_trades_settings",
             IndicatorSettingsDialog::OrderFlow(_) => "order_flow_settings",
@@ -6243,7 +6244,8 @@ impl WorkspaceSurface {
             Some(IndicatorSettingsDialog::Volume(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::OrderFlow(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::SessionProfile(dialog)) => Some(&mut dialog.menu),
-            Some(IndicatorSettingsDialog::Drawing(_)) | None => None,
+            Some(IndicatorSettingsDialog::Drawing(_) | IndicatorSettingsDialog::StudyEditor(_))
+            | None => None,
         }
     }
 
@@ -6414,6 +6416,91 @@ impl WorkspaceSurface {
     }
 
     /// Cancel: closes the dialog and restores the study's style and settings it opened with.
+    pub(super) fn open_study_editor_dialog(
+        &mut self,
+        data_root: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.indicator_settings_dialog = Some(IndicatorSettingsDialog::StudyEditor(
+            StudyEditorDialogState::open(data_root, window, cx),
+        ));
+        cx.notify();
+    }
+
+    pub(super) fn close_study_editor_dialog(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.indicator_settings_dialog,
+            Some(IndicatorSettingsDialog::StudyEditor(_))
+        ) {
+            self.indicator_settings_dialog = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn select_study_editor_project(
+        &mut self,
+        identifier: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.select_project(identifier, window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn create_study_editor_project(
+        &mut self,
+        template: aeris_study_sdk::project::StudyProjectTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.create_from_template(template, window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn validate_and_save_study_editor_project(&mut self, cx: &mut Context<Self>) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.validate_and_save(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn revert_study_editor_project(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.revert_to_last_good(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn delete_study_editor_project(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.delete_selected(window, cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
         let Some((study_id, original)) = self
             .study_settings_dialog()

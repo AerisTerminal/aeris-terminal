@@ -523,6 +523,12 @@ study_lines_description = Толщина каждой линии и её цве�
 study_inputs = Входные параметры
 study_style = Стиль
 study_settings = Настройки индикатора
+study_editor = Редактор индикаторов
+study_editor_subtitle = Создавайте, проверяйте и управляйте пользовательскими проектами Rust-индикаторов
+study_editor_new_project = Новый проект
+study_editor_validate_save = Проверить и сохранить
+study_editor_revert = Вернуть последнюю рабочую версию
+study_editor_no_projects = Пользовательских проектов пока нет. Выберите шаблон для создания.
 
 ## Контекстная панель рисунка
 drawing_width_px = {width} пкс

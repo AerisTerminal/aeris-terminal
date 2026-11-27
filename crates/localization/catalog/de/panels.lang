@@ -518,6 +518,12 @@ study_lines_description = Stärke aller Linien und die Farbe jeder einzelnen, in
 study_inputs = Eingaben
 study_style = Stil
 study_settings = Studieneinstellungen
+study_editor = Studien-Editor
+study_editor_subtitle = Eigene Rust-Studienprojekte erstellen, prüfen und verwalten
+study_editor_new_project = Neues Projekt
+study_editor_validate_save = Prüfen & speichern
+study_editor_revert = Letzten gültigen Stand wiederherstellen
+study_editor_no_projects = Noch keine eigenen Studienprojekte. Wähle eine Vorlage zum Erstellen.
 
 ## Kontextleiste für Zeichnungen
 drawing_width_px = {width}px

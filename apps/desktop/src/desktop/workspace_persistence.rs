@@ -125,6 +125,7 @@ impl WorkspaceLayoutShutdownWait {
 
 #[derive(Clone)]
 pub(super) struct WorkspaceLayoutPersistence {
+    data_root: std::path::PathBuf,
     latest: Arc<Mutex<Option<WorkspaceLayoutRequest>>>,
     wake: SyncSender<()>,
     result: Arc<Mutex<Option<WorkspaceLayoutCompletion>>>,
@@ -170,7 +171,13 @@ impl WorkspaceLayoutPersistence {
                 );
             })
             .map_err(|_| "workspace layout client could not start".to_string())?;
+        let data_root = persistence
+            .workspace_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
         Ok(Self {
+            data_root,
             latest,
             wake: wake_tx,
             result,
@@ -181,6 +188,10 @@ impl WorkspaceLayoutPersistence {
             pending: Rc::new(Cell::new(false)),
             error: Rc::new(RefCell::new(None)),
         })
+    }
+
+    pub(super) fn data_root(&self) -> &std::path::Path {
+        &self.data_root
     }
 
     pub(super) fn request_with_chart_settings(
@@ -399,6 +410,7 @@ mod tests {
         let (wake, receiver) = mpsc::sync_channel(1);
         (
             WorkspaceLayoutPersistence {
+                data_root: std::path::PathBuf::new(),
                 latest: Arc::new(Mutex::new(None)),
                 wake,
                 result: Arc::new(Mutex::new(None)),

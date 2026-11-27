@@ -518,6 +518,12 @@ study_lines_description = हर लाइन की मोटाई और ल�
 study_inputs = इनपुट
 study_style = स्टाइल
 study_settings = स्टडी सेटिंग्स
+study_editor = स्टडी एडिटर
+study_editor_subtitle = कस्टम Rust स्टडी प्रोजेक्ट बनाएं, सत्यापित करें और प्रबंधित करें
+study_editor_new_project = नया प्रोजेक्ट
+study_editor_validate_save = सत्यापित करें और सहेजें
+study_editor_revert = अंतिम सही संस्करण पर लौटें
+study_editor_no_projects = अभी कोई कस्टम स्टडी प्रोजेक्ट नहीं है। बनाने के लिए एक टेम्पलेट चुनें।
 
 ## Drawing context toolbar
 drawing_width_px = {width}px

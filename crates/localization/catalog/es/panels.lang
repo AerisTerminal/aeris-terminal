@@ -519,6 +519,12 @@ study_lines_description = Grosor de todas las líneas y color de cada una, en el
 study_inputs = Entradas
 study_style = Estilo
 study_settings = Configuración del estudio
+study_editor = Editor de estudios
+study_editor_subtitle = Crea, valida y gestiona proyectos de estudios Rust personalizados
+study_editor_new_project = Nuevo proyecto
+study_editor_validate_save = Validar y guardar
+study_editor_revert = Revertir al último válido
+study_editor_no_projects = Aún no hay proyectos personalizados. Elige una plantilla para crear uno.
 
 ## Barra contextual de dibujo
 drawing_width_px = {width}px

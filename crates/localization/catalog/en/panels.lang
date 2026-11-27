@@ -518,6 +518,12 @@ study_lines_description = Thickness of every line and the color of each, in lege
 study_inputs = Inputs
 study_style = Style
 study_settings = Study settings
+study_editor = Study editor
+study_editor_subtitle = Create, validate, and manage custom Rust study projects
+study_editor_new_project = New project
+study_editor_validate_save = Validate & save
+study_editor_revert = Revert to last good
+study_editor_no_projects = No custom study projects yet. Choose a template to create one.
 
 ## Drawing context toolbar
 drawing_width_px = {width}px
