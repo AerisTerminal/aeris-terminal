@@ -12,7 +12,9 @@ use crate::sandbox::{
     MAXIMUM_SANDBOX_ARTIFACT_BYTES, STUDY_SANDBOX_ABI_VERSION, StudySandboxColumnarBars,
     StudySandboxLimits,
 };
-use crate::{NativeStudyProgram, StudyExecutionContext, StudyInputSeries, fixed_point_to_f64};
+use crate::{
+    NativeStudyProgram, StudyExecutionContext, StudyFillSpec, StudyInputSeries, fixed_point_to_f64,
+};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -25,6 +27,9 @@ pub const WASM_EXPORT_ALLOC: &str = "aeris_study_alloc";
 /// Required guest export computing one output series over columnized OHLCV `f64` bars:
 /// `(bars_ptr: u32, bar_count: u32, out_ptr: u32) -> i32`.
 pub const WASM_EXPORT_CALCULATE: &str = "aeris_study_calculate";
+/// Optional guest export computing `output_count` contiguous output series over columnized
+/// OHLCV `f64` bars: `(bars_ptr: u32, bar_count: u32, out_ptr: u32, output_count: u32) -> i32`.
+pub const WASM_EXPORT_CALCULATE_MULTI: &str = "aeris_study_calculate_multi";
 /// Required guest linear memory export name.
 pub const WASM_EXPORT_MEMORY: &str = "memory";
 
@@ -127,6 +132,15 @@ impl Error for WasmSandboxError {}
 pub struct WasmExecutionResult {
     /// Computed study output values aligned 1:1 with the input bars (`None` = hard gap).
     pub values: Vec<Option<f64>>,
+    /// Exact instruction fuel consumed by this execution wave.
+    pub fuel_consumed: u64,
+}
+
+/// Execution telemetry returned alongside multi-output computed study series.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WasmMultiExecutionResult {
+    /// One output vector per declared output series, each aligned 1:1 with the input bars.
+    pub outputs: Vec<Vec<Option<f64>>>,
     /// Exact instruction fuel consumed by this execution wave.
     pub fuel_consumed: u64,
 }
@@ -248,23 +262,28 @@ impl CompiledWasmStudy {
     }
 
     /// Executes this sandboxed study over one columnized OHLCV bar batch in a fresh isolated
-    /// `wasmi::Store` bounded by `limits`.
+    /// `wasmi::Store` bounded by `limits`, returning `output_count` output series.
+    ///
+    /// Uses `aeris_study_calculate_multi` when exported; otherwise falls back to
+    /// `aeris_study_calculate` for single-output modules.
     ///
     /// # Errors
     /// Returns [`WasmSandboxError`] on inconsistent input, fuel exhaustion, memory ceiling
     /// violation, guest trap, guest error code, or non-finite infinite output.
-    pub fn execute_columnar(
+    pub fn execute_columnar_outputs(
         &self,
         bars: &StudySandboxColumnarBars,
+        output_count: usize,
         limits: StudySandboxLimits,
-    ) -> Result<WasmExecutionResult, WasmSandboxError> {
+    ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
+        let count = output_count.clamp(1, 16);
         if !bars.is_consistent() {
             return Err(WasmSandboxError::InconsistentInputBars);
         }
         let bar_count = bars.len();
         if bar_count == 0 {
-            return Ok(WasmExecutionResult {
-                values: Vec::new(),
+            return Ok(WasmMultiExecutionResult {
+                outputs: vec![Vec::new(); count],
                 fuel_consumed: 0,
             });
         }
@@ -288,53 +307,34 @@ impl CompiledWasmStudy {
         let alloc_fn = instance
             .get_typed_func::<u32, u32>(&store, WASM_EXPORT_ALLOC)
             .map_err(|_| WasmSandboxError::MissingExport(WASM_EXPORT_ALLOC))?;
-        let calc_fn = instance
+        let multi_fn = instance
+            .get_typed_func::<(u32, u32, u32, u32), i32>(&store, WASM_EXPORT_CALCULATE_MULTI)
+            .ok();
+        let single_fn = instance
             .get_typed_func::<(u32, u32, u32), i32>(&store, WASM_EXPORT_CALCULATE)
             .map_err(|_| WasmSandboxError::MissingExport(WASM_EXPORT_CALCULATE))?;
 
         let input_bytes = pack_columnar_ohlcv_f64(bars);
-        let input_len_u32 =
-            u32::try_from(input_bytes.len()).map_err(|_| WasmSandboxError::AllocationFailed {
-                requested_bytes: input_bytes.len(),
-            })?;
-        let out_byte_len =
+        let total_out_values =
             bar_count
-                .checked_mul(size_of::<f64>())
+                .checked_mul(count)
                 .ok_or(WasmSandboxError::AllocationFailed {
                     requested_bytes: usize::MAX,
                 })?;
-        let out_len_u32 =
-            u32::try_from(out_byte_len).map_err(|_| WasmSandboxError::AllocationFailed {
-                requested_bytes: out_byte_len,
-            })?;
-        let bar_count_u32 =
-            u32::try_from(bar_count).map_err(|_| WasmSandboxError::InputTooLarge {
-                maximum: limits.max_output_points,
-                actual: bar_count,
-            })?;
+        let out_byte_len = total_out_values.checked_mul(size_of::<f64>()).ok_or(
+            WasmSandboxError::AllocationFailed {
+                requested_bytes: usize::MAX,
+            },
+        )?;
+        let (input_len_u32, out_len_u32, bar_count_u32, out_count_u32) =
+            checked_wasm_sizes(input_bytes.len(), out_byte_len, bar_count, count, limits)?;
 
-        let bars_ptr = alloc_fn
-            .call(&mut store, input_len_u32)
-            .map_err(|err| classify_wasmi_error(&err, false))?;
-        if bars_ptr == 0 {
-            return Err(WasmSandboxError::AllocationFailed {
-                requested_bytes: input_bytes.len(),
-            });
-        }
-        let out_ptr = alloc_fn
-            .call(&mut store, out_len_u32)
-            .map_err(|err| classify_wasmi_error(&err, false))?;
-        if out_ptr == 0 {
-            return Err(WasmSandboxError::AllocationFailed {
-                requested_bytes: out_byte_len,
-            });
-        }
+        let bars_ptr = alloc_guest(&mut store, alloc_fn, input_len_u32, input_bytes.len())?;
+        let out_ptr = alloc_guest(&mut store, alloc_fn, out_len_u32, out_byte_len)?;
 
         memory
             .write(&mut store, bars_ptr as usize, &input_bytes)
             .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
-
-        // Pre-fill output buffer with NaN (hard gap) so untouched slots never leak stale bytes.
         let nan_fill: Vec<u8> = f64::NAN
             .to_le_bytes()
             .into_iter()
@@ -345,9 +345,18 @@ impl CompiledWasmStudy {
             .write(&mut store, out_ptr as usize, &nan_fill)
             .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
 
-        let status = calc_fn
-            .call(&mut store, (bars_ptr, bar_count_u32, out_ptr))
-            .map_err(|err| classify_wasmi_error(&err, false))?;
+        let status = if let Some(multi) = multi_fn {
+            multi
+                .call(
+                    &mut store,
+                    (bars_ptr, bar_count_u32, out_ptr, out_count_u32),
+                )
+                .map_err(|err| classify_wasmi_error(&err, false))?
+        } else {
+            single_fn
+                .call(&mut store, (bars_ptr, bar_count_u32, out_ptr))
+                .map_err(|err| classify_wasmi_error(&err, false))?
+        };
         if status != 0 {
             return Err(WasmSandboxError::GuestError(status));
         }
@@ -356,13 +365,33 @@ impl CompiledWasmStudy {
         memory
             .read(&store, out_ptr as usize, &mut raw_output)
             .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
-        let values = decode_output_f64_values(&raw_output, bar_count)?;
+        let flat = decode_output_f64_values(&raw_output, total_out_values)?;
+        let outputs: Vec<Vec<Option<f64>>> = flat
+            .chunks_exact(bar_count)
+            .map(<[Option<f64>]>::to_vec)
+            .collect();
 
         let remaining_fuel = store.get_fuel().unwrap_or(0);
         let fuel_consumed = initial_fuel.saturating_sub(remaining_fuel);
-        Ok(WasmExecutionResult {
-            values,
+        Ok(WasmMultiExecutionResult {
+            outputs,
             fuel_consumed,
+        })
+    }
+
+    /// Executes a single-output sandboxed study over one columnized OHLCV bar batch.
+    ///
+    /// # Errors
+    /// Returns [`WasmSandboxError`] on failure.
+    pub fn execute_columnar(
+        &self,
+        bars: &StudySandboxColumnarBars,
+        limits: StudySandboxLimits,
+    ) -> Result<WasmExecutionResult, WasmSandboxError> {
+        let multi = self.execute_columnar_outputs(bars, 1, limits)?;
+        Ok(WasmExecutionResult {
+            values: multi.outputs.into_iter().next().unwrap_or_default(),
+            fuel_consumed: multi.fuel_consumed,
         })
     }
 
@@ -370,7 +399,20 @@ impl CompiledWasmStudy {
     /// directly inside `StudyRuntime` with transactional rollback and generation fencing.
     #[must_use]
     pub fn into_native_program(self, limits: StudySandboxLimits) -> NativeStudyProgram {
+        self.into_native_program_with_spec(1, Vec::new(), limits)
+    }
+
+    /// Wraps a multi-output sandboxed WebAssembly module (with optional fills) into a
+    /// [`NativeStudyProgram`] that runs inside `StudyRuntime`.
+    #[must_use]
+    pub fn into_native_program_with_spec(
+        self,
+        output_count: usize,
+        fills: Vec<StudyFillSpec>,
+        limits: StudySandboxLimits,
+    ) -> NativeStudyProgram {
         let compiled = self;
+        let count = output_count.clamp(1, 16);
         NativeStudyProgram::dynamic(Arc::new(move |context: &mut StudyExecutionContext<'_>| {
             let Some(StudyInputSeries::Market(market)) = context.input(0) else {
                 return Err("sandboxed study requires primary market bar input".to_string());
@@ -407,18 +449,60 @@ impl CompiledWasmStudy {
             }
 
             let result = compiled
-                .execute_columnar(&columnar, limits)
+                .execute_columnar_outputs(&columnar, count, limits)
                 .map_err(|err| err.to_string())?;
 
-            let Some(output) = context.output(0) else {
-                return Err("sandboxed study requires primary output buffer".to_string());
-            };
-            for (offset, value) in result.values.into_iter().enumerate() {
-                output.set(start + offset, value)?;
+            for (out_idx, series) in result.outputs.into_iter().enumerate() {
+                let Some(output) = context.output(out_idx) else {
+                    break;
+                };
+                for (offset, value) in series.into_iter().enumerate() {
+                    output.set(start + offset, value)?;
+                }
+            }
+            for &fill in &fills {
+                context.add_fill(fill)?;
             }
             Ok(())
         }))
     }
+}
+
+fn checked_wasm_sizes(
+    input_bytes: usize,
+    out_bytes: usize,
+    bar_count: usize,
+    output_count: usize,
+    limits: StudySandboxLimits,
+) -> Result<(u32, u32, u32, u32), WasmSandboxError> {
+    let input_len_u32 =
+        u32::try_from(input_bytes).map_err(|_| WasmSandboxError::AllocationFailed {
+            requested_bytes: input_bytes,
+        })?;
+    let out_len_u32 = u32::try_from(out_bytes).map_err(|_| WasmSandboxError::AllocationFailed {
+        requested_bytes: out_bytes,
+    })?;
+    let bar_count_u32 = u32::try_from(bar_count).map_err(|_| WasmSandboxError::InputTooLarge {
+        maximum: limits.max_output_points,
+        actual: bar_count,
+    })?;
+    let out_count_u32 = u32::try_from(output_count).unwrap_or(1);
+    Ok((input_len_u32, out_len_u32, bar_count_u32, out_count_u32))
+}
+
+fn alloc_guest(
+    store: &mut Store<SandboxStoreState>,
+    alloc_fn: wasmi::TypedFunc<u32, u32>,
+    byte_len_u32: u32,
+    requested_bytes: usize,
+) -> Result<u32, WasmSandboxError> {
+    let ptr = alloc_fn
+        .call(store, byte_len_u32)
+        .map_err(|err| classify_wasmi_error(&err, false))?;
+    if ptr == 0 {
+        return Err(WasmSandboxError::AllocationFailed { requested_bytes });
+    }
+    Ok(ptr)
 }
 
 fn decode_output_f64_values(

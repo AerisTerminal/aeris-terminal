@@ -23,8 +23,8 @@ use aeris_study_sdk::toolchain::{
 };
 use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
 use aeris_study_sdk::{
-    BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyInvalidationPolicy,
-    StudyPaneTarget, StudyPlotKind, StudySettings,
+    BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyColor, StudyFillSpec,
+    StudyInvalidationPolicy, StudyPaneTarget, StudyPlotKind, StudySettings,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -142,49 +142,192 @@ impl TryFrom<StoredManifest> for StudyProjectManifest {
     }
 }
 
-/// Parses optional presentation directives from the top comments of a user study:
-/// - `// @pane: separate` (or `// @overlay: false`) -> dedicated oscillator pane below price
-/// - `// @pane: price` (default) -> main price overlay pane
-/// - `// @plot: histogram | columns | stepline | line` (default: `line`)
+/// One parsed `@output:` declaration from a user study's header comments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ParsedStudyOutputSpec {
+    pub(crate) identifier: String,
+    pub(crate) title: String,
+    pub(crate) plot: StudyPlotKind,
+    /// Optional CSS `#RRGGBB` or `#RRGGBBAA` color override.
+    pub(crate) color: Option<String>,
+}
+
+/// Complete declarative presentation metadata parsed from a user study's header comments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ParsedStudySpec {
+    pub(crate) pane: StudyPaneTarget,
+    pub(crate) line_width: u32,
+    pub(crate) outputs: Vec<ParsedStudyOutputSpec>,
+    pub(crate) fills: Vec<StudyFillSpec>,
+}
+
+fn parse_plot_kind(raw: &str) -> StudyPlotKind {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "histogram" | "hist" => StudyPlotKind::Histogram,
+        "columns" | "bars" => StudyPlotKind::Columns,
+        "stepline" | "step" => StudyPlotKind::StepLine,
+        "circles" | "dots" => StudyPlotKind::Circles,
+        "cross" => StudyPlotKind::Cross,
+        _ => StudyPlotKind::Line,
+    }
+}
+
+fn parse_hex_study_color(raw: &str) -> Option<StudyColor> {
+    let hex = raw.trim().strip_prefix('#')?;
+    match hex.len() {
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(StudyColor { r, g, b, a: 255 })
+        }
+        8 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
+            Some(StudyColor { r, g, b, a })
+        }
+        _ => None,
+    }
+}
+
+/// Parses declarative presentation directives from the header comments of a user study:
+/// - `// @pane: separate | price` (or `// @overlay: false | true`)
+/// - `// @plot: line | histogram | columns | stepline | circles | cross`
+/// - `// @width: 1..4`
+/// - `// @output: <id> | <title> | <plot> | <#RRGGBB or #RRGGBBAA>` (up to 16 outputs)
+/// - `// @fill: <first_idx>, <second_idx> | <#RRGGBBAA>` (up to 16 fills)
 #[must_use]
-pub(crate) fn parse_study_source_presentation(source: &str) -> (StudyPaneTarget, StudyPlotKind) {
+pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> ParsedStudySpec {
     let mut pane = StudyPaneTarget::Price;
-    let mut plot = StudyPlotKind::Line;
-    for raw_line in source.lines().take(32) {
+    let mut default_plot = StudyPlotKind::Line;
+    let mut line_width: u32 = 0;
+    let mut outputs = Vec::new();
+    let mut fills = Vec::new();
+
+    for raw_line in source.lines().take(64) {
         let trimmed = raw_line.trim();
         let Some(comment) = trimmed.strip_prefix("//") else {
             continue;
         };
-        let directive = comment.trim().to_ascii_lowercase();
-        if let Some(value) = directive.strip_prefix("@pane:") {
+        let content = comment.trim();
+        let lower = content.to_ascii_lowercase();
+        if let Some(value) = lower.strip_prefix("@pane:") {
             match value.trim() {
                 "separate" | "dedicated" | "subpane" | "oscillator" => {
                     pane = StudyPaneTarget::Dedicated { group: 0 };
                 }
-                "price" | "overlay" => {
-                    pane = StudyPaneTarget::Price;
-                }
+                "price" | "overlay" => pane = StudyPaneTarget::Price,
                 _ => {}
             }
-        } else if let Some(value) = directive.strip_prefix("@overlay:") {
+        } else if let Some(value) = lower.strip_prefix("@overlay:") {
             if value.trim() == "false" {
                 pane = StudyPaneTarget::Dedicated { group: 0 };
             } else if value.trim() == "true" {
                 pane = StudyPaneTarget::Price;
             }
-        } else if let Some(value) = directive.strip_prefix("@plot:") {
-            match value.trim() {
-                "histogram" | "hist" => plot = StudyPlotKind::Histogram,
-                "columns" | "bars" => plot = StudyPlotKind::Columns,
-                "stepline" | "step" => plot = StudyPlotKind::StepLine,
-                "circles" | "dots" => plot = StudyPlotKind::Circles,
-                "cross" => plot = StudyPlotKind::Cross,
-                "line" => plot = StudyPlotKind::Line,
-                _ => {}
+        } else if let Some(value) = lower.strip_prefix("@plot:") {
+            default_plot = parse_plot_kind(value);
+        } else if let Some(value) = lower.strip_prefix("@width:") {
+            if let Ok(w) = value.trim().parse::<u32>() {
+                line_width = w.clamp(1, 4);
+            }
+        } else if lower.starts_with("@output:") && outputs.len() < 16 {
+            let body = content[8..].trim();
+            let parts: Vec<&str> = body.split('|').map(str::trim).collect();
+            if let Some(id) = parts.first().filter(|s| !s.is_empty()) {
+                let title = parts
+                    .get(1)
+                    .filter(|s| !s.is_empty())
+                    .copied()
+                    .unwrap_or(id);
+                let plot = parts
+                    .get(2)
+                    .map_or(default_plot, |raw| parse_plot_kind(raw));
+                let color = parts
+                    .get(3)
+                    .filter(|raw| parse_hex_study_color(raw).is_some())
+                    .map(|raw| (*raw).to_string());
+                outputs.push(ParsedStudyOutputSpec {
+                    identifier: (*id).to_string(),
+                    title: title.to_string(),
+                    plot,
+                    color,
+                });
+            }
+        } else if lower.starts_with("@fill:") && fills.len() < 16 {
+            let body = content[6..].trim();
+            let parts: Vec<&str> = body.split('|').map(str::trim).collect();
+            if parts.len() >= 2 {
+                let pair: Vec<&str> = parts[0].split(',').map(str::trim).collect();
+                if pair.len() == 2
+                    && let (Ok(first), Ok(second), Some(color)) = (
+                        pair[0].parse::<usize>(),
+                        pair[1].parse::<usize>(),
+                        parse_hex_study_color(parts[1]),
+                    )
+                {
+                    fills.push(StudyFillSpec {
+                        first_output_index: first,
+                        second_output_index: second,
+                        color,
+                    });
+                }
             }
         }
     }
-    (pane, plot)
+
+    if outputs.is_empty() {
+        outputs.push(ParsedStudyOutputSpec {
+            identifier: "value".to_string(),
+            title: default_title.to_string(),
+            plot: default_plot,
+            color: None,
+        });
+    }
+    let output_count = outputs.len();
+    fills.retain(|f| {
+        f.first_output_index < output_count
+            && f.second_output_index < output_count
+            && f.first_output_index != f.second_output_index
+    });
+
+    ParsedStudySpec {
+        pane,
+        line_width,
+        outputs,
+        fills,
+    }
+}
+
+/// Builds a `NativeStudyRegistration` for a compiled sandboxed WASM study using its parsed spec.
+#[must_use]
+pub(crate) fn build_wasm_study_registration(
+    identifier: &str,
+    series: &BarSeriesKey,
+    spec: &ParsedStudySpec,
+    compiled: CompiledWasmStudy,
+) -> NativeStudyRegistration {
+    let mut builder = StudyDefinitionBuilder::new(identifier)
+        .market(series.clone(), StreamRequirements::BARS)
+        .invalidation(StudyInvalidationPolicy::FromFirstChanged);
+    for out in &spec.outputs {
+        builder = builder.output(
+            StudyOutputBuilder::new(&out.identifier, &out.title, out.plot)
+                .pane(spec.pane)
+                .build(),
+        );
+    }
+    NativeStudyRegistration {
+        settings: StudySettings::default(),
+        definition: builder.build(),
+        program: compiled.into_native_program_with_spec(
+            spec.outputs.len(),
+            spec.fills.clone(),
+            StudySandboxLimits::default(),
+        ),
+    }
 }
 
 /// Computes the canonical lowercase SHA-256 hex digest of an arbitrary byte slice.
@@ -458,32 +601,17 @@ impl StudyProjectStore {
         let display_name = loaded_project
             .as_ref()
             .map_or_else(|| state.identifier.clone(), |p| p.manifest.name.clone());
-        let (pane, plot) = loaded_project
+        let source_text = loaded_project
             .as_ref()
             .map(|p| p.last_good_source.as_deref().unwrap_or(&p.source))
-            .map_or(
-                (StudyPaneTarget::Price, StudyPlotKind::Line),
-                parse_study_source_presentation,
-            );
-        let output_id = state
-            .output_identifiers
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "value".to_string());
-        let definition = StudyDefinitionBuilder::new(&state.identifier)
-            .market(current_series.clone(), StreamRequirements::BARS)
-            .output(
-                StudyOutputBuilder::new(output_id, display_name, plot)
-                    .pane(pane)
-                    .build(),
-            )
-            .invalidation(StudyInvalidationPolicy::FromFirstChanged)
-            .build();
-        Ok(NativeStudyRegistration {
-            settings: StudySettings::default(),
-            definition,
-            program: compiled.into_native_program(StudySandboxLimits::default()),
-        })
+            .unwrap_or("");
+        let spec = parse_study_source_spec(source_text, &display_name);
+        Ok(build_wasm_study_registration(
+            &state.identifier,
+            current_series,
+            &spec,
+            compiled,
+        ))
     }
 
     /// Deletes one persisted study project directory.
@@ -706,6 +834,65 @@ pub(crate) struct CompiledStudyArtifact {
     pub(crate) compiled: CompiledWasmStudy,
 }
 
+const WASM_MULTI_HARNESS_SOURCE: &str = r#"#[forbid(unsafe_code)]
+mod user_study;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_abi_version() -> u32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_alloc(byte_len: u32) -> u32 {
+    let words = (byte_len as usize).div_ceil(std::mem::size_of::<f64>()).max(1);
+    let mut buf = Vec::<f64>::with_capacity(words);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_calculate(bars_ptr: u32, bar_count: u32, out_ptr: u32) -> i32 {
+    aeris_study_calculate_multi(bars_ptr, bar_count, out_ptr, 1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_calculate_multi(
+    bars_ptr: u32,
+    bar_count: u32,
+    out_ptr: u32,
+    output_count: u32,
+) -> i32 {
+    let n = bar_count as usize;
+    let count = (output_count as usize).clamp(1, 16);
+    if n == 0 {
+        return 0;
+    }
+    let base = bars_ptr as usize as *const f64;
+    let out_base = out_ptr as usize as *mut f64;
+    let (open, high, low, close, volume, flat_out) = unsafe {
+        (
+            std::slice::from_raw_parts(base, n),
+            std::slice::from_raw_parts(base.add(n), n),
+            std::slice::from_raw_parts(base.add(n * 2), n),
+            std::slice::from_raw_parts(base.add(n * 3), n),
+            std::slice::from_raw_parts(base.add(n * 4), n),
+            std::slice::from_raw_parts_mut(out_base, n * count),
+        )
+    };
+    let mut slices: Vec<&mut [f64]> = flat_out.chunks_exact_mut(n).collect();
+    user_study::calculate_multi(open, high, low, close, volume, &mut slices);
+    0
+}
+"#;
+
+fn source_uses_multi_output_entrypoint(source: &str) -> bool {
+    source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or("");
+        code.contains("fn calculate_multi")
+    })
+}
+
 const WASM_HARNESS_SOURCE: &str = r#"#[forbid(unsafe_code)]
 mod user_study;
 
@@ -880,8 +1067,13 @@ pub(crate) fn compile_study_source_to_wasm(
     let harness_path = build_dir.join("harness.rs");
     let user_path = build_dir.join("user_study.rs");
     let out_wasm_path = build_dir.join("study.wasm");
+    let harness_src = if source_uses_multi_output_entrypoint(source) {
+        WASM_MULTI_HARNESS_SOURCE
+    } else {
+        WASM_HARNESS_SOURCE
+    };
     if let Err(err) =
-        fs::write(&harness_path, WASM_HARNESS_SOURCE).and_then(|()| fs::write(&user_path, source))
+        fs::write(&harness_path, harness_src).and_then(|()| fs::write(&user_path, source))
     {
         cleanup(&build_dir);
         return Err(vec![StudyDiagnostic {
@@ -978,16 +1170,18 @@ pub(crate) fn run_offline_preview_check(
     preset: PreviewFixturePreset,
 ) -> (Vec<StudyDiagnostic>, String) {
     let fixture = StudyPreviewFixture::generate(preset, 120, 60);
+    let spec = parse_study_source_spec(source, "Preview");
     match compile_study_source_to_wasm(source) {
         Ok(artifact) => {
-            match artifact
-                .compiled
-                .execute_columnar(&fixture.bars, StudySandboxLimits::default())
-            {
+            match artifact.compiled.execute_columnar_outputs(
+                &fixture.bars,
+                spec.outputs.len(),
+                StudySandboxLimits::default(),
+            ) {
                 Ok(result) => {
-                    let finite_count = result.values.iter().filter(|v| v.is_some()).count();
-                    let last_label = result
-                        .values
+                    let primary = result.outputs.first().map_or(&[][..], Vec::as_slice);
+                    let finite_count = primary.iter().filter(|v| v.is_some()).count();
+                    let last_label = primary
                         .iter()
                         .rev()
                         .find_map(|v| *v)
@@ -995,7 +1189,8 @@ pub(crate) fn run_offline_preview_check(
                     (
                         Vec::new(),
                         format!(
-                            "WASM Preview [{preset:?}]: {finite_count}/{} pts, last={last_label}, fuel={}",
+                            "WASM Preview [{preset:?}]: {} series, {finite_count}/{} pts, last={last_label}, fuel={}",
+                            result.outputs.len(),
                             fixture.bars.len(),
                             result.fuel_consumed
                         ),
@@ -1524,24 +1719,131 @@ pub fn calculate(
     }
 }
 "#;
-        let (pane, plot) = parse_study_source_presentation(src);
-        assert_eq!(pane, StudyPaneTarget::Dedicated { group: 0 });
-        assert_eq!(plot, StudyPlotKind::Histogram);
+        let spec = parse_study_source_spec(src, "Squeeze");
+        assert_eq!(spec.pane, StudyPaneTarget::Dedicated { group: 0 });
+        assert_eq!(spec.outputs.len(), 1);
+        assert_eq!(spec.outputs[0].plot, StudyPlotKind::Histogram);
 
         let artifact = compile_study_source_to_wasm(src).expect("oscillator compiles to wasm");
         let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::RangeBound, 1_500, 60);
-        let t0 = std::time::Instant::now();
         let res = artifact
             .compiled
             .execute_columnar(&fixture.bars, StudySandboxLimits::default())
             .expect("oscillator executes cleanly over 1,500 bars in wasmi");
-        let elapsed = t0.elapsed();
-        eprintln!(
-            "Squeeze Momentum 1,500 bars: fuel={}, elapsed={:?}",
-            res.fuel_consumed, elapsed
-        );
         assert_eq!(res.values.len(), 1_500);
         assert!(res.values[0].is_none());
         assert!(res.values[1_499].is_some());
+    }
+
+    #[test]
+    fn multi_output_median_atr_bands_and_fills_compile_and_execute() {
+        let hash = "#";
+        let src = format!(
+            r#"
+// @pane: price
+// @width: 2
+// @output: median | Median | line | {hash}ef4444
+// @output: upper | Upper Band | line | {hash}22c55e
+// @output: lower | Lower Band | line | {hash}d946ef
+// @output: ema | Median EMA | line | {hash}3b82f6
+// @output: bull_fill | Bull Cloud | line | {hash}00000000
+// @output: bear_fill | Bear Cloud | line | {hash}00000000
+// @fill: 4, 3 | {hash}22c55e33
+// @fill: 5, 3 | {hash}d946ef33
+pub fn calculate_multi(
+    _open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    _volume: &[f64],
+    outs: &mut [&mut [f64]],
+) {{
+    let length = 3usize;
+    let atr_len = 14usize;
+    let atr_mult = 2.0_f64;
+    let n = close.len();
+    if n == 0 || outs.len() < 6 {{
+        return;
+    }}
+    let mut hl2 = vec![0.0_f64; n];
+    let mut tr = vec![0.0_f64; n];
+    for i in 0..n {{
+        hl2[i] = 0.5 * (high[i] + low[i]);
+        let hl = high[i] - low[i];
+        tr[i] = if i == 0 {{
+            hl
+        }} else {{
+            hl.max((high[i] - close[i - 1]).abs())
+                .max((low[i] - close[i - 1]).abs())
+        }};
+    }}
+    let mut rma_atr = f64::NAN;
+    let mut ema_med = f64::NAN;
+    let alpha_ema = 2.0 / (length as f64 + 1.0);
+    let mut win = vec![0.0_f64; length];
+    for i in 0..n {{
+        if i + 1 < atr_len {{
+            rma_atr = f64::NAN;
+        }} else if i + 1 == atr_len {{
+            let mut sum = 0.0;
+            for j in 0..atr_len {{
+                sum += tr[j];
+            }}
+            rma_atr = sum / (atr_len as f64);
+        }} else {{
+            rma_atr = (rma_atr * (atr_len as f64 - 1.0) + tr[i]) / (atr_len as f64);
+        }}
+        if i + 1 < length {{
+            continue;
+        }}
+        let start = i + 1 - length;
+        win.copy_from_slice(&hl2[start..=i]);
+        win.sort_by(|a, b| a.total_cmp(b));
+        let rank_idx = ((0.5 * (length as f64)).ceil() as usize).saturating_sub(1).min(length - 1);
+        let median = win[rank_idx];
+        ema_med = if !ema_med.is_finite() {{
+            median
+        }} else {{
+            alpha_ema * median + (1.0 - alpha_ema) * ema_med
+        }};
+        outs[0][i] = median;
+        if rma_atr.is_finite() {{
+            let band = atr_mult * rma_atr;
+            outs[1][i] = median + band;
+            outs[2][i] = median - band;
+        }}
+        outs[3][i] = ema_med;
+        if median > ema_med {{
+            outs[4][i] = median;
+            outs[5][i] = f64::NAN;
+        }} else {{
+            outs[4][i] = f64::NAN;
+            outs[5][i] = median;
+        }}
+    }}
+}}
+"#
+        );
+        let spec = parse_study_source_spec(&src, "Median");
+        assert_eq!(spec.pane, StudyPaneTarget::Price);
+        assert_eq!(spec.line_width, 2);
+        assert_eq!(spec.outputs.len(), 6);
+        assert_eq!(spec.fills.len(), 2);
+
+        let artifact = compile_study_source_to_wasm(&src).expect("median compiles to wasm");
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::RangeBound, 120, 60);
+        let res = artifact
+            .compiled
+            .execute_columnar_outputs(
+                &fixture.bars,
+                spec.outputs.len(),
+                StudySandboxLimits::default(),
+            )
+            .expect("multi-output median executes cleanly");
+        assert_eq!(res.outputs.len(), 6);
+        assert!(res.outputs[0][119].is_some());
+        assert!(res.outputs[1][119].is_some());
+        assert!(res.outputs[2][119].is_some());
+        assert!(res.outputs[3][119].is_some());
     }
 }

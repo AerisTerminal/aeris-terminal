@@ -5,7 +5,7 @@ use super::study_editor_highlight::{
 use super::study_editor_store::{
     CompiledStudyArtifact, StudyProjectStore, compile_study_source_to_wasm,
     export_project_bundle_json, import_project_bundle_json, install_wasm_sandbox_target,
-    parse_study_source_presentation, probe_study_dev_pack, probe_study_dev_pack_fresh,
+    parse_study_source_spec, probe_study_dev_pack, probe_study_dev_pack_fresh,
     run_offline_preview_check,
 };
 use super::*;
@@ -339,7 +339,7 @@ impl StudyEditorDialogState {
             || (identifier.clone(), 1),
             |p| (p.manifest.name.clone(), p.manifest.implementation_revision),
         );
-        let (pane, plot) = parse_study_source_presentation(&source);
+        let spec = parse_study_source_spec(&source, &display_name);
         self.active_job_id = self.active_job_id.wrapping_add(1);
         let job_id = self.active_job_id;
         self.busy_label = Some(format!("Building `{identifier}` for chart..."));
@@ -405,13 +405,7 @@ impl StudyEditorDialogState {
                             }
                         }
                         surface.attach_compiled_wasm_study_to_chart(
-                            identifier,
-                            display_name,
-                            revision,
-                            pane,
-                            plot,
-                            compiled,
-                            surface_cx,
+                            identifier, revision, spec, compiled, surface_cx,
                         );
                     }
                     Err(diagnostics) => {

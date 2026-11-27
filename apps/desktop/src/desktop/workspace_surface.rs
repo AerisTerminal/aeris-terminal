@@ -6661,44 +6661,43 @@ impl WorkspaceSurface {
     pub(super) fn attach_compiled_wasm_study_to_chart(
         &mut self,
         identifier: String,
-        display_name: String,
         revision: u32,
-        pane: aeris_study_sdk::StudyPaneTarget,
-        plot: aeris_study_sdk::StudyPlotKind,
+        spec: super::study_editor_store::ParsedStudySpec,
         compiled: aeris_study_sdk::wasm_runtime::CompiledWasmStudy,
         cx: &mut Context<Self>,
     ) {
         let status = match self.current_runtime_series() {
             Err(error) => format!("Chart not ready: {error}"),
             Ok(series) => {
-                let definition =
-                    aeris_study_sdk::builders::StudyDefinitionBuilder::new(&identifier)
-                        .market(series.clone(), aeris_study_sdk::StreamRequirements::BARS)
-                        .output(
-                            aeris_study_sdk::builders::StudyOutputBuilder::new(
-                                "value",
-                                &display_name,
-                                plot,
-                            )
-                            .pane(pane)
-                            .build(),
-                        )
-                        .invalidation(aeris_study_sdk::StudyInvalidationPolicy::FromFirstChanged)
-                        .build();
-                let registration = NativeStudyRegistration {
-                    settings: aeris_study_sdk::StudySettings::default(),
-                    definition,
-                    program: compiled.into_native_program(
-                        aeris_study_sdk::sandbox::StudySandboxLimits::default(),
-                    ),
+                let registration = super::study_editor_store::build_wasm_study_registration(
+                    &identifier,
+                    &series,
+                    &spec,
+                    compiled,
+                );
+                let output_identifiers: Vec<String> = spec
+                    .outputs
+                    .iter()
+                    .map(|out| out.identifier.clone())
+                    .collect();
+                let output_colors: Vec<String> = if spec.outputs.iter().any(|o| o.color.is_some()) {
+                    spec.outputs
+                        .iter()
+                        .map(|o| o.color.clone().unwrap_or_default())
+                        .collect()
+                } else {
+                    Vec::new()
                 };
-                let existing_id = self
+                let existing = self
                     .studies
                     .active()
                     .iter()
                     .find(|active| active.persisted.identifier == identifier)
-                    .map(|active| active.study_id);
-                if let Some(study_id) = existing_id {
+                    .map(|active| (active.study_id, active.persisted.output_identifiers.clone()));
+                if let Some((study_id, ref existing_outputs)) = existing
+                    && *existing_outputs == output_identifiers
+                {
+                    self.apply_study_style(study_id, spec.line_width, &output_colors, cx);
                     match self
                         .market_worker
                         .try_reinitialize_study(study_id, registration)
@@ -6712,12 +6711,15 @@ impl WorkspaceSurface {
                         }
                     }
                 } else {
+                    if let Some((old_study_id, _)) = existing {
+                        let _ = self.market_worker.try_remove_study(old_study_id);
+                    }
                     match self.studies.allocate_local_id() {
                         None => "Study identity limit reached".to_string(),
                         Some(local_id) => {
                             let persisted = WorkspaceChartStudyState {
-                                line_width: 0,
-                                output_colors: Vec::new(),
+                                line_width: spec.line_width,
+                                output_colors,
                                 local_id,
                                 identifier: identifier.clone(),
                                 implementation_revision: revision,
@@ -6728,7 +6730,7 @@ impl WorkspaceSurface {
                                     ..WorkspaceStudyDependencyState::default()
                                 }],
                                 visible: true,
-                                output_identifiers: vec!["value".to_string()],
+                                output_identifiers,
                             };
                             match self.market_worker.try_register_study(registration) {
                                 Ok(sequence) => {
