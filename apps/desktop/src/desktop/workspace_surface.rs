@@ -6504,8 +6504,9 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let theme = self.theme;
         self.indicator_settings_dialog = Some(IndicatorSettingsDialog::StudyEditor(
-            StudyEditorDialogState::open(data_root, window, cx),
+            StudyEditorDialogState::open(data_root, &theme, window, cx),
         ));
         cx.notify();
     }
@@ -6552,7 +6553,7 @@ impl WorkspaceSurface {
         if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
             self.indicator_settings_dialog.as_mut()
         {
-            dialog.validate_and_save(cx);
+            dialog.start_build_and_save(cx);
             cx.notify();
         }
     }
@@ -6622,23 +6623,28 @@ impl WorkspaceSurface {
         if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
             self.indicator_settings_dialog.as_mut()
         {
-            dialog.run_preview_test(cx);
+            dialog.start_preview_test(cx);
             cx.notify();
         }
     }
 
     pub(super) fn add_study_editor_project_to_chart(&mut self, cx: &mut Context<Self>) {
-        let prepared = match self.indicator_settings_dialog.as_mut() {
-            Some(IndicatorSettingsDialog::StudyEditor(dialog)) => dialog.prepare_chart_artifact(cx),
-            _ => return,
-        };
-        let (identifier, display_name, revision, compiled) = match prepared {
-            Ok(parts) => parts,
-            Err(_) => {
-                cx.notify();
-                return;
-            }
-        };
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.start_build_for_chart(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn attach_compiled_wasm_study_to_chart(
+        &mut self,
+        identifier: String,
+        display_name: String,
+        revision: u32,
+        compiled: aeris_study_sdk::wasm_runtime::CompiledWasmStudy,
+        cx: &mut Context<Self>,
+    ) {
         let status = match self.current_runtime_series() {
             Err(error) => format!("Chart not ready: {error}"),
             Ok(series) => {
@@ -6777,7 +6783,7 @@ impl WorkspaceSurface {
         if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
             self.indicator_settings_dialog.as_mut()
         {
-            dialog.install_dev_pack_target();
+            dialog.start_install_dev_pack_target(cx);
             cx.notify();
         }
     }
@@ -6786,7 +6792,7 @@ impl WorkspaceSurface {
         if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
             self.indicator_settings_dialog.as_mut()
         {
-            dialog.clean_dev_pack_cache();
+            dialog.start_clean_dev_pack_cache(cx);
             cx.notify();
         }
     }

@@ -254,6 +254,11 @@ pub(super) fn indicator_dialog_content(
                                 .saved
                                 .writer()
                                 .map(|writer| writer.data_root().to_path_buf())
+                                .or_else(|| {
+                                    aeris_platform_runtime::active_data_root()
+                                        .ok()
+                                        .map(|root| root.path().to_path_buf())
+                                })
                                 .unwrap_or_default();
                             editor_app.update(cx, |surface, surface_cx| {
                                 surface.close_chrome_overlay(window, surface_cx);

@@ -8,7 +8,9 @@
 use super::native_ui::theme::gpui_color;
 use aeris_design_system::AerisTheme;
 use gpui::{Hsla, TextRun};
-use std::sync::Arc;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 
 /// One-click Rust Study SDK snippet insertable at the editor cursor.
 #[derive(Clone, Copy, Debug)]
@@ -72,13 +74,34 @@ impl RustPalette {
     }
 }
 
-/// Builds a theme-aware Rust syntax highlighter callback for `gpui_base::input::TextareaState`.
+/// Builds a theme-aware, cached Rust syntax highlighter callback for `gpui_base::input::TextareaState`.
+///
+/// Caches the most recent tokenized run vector keyed by `(text_len, text_hash, base_color)` so
+/// live chart redraws never re-lex unchanged editor text.
 #[must_use]
 pub(super) fn rust_syntax_highlighter(
     theme: &AerisTheme,
 ) -> Arc<dyn Fn(&str, &TextRun) -> Vec<TextRun> + Send + Sync> {
     let palette = RustPalette::from_theme(theme);
-    Arc::new(move |text: &str, base: &TextRun| tokenize_rust_runs(text, base, palette))
+    let cache: Mutex<Option<(usize, u64, Hsla, Vec<TextRun>)>> = Mutex::new(None);
+    Arc::new(move |text: &str, base: &TextRun| {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Ok(guard) = cache.lock()
+            && let Some((cached_len, cached_hash, cached_color, runs)) = guard.as_ref()
+            && *cached_len == text.len()
+            && *cached_hash == hash
+            && *cached_color == base.color
+        {
+            return runs.clone();
+        }
+        let runs = tokenize_rust_runs(text, base, palette);
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some((text.len(), hash, base.color, runs.clone()));
+        }
+        runs
+    })
 }
 
 fn is_rust_keyword(word: &str) -> bool {
