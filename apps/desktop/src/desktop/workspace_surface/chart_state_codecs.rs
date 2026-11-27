@@ -621,17 +621,23 @@ pub(super) fn chart_study_scene_deltas(
     deltas: &[aeris_market_runtime::study::StudySceneDelta],
 ) -> Vec<aeris_chart_integration::ChartStudySceneDelta> {
     use aeris_chart_integration::{
-        ChartStudySceneBox, ChartStudySceneDelta, ChartStudySceneLabel, ChartStudySceneLine,
-        ChartStudySceneObject, ChartStudyScenePolyline, ChartStudySceneTable,
-        ChartStudySceneTableCell, ChartStudyTablePosition,
+        ChartStudyLabelPlacement, ChartStudyLineStyle, ChartStudySceneBox, ChartStudySceneDelta,
+        ChartStudySceneLabel, ChartStudySceneLine, ChartStudySceneObject, ChartStudyScenePolyline,
+        ChartStudySceneTable, ChartStudySceneTableCell, ChartStudyTablePosition,
     };
     use aeris_market_runtime::study::{
-        StudyLineExtend, StudySceneDelta, StudySceneObject, StudyTablePosition,
+        StudyLabelStyle, StudyLineExtend, StudyLineStyle, StudySceneDelta, StudySceneObject,
+        StudyTablePosition,
     };
 
     let convert_object = |object: &StudySceneObject| -> Option<ChartStudySceneObject> {
         match object {
             StudySceneObject::Line(line) => {
+                let style = match line.style {
+                    StudyLineStyle::Solid => ChartStudyLineStyle::Solid,
+                    StudyLineStyle::Dashed => ChartStudyLineStyle::Dashed,
+                    StudyLineStyle::Dotted => ChartStudyLineStyle::Dotted,
+                };
                 Some(ChartStudySceneObject::Line(ChartStudySceneLine {
                     x1_unix_nanos: line.start.timestamp_unix_nanos,
                     y1: line.start.price,
@@ -639,6 +645,7 @@ pub(super) fn chart_study_scene_deltas(
                     y2: line.end.price,
                     color_rgba: line.color.to_rgba_u32(),
                     width: line.width,
+                    style,
                     extend_left: matches!(
                         line.extend,
                         StudyLineExtend::Left | StudyLineExtend::Both
@@ -676,12 +683,20 @@ pub(super) fn chart_study_scene_deltas(
                 }))
             }
             StudySceneObject::Label(label) => {
+                let placement = match label.style {
+                    StudyLabelStyle::LabelDown => ChartStudyLabelPlacement::Above,
+                    StudyLabelStyle::LabelUp => ChartStudyLabelPlacement::Below,
+                    StudyLabelStyle::LabelLeft => ChartStudyLabelPlacement::Right,
+                    StudyLabelStyle::LabelRight => ChartStudyLabelPlacement::Left,
+                    _ => ChartStudyLabelPlacement::Center,
+                };
                 Some(ChartStudySceneObject::Label(ChartStudySceneLabel {
                     x_unix_nanos: label.point.timestamp_unix_nanos,
                     y: label.point.price,
                     text: label.text.clone(),
                     text_color_rgba: label.text_color.to_rgba_u32(),
                     background_color_rgba: Some(label.color.to_rgba_u32()),
+                    placement,
                 }))
             }
             StudySceneObject::Table(table) => {
@@ -699,7 +714,7 @@ pub(super) fn chart_study_scene_deltas(
                 let cells = table
                     .cells
                     .iter()
-                    .map(|(&(row, col), cell)| ChartStudySceneTableCell {
+                    .map(|(&(col, row), cell)| ChartStudySceneTableCell {
                         row,
                         col,
                         text: cell.text.clone(),

@@ -31,7 +31,8 @@ pub use aeris_charts_engine::{
 pub use aeris_charts_engine::{
     ExternalStudyError as ChartStudyOutputError, ExternalStudyFill as ChartStudyFill,
     ExternalStudyInputRequirements as ChartStudyInputRequirements,
-    ExternalStudyInputStream as ChartStudyInputStream, ExternalStudyLevel as ChartStudyLevel,
+    ExternalStudyInputStream as ChartStudyInputStream,
+    ExternalStudyLabelPlacement as ChartStudyLabelPlacement, ExternalStudyLevel as ChartStudyLevel,
     ExternalStudyLineStyle as ChartStudyLineStyle,
     ExternalStudyOutputDescriptor as ChartStudyOutputDescriptor,
     ExternalStudyPaneTarget as ChartStudyPaneTarget, ExternalStudyPlotKind as ChartStudyPlotKind,
