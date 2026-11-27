@@ -107,6 +107,17 @@ The examples compile against the SDK facade only:
 - `examples/multi_output.rs` — two stable outputs grouped under one study presentation.
 - `examples/multi_timeframe.rs` — two market dependencies with explicit timestamp alignment.
 - `examples/market_microstructure.rs` — bar-aligned use of borrowed quote/trade/depth state.
+- `examples/pine_class_composite.rs` — full Pine-class composite study using fluent builders, `prelude`, semantic `Color`/`Timeframe`/`Session`/`Source` settings, `StepLine` + `PerPoint` styling, candle/background/level/fill overlays, transactional ray lines & bottom-right dashboard tables, deduplicated alerts, and canonical `order_flow` footprint aggregation.
+
+## Pine-class host capabilities
+
+- **Fluent builders & prelude:** `aeris_study_sdk::prelude::*` exports `StudyDefinitionBuilder`, `StudySettingBuilder`, and `StudyOutputBuilder` alongside all core types.
+- **Semantic settings:** First-class `Color`, `Symbol`, `Timeframe`, `Session` (IANA timezone validated), `Timestamp`, `Price`, and `Source` settings with native GPUI pickers and additive protobuf persistence.
+- **Generalized styling & overlays:** `StepLine`, `Columns`, `Circles`, `Cross` plots, `PerPoint` dynamic colors, candle bar colors (`set_bar_color`), background tints (`set_background_color`), horizontal reference levels (`add_level`), and band fills (`add_fill`) projected into Aeris Charts' GPU `DrawList`.
+- **Transactional semantic scene & tables:** Bounded study-local lines/rays, boxes, polylines, labels, and 9-position viewport-anchored dashboard tables emitted via compact `StudySceneDelta` diffs.
+- **Non-repainting MTF, intrabar & chart context:** `align_higher_timeframe_bar`, `intrabar_range`, `StudyExecutionMeta`, `varip` intrabar state, and opt-in visible-range `StudyChartContext`.
+- **Alerts & order-flow contracts:** Transactional deduplicated `StudyAlertEvent` delivery, bounded `StudyEventTimeline`, and fixed-point `order_flow::{StudyFootprintBar, StudyVolumeProfile}`.
+- **In-app Study Editor & Sandbox Boundary:** Versioned `StudyProjectManifest`, 5 starter templates, `StudyProjectLibrary`, `STUDY_SANDBOX_ABI_VERSION = 1` + `SandboxedStudyRegistry`, upgrade-safe `StudyArtifactCacheKey`, and deterministic offline `StudyPreviewFixture`s.
 
 Check all examples with:
 
