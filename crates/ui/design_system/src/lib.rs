@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(light.surface, ThemeColor::from_rgb8(255, 255, 255));
         assert_eq!(
             light.surface_secondary,
-            ThemeColor::from_rgb8(250, 250, 250)
+            ThemeColor::from_rgb8(0xf5, 0xf6, 0xf8)
         );
         assert_eq!(light.border, ThemeColor::from_rgb8(0xce, 0xce, 0xce));
         assert_eq!(

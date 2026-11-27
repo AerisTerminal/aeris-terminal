@@ -798,7 +798,7 @@ fn popover_menu_row(
     } else {
         gpui_color(colors.text_default)
     };
-    let hover_bg = gpui_color(colors.hover_bg);
+    let hover_bg = gpui_color(colors.hover_bg_secondary);
     div()
         .id(id)
         .w_full()
@@ -1091,7 +1091,7 @@ fn scripts_popover(
         .flex()
         .flex_col()
         .gap_0p5();
-    let hover_bg = gpui_color(colors.hover_bg);
+    let hover_bg = gpui_color(colors.hover_bg_secondary);
     for (idx, project) in editor.library.iter().enumerate() {
         let id = project.manifest.identifier.clone();
         let selected = editor.selected_id.as_deref() == Some(id.as_str());
@@ -1131,8 +1131,8 @@ fn scripts_popover(
         );
     }
 
-    div()
-        .id("study_editor_scripts_popover")
+    let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
+    popover_surface(div().id("study_editor_scripts_popover"), theme, radius)
         .absolute()
         .top(px(76.0))
         .left(px(12.0))
@@ -1140,11 +1140,6 @@ fn scripts_popover(
         .max_h(px(460.0))
         .overflow_y_scroll()
         .p_2()
-        .rounded(px(10.0))
-        .bg(gpui_color(colors.surface))
-        .border_1()
-        .border_color(gpui_color(colors.border))
-        .shadow_lg()
         .flex()
         .flex_col()
         .gap_1()
@@ -1297,8 +1292,8 @@ fn more_popover(
         );
     }
 
-    let mut menu = div()
-        .id("study_editor_more_popover")
+    let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
+    let mut menu = popover_surface(div().id("study_editor_more_popover"), theme, radius)
         .absolute()
         .top(px(76.0))
         .right(px(12.0))
@@ -1306,11 +1301,6 @@ fn more_popover(
         .max_h(px(420.0))
         .overflow_y_scroll()
         .p_2()
-        .rounded(px(10.0))
-        .bg(gpui_color(colors.surface))
-        .border_1()
-        .border_color(gpui_color(colors.border))
-        .shadow_lg()
         .flex()
         .flex_col()
         .gap_1()
@@ -1565,7 +1555,7 @@ fn find_strip(
         .flex()
         .items_center()
         .gap_2()
-        .bg(gpui_color(colors.surface_secondary))
+        .bg(gpui_color(colors.surface))
         .border_b_1()
         .border_color(gpui_color(colors.border_subtle))
         .child(

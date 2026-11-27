@@ -27,7 +27,7 @@ Components pick the colours up through the variables, for example `background: v
 
 `--text-default` is for the main platform (the trading terminal). `--text-web-default` is for the website and landing pages: in dark mode it is a brighter `#ededed` instead of `#c1c1c1`, and in light mode it matches `--text-default`. Icons use `currentColor`, so an icon takes the same colour as the text it sits in. `--text-secondary` and `--text-muted` are shared by both.
 
-Floating layers (menus, dialogs, tooltips) and secondary controls sit on `--surface-secondary` with a 1px `--border-secondary` edge in every theme. Use `--hover-bg-secondary` and `--active-bg-secondary` for hover and active states on `--surface-secondary` (in dark mode `--hover-bg` is flattened against `--surface`, which is darker than `--surface-secondary`).
+Floating layers (menus, tooltips, popovers) and secondary controls sit on `--surface-secondary` with a 1px `--border-secondary` edge in every theme. Form dialogs and cards sit on `--surface`, with inputs on `--surface-secondary`. Use `--hover-bg-secondary` and `--active-bg-secondary` for hover and active states on `--surface-secondary` (in dark mode `--hover-bg` is flattened against `--surface`, which is darker than `--surface-secondary`).
 
 ## Themes
 
@@ -44,7 +44,7 @@ The default theme. It applies whenever no `data-theme` is set. Dark mode uses a 
 :root {
   /* Surfaces */
   --surface: #ffffff;
-  --surface-secondary: #fafafa;
+  --surface-secondary: #f5f6f8;
   --surface-backdrop: #e5e5e5;
 
   /* Borders */
@@ -267,7 +267,7 @@ Normal Light uses softer `#d9d9d9` borders (`#f0f0f0` subtle) and lighter `#f2f2
 [data-theme="normal"] {
   /* Surfaces */
   --surface: #ffffff;
-  --surface-secondary: #fafafa;
+  --surface-secondary: #f5f6f8;
   --surface-backdrop: #e5e5e5;
 
   /* Borders */

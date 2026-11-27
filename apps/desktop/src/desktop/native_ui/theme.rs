@@ -5,10 +5,10 @@ use aeris_design_system::{
 use gpui::{Div, FontWeight, Hsla, Pixels, Styled, div, px};
 use gpui_base::{ColorTokens, RadiusTokens, Theme, ThemeAppearance};
 
-/// Text-field tokens, exactly as the Theme System `Input` uses them: a `border` field on
-/// `surface` (a `border-secondary` field on `surface-secondary` in dark mode) that takes
-/// `hover-bg` on hover, the shared 2px
-/// `ring-primary` focus outline, and a `danger` border with a 3px `danger-ring` halo while invalid.
+/// Text-field tokens, matching Theme Studio (`themes.md`): a `border` (`border-secondary` in
+/// dark) field on `surface-secondary` in every theme, placed on `surface` panels and dialogs,
+/// taking `hover-bg-secondary` on hover, the shared 1px `ring-primary` focus outline, and a
+/// `danger` border with a 3px `danger-ring` halo while invalid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct InputAppearance {
     pub(crate) fill: ThemeColor,
@@ -21,13 +21,9 @@ pub(crate) struct InputAppearance {
 
 pub(crate) fn input_appearance(theme: &AerisTheme) -> InputAppearance {
     let colors = &theme.colors;
-    let hover_fill = match theme.mode {
-        ThemeMode::Light => colors.hover_bg,
-        ThemeMode::Dark => colors.hover_bg_secondary,
-    };
     InputAppearance {
         fill: field_surface(theme),
-        hover_fill,
+        hover_fill: colors.hover_bg_secondary,
         border: field_border(theme),
         focus_ring: colors.ring_primary,
         invalid_border: colors.danger,
@@ -35,13 +31,10 @@ pub(crate) fn input_appearance(theme: &AerisTheme) -> InputAppearance {
     }
 }
 
-/// The Theme System `bg-surface dark:bg-surface-secondary` pair for fields and setting rows
-/// inside a layer: plain `surface` in light mode, `surface-secondary` in dark mode.
+/// The Theme Studio field fill: `surface-secondary` in both light and dark modes so inputs and
+/// setting rows sit cleanly on `surface` panels and form dialogs.
 pub(crate) const fn field_surface(theme: &AerisTheme) -> ThemeColor {
-    match theme.mode {
-        ThemeMode::Light => theme.colors.surface,
-        ThemeMode::Dark => theme.colors.surface_secondary,
-    }
+    theme.colors.surface_secondary
 }
 
 /// The Theme System `border dark:border-border-secondary` pair for fields: `border` in light
@@ -294,20 +287,8 @@ mod tests {
     fn input_appearance_follows_platform_aliases_in_both_modes() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let field = input_appearance(&theme);
-            assert_eq!(
-                field.fill,
-                match theme.mode {
-                    ThemeMode::Light => theme.colors.surface,
-                    ThemeMode::Dark => theme.colors.surface_secondary,
-                }
-            );
-            assert_eq!(
-                field.hover_fill,
-                match theme.mode {
-                    ThemeMode::Light => theme.colors.hover_bg,
-                    ThemeMode::Dark => theme.colors.hover_bg_secondary,
-                }
-            );
+            assert_eq!(field.fill, theme.colors.surface_secondary);
+            assert_eq!(field.hover_fill, theme.colors.hover_bg_secondary);
             assert_eq!(
                 field.border,
                 match theme.mode {

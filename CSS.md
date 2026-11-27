@@ -27,11 +27,12 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
-- Floating layers (dialogs, popovers, toasts, hints, floating toolbars, the large workspace
-  panels and every menu: header dropdowns such as the time zone menu, context menus, flyouts,
-  select menus and the symbol and indicator menus) use `popover_surface` from
-  `desktop/native_ui/theme.rs`: a `surface-secondary` fill with a 1px `border-secondary` edge,
-  in every theme. Menu rows rest on that `surface-secondary` fill.
+- Floating layers (menus, tooltips, popovers, toasts, hints, floating toolbars, select menus) sit on
+  `surface-secondary` with a 1px `border-secondary` edge via `popover_surface` in every theme.
+  Form dialogs, cards, and the large workspace panels (the Accounts panel, chart settings, and the
+  searchable Symbol/Indicator menus) sit on primary `surface` with a 1px `border` edge via
+  `primary_overlay_surface`, with inputs on `surface-secondary`. Menu rows rest on their layer's
+  `surface-secondary` fill and use `hover-bg-secondary` / `active-bg-secondary`.
 - No floating layer or menu casts a shadow. Menus, dropdowns, select menus, dialogs, the color
   picker and the large workspace panels use `--radius-compact` (`RadiusToken::Compact`).
 - The workspace page background is `surface-backdrop`: it paints the gaps between panels and the
@@ -57,11 +58,11 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   (`color_dot_button`) on the same row as the line-thickness dropdown.
 - A neutral badge is a `radius-large` `surface-secondary` pill with a 1px `border-subtle` edge and
   `text-secondary`; tinted badges pair a `-subtle` fill with its text color.
-- Nothing inside a popover layer rests on plain `surface` in dark mode. Fields and setting rows use
-  `field_surface` (`surface`, `surface-secondary` in dark) with `field_border` (`border`,
-  `border-secondary` in dark, as the Theme System inputs and trade-ticket fields), and buttons use
-  the `Secondary` variant, except a panel's own add or connect action (New practice account,
-  Connect), which uses `Default`.
+- Fields and setting rows inside panels and form dialogs use `field_surface` (`surface-secondary`
+  in every theme) with `field_border` (`border` in light, `border-secondary` in dark, matching
+  Theme Studio inputs and trade-ticket fields), and `hover-bg-secondary` on hover. Buttons inside
+  popover layers use the `Secondary` variant, except a panel's own add or connect action (New
+  practice account, Connect), which uses `Default`.
 - Button labels always use the normal platform weight, trade buttons included.
 - A fill resolved with `.over(..)` is opaque only over an opaque backdrop. Resolve a translucent
   fill over the opaque surface beneath it first.
@@ -158,9 +159,9 @@ under its switch), never a setting of its own. A 16px `--radius-small` box: `sur
 fills `hover-bg` / `primary-hover`; disabled uses `disabled-bg` / `primary-disabled` and `text-muted`.
 The whole row toggles, and focus uses the shared ring.
 
-**`Input`** (`input.rs`), the Theme System `Input`: a `border` field on `surface` (`surface-secondary` in
-dark), `hover-bg` on hover, the shared focus ring, and a `danger` border with a 3px `danger-ring` halo
-while invalid.
+**`Input`** (`input.rs`), the Theme System `Input`: a `border` (`border-secondary` in dark) field on
+`surface-secondary` in both light and dark modes, `hover-bg-secondary` on hover, the shared focus
+ring, and a `danger` border with a 3px `danger-ring` halo while invalid.
 
 ## Theme presets
 
@@ -181,7 +182,7 @@ keeps reading `theme.colors.<token>` and never branches on the preset. The profi
 :root {
   /* Surfaces */
   --surface: #ffffff;
-  --surface-secondary: #fafafa;
+  --surface-secondary: #f5f6f8;
   --surface-backdrop: #e5e5e5;
 
   /* Borders */

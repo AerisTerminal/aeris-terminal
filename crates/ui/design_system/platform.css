@@ -50,7 +50,7 @@
 :root {
   /* Surfaces */
   --surface: #ffffff;
-  --surface-secondary: #fafafa;
+  --surface-secondary: #f5f6f8;
   --surface-backdrop: #e5e5e5;
 
   /* Borders */
@@ -283,7 +283,7 @@
 [data-theme="normal"] {
   /* Surfaces */
   --surface: #ffffff;
-  --surface-secondary: #fafafa;
+  --surface-secondary: #f5f6f8;
   --surface-backdrop: #e5e5e5;
 
   /* Borders */
