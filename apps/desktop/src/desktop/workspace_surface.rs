@@ -6775,18 +6775,21 @@ impl WorkspaceSurface {
         revision: u32,
         spec: super::study_editor_store::ParsedStudySpec,
         compiled: aeris_study_sdk::wasm_runtime::CompiledWasmStudy,
+        telemetry_sink: Option<aeris_study_sdk::wasm_runtime::WasmStudyTelemetrySink>,
         cx: &mut Context<Self>,
     ) {
         let status = match self.current_runtime_series() {
             Err(error) => format!("Chart not ready: {error}"),
             Ok(series) => {
-                let registration = super::study_editor_store::build_wasm_study_registration(
-                    &identifier,
-                    &series,
-                    &spec,
-                    std::collections::BTreeMap::new(),
-                    compiled,
-                );
+                let registration =
+                    super::study_editor_store::build_wasm_study_registration_with_telemetry(
+                        &identifier,
+                        &series,
+                        &spec,
+                        std::collections::BTreeMap::new(),
+                        compiled,
+                        telemetry_sink,
+                    );
                 let persisted_settings: Vec<WorkspaceStudySettingState> = spec
                     .inputs
                     .iter()

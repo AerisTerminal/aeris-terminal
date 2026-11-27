@@ -23,34 +23,34 @@ pub(super) struct StudySnippet {
 /// Curated Study SDK snippets for rapid indicator authoring.
 pub(super) const STUDY_SNIPPETS: &[StudySnippet] = &[
     StudySnippet {
-        label: "+ SMA",
-        doc: "Simple Moving Average loop over `close`",
-        body: "    let period = 20usize;\n    for i in 0..out.len() {\n        if i + 1 < period {\n            out[i] = f64::NAN;\n            continue;\n        }\n        let mut sum = 0.0;\n        for j in (i + 1 - period)..=i {\n            sum += close[j];\n        }\n        out[i] = sum / (period as f64);\n    }\n",
+        label: "+ ta::ema",
+        doc: "Built-in Exponential Moving Average via `super::ta::ema`",
+        body: "    let fast = super::ta::ema(close, 20);\n    out.copy_from_slice(&fast);\n",
     },
     StudySnippet {
-        label: "+ EMA",
-        doc: "Recursive Exponential Moving Average over `close`",
-        body: "    let alpha = 2.0 / (20.0 + 1.0);\n    let mut ema = f64::NAN;\n    for i in 0..out.len() {\n        let c = close[i];\n        ema = if !c.is_finite() { f64::NAN } else if !ema.is_finite() { c } else { alpha * c + (1.0 - alpha) * ema };\n        out[i] = ema;\n    }\n",
+        label: "+ ta::rsi",
+        doc: "Built-in Wilder RSI via `super::ta::rsi`",
+        body: "    let rsi = super::ta::rsi(close, 14);\n    out.copy_from_slice(&rsi);\n",
     },
     StudySnippet {
-        label: "+ VWAP",
-        doc: "Cumulative typical-price volume-weighted average",
-        body: "    let mut pv = 0.0;\n    let mut vol = 0.0;\n    for i in 0..out.len() {\n        let tp = (high[i] + low[i] + close[i]) / 3.0;\n        pv += tp * volume[i];\n        vol += volume[i];\n        out[i] = if vol > 0.0 { pv / vol } else { f64::NAN };\n    }\n",
+        label: "+ Session VWAP",
+        doc: "Daily-resetting Session VWAP using bar timestamps",
+        body: "    let vwap = super::ta::session_vwap(high, low, close, volume);\n    out.copy_from_slice(&vwap);\n",
     },
     StudySnippet {
-        label: "+ Gap",
-        doc: "Emit an explicit hard gap (`f64::NAN`)",
-        body: "out[i] = f64::NAN;",
+        label: "+ Alert",
+        doc: "Emit a deduplicated alert to Aeris's notification center",
+        body: "    let last = close.len().saturating_sub(1);\n    if super::ta::crossover(close, out, last) {\n        super::emit_alert(last, \"cross_up\", \"Price crossed above indicator\", super::ALERT_ONCE_PER_BAR_CLOSE);\n    }\n",
     },
     StudySnippet {
-        label: "+ HL2",
-        doc: "Bar midpoint `(high[i] + low[i]) * 0.5`",
-        body: "(high[i] + low[i]) * 0.5",
+        label: "+ Log",
+        doc: "Print a debug message to the Study Editor Console",
+        body: "    super::log_info(&format!(\"{} @ {}s bars={}\", super::syminfo::symbol(), super::syminfo::timeframe_seconds(), close.len()));\n",
     },
 ];
 
 /// Compact API quick-reference line displayed beneath the snippet bar.
-pub(super) const STUDY_API_QUICK_REF: &str = "API: pub fn calculate(open: &[f64], high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64]) · f64::NAN = gap";
+pub(super) const STUDY_API_QUICK_REF: &str = "API: super::ta::{sma,ema,rma,rsi,atr,bb,macd,session_vwap,pivothigh,crossover} · super::{time,is_new_day,syminfo,emit_alert,log_info}";
 
 #[derive(Clone, Copy)]
 struct RustPalette {

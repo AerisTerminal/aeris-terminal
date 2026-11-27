@@ -15,8 +15,11 @@ use aeris_study_sdk::project::{
 };
 use aeris_study_sdk::sandbox::StudySandboxLimits;
 use aeris_study_sdk::toolchain::{PreviewFixturePreset, StudyDevPackStatus};
-use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
+use aeris_study_sdk::wasm_runtime::{
+    CompiledWasmStudy, WasmStudyLogLevel, WasmStudyTelemetry, WasmStudyTelemetrySink,
+};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum StudyEditorDock {
@@ -76,6 +79,8 @@ pub(super) struct StudyEditorDialogState {
     pub(super) active_job_id: u64,
     pub(super) active_task: Option<gpui::Task<()>>,
     pub(super) probe_task: Option<gpui::Task<()>>,
+    pub(super) telemetry_sink: WasmStudyTelemetrySink,
+    pub(super) preview_telemetry: Option<WasmStudyTelemetry>,
 }
 
 const TEMPLATES: [(StudyProjectTemplate, &str); 5] = [
@@ -188,6 +193,8 @@ impl StudyEditorDialogState {
             active_job_id: 0,
             active_task: None,
             probe_task: Some(probe_task),
+            telemetry_sink: Arc::new(Mutex::new(None)),
+            preview_telemetry: None,
         }
     }
 
@@ -356,21 +363,23 @@ impl StudyEditorDialogState {
         self.status_message = None;
 
         self.active_task = Some(cx.spawn(async move |surface, cx| {
-            let (diagnostics, summary) =
-                cx.background_executor()
-                    .spawn(async move {
-                        run_offline_preview_check(&source, PreviewFixturePreset::Uptrend)
-                    })
-                    .await;
+            let (diagnostics, summary, telemetry) = cx
+                .background_executor()
+                .spawn(async move {
+                    run_offline_preview_check(&source, PreviewFixturePreset::Uptrend)
+                })
+                .await;
             let _ = surface.update(cx, |surface, surface_cx| {
                 if let Some(dialog) = surface.study_editor.as_mut() {
                     if dialog.active_job_id != job_id {
                         return;
                     }
+                    let has_logs = telemetry.as_ref().is_some_and(|t| !t.logs.is_empty());
                     dialog.busy_label = None;
                     dialog.active_task = None;
-                    dialog.console_open = !diagnostics.is_empty();
+                    dialog.console_open = !diagnostics.is_empty() || has_logs;
                     dialog.diagnostics = diagnostics;
+                    dialog.preview_telemetry = telemetry;
                     dialog.status_message = Some(summary);
                     surface_cx.notify();
                 }
@@ -454,8 +463,18 @@ impl StudyEditorDialogState {
                                 let _ = dialog.store.save_project(project);
                             }
                         }
+                        dialog.preview_telemetry = None;
+                        if let Ok(mut guard) = dialog.telemetry_sink.lock() {
+                            *guard = None;
+                        }
+                        let telemetry_sink = dialog.telemetry_sink.clone();
                         surface.attach_compiled_wasm_study_to_chart(
-                            identifier, revision, spec, compiled, surface_cx,
+                            identifier,
+                            revision,
+                            spec,
+                            compiled,
+                            Some(telemetry_sink),
+                            surface_cx,
                         );
                     }
                     Err(diagnostics) => {
@@ -1659,6 +1678,49 @@ fn diagnostics_drawer(
                 .text_color(gpui_color(colors.text_secondary))
                 .child(status.clone()),
         );
+    }
+
+    let active_telemetry: Option<WasmStudyTelemetry> = editor
+        .telemetry_sink
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .or_else(|| editor.preview_telemetry.clone());
+
+    if let Some(telemetry) = &active_telemetry {
+        let elapsed_ms = (telemetry.elapsed_micros as f64) / 1000.0;
+        let fuel_pct = if telemetry.fuel_limit > 0 {
+            ((telemetry.fuel_consumed as f64) / (telemetry.fuel_limit as f64)) * 100.0
+        } else {
+            0.0
+        };
+        let summary_line = format!(
+            "Profile: {elapsed_ms:.2} ms · fuel {}/{} ({fuel_pct:.1}%) · {} bars · {} scene objs · {} alert(s)",
+            telemetry.fuel_consumed,
+            telemetry.fuel_limit,
+            telemetry.bar_count,
+            telemetry.scene_object_count,
+            telemetry.alert_count,
+        );
+        list = list.child(
+            div()
+                .text_xs()
+                .text_color(gpui_color(colors.text_muted))
+                .child(summary_line),
+        );
+        for entry in &telemetry.logs {
+            let (tag, color) = match entry.level {
+                WasmStudyLogLevel::Info => ("INFO", gpui_color(colors.text_secondary)),
+                WasmStudyLogLevel::Warn => ("WARN", gpui_color(colors.text_warning)),
+                WasmStudyLogLevel::Error => ("ERR", gpui_color(colors.text_danger)),
+            };
+            list = list.child(
+                div()
+                    .text_xs()
+                    .text_color(color)
+                    .child(format!("[{tag}] {}", entry.message)),
+            );
+        }
     }
 
     for (idx, diag) in editor.diagnostics.iter().take(12).enumerate() {

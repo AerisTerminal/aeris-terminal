@@ -13,17 +13,20 @@ use crate::sandbox::{
     StudySandboxLimits,
 };
 use crate::{
-    MAXIMUM_STUDY_POLYLINE_POINTS, MAXIMUM_STUDY_SCENE_OBJECTS, MAXIMUM_STUDY_SCENE_TEXT_BYTES,
-    MAXIMUM_STUDY_TABLE_CELLS, NativeStudyProgram, StudyBoxObject, StudyColor,
-    StudyExecutionContext, StudyFillSpec, StudyInputSeries, StudyLabelObject, StudyLabelStyle,
-    StudyLevelSpec, StudyLineExtend, StudyLineObject, StudyLineStyle, StudyPoint,
-    StudyPolylineObject, StudySceneObject, StudySceneState, StudySettingValue, StudyTableCell,
-    StudyTableObject, StudyTablePosition, StudyTextAlign, fixed_point_to_f64,
+    BarPeriod, MAXIMUM_STUDY_ALERT_MESSAGE_BYTES, MAXIMUM_STUDY_ALERTS_PER_WAVE,
+    MAXIMUM_STUDY_IDENTIFIER_BYTES, MAXIMUM_STUDY_POLYLINE_POINTS, MAXIMUM_STUDY_SCENE_OBJECTS,
+    MAXIMUM_STUDY_SCENE_TEXT_BYTES, MAXIMUM_STUDY_TABLE_CELLS, NativeStudyProgram,
+    StudyAlertEvent, StudyAlertFrequency, StudyBoxObject, StudyColor, StudyExecutionContext,
+    StudyFillSpec, StudyInputSeries, StudyLabelObject, StudyLabelStyle, StudyLevelSpec,
+    StudyLineExtend, StudyLineObject, StudyLineStyle, StudyPoint, StudyPolylineObject,
+    StudySceneObject, StudySceneState, StudySettingValue, StudyTableCell, StudyTableObject,
+    StudyTablePosition, StudyTextAlign, fixed_point_to_f64,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use wasmi::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode};
 
 /// Required guest export returning the supported sandbox ABI version (`u32`).
@@ -41,6 +44,12 @@ pub const WASM_EXPORT_CALCULATE_MULTI: &str = "aeris_study_calculate_multi";
 pub const WASM_EXPORT_SET_PARAM: &str = "aeris_study_set_param";
 /// Optional guest export setting the chart's visible bar index range `(left: u32, right: u32)`.
 pub const WASM_EXPORT_SET_VIEWPORT: &str = "aeris_study_set_viewport";
+/// Optional guest export receiving the bar timestamps slice `(ptr: u32, count: u32)` where
+/// `ptr` points to `count` little-endian `i64` Unix-nanosecond timestamps.
+pub const WASM_EXPORT_SET_TIMESTAMPS: &str = "aeris_study_set_timestamps";
+/// Optional guest export receiving instrument & execution metadata:
+/// `(timeframe_secs: u32, price_scale: u32, qty_scale: u32, flags: u32, symbol_ptr: u32, symbol_len: u32)`.
+pub const WASM_EXPORT_SET_META: &str = "aeris_study_set_meta";
 /// Optional guest export returning the linear-memory pointer of the encoded scene command buffer.
 pub const WASM_EXPORT_SCENE_PTR: &str = "aeris_study_scene_ptr";
 /// Optional guest export returning the byte length of the encoded scene command buffer.
@@ -50,6 +59,13 @@ pub const WASM_EXPORT_MEMORY: &str = "memory";
 
 /// Maximum encoded scene command buffer size read from one sandbox execution (256 KiB).
 const MAX_WASM_SCENE_BYTES: usize = 256 * 1024;
+/// Maximum runtime log entries decoded from one sandbox execution wave.
+pub const MAX_WASM_LOGS_PER_WAVE: usize = 32;
+/// Maximum UTF-8 bytes retained per runtime log entry.
+pub const MAX_WASM_LOG_MESSAGE_BYTES: usize = 256;
+/// Maximum UTF-8 bytes passed for the instrument symbol metadata.
+const MAX_WASM_SYMBOL_BYTES: usize = 64;
+
 const OP_BOX: u8 = 1;
 const OP_LINE: u8 = 2;
 const OP_POLYLINE: u8 = 3;
@@ -57,6 +73,12 @@ const OP_LABEL: u8 = 4;
 const OP_TABLE_CELL: u8 = 5;
 const OP_BAR_COLOR: u8 = 6;
 const OP_BG_COLOR: u8 = 7;
+const OP_ALERT: u8 = 8;
+const OP_LOG: u8 = 9;
+
+const META_FLAG_REALTIME: u32 = 1 << 0;
+const META_FLAG_CONFIRMED_BAR: u32 = 1 << 1;
+const META_FLAG_NEW_BAR: u32 = 1 << 2;
 
 /// Number of `f64` columns packed into the input buffer (`open`, `high`, `low`, `close`, `volume`).
 const INPUT_COLUMN_COUNT: usize = 5;
@@ -161,16 +183,66 @@ pub struct WasmExecutionResult {
     pub fuel_consumed: u64,
 }
 
+/// Severity level for a runtime debug log emitted by a sandboxed WASM study.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WasmStudyLogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// One bounded debug log entry emitted by a sandboxed WASM study during execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmStudyLogEntry {
+    pub level: WasmStudyLogLevel,
+    pub message: String,
+}
+
+/// Read-only instrument and execution metadata passed into a sandboxed WASM study.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WasmStudyMeta {
+    pub timeframe_seconds: u32,
+    pub price_scale: u8,
+    pub quantity_scale: u8,
+    pub is_realtime: bool,
+    pub is_confirmed_bar: bool,
+    pub is_new_bar: bool,
+    pub symbol: String,
+}
+
+/// Bounded execution telemetry captured from the most recent sandboxed WASM study wave.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WasmStudyTelemetry {
+    pub fuel_consumed: u64,
+    pub fuel_limit: u64,
+    pub elapsed_micros: u64,
+    pub bar_count: usize,
+    pub scene_object_count: usize,
+    pub alert_count: usize,
+    pub logs: Vec<WasmStudyLogEntry>,
+}
+
+/// Shared bounded sink for reading the latest execution telemetry of one live WASM study.
+pub type WasmStudyTelemetrySink = Arc<Mutex<Option<WasmStudyTelemetry>>>;
+
 /// Execution telemetry returned alongside multi-output computed study series.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WasmMultiExecutionResult {
     /// One output vector per declared output series, each aligned 1:1 with the input bars.
     pub outputs: Vec<Vec<Option<f64>>>,
     /// Optional binary scene command buffer emitted by the guest study (boxes, lines, polylines,
-    /// labels, tables, per-bar colors, background colors).
+    /// labels, tables, per-bar colors, background colors, alerts, logs).
     pub scene_bytes: Vec<u8>,
     /// Exact instruction fuel consumed by this execution wave.
     pub fuel_consumed: u64,
+    /// Wall-clock duration of this execution wave in microseconds.
+    pub elapsed_micros: u64,
+    /// Decoded semantic alert events emitted during this wave (bounded).
+    pub alerts: Vec<StudyAlertEvent>,
+    /// Decoded runtime debug log entries emitted during this wave (bounded).
+    pub logs: Vec<WasmStudyLogEntry>,
+    /// Count of decoded scene objects in this wave.
+    pub scene_object_count: usize,
 }
 
 struct SandboxStoreState {
@@ -334,6 +406,37 @@ impl CompiledWasmStudy {
         viewport: Option<(usize, usize)>,
         limits: StudySandboxLimits,
     ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
+        let meta = WasmStudyMeta {
+            timeframe_seconds: u32::try_from(
+                estimate_bar_step_ns(&bars.timestamps_unix_nanos) / 1_000_000_000,
+            )
+            .unwrap_or(60),
+            price_scale: bars.price_scale,
+            quantity_scale: bars.quantity_scale,
+            is_realtime: false,
+            is_confirmed_bar: true,
+            is_new_bar: false,
+            symbol: String::new(),
+        };
+        self.execute_columnar_with_meta(bars, output_count, params, viewport, &meta, limits)
+    }
+
+    /// Executes a single- or multi-output sandboxed study with parameters, visible chart viewport
+    /// range, and full instrument/execution metadata (`timestamps_unix_nanos`, `syminfo`).
+    ///
+    /// # Errors
+    /// Returns [`WasmSandboxError`] on inconsistent input, fuel exhaustion, memory ceiling
+    /// violation, guest trap, guest error code, or non-finite infinite output.
+    pub fn execute_columnar_with_meta(
+        &self,
+        bars: &StudySandboxColumnarBars,
+        output_count: usize,
+        params: &[f64],
+        viewport: Option<(usize, usize)>,
+        meta: &WasmStudyMeta,
+        limits: StudySandboxLimits,
+    ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
+        let started_at = Instant::now();
         let count = output_count.clamp(1, 16);
         if !bars.is_consistent() {
             return Err(WasmSandboxError::InconsistentInputBars);
@@ -344,6 +447,10 @@ impl CompiledWasmStudy {
                 outputs: vec![Vec::new(); count],
                 scene_bytes: Vec::new(),
                 fuel_consumed: 0,
+                elapsed_micros: 0,
+                alerts: Vec::new(),
+                logs: Vec::new(),
+                scene_object_count: 0,
             });
         }
         if bar_count > limits.max_output_points {
@@ -374,6 +481,14 @@ impl CompiledWasmStudy {
             .map_err(|_| WasmSandboxError::MissingExport(WASM_EXPORT_CALCULATE))?;
         apply_wasm_params(instance, &mut store, params)?;
         apply_wasm_viewport(instance, &mut store, viewport, bar_count)?;
+        apply_wasm_timestamps(
+            instance,
+            &mut store,
+            memory,
+            alloc_fn,
+            &bars.timestamps_unix_nanos,
+        )?;
+        apply_wasm_meta(instance, &mut store, memory, alloc_fn, meta)?;
 
         let input_bytes = pack_columnar_ohlcv_f64(bars);
         let total_out_values =
@@ -432,13 +547,24 @@ impl CompiledWasmStudy {
             .map(<[Option<f64>]>::to_vec)
             .collect();
         let scene_bytes = read_wasm_scene_buffer(instance, &mut store, memory)?;
+        let (alerts, logs, scene_object_count) = if scene_bytes.is_empty() {
+            (Vec::new(), Vec::new(), 0)
+        } else {
+            let decoded = decode_wasm_scene_commands(&scene_bytes, &bars.timestamps_unix_nanos);
+            (decoded.alerts, decoded.logs, decoded.objects.len())
+        };
 
         let remaining_fuel = store.get_fuel().unwrap_or(0);
         let fuel_consumed = initial_fuel.saturating_sub(remaining_fuel);
+        let elapsed_micros = u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
         Ok(WasmMultiExecutionResult {
             outputs,
             scene_bytes,
             fuel_consumed,
+            elapsed_micros,
+            alerts,
+            logs,
+            scene_object_count,
         })
     }
 
@@ -480,6 +606,29 @@ impl CompiledWasmStudy {
         levels: Vec<StudyLevelSpec>,
         limits: StudySandboxLimits,
     ) -> NativeStudyProgram {
+        self.into_native_program_with_spec_and_telemetry(
+            output_count,
+            param_identifiers,
+            fills,
+            levels,
+            limits,
+            None,
+        )
+    }
+
+    /// Wraps a multi-output sandboxed WebAssembly module with optional telemetry sink so the
+    /// Study Editor Console can observe live execution fuel, duration, scene counts, and `log_*`
+    /// output from the running chart instance.
+    #[must_use]
+    pub fn into_native_program_with_spec_and_telemetry(
+        self,
+        output_count: usize,
+        param_identifiers: Vec<String>,
+        fills: Vec<StudyFillSpec>,
+        levels: Vec<StudyLevelSpec>,
+        limits: StudySandboxLimits,
+        telemetry_sink: Option<WasmStudyTelemetrySink>,
+    ) -> NativeStudyProgram {
         let compiled = self;
         let count = output_count.clamp(1, 16);
         NativeStudyProgram::dynamic(Arc::new(move |context: &mut StudyExecutionContext<'_>| {
@@ -491,6 +640,10 @@ impl CompiledWasmStudy {
             if bar_count == 0 {
                 return Ok(());
             }
+            let exec_meta = context.meta();
+            let series_key = market.series();
+            let timeframe_seconds = bar_period_to_seconds(series_key.period);
+            let symbol = series_key.instrument_id.clone();
             let dirty = context.dirty_range();
             let dirty_start = dirty.start.min(bar_count);
             let dirty_end = dirty.end_exclusive.unwrap_or(bar_count).min(bar_count);
@@ -545,8 +698,31 @@ impl CompiledWasmStudy {
                 context.chart_context().visible_start_unix_nanos,
                 context.chart_context().visible_end_unix_nanos,
             );
+            let wasm_meta = WasmStudyMeta {
+                timeframe_seconds: if timeframe_seconds > 0 {
+                    timeframe_seconds
+                } else {
+                    u32::try_from(
+                        estimate_bar_step_ns(&columnar.timestamps_unix_nanos) / 1_000_000_000,
+                    )
+                    .unwrap_or(60)
+                },
+                price_scale: columnar.price_scale,
+                quantity_scale: columnar.quantity_scale,
+                is_realtime: exec_meta.is_realtime(),
+                is_confirmed_bar: exec_meta.is_confirmed_bar,
+                is_new_bar: exec_meta.is_new_bar,
+                symbol,
+            };
             let result = compiled
-                .execute_columnar_full(&columnar, count, &params, viewport, limits)
+                .execute_columnar_with_meta(
+                    &columnar,
+                    count,
+                    &params,
+                    viewport,
+                    &wasm_meta,
+                    limits,
+                )
                 .map_err(|err| err.to_string())?;
 
             let write_from = dirty_start.max(start);
@@ -570,6 +746,19 @@ impl CompiledWasmStudy {
                     write_from,
                     write_to,
                 )?;
+            }
+            if let Some(sink) = &telemetry_sink
+                && let Ok(mut guard) = sink.lock()
+            {
+                *guard = Some(WasmStudyTelemetry {
+                    fuel_consumed: result.fuel_consumed,
+                    fuel_limit: limits.max_instruction_fuel,
+                    elapsed_micros: result.elapsed_micros,
+                    bar_count: slice_len,
+                    scene_object_count: result.scene_object_count,
+                    alert_count: result.alerts.len(),
+                    logs: result.logs,
+                });
             }
             if dirty_start == 0 && dirty_end == bar_count {
                 for &fill in &fills {
@@ -605,6 +794,102 @@ fn apply_wasm_params(
         }
     }
     Ok(())
+}
+
+fn bar_period_to_seconds(period: BarPeriod) -> u32 {
+    match period {
+        BarPeriod::Time { seconds } => seconds,
+        BarPeriod::Session { days } => u32::from(days).saturating_mul(86_400),
+        _ => 0,
+    }
+}
+
+fn apply_wasm_timestamps(
+    instance: wasmi::Instance,
+    store: &mut Store<SandboxStoreState>,
+    memory: wasmi::Memory,
+    alloc_fn: wasmi::TypedFunc<u32, u32>,
+    timestamps: &[i64],
+) -> Result<(), WasmSandboxError> {
+    if timestamps.is_empty() {
+        return Ok(());
+    }
+    let Ok(set_ts_fn) =
+        instance.get_typed_func::<(u32, u32), ()>(&*store, WASM_EXPORT_SET_TIMESTAMPS)
+    else {
+        return Ok(());
+    };
+    let byte_len =
+        timestamps
+            .len()
+            .checked_mul(size_of::<i64>())
+            .ok_or(WasmSandboxError::AllocationFailed {
+                requested_bytes: usize::MAX,
+            })?;
+    let byte_len_u32 = u32::try_from(byte_len).map_err(|_| WasmSandboxError::AllocationFailed {
+        requested_bytes: byte_len,
+    })?;
+    let count_u32 = u32::try_from(timestamps.len()).unwrap_or(0);
+    let ptr = alloc_guest(store, alloc_fn, byte_len_u32, byte_len)?;
+    let mut raw = Vec::with_capacity(byte_len);
+    for &ts in timestamps {
+        raw.extend_from_slice(&ts.to_le_bytes());
+    }
+    memory
+        .write(&mut *store, ptr as usize, &raw)
+        .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
+    set_ts_fn
+        .call(&mut *store, (ptr, count_u32))
+        .map_err(|err| classify_wasmi_error(&err, false))
+}
+
+fn apply_wasm_meta(
+    instance: wasmi::Instance,
+    store: &mut Store<SandboxStoreState>,
+    memory: wasmi::Memory,
+    alloc_fn: wasmi::TypedFunc<u32, u32>,
+    meta: &WasmStudyMeta,
+) -> Result<(), WasmSandboxError> {
+    let Ok(set_meta_fn) = instance
+        .get_typed_func::<(u32, u32, u32, u32, u32, u32), ()>(&*store, WASM_EXPORT_SET_META)
+    else {
+        return Ok(());
+    };
+    let mut flags = 0_u32;
+    if meta.is_realtime {
+        flags |= META_FLAG_REALTIME;
+    }
+    if meta.is_confirmed_bar {
+        flags |= META_FLAG_CONFIRMED_BAR;
+    }
+    if meta.is_new_bar {
+        flags |= META_FLAG_NEW_BAR;
+    }
+    let sym_bytes = meta.symbol.as_bytes();
+    let sym_len = sym_bytes.len().min(MAX_WASM_SYMBOL_BYTES);
+    let (sym_ptr, sym_len_u32) = if sym_len > 0 {
+        let len_u32 = u32::try_from(sym_len).unwrap_or(0);
+        let ptr = alloc_guest(store, alloc_fn, len_u32, sym_len)?;
+        memory
+            .write(&mut *store, ptr as usize, &sym_bytes[..sym_len])
+            .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
+        (ptr, len_u32)
+    } else {
+        (0, 0)
+    };
+    set_meta_fn
+        .call(
+            &mut *store,
+            (
+                meta.timeframe_seconds,
+                u32::from(meta.price_scale),
+                u32::from(meta.quantity_scale),
+                flags,
+                sym_ptr,
+                sym_len_u32,
+            ),
+        )
+        .map_err(|err| classify_wasmi_error(&err, false))
 }
 
 fn apply_wasm_viewport(
@@ -824,6 +1109,78 @@ struct DecodedWasmScene {
     objects: Vec<StudySceneObject>,
     bar_colors: Vec<(usize, StudyColor)>,
     bg_colors: Vec<(usize, StudyColor)>,
+    alerts: Vec<StudyAlertEvent>,
+    logs: Vec<WasmStudyLogEntry>,
+}
+
+const fn decode_alert_frequency(code: u8) -> StudyAlertFrequency {
+    match code {
+        1 => StudyAlertFrequency::OncePerBarClose,
+        2 => StudyAlertFrequency::EveryTick,
+        _ => StudyAlertFrequency::OncePerBar,
+    }
+}
+
+const fn decode_log_level(code: u8) -> WasmStudyLogLevel {
+    match code {
+        1 => WasmStudyLogLevel::Warn,
+        2 => WasmStudyLogLevel::Error,
+        _ => WasmStudyLogLevel::Info,
+    }
+}
+
+fn decode_alert_cmd(
+    cursor: &mut SceneCursor<'_>,
+    timestamps: &[i64],
+    alerts: &mut Vec<StudyAlertEvent>,
+) -> bool {
+    let (Some(bar_idx), Some(freq_code), Some(cond_id), Some(message)) =
+        (cursor.u32(), cursor.u8(), cursor.text(), cursor.text())
+    else {
+        return false;
+    };
+    if alerts.len() < MAXIMUM_STUDY_ALERTS_PER_WAVE
+        && let Some(&ts) = timestamps.get(bar_idx as usize)
+    {
+        let trimmed_id = cond_id.trim();
+        if !trimmed_id.is_empty() && trimmed_id.len() <= MAXIMUM_STUDY_IDENTIFIER_BYTES {
+            let mut msg = message;
+            if msg.len() > MAXIMUM_STUDY_ALERT_MESSAGE_BYTES {
+                let mut end = MAXIMUM_STUDY_ALERT_MESSAGE_BYTES;
+                while end > 0 && !msg.is_char_boundary(end) {
+                    end -= 1;
+                }
+                msg.truncate(end);
+            }
+            alerts.push(StudyAlertEvent {
+                condition_id: trimmed_id.to_string(),
+                message: msg,
+                bar_timestamp_unix_nanos: ts,
+                frequency: decode_alert_frequency(freq_code),
+            });
+        }
+    }
+    true
+}
+
+fn decode_log_cmd(cursor: &mut SceneCursor<'_>, logs: &mut Vec<WasmStudyLogEntry>) -> bool {
+    let (Some(level_code), Some(mut message)) = (cursor.u8(), cursor.text()) else {
+        return false;
+    };
+    if logs.len() < MAX_WASM_LOGS_PER_WAVE {
+        if message.len() > MAX_WASM_LOG_MESSAGE_BYTES {
+            let mut end = MAX_WASM_LOG_MESSAGE_BYTES;
+            while end > 0 && !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            message.truncate(end);
+        }
+        logs.push(WasmStudyLogEntry {
+            level: decode_log_level(level_code),
+            message,
+        });
+    }
+    true
 }
 
 fn decode_box_cmd(
@@ -1041,6 +1398,8 @@ fn decode_wasm_scene_commands(bytes: &[u8], timestamps: &[i64]) -> DecodedWasmSc
     let mut tables: BTreeMap<(u8, u16, u16), StudyTableObject> = BTreeMap::new();
     let mut bar_colors: Vec<(usize, StudyColor)> = Vec::new();
     let mut bg_colors: Vec<(usize, StudyColor)> = Vec::new();
+    let mut alerts: Vec<StudyAlertEvent> = Vec::new();
+    let mut logs: Vec<WasmStudyLogEntry> = Vec::new();
 
     while let Some(op) = cursor.u8() {
         let ok = match op {
@@ -1063,6 +1422,8 @@ fn decode_wasm_scene_commands(bytes: &[u8], timestamps: &[i64]) -> DecodedWasmSc
                 }
                 _ => false,
             },
+            OP_ALERT => decode_alert_cmd(&mut cursor, timestamps, &mut alerts),
+            OP_LOG => decode_log_cmd(&mut cursor, &mut logs),
             _ => false,
         };
         if !ok {
@@ -1079,6 +1440,8 @@ fn decode_wasm_scene_commands(bytes: &[u8], timestamps: &[i64]) -> DecodedWasmSc
         objects,
         bar_colors,
         bg_colors,
+        alerts,
+        logs,
     }
 }
 
@@ -1126,6 +1489,9 @@ fn apply_decoded_wasm_scene(
         if row >= write_from && row < write_to {
             context.set_background_color(row, (color.a != 0).then_some(color))?;
         }
+    }
+    for alert in decoded.alerts {
+        context.emit_alert(alert)?;
     }
     Ok(())
 }
@@ -1416,5 +1782,49 @@ mod tests {
             .execute_columnar(&fixture.bars, limits)
             .expect_err("32 MiB growth must fail against 16 MiB store limit");
         assert!(matches!(err, WasmSandboxError::AllocationFailed { .. }));
+    }
+
+    #[test]
+    fn scene_decoder_parses_bounded_alerts_and_logs() {
+        let timestamps = [1_000_000_000_i64, 2_000_000_000, 3_000_000_000];
+        let mut buf = Vec::new();
+
+        // Emit 20 alerts (> MAXIMUM_STUDY_ALERTS_PER_WAVE = 16) to verify hard cap.
+        for i in 0..20_u32 {
+            let cond = format!("cond_{i}");
+            let msg = format!("Alert #{i}");
+            buf.push(OP_ALERT);
+            buf.extend_from_slice(&(i % 3).to_le_bytes());
+            buf.push((i % 3) as u8);
+            buf.extend_from_slice(&(cond.len() as u16).to_le_bytes());
+            buf.extend_from_slice(cond.as_bytes());
+            buf.extend_from_slice(&(msg.len() as u16).to_le_bytes());
+            buf.extend_from_slice(msg.as_bytes());
+        }
+
+        // Emit 3 logs across all severity levels.
+        for (level, text) in [(0_u8, "hello"), (1_u8, "careful"), (2_u8, "boom")] {
+            buf.push(OP_LOG);
+            buf.push(level);
+            buf.extend_from_slice(&(text.len() as u16).to_le_bytes());
+            buf.extend_from_slice(text.as_bytes());
+        }
+
+        let decoded = decode_wasm_scene_commands(&buf, &timestamps);
+        assert_eq!(decoded.alerts.len(), MAXIMUM_STUDY_ALERTS_PER_WAVE);
+        assert_eq!(decoded.alerts[0].condition_id, "cond_0");
+        assert_eq!(decoded.alerts[0].bar_timestamp_unix_nanos, 1_000_000_000);
+        assert_eq!(decoded.alerts[0].frequency, StudyAlertFrequency::OncePerBar);
+        assert_eq!(
+            decoded.alerts[1].frequency,
+            StudyAlertFrequency::OncePerBarClose
+        );
+        assert_eq!(decoded.alerts[2].frequency, StudyAlertFrequency::EveryTick);
+
+        assert_eq!(decoded.logs.len(), 3);
+        assert_eq!(decoded.logs[0].level, WasmStudyLogLevel::Info);
+        assert_eq!(decoded.logs[0].message, "hello");
+        assert_eq!(decoded.logs[1].level, WasmStudyLogLevel::Warn);
+        assert_eq!(decoded.logs[2].level, WasmStudyLogLevel::Error);
     }
 }

@@ -21,7 +21,9 @@ use aeris_study_sdk::toolchain::{
     PreviewFixturePreset, STUDY_SANDBOX_TARGET_TRIPLE, STUDY_TOOLCHAIN_POLICY_VERSION,
     StudyArtifactCacheKey, StudyDevPackStatus, StudyPreviewFixture,
 };
-use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
+use aeris_study_sdk::wasm_runtime::{
+    CompiledWasmStudy, WasmStudyTelemetry, WasmStudyTelemetrySink,
+};
 use aeris_study_sdk::{
     BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyColor, StudyDecimal,
     StudyFillSpec, StudyInvalidationPolicy, StudyLevelSpec, StudyLineStyle, StudyPaneTarget,
@@ -429,6 +431,20 @@ pub(crate) fn build_wasm_study_registration(
     overrides: BTreeMap<String, StudySettingValue>,
     compiled: CompiledWasmStudy,
 ) -> NativeStudyRegistration {
+    build_wasm_study_registration_with_telemetry(identifier, series, spec, overrides, compiled, None)
+}
+
+/// Builds a `NativeStudyRegistration` for a compiled sandboxed WASM study with an optional
+/// bounded telemetry sink so the Study Editor Console displays live fuel, timing, and `log_*` output.
+#[must_use]
+pub(crate) fn build_wasm_study_registration_with_telemetry(
+    identifier: &str,
+    series: &BarSeriesKey,
+    spec: &ParsedStudySpec,
+    overrides: BTreeMap<String, StudySettingValue>,
+    compiled: CompiledWasmStudy,
+    telemetry_sink: Option<WasmStudyTelemetrySink>,
+) -> NativeStudyRegistration {
     let mut builder = StudyDefinitionBuilder::new(identifier)
         .market(series.clone(), StreamRequirements::BARS)
         .invalidation(StudyInvalidationPolicy::FromFirstChanged);
@@ -450,12 +466,13 @@ pub(crate) fn build_wasm_study_registration(
     NativeStudyRegistration {
         settings,
         definition,
-        program: compiled.into_native_program_with_spec(
+        program: compiled.into_native_program_with_spec_and_telemetry(
             spec.outputs.len(),
             param_identifiers,
             spec.fills.clone(),
             spec.levels.clone(),
             StudySandboxLimits::default(),
+            telemetry_sink,
         ),
     }
 }
@@ -1112,6 +1129,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 static PARAMS: [AtomicU64; 16] = [const { AtomicU64::new(f64::NAN.to_bits()) }; 16];
 static VIEWPORT_LEFT: AtomicU32 = AtomicU32::new(0);
 static VIEWPORT_RIGHT: AtomicU32 = AtomicU32::new(u32::MAX);
+static META_TIMEFRAME_SECS: AtomicU32 = AtomicU32::new(60);
+static META_PRICE_SCALE: AtomicU32 = AtomicU32::new(2);
+static META_QTY_SCALE: AtomicU32 = AtomicU32::new(0);
+static META_FLAGS: AtomicU32 = AtomicU32::new(0);
+static META_SYMBOL: Mutex<String> = Mutex::new(String::new());
+static TIMESTAMPS: Mutex<Vec<i64>> = Mutex::new(Vec::new());
 static SCENE_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 const MAX_SCENE_BYTES: usize = 256 * 1024;
@@ -1122,7 +1145,17 @@ const OP_LABEL: u8 = 4;
 const OP_TABLE_CELL: u8 = 5;
 const OP_BAR_COLOR: u8 = 6;
 const OP_BG_COLOR: u8 = 7;
+const OP_ALERT: u8 = 8;
+const OP_LOG: u8 = 9;
 
+#[allow(dead_code)]
+pub const ALERT_ONCE_PER_BAR: u8 = 0;
+#[allow(dead_code)]
+pub const ALERT_ONCE_PER_BAR_CLOSE: u8 = 1;
+#[allow(dead_code)]
+pub const ALERT_EVERY_TICK: u8 = 2;
+
+#[allow(dead_code)]
 pub fn param(index: usize, default: f64) -> f64 {
     if let Some(slot) = PARAMS.get(index) {
         let v = f64::from_bits(slot.load(Ordering::Relaxed));
@@ -1133,6 +1166,7 @@ pub fn param(index: usize, default: f64) -> f64 {
     default
 }
 
+#[allow(dead_code)]
 pub fn visible_range() -> (usize, usize) {
     (
         VIEWPORT_LEFT.load(Ordering::Relaxed) as usize,
@@ -1140,6 +1174,833 @@ pub fn visible_range() -> (usize, usize) {
     )
 }
 
+/// Returns the bar's exchange timestamp in Unix nanoseconds (`0` if out of bounds).
+#[allow(dead_code)]
+pub fn time(bar_index: usize) -> i64 {
+    TIMESTAMPS
+        .lock()
+        .ok()
+        .and_then(|ts| ts.get(bar_index).copied())
+        .unwrap_or(0)
+}
+
+/// Returns the bar's exchange timestamp in Unix milliseconds (`0` if out of bounds).
+#[allow(dead_code)]
+pub fn time_ms(bar_index: usize) -> i64 {
+    time(bar_index) / 1_000_000
+}
+
+/// Returns the bar's exchange timestamp in Unix seconds (`0` if out of bounds).
+#[allow(dead_code)]
+pub fn time_secs(bar_index: usize) -> i64 {
+    time(bar_index) / 1_000_000_000
+}
+
+/// Returns the UTC `(hour, minute, second)` of `bar_index`.
+#[allow(dead_code)]
+pub fn bar_time_hms(bar_index: usize) -> (u8, u8, u8) {
+    let sec_of_day = time_secs(bar_index).rem_euclid(86_400);
+    let h = (sec_of_day / 3600) as u8;
+    let m = ((sec_of_day % 3600) / 60) as u8;
+    let s = (sec_of_day % 60) as u8;
+    (h, m, s)
+}
+
+/// Returns the UTC civil day index since 1970-01-01 for `bar_index`.
+#[allow(dead_code)]
+pub fn bar_day_number(bar_index: usize) -> i64 {
+    time_secs(bar_index).div_euclid(86_400)
+}
+
+/// Returns the UTC `(year, month, day)` of `bar_index` (1-based month and day).
+#[allow(dead_code)]
+pub fn bar_ymd(bar_index: usize) -> (i32, u8, u8) {
+    let z = bar_day_number(bar_index) + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u8;
+    let year = (y + i64::from(m <= 2)) as i32;
+    (year, m, d)
+}
+
+/// Returns `true` if `bar_index` starts a new UTC calendar day relative to `bar_index - 1`.
+#[allow(dead_code)]
+pub fn is_new_day(bar_index: usize) -> bool {
+    bar_index == 0 || bar_day_number(bar_index) != bar_day_number(bar_index - 1)
+}
+
+/// Returns `true` if `bar_index` starts a new Monday-aligned UTC week relative to `bar_index - 1`.
+#[allow(dead_code)]
+pub fn is_new_week(bar_index: usize) -> bool {
+    if bar_index == 0 {
+        return true;
+    }
+    let w_cur = (bar_day_number(bar_index) + 3).div_euclid(7);
+    let w_prev = (bar_day_number(bar_index - 1) + 3).div_euclid(7);
+    w_cur != w_prev
+}
+
+/// Returns `true` if `bar_index` starts a new UTC calendar month relative to `bar_index - 1`.
+#[allow(dead_code)]
+pub fn is_new_month(bar_index: usize) -> bool {
+    if bar_index == 0 {
+        return true;
+    }
+    let (y1, m1, _) = bar_ymd(bar_index);
+    let (y0, m0, _) = bar_ymd(bar_index - 1);
+    y1 != y0 || m1 != m0
+}
+
+/// Read-only instrument and execution metadata for the current chart.
+#[allow(dead_code)]
+pub mod syminfo {
+    use super::*;
+
+    pub fn symbol() -> String {
+        META_SYMBOL
+            .lock()
+            .ok()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn timeframe_seconds() -> u32 {
+        META_TIMEFRAME_SECS.load(Ordering::Relaxed)
+    }
+
+    pub fn price_scale() -> u8 {
+        META_PRICE_SCALE.load(Ordering::Relaxed) as u8
+    }
+
+    pub fn quantity_scale() -> u8 {
+        META_QTY_SCALE.load(Ordering::Relaxed) as u8
+    }
+
+    pub fn tick_size() -> f64 {
+        10_f64.powi(-i32::from(price_scale()))
+    }
+
+    pub fn is_realtime() -> bool {
+        (META_FLAGS.load(Ordering::Relaxed) & 1) != 0
+    }
+
+    pub fn is_confirmed_bar() -> bool {
+        (META_FLAGS.load(Ordering::Relaxed) & 2) != 0
+    }
+
+    pub fn is_new_bar() -> bool {
+        (META_FLAGS.load(Ordering::Relaxed) & 4) != 0
+    }
+}
+
+/// Emits a deduplicated semantic alert event routed to Aeris's notification center & toaster.
+#[allow(dead_code)]
+pub fn emit_alert(bar_index: usize, condition_id: &str, message: &str, frequency: u8) {
+    let Ok(idx) = u32::try_from(bar_index) else {
+        return;
+    };
+    let cid = condition_id.as_bytes();
+    let cid_len = cid.len().min(64);
+    if cid_len == 0 {
+        return;
+    }
+    let msg = message.as_bytes();
+    let msg_len = msg.len().min(256);
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        if buf.len() + 10 + cid_len + msg_len > MAX_SCENE_BYTES {
+            return;
+        }
+        buf.push(OP_ALERT);
+        buf.extend_from_slice(&idx.to_le_bytes());
+        buf.push(frequency);
+        buf.extend_from_slice(&(cid_len as u16).to_le_bytes());
+        buf.extend_from_slice(&cid[..cid_len]);
+        buf.extend_from_slice(&(msg_len as u16).to_le_bytes());
+        buf.extend_from_slice(&msg[..msg_len]);
+    }
+}
+
+fn push_log(level: u8, message: &str) {
+    let bytes = message.as_bytes();
+    let len = bytes.len().min(256);
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        if buf.len() + 4 + len > MAX_SCENE_BYTES {
+            return;
+        }
+        buf.push(OP_LOG);
+        buf.push(level);
+        buf.extend_from_slice(&(len as u16).to_le_bytes());
+        buf.extend_from_slice(&bytes[..len]);
+    }
+}
+
+#[allow(dead_code)]
+pub fn log_info(message: &str) {
+    push_log(0, message);
+}
+
+#[allow(dead_code)]
+pub fn log_warn(message: &str) {
+    push_log(1, message);
+}
+
+#[allow(dead_code)]
+pub fn log_error(message: &str) {
+    push_log(2, message);
+}
+
+/// Built-in Technical Analysis standard library (`super::ta::*`).
+#[allow(dead_code)]
+pub mod ta {
+    pub fn sma(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n == 0 {
+            return out;
+        }
+        let mut sum = 0.0;
+        let mut bad = 0usize;
+        for i in 0..n {
+            let v = src[i];
+            if v.is_finite() {
+                sum += v;
+            } else {
+                bad += 1;
+            }
+            if i >= period {
+                let old = src[i - period];
+                if old.is_finite() {
+                    sum -= old;
+                } else {
+                    bad = bad.saturating_sub(1);
+                }
+            }
+            if i + 1 >= period && bad == 0 {
+                out[i] = sum / (period as f64);
+            }
+        }
+        out
+    }
+
+    pub fn ema(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n == 0 {
+            return out;
+        }
+        let alpha = 2.0 / ((period as f64) + 1.0);
+        let mut prev = f64::NAN;
+        let mut seed_sum = 0.0;
+        let mut seed_cnt = 0usize;
+        for i in 0..n {
+            let v = src[i];
+            if !v.is_finite() {
+                continue;
+            }
+            if !prev.is_finite() {
+                seed_sum += v;
+                seed_cnt += 1;
+                if seed_cnt == period {
+                    prev = seed_sum / (period as f64);
+                    out[i] = prev;
+                }
+            } else {
+                prev = alpha * v + (1.0 - alpha) * prev;
+                out[i] = prev;
+            }
+        }
+        out
+    }
+
+    /// Wilder's smoothing (Pine `ta.rma`).
+    pub fn rma(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n == 0 {
+            return out;
+        }
+        let alpha = 1.0 / (period as f64);
+        let mut prev = f64::NAN;
+        let mut seed_sum = 0.0;
+        let mut seed_cnt = 0usize;
+        for i in 0..n {
+            let v = src[i];
+            if !v.is_finite() {
+                continue;
+            }
+            if !prev.is_finite() {
+                seed_sum += v;
+                seed_cnt += 1;
+                if seed_cnt == period {
+                    prev = seed_sum / (period as f64);
+                    out[i] = prev;
+                }
+            } else {
+                prev = alpha * v + (1.0 - alpha) * prev;
+                out[i] = prev;
+            }
+        }
+        out
+    }
+
+    pub fn wma(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n < period {
+            return out;
+        }
+        let denom = ((period * (period + 1)) / 2) as f64;
+        for i in (period - 1)..n {
+            let mut sum = 0.0;
+            let mut ok = true;
+            for k in 0..period {
+                let v = src[i + 1 - period + k];
+                if !v.is_finite() {
+                    ok = false;
+                    break;
+                }
+                sum += v * ((k + 1) as f64);
+            }
+            if ok {
+                out[i] = sum / denom;
+            }
+        }
+        out
+    }
+
+    pub fn vwma(src: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len().min(volume.len());
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n < period {
+            return out;
+        }
+        for i in (period - 1)..n {
+            let mut pv = 0.0;
+            let mut vsum = 0.0;
+            for j in (i + 1 - period)..=i {
+                if src[j].is_finite() && volume[j].is_finite() {
+                    pv += src[j] * volume[j];
+                    vsum += volume[j];
+                }
+            }
+            if vsum > 0.0 {
+                out[i] = pv / vsum;
+            }
+        }
+        out
+    }
+
+    pub fn hma(src: &[f64], period: usize) -> Vec<f64> {
+        if period <= 1 {
+            return src.to_vec();
+        }
+        let half = (period / 2).max(1);
+        let sqrt_p = (period as f64).sqrt().round().max(1.0) as usize;
+        let w1 = wma(src, half);
+        let w2 = wma(src, period);
+        let diff: Vec<f64> = w1
+            .iter()
+            .zip(w2.iter())
+            .map(|(&a, &b)| 2.0 * a - b)
+            .collect();
+        wma(&diff, sqrt_p)
+    }
+
+    pub fn vwap(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
+        let n = high.len().min(low.len()).min(close.len()).min(volume.len());
+        let mut out = vec![f64::NAN; n];
+        let mut pv = 0.0;
+        let mut vsum = 0.0;
+        for i in 0..n {
+            let tp = (high[i] + low[i] + close[i]) / 3.0;
+            if tp.is_finite() && volume[i].is_finite() && volume[i] >= 0.0 {
+                pv += tp * volume[i];
+                vsum += volume[i];
+            }
+            if vsum > 0.0 {
+                out[i] = pv / vsum;
+            }
+        }
+        out
+    }
+
+    /// Daily-resetting session VWAP using UTC calendar day boundaries (`super::is_new_day`).
+    pub fn session_vwap(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
+        let n = high.len().min(low.len()).min(close.len()).min(volume.len());
+        let mut out = vec![f64::NAN; n];
+        let mut pv = 0.0;
+        let mut vsum = 0.0;
+        for i in 0..n {
+            if super::is_new_day(i) {
+                pv = 0.0;
+                vsum = 0.0;
+            }
+            let tp = (high[i] + low[i] + close[i]) / 3.0;
+            if tp.is_finite() && volume[i].is_finite() && volume[i] >= 0.0 {
+                pv += tp * volume[i];
+                vsum += volume[i];
+            }
+            if vsum > 0.0 {
+                out[i] = pv / vsum;
+            }
+        }
+        out
+    }
+
+    pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
+        let n = high.len().min(low.len()).min(close.len());
+        let mut out = vec![f64::NAN; n];
+        for i in 0..n {
+            let hl = high[i] - low[i];
+            if i == 0 || !close[i - 1].is_finite() {
+                out[i] = hl;
+            } else {
+                let hc = (high[i] - close[i - 1]).abs();
+                let lc = (low[i] - close[i - 1]).abs();
+                out[i] = hl.max(hc).max(lc);
+            }
+        }
+        out
+    }
+
+    pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+        let true_range = tr(high, low, close);
+        rma(&true_range, period)
+    }
+
+    pub fn variance(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n < period {
+            return out;
+        }
+        let mean = sma(src, period);
+        for i in (period - 1)..n {
+            let m = mean[i];
+            if !m.is_finite() {
+                continue;
+            }
+            let mut acc = 0.0;
+            for j in (i + 1 - period)..=i {
+                let d = src[j] - m;
+                acc += d * d;
+            }
+            out[i] = acc / (period as f64);
+        }
+        out
+    }
+
+    pub fn stdev(src: &[f64], period: usize) -> Vec<f64> {
+        variance(src, period)
+            .into_iter()
+            .map(|v| if v.is_finite() { v.max(0.0).sqrt() } else { f64::NAN })
+            .collect()
+    }
+
+    /// Bollinger Bands: returns `(upper, middle, lower)`.
+    pub fn bb(src: &[f64], period: usize, mult: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let mid = sma(src, period);
+        let sd = stdev(src, period);
+        let upper: Vec<f64> = mid.iter().zip(&sd).map(|(&m, &s)| m + mult * s).collect();
+        let lower: Vec<f64> = mid.iter().zip(&sd).map(|(&m, &s)| m - mult * s).collect();
+        (upper, mid, lower)
+    }
+
+    /// Keltner Channels: returns `(upper, middle, lower)`.
+    pub fn kc(
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        period: usize,
+        mult: f64,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let mid = ema(close, period);
+        let a = atr(high, low, close, period);
+        let upper: Vec<f64> = mid.iter().zip(&a).map(|(&m, &v)| m + mult * v).collect();
+        let lower: Vec<f64> = mid.iter().zip(&a).map(|(&m, &v)| m - mult * v).collect();
+        (upper, mid, lower)
+    }
+
+    /// Donchian Channels: returns `(upper, middle, lower)`.
+    pub fn dc(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let upper = highest(high, period);
+        let lower = lowest(low, period);
+        let mid: Vec<f64> = upper
+            .iter()
+            .zip(&lower)
+            .map(|(&u, &l)| (u + l) * 0.5)
+            .collect();
+        (upper, mid, lower)
+    }
+
+    pub fn rsi(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n <= period {
+            return out;
+        }
+        let mut gains = vec![0.0; n];
+        let mut losses = vec![0.0; n];
+        for i in 1..n {
+            let d = src[i] - src[i - 1];
+            if d.is_finite() {
+                if d > 0.0 {
+                    gains[i] = d;
+                } else {
+                    losses[i] = -d;
+                }
+            }
+        }
+        let avg_gain = rma(&gains[1..], period);
+        let avg_loss = rma(&losses[1..], period);
+        for i in 0..avg_gain.len() {
+            let g = avg_gain[i];
+            let l = avg_loss[i];
+            if g.is_finite() && l.is_finite() {
+                out[i + 1] = if l == 0.0 {
+                    if g == 0.0 { 50.0 } else { 100.0 }
+                } else {
+                    100.0 - (100.0 / (1.0 + g / l))
+                };
+            }
+        }
+        out
+    }
+
+    /// MACD: returns `(macd_line, signal_line, histogram)`.
+    pub fn macd(
+        src: &[f64],
+        fast: usize,
+        slow: usize,
+        signal: usize,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let f = ema(src, fast);
+        let s = ema(src, slow);
+        let line: Vec<f64> = f.iter().zip(&s).map(|(&a, &b)| a - b).collect();
+        let sig = ema(&line, signal);
+        let hist: Vec<f64> = line.iter().zip(&sig).map(|(&a, &b)| a - b).collect();
+        (line, sig, hist)
+    }
+
+    /// Stochastic oscillator: returns `(%K, %D)`.
+    pub fn stoch(
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        k_period: usize,
+        d_period: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let n = high.len().min(low.len()).min(close.len());
+        let hh = highest(high, k_period);
+        let ll = lowest(low, k_period);
+        let mut k = vec![f64::NAN; n];
+        for i in 0..n {
+            let range = hh[i] - ll[i];
+            if range.is_finite() && range > 0.0 && close[i].is_finite() {
+                k[i] = 100.0 * (close[i] - ll[i]) / range;
+            }
+        }
+        let d = sma(&k, d_period);
+        (k, d)
+    }
+
+    /// Directional Movement Index: returns `(adx, plus_di, minus_di)`.
+    pub fn dmi(
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        di_len: usize,
+        adx_len: usize,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let n = high.len().min(low.len()).min(close.len());
+        let mut plus_dm = vec![0.0; n];
+        let mut minus_dm = vec![0.0; n];
+        for i in 1..n {
+            let up = high[i] - high[i - 1];
+            let down = low[i - 1] - low[i];
+            if up > down && up > 0.0 {
+                plus_dm[i] = up;
+            }
+            if down > up && down > 0.0 {
+                minus_dm[i] = down;
+            }
+        }
+        let tr_s = rma(&tr(high, low, close), di_len);
+        let p_s = rma(&plus_dm, di_len);
+        let m_s = rma(&minus_dm, di_len);
+        let mut pdi = vec![f64::NAN; n];
+        let mut mdi = vec![f64::NAN; n];
+        let mut dx = vec![f64::NAN; n];
+        for i in 0..n {
+            if tr_s[i].is_finite() && tr_s[i] > 0.0 {
+                pdi[i] = 100.0 * p_s[i] / tr_s[i];
+                mdi[i] = 100.0 * m_s[i] / tr_s[i];
+                let sum = pdi[i] + mdi[i];
+                if sum > 0.0 {
+                    dx[i] = 100.0 * (pdi[i] - mdi[i]).abs() / sum;
+                }
+            }
+        }
+        let adx = rma(&dx, adx_len);
+        (adx, pdi, mdi)
+    }
+
+    pub fn roc(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 {
+            return out;
+        }
+        for i in period..n {
+            let prev = src[i - period];
+            if prev.is_finite() && prev != 0.0 && src[i].is_finite() {
+                out[i] = 100.0 * (src[i] - prev) / prev;
+            }
+        }
+        out
+    }
+
+    pub fn mom(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 {
+            return out;
+        }
+        for i in period..n {
+            out[i] = src[i] - src[i - period];
+        }
+        out
+    }
+
+    pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+        let n = high.len().min(low.len()).min(close.len());
+        let tp: Vec<f64> = (0..n).map(|i| (high[i] + low[i] + close[i]) / 3.0).collect();
+        let mean = sma(&tp, period);
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n < period {
+            return out;
+        }
+        for i in (period - 1)..n {
+            let m = mean[i];
+            if !m.is_finite() {
+                continue;
+            }
+            let mut md = 0.0;
+            for j in (i + 1 - period)..=i {
+                md += (tp[j] - m).abs();
+            }
+            md /= period as f64;
+            if md > 0.0 {
+                out[i] = (tp[i] - m) / (0.015 * md);
+            }
+        }
+        out
+    }
+
+    pub fn highest(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n == 0 {
+            return out;
+        }
+        for i in (period - 1).min(n)..n {
+            let mut best = f64::NEG_INFINITY;
+            for j in (i + 1 - period)..=i {
+                if src[j].is_finite() && src[j] > best {
+                    best = src[j];
+                }
+            }
+            if best.is_finite() {
+                out[i] = best;
+            }
+        }
+        out
+    }
+
+    pub fn lowest(src: &[f64], period: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period == 0 || n == 0 {
+            return out;
+        }
+        for i in (period - 1).min(n)..n {
+            let mut best = f64::INFINITY;
+            for j in (i + 1 - period)..=i {
+                if src[j].is_finite() && src[j] < best {
+                    best = src[j];
+                }
+            }
+            if best.is_finite() {
+                out[i] = best;
+            }
+        }
+        out
+    }
+
+    /// Bar offset `<= 0` to the highest value in `src[i+1-period..=i]` (matches Pine `ta.highestbars`).
+    pub fn highestbars(src: &[f64], bar_index: usize, period: usize) -> isize {
+        if period == 0 || bar_index >= src.len() {
+            return 0;
+        }
+        let start = bar_index.saturating_sub(period - 1);
+        let mut best_val = f64::NEG_INFINITY;
+        let mut best_idx = bar_index;
+        for j in start..=bar_index {
+            if src[j].is_finite() && src[j] >= best_val {
+                best_val = src[j];
+                best_idx = j;
+            }
+        }
+        (best_idx as isize) - (bar_index as isize)
+    }
+
+    /// Bar offset `<= 0` to the lowest value in `src[i+1-period..=i]` (matches Pine `ta.lowestbars`).
+    pub fn lowestbars(src: &[f64], bar_index: usize, period: usize) -> isize {
+        if period == 0 || bar_index >= src.len() {
+            return 0;
+        }
+        let start = bar_index.saturating_sub(period - 1);
+        let mut best_val = f64::INFINITY;
+        let mut best_idx = bar_index;
+        for j in start..=bar_index {
+            if src[j].is_finite() && src[j] <= best_val {
+                best_val = src[j];
+                best_idx = j;
+            }
+        }
+        (best_idx as isize) - (bar_index as isize)
+    }
+
+    /// Pivot high confirmed at `bar_index` (pivot bar is `bar_index - right`).
+    pub fn pivothigh(src: &[f64], bar_index: usize, left: usize, right: usize) -> Option<f64> {
+        if bar_index < left + right || bar_index >= src.len() {
+            return None;
+        }
+        let p = bar_index - right;
+        let pv = src[p];
+        if !pv.is_finite() {
+            return None;
+        }
+        for j in (p - left)..p {
+            if src[j] > pv {
+                return None;
+            }
+        }
+        for j in (p + 1)..=bar_index {
+            if src[j] >= pv {
+                return None;
+            }
+        }
+        Some(pv)
+    }
+
+    /// Pivot low confirmed at `bar_index` (pivot bar is `bar_index - right`).
+    pub fn pivotlow(src: &[f64], bar_index: usize, left: usize, right: usize) -> Option<f64> {
+        if bar_index < left + right || bar_index >= src.len() {
+            return None;
+        }
+        let p = bar_index - right;
+        let pv = src[p];
+        if !pv.is_finite() {
+            return None;
+        }
+        for j in (p - left)..p {
+            if src[j] < pv {
+                return None;
+            }
+        }
+        for j in (p + 1)..=bar_index {
+            if src[j] <= pv {
+                return None;
+            }
+        }
+        Some(pv)
+    }
+
+    pub fn crossover(a: &[f64], b: &[f64], i: usize) -> bool {
+        i > 0 && i < a.len() && i < b.len() && a[i] > b[i] && a[i - 1] <= b[i - 1]
+    }
+
+    pub fn crossunder(a: &[f64], b: &[f64], i: usize) -> bool {
+        i > 0 && i < a.len() && i < b.len() && a[i] < b[i] && a[i - 1] >= b[i - 1]
+    }
+
+    pub fn rising(src: &[f64], i: usize, len: usize) -> bool {
+        if len == 0 || i < len || i >= src.len() {
+            return false;
+        }
+        let cur = src[i];
+        cur.is_finite() && ((i - len)..i).all(|j| src[j].is_finite() && cur > src[j])
+    }
+
+    pub fn falling(src: &[f64], i: usize, len: usize) -> bool {
+        if len == 0 || i < len || i >= src.len() {
+            return false;
+        }
+        let cur = src[i];
+        cur.is_finite() && ((i - len)..i).all(|j| src[j].is_finite() && cur < src[j])
+    }
+
+    pub fn cum(src: &[f64]) -> Vec<f64> {
+        let mut out = Vec::with_capacity(src.len());
+        let mut acc = 0.0;
+        for &v in src {
+            if v.is_finite() {
+                acc += v;
+            }
+            out.push(acc);
+        }
+        out
+    }
+
+    pub fn change(src: &[f64], i: usize, len: usize) -> f64 {
+        if i >= len && i < src.len() {
+            src[i] - src[i - len]
+        } else {
+            f64::NAN
+        }
+    }
+
+    pub fn linreg(src: &[f64], period: usize, offset: usize) -> Vec<f64> {
+        let n = src.len();
+        let mut out = vec![f64::NAN; n];
+        if period < 2 || n < period {
+            return out;
+        }
+        let p = period as f64;
+        let sum_x = p * (p - 1.0) * 0.5;
+        let sum_xx = p * (p - 1.0) * (2.0 * p - 1.0) / 6.0;
+        let denom = p * sum_xx - sum_x * sum_x;
+        let eval_x = (period.saturating_sub(1 + offset)) as f64;
+        for i in (period - 1)..n {
+            let mut sum_y = 0.0;
+            let mut sum_xy = 0.0;
+            let mut ok = true;
+            for k in 0..period {
+                let y = src[i + 1 - period + k];
+                if !y.is_finite() {
+                    ok = false;
+                    break;
+                }
+                sum_y += y;
+                sum_xy += (k as f64) * y;
+            }
+            if ok && denom != 0.0 {
+                let slope = (p * sum_xy - sum_x * sum_y) / denom;
+                let intercept = (sum_y - slope * sum_x) / p;
+                out[i] = intercept + slope * eval_x;
+            }
+        }
+        out
+    }
+}
+
+#[allow(dead_code)]
 pub const fn rgba(hex_rgb: u32, alpha: u8) -> u32 {
     ((hex_rgb & 0x00FF_FFFF) << 8) | (alpha as u32)
 }
@@ -1320,6 +2181,44 @@ pub extern "C" fn aeris_study_set_param(index: u32, value: f64) {
 pub extern "C" fn aeris_study_set_viewport(left: u32, right: u32) {
     VIEWPORT_LEFT.store(left, Ordering::Relaxed);
     VIEWPORT_RIGHT.store(right, Ordering::Relaxed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_set_timestamps(ptr: u32, count: u32) {
+    if ptr == 0 || count == 0 {
+        if let Ok(mut ts) = TIMESTAMPS.lock() {
+            ts.clear();
+        }
+        return;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr as usize as *const i64, count as usize) };
+    if let Ok(mut ts) = TIMESTAMPS.lock() {
+        ts.clear();
+        ts.extend_from_slice(slice);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_set_meta(
+    timeframe_secs: u32,
+    price_scale: u32,
+    qty_scale: u32,
+    flags: u32,
+    symbol_ptr: u32,
+    symbol_len: u32,
+) {
+    META_TIMEFRAME_SECS.store(timeframe_secs, Ordering::Relaxed);
+    META_PRICE_SCALE.store(price_scale, Ordering::Relaxed);
+    META_QTY_SCALE.store(qty_scale, Ordering::Relaxed);
+    META_FLAGS.store(flags, Ordering::Relaxed);
+    if let Ok(mut sym) = META_SYMBOL.lock() {
+        sym.clear();
+        if symbol_ptr != 0 && symbol_len > 0 {
+            let len = (symbol_len as usize).min(64);
+            let bytes = unsafe { std::slice::from_raw_parts(symbol_ptr as usize as *const u8, len) };
+            sym.push_str(&String::from_utf8_lossy(bytes));
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1652,16 +2551,16 @@ pub(crate) fn compile_study_source_to_wasm(
 pub(crate) fn run_offline_preview_check(
     source: &str,
     preset: PreviewFixturePreset,
-) -> (Vec<StudyDiagnostic>, String) {
+) -> (Vec<StudyDiagnostic>, String, Option<WasmStudyTelemetry>) {
     let fixture = StudyPreviewFixture::generate(preset, 120, 60);
     let spec = parse_study_source_spec(source, "Preview");
+    let limits = StudySandboxLimits::default();
     match compile_study_source_to_wasm(source) {
         Ok(artifact) => {
-            match artifact.compiled.execute_columnar_outputs(
-                &fixture.bars,
-                spec.outputs.len(),
-                StudySandboxLimits::default(),
-            ) {
+            match artifact
+                .compiled
+                .execute_columnar_outputs(&fixture.bars, spec.outputs.len(), limits)
+            {
                 Ok(result) => {
                     let primary = result.outputs.first().map_or(&[][..], Vec::as_slice);
                     let finite_count = primary.iter().filter(|v| v.is_some()).count();
@@ -1670,15 +2569,23 @@ pub(crate) fn run_offline_preview_check(
                         .rev()
                         .find_map(|v| *v)
                         .map_or_else(|| "NaN".to_string(), |v| format!("{v:.2}"));
-                    (
-                        Vec::new(),
-                        format!(
-                            "WASM Preview [{preset:?}]: {} series, {finite_count}/{} pts, last={last_label}, fuel={}",
-                            result.outputs.len(),
-                            fixture.bars.len(),
-                            result.fuel_consumed
-                        ),
-                    )
+                    let elapsed_ms = (result.elapsed_micros as f64) / 1000.0;
+                    let summary = format!(
+                        "WASM Preview [{preset:?}]: {} series, {finite_count}/{} pts, last={last_label}, {elapsed_ms:.2}ms, fuel={}",
+                        result.outputs.len(),
+                        fixture.bars.len(),
+                        result.fuel_consumed
+                    );
+                    let telemetry = WasmStudyTelemetry {
+                        fuel_consumed: result.fuel_consumed,
+                        fuel_limit: limits.max_instruction_fuel,
+                        elapsed_micros: result.elapsed_micros,
+                        bar_count: fixture.bars.len(),
+                        scene_object_count: result.scene_object_count,
+                        alert_count: result.alerts.len(),
+                        logs: result.logs,
+                    };
+                    (Vec::new(), summary, Some(telemetry))
                 }
                 Err(err) => (
                     vec![StudyDiagnostic {
@@ -1689,6 +2596,7 @@ pub(crate) fn run_offline_preview_check(
                         message: err.to_string(),
                     }],
                     format!("WASM Preview [{preset:?}] trapped: {err}"),
+                    None,
                 ),
             }
         }
@@ -1697,7 +2605,7 @@ pub(crate) fn run_offline_preview_check(
                 "Preview [{preset:?}] blocked: {} diagnostic(s) must be fixed",
                 diagnostics.len()
             );
-            (diagnostics, summary)
+            (diagnostics, summary, None)
         }
     }
 }
@@ -2005,12 +2913,14 @@ mod tests {
         assert!(!cache_dir.join("stale.json").exists());
 
         let (_, clean_src) = StudyProjectTemplate::StatelessOverlay.scaffold("user.prev", "Prev");
-        let (diags, summary) = run_offline_preview_check(&clean_src, PreviewFixturePreset::Uptrend);
+        let (diags, summary, telemetry) =
+            run_offline_preview_check(&clean_src, PreviewFixturePreset::Uptrend);
         assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
         assert!(
             summary.contains("120/120 pts"),
             "unexpected summary: {summary}"
         );
+        assert!(telemetry.is_some());
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -2048,11 +2958,62 @@ mod tests {
 
         // Infinite loop compiles, then deterministically traps on fuel exhaustion during execution.
         let loopy = "pub fn calculate(_o: &[f64], _h: &[f64], _l: &[f64], _c: &[f64], _v: &[f64], _out: &mut [f64]) { loop {} }";
-        let (loop_diags, loop_summary) =
+        let (loop_diags, loop_summary, loop_telemetry) =
             run_offline_preview_check(loopy, PreviewFixturePreset::Uptrend);
         assert_eq!(loop_diags.len(), 1);
         assert_eq!(loop_diags[0].code.as_deref(), Some("AERIS_WASM_TRAP"));
         assert!(loop_summary.contains("fuel"), "summary: {loop_summary}");
+        assert!(loop_telemetry.is_none());
+    }
+
+    #[test]
+    fn phase_1_wasm_prelude_ta_time_syminfo_alerts_and_logs_execute_end_to_end() {
+        let source = r#"
+// @pane: price
+// @output: ema | EMA 10 | line | #38bdf8
+// @output: vwap | Session VWAP | line | #f59e0b
+// @output: rsi | RSI 14 | line | #22c55e
+pub fn calculate_multi(
+    _open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    outs: &mut [&mut [f64]],
+) {
+    let ema10 = super::ta::ema(close, 10);
+    let svwap = super::ta::session_vwap(high, low, close, volume);
+    let rsi14 = super::ta::rsi(close, 14);
+    outs[0].copy_from_slice(&ema10);
+    outs[1].copy_from_slice(&svwap);
+    outs[2].copy_from_slice(&rsi14);
+
+    let last = close.len().saturating_sub(1);
+    let ts = super::time(last);
+    let (h, m, _s) = super::bar_time_hms(last);
+    let tf = super::syminfo::timeframe_seconds();
+    super::log_info(&format!("ts={ts} hms={h:02}:{m:02} tf={tf}s"));
+    super::log_warn("sample warning");
+    super::emit_alert(
+        last,
+        "phase1_signal",
+        "EMA + VWAP ready",
+        super::ALERT_ONCE_PER_BAR_CLOSE,
+    );
+}
+"#;
+        let (diags, summary, telemetry) =
+            run_offline_preview_check(source, PreviewFixturePreset::Uptrend);
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        assert!(summary.contains("3 series"), "summary: {summary}");
+        let telemetry = telemetry.expect("telemetry must be populated");
+        assert!(telemetry.fuel_consumed > 0);
+        assert_eq!(telemetry.bar_count, 120);
+        assert_eq!(telemetry.alert_count, 1);
+        assert_eq!(telemetry.logs.len(), 2);
+        assert!(telemetry.logs[0].message.contains("tf=60s"));
+        assert!(!telemetry.logs[0].message.contains("ts=0 "));
+        assert_eq!(telemetry.logs[1].message, "sample warning");
     }
 
     #[test]
