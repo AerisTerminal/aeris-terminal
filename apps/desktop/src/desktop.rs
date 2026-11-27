@@ -94,6 +94,8 @@ use saved_workspace::{SavedWorkspace, UnsavedEdit, WorkspaceSave, WorkspaceSnaps
 mod session_profile_dialog;
 mod side_panel_dock;
 mod sign_in_gate;
+#[cfg(test)]
+mod study_editor_store;
 mod study_packages;
 mod study_settings_dialog;
 mod symbol_browser;

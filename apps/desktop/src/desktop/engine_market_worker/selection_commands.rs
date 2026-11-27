@@ -233,6 +233,15 @@ pub(super) fn process_command(
                     viewport.start_unix_nanos,
                     viewport.end_unix_nanos,
                 )?;
+                let _ = market.set_study_chart_context(
+                    client_id,
+                    endpoint.consumer_id,
+                    aeris_market_runtime::study::StudyChartContext {
+                        visible_start_unix_nanos: Some(viewport.start_unix_nanos),
+                        visible_end_unix_nanos: Some(viewport.end_unix_nanos),
+                        visible_bar_count: None,
+                    },
+                );
             }
             Ok(())
         }

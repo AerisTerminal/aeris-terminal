@@ -511,7 +511,7 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Add deterministic runtime evaluation time, bar count, and primary bar period on `StudyExecutionMeta`.
 - [x] Add explicit intrabar-persistent state semantics (`NativeStudyProgram::with_intrabar_state`, `StudyExecutionContext::intrabar_state_mut`) distinct from normal transactional/confirmed state.
 - [x] Add read-only visible-range/chart-window context (`StudyChartContext`, `NativeStudyProgram::with_chart_context`, `StudyRuntime::set_chart_context`) with opt-in recalculation targeting.
-- [ ] Wire desktop chart viewport updates into `StudyRuntime::set_chart_context` and evaluate bounded dynamic request contexts if compatibility-corpus evidence requires them.
+- [x] Wire desktop chart viewport updates (`MarketWorkerCommand::ChartViewport`) into `MarketService::set_study_chart_context` so opted-in visible-range studies recalculate live; evaluate bounded dynamic request contexts only if compatibility-corpus evidence requires them.
 
 ### Phase J — alerts and advanced data contracts
 
@@ -548,7 +548,7 @@ Phase L is a required product program, not optional polish and not merely an ext
 
 #### Rust authoring experience
 
-- [x] Define versioned user-study project manifest (`StudyProjectManifest`), explicit capability set (`StudyProjectCapability`), structured diagnostics (`StudyDiagnostic`), and starter templates (`StudyProjectTemplate`: stateless, stateful, MTF, drawing/table, alert) in `crates/study_sdk/src/project.rs`.
+- [x] Define versioned user-study project manifest (`StudyProjectManifest`), explicit capability set (`StudyProjectCapability`), structured diagnostics (`StudyDiagnostic`), starter templates (`StudyProjectTemplate`), bounded `StudyProjectLibrary`, versioned transport-safe sandbox ABI + admission validator (`crates/study_sdk/src/sandbox.rs`), and durable on-disk `StudyProjectStore` + static forbidden-API validator (`apps/desktop/src/desktop/study_editor_store.rs`).
 - [ ] Add a first-class Aeris Study Editor UI for creating, opening, renaming, duplicating, saving, deleting, importing, and exporting Rust study projects.
 - [ ] Provide starter templates for stateless, stateful, overlay, oscillator, multi-output, multi-timeframe, drawing, table, and alert studies as those capabilities qualify.
 - [ ] Improve Rust author ergonomics with higher-level SDK builders, attributes/macros, prelude types, and helpers where they reduce boilerplate without hiding ownership, determinism, or bounds.
