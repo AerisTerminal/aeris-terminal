@@ -6605,6 +6605,15 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn run_study_editor_preview_test(&mut self, cx: &mut Context<Self>) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.run_preview_test(cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
         let Some((study_id, original)) = self
             .study_settings_dialog()

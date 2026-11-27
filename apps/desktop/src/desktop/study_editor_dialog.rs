@@ -1,6 +1,7 @@
 use super::native_ui::input::{TextArea, TextareaState};
 use super::study_editor_store::{
-    StudyProjectStore, export_project_bundle_json, import_project_bundle_json, source_sha256_hex,
+    StudyProjectStore, export_project_bundle_json, import_project_bundle_json,
+    probe_study_dev_pack, run_offline_preview_check, source_sha256_hex,
     validate_study_source_static,
 };
 use super::*;
@@ -8,6 +9,7 @@ use aeris_localization::{common, panels, tr};
 use aeris_study_sdk::project::{
     StudyDiagnostic, StudyDiagnosticSeverity, StudyProjectLibrary, StudyProjectTemplate,
 };
+use aeris_study_sdk::toolchain::{PreviewFixturePreset, StudyDevPackStatus};
 use std::path::PathBuf;
 
 pub(super) struct StudyEditorDialogState {
@@ -18,6 +20,7 @@ pub(super) struct StudyEditorDialogState {
     pub(super) source_input: Entity<TextareaState>,
     pub(super) diagnostics: Vec<StudyDiagnostic>,
     pub(super) status_message: Option<String>,
+    pub(super) dev_pack_status: StudyDevPackStatus,
 }
 
 const TEMPLATES: [(StudyProjectTemplate, &str); 5] = [
@@ -55,6 +58,12 @@ impl StudyEditorDialogState {
                 input.set_value(initial_source, window, input_cx);
             });
         }
+        let dev_pack_status = probe_study_dev_pack();
+        if let StudyDevPackStatus::Ready { rustc_version, .. }
+        | StudyDevPackStatus::MissingSandboxTarget { rustc_version, .. } = &dev_pack_status
+        {
+            let _ = store.prune_stale_artifact_cache(rustc_version);
+        }
         let status_message = (!warnings.is_empty()).then(|| warnings.join(" · "));
         Self {
             store,
@@ -64,6 +73,7 @@ impl StudyEditorDialogState {
             source_input,
             diagnostics: Vec::new(),
             status_message,
+            dev_pack_status,
         }
     }
 
@@ -278,6 +288,17 @@ impl StudyEditorDialogState {
         }
     }
 
+    pub(super) fn run_preview_test(&mut self, cx: &mut Context<WorkspaceSurface>) {
+        if self.selected_id.is_none() {
+            return;
+        }
+        let source = self.source_input.read(cx).value().to_string();
+        let (diagnostics, summary) =
+            run_offline_preview_check(&source, PreviewFixturePreset::Uptrend);
+        self.diagnostics = diagnostics;
+        self.status_message = Some(summary);
+    }
+
     pub(super) fn import_bundle_from_clipboard(
         &mut self,
         window: &mut Window,
@@ -379,6 +400,27 @@ fn project_sidebar(
 fn diagnostics_panel(dialog: &StudyEditorDialogState, theme: &AerisTheme) -> AnyElement {
     let colors = theme.colors;
     let mut panel = div().flex().flex_col().gap_1();
+    let toolchain_line = match &dialog.dev_pack_status {
+        StudyDevPackStatus::Ready {
+            rustc_version,
+            target_triple,
+        } => format!("Dev Pack: Ready ({rustc_version} · {target_triple})"),
+        StudyDevPackStatus::MissingSandboxTarget {
+            rustc_version,
+            required_target,
+        } => format!(
+            "Dev Pack: {rustc_version} (install `{required_target}` target for WASM builds)"
+        ),
+        StudyDevPackStatus::Unavailable => {
+            "Dev Pack: Static sandbox validation mode (no local rustc detected)".to_string()
+        }
+    };
+    panel = panel.child(
+        div()
+            .text_xs()
+            .text_color(gpui_color(colors.text_secondary))
+            .child(toolchain_line),
+    );
     if let Some(status) = &dialog.status_message {
         panel = panel.child(
             div()
@@ -411,6 +453,7 @@ pub(super) fn study_editor_dialog_layer(
     let duplicate = app.clone();
     let export_bundle = app.clone();
     let import_bundle = app.clone();
+    let preview = app.clone();
     let delete = app.clone();
     let cancel = app.clone();
     let save = app.clone();
@@ -520,6 +563,15 @@ pub(super) fn study_editor_dialog_layer(
             .label(tr!(common::CANCEL))
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_study_editor_dialog);
+            }),
+    )
+    .action(
+        Button::new("study_editor_preview", theme)
+            .variant(ButtonVariant::Secondary)
+            .label("Preview test")
+            .disabled(!has_selection)
+            .on_click(move |_, _, cx| {
+                preview.update(cx, WorkspaceSurface::run_study_editor_preview_test);
             }),
     )
     .action(

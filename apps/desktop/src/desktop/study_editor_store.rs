@@ -14,6 +14,10 @@ use aeris_study_sdk::project::{
     StudyDiagnostic, StudyDiagnosticSeverity, StudyProject, StudyProjectCapability,
     StudyProjectLibrary, StudyProjectManifest, StudyProjectTemplate, validate_study_source,
 };
+use aeris_study_sdk::toolchain::{
+    PreviewFixturePreset, STUDY_SANDBOX_TARGET_TRIPLE, StudyArtifactCacheKey, StudyDevPackStatus,
+    StudyPreviewFixture,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -23,6 +27,8 @@ use std::{
 };
 
 const PROJECTS_DIR_NAME: &str = "study_projects";
+const ARTIFACT_CACHE_DIR_NAME: &str = ".artifact_cache";
+const MAXIMUM_RETAINED_ARTIFACT_CACHE_ENTRIES: usize = 128;
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const SOURCE_FILE_NAME: &str = "lib.rs";
 const LAST_GOOD_FILE_NAME: &str = "last_good.rs";
@@ -313,6 +319,55 @@ impl StudyProjectStore {
         Ok(())
     }
 
+    /// Prunes stale or incompatible cached artifact receipts under `.artifact_cache/` while
+    /// keeping user project source files untouched.
+    pub(crate) fn prune_stale_artifact_cache(&self, host_toolchain_identity: &str) -> usize {
+        let cache_dir = self.root.join(ARTIFACT_CACHE_DIR_NAME);
+        let Ok(entries) = fs::read_dir(&cache_dir) else {
+            return 0;
+        };
+        let mut kept: Vec<PathBuf> = Vec::new();
+        let mut removed = 0;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let compatible = fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<StoredCacheKey>(&raw).ok())
+                .is_some_and(|stored| {
+                    StudyArtifactCacheKey {
+                        policy_version: stored.policy_version,
+                        sdk_compatibility_epoch: stored.sdk_compatibility_epoch,
+                        sandbox_abi_version: stored.sandbox_abi_version,
+                        toolchain_identity: stored.toolchain_identity,
+                        target_triple: stored.target_triple,
+                        source_sha256: stored.source_sha256,
+                        lockfile_sha256: stored.lockfile_sha256,
+                    }
+                    .is_compatible_with_host(host_toolchain_identity)
+                });
+            if !compatible {
+                if fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            } else {
+                kept.push(path);
+            }
+        }
+        kept.sort();
+        if kept.len() > MAXIMUM_RETAINED_ARTIFACT_CACHE_ENTRIES {
+            let excess = kept.len() - MAXIMUM_RETAINED_ARTIFACT_CACHE_ENTRIES;
+            for path in kept.into_iter().take(excess) {
+                if fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+
     fn project_dir(&self, identifier: &str) -> Result<PathBuf, String> {
         if identifier.is_empty()
             || identifier.contains('/')
@@ -370,6 +425,85 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 const STUDY_PROJECT_BUNDLE_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StoredCacheKey {
+    policy_version: u32,
+    sdk_compatibility_epoch: u32,
+    sandbox_abi_version: u32,
+    toolchain_identity: String,
+    target_triple: String,
+    source_sha256: String,
+    lockfile_sha256: String,
+}
+
+/// Probes whether a local Rust compiler and `wasm32-wasip2` sandbox target are available.
+#[must_use]
+pub(crate) fn probe_study_dev_pack() -> StudyDevPackStatus {
+    let Ok(output) = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+    else {
+        return StudyDevPackStatus::Unavailable;
+    };
+    if !output.status.success() {
+        return StudyDevPackStatus::Unavailable;
+    }
+    let rustc_version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if rustc_version.is_empty() {
+        return StudyDevPackStatus::Unavailable;
+    }
+    let target_ok = std::process::Command::new("rustc")
+        .args([
+            "--print",
+            "target-libdir",
+            "--target",
+            STUDY_SANDBOX_TARGET_TRIPLE,
+        ])
+        .output()
+        .is_ok_and(|out| {
+            out.status.success() && {
+                let libdir = String::from_utf8_lossy(&out.stdout);
+                let trimmed = libdir.trim();
+                !trimmed.is_empty() && Path::new(trimmed).exists()
+            }
+        });
+    if target_ok {
+        StudyDevPackStatus::Ready {
+            rustc_version,
+            target_triple: STUDY_SANDBOX_TARGET_TRIPLE.to_string(),
+        }
+    } else {
+        StudyDevPackStatus::MissingSandboxTarget {
+            rustc_version,
+            required_target: STUDY_SANDBOX_TARGET_TRIPLE.to_string(),
+        }
+    }
+}
+
+/// Runs static sandbox validation alongside a deterministic offline market preview fixture
+/// without opening any provider session.
+#[must_use]
+pub(crate) fn run_offline_preview_check(
+    source: &str,
+    preset: PreviewFixturePreset,
+) -> (Vec<StudyDiagnostic>, String) {
+    let diagnostics = validate_study_source_static(source);
+    let fixture = StudyPreviewFixture::generate(preset, 120, 60);
+    let summary = if diagnostics.is_empty() {
+        format!(
+            "Preview [{preset:?}]: {} bars, {} trades verified (0 diagnostics)",
+            fixture.bars.len(),
+            fixture.trades.len()
+        )
+    } else {
+        format!(
+            "Preview [{preset:?}] blocked: {} diagnostic(s) must be fixed",
+            diagnostics.len()
+        )
+    };
+    (diagnostics, summary)
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct StudyProjectBundle {
@@ -629,5 +763,55 @@ mod tests {
         assert!(outcome.diagnostics.is_empty());
         assert!(!outcome.cancelled);
         coordinator.cancel_active();
+    }
+
+    #[test]
+    fn artifact_cache_pruning_removes_stale_entries_and_preview_check_validates_source() {
+        let root = std::env::temp_dir().join(format!(
+            "aeris_study_cache_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = StudyProjectStore::new(&root);
+        let cache_dir = root.join(PROJECTS_DIR_NAME).join(ARTIFACT_CACHE_DIR_NAME);
+        fs::create_dir_all(&cache_dir).expect("cache dir");
+
+        let fresh = StoredCacheKey {
+            policy_version: aeris_study_sdk::toolchain::STUDY_TOOLCHAIN_POLICY_VERSION,
+            sdk_compatibility_epoch: aeris_study_sdk::STUDY_SDK_COMPATIBILITY_EPOCH,
+            sandbox_abi_version: aeris_study_sdk::sandbox::STUDY_SANDBOX_ABI_VERSION,
+            toolchain_identity: "rustc 1.99.0".to_string(),
+            target_triple: STUDY_SANDBOX_TARGET_TRIPLE.to_string(),
+            source_sha256: "a".repeat(64),
+            lockfile_sha256: "b".repeat(64),
+        };
+        let stale = StoredCacheKey {
+            sdk_compatibility_epoch: aeris_study_sdk::STUDY_SDK_COMPATIBILITY_EPOCH + 1,
+            ..fresh.clone()
+        };
+        fs::write(
+            cache_dir.join("fresh.json"),
+            serde_json::to_string(&fresh).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            cache_dir.join("stale.json"),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.prune_stale_artifact_cache("rustc 1.99.0"), 1);
+        assert!(cache_dir.join("fresh.json").exists());
+        assert!(!cache_dir.join("stale.json").exists());
+
+        let (_, clean_src) = StudyProjectTemplate::StatelessOverlay.scaffold("user.prev", "Prev");
+        let (diags, summary) = run_offline_preview_check(&clean_src, PreviewFixturePreset::Uptrend);
+        assert!(diags.is_empty());
+        assert!(summary.contains("120 bars"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
