@@ -6190,8 +6190,7 @@ impl WorkspaceSurface {
             Self::post_study_failure(tr!(workspace::CHART_DATA_UNAVAILABLE_FOR_STUDY), cx);
             return;
         };
-        let Ok(registration) =
-            runtime_study_registration(&active.persisted, &series, self.studies.active())
+        let Ok(registration) = self.resolve_runtime_study_registration(&active.persisted, &series)
         else {
             Self::post_study_failure(tr!(workspace::STUDY_SETTINGS_LOAD_FAILED), cx);
             return;
@@ -7069,7 +7068,7 @@ impl WorkspaceSurface {
             StudySettingsRequest::Reinitialize(replacement) => replacement,
         };
         let (series, registration) = self.current_runtime_series().and_then(|series| {
-            runtime_study_registration(&replacement, &series, self.studies.active())
+            self.resolve_runtime_study_registration(&replacement, &series)
                 .map(|registration| (series, registration))
         })?;
         if !self.retry_automatic_study_removals(cx) {
