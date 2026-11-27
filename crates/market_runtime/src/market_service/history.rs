@@ -499,7 +499,7 @@ impl Coordinator<'_> {
                     Some(detail),
                 );
             }
-        } else if self.provider_uses_candles(&series.provider_id) {
+        } else if self.series_uses_candles(series) {
             self.restore_candle_from_snapshot(series, snapshot)?;
         } else {
             self.restore_trade_from_snapshot(series, snapshot)?;
@@ -760,7 +760,7 @@ impl Coordinator<'_> {
     }
 
     fn live_history_coverage(&self, series: &BarSeriesKey) -> Option<(i64, i64)> {
-        if self.provider_uses_candles(&series.provider_id) {
+        if self.series_uses_candles(series) {
             self.series.candle(series)?.coverage()
         } else {
             self.series.trade(series)?.coverage()
@@ -768,7 +768,7 @@ impl Coordinator<'_> {
     }
 
     fn begin_live_history_reseed(&mut self, series: &BarSeriesKey) {
-        if self.provider_uses_candles(&series.provider_id) {
+        if self.series_uses_candles(series) {
             if let Some(live) = self.series.candle_mut(series) {
                 live.begin_history_reseed();
             }
@@ -778,7 +778,7 @@ impl Coordinator<'_> {
     }
 
     fn cancel_live_history_reseed(&mut self, series: &BarSeriesKey) -> Result<(), String> {
-        if self.provider_uses_candles(&series.provider_id) {
+        if self.series_uses_candles(series) {
             if let Some(live) = self.series.candle_mut(series) {
                 live.cancel_history_reseed()?;
             }
@@ -889,7 +889,7 @@ impl Coordinator<'_> {
         let dispatched = self.dispatch_history_request(request, &ticket, range)?;
         match dispatched {
             Ok(()) => {
-                if range.is_none() && self.provider_uses_candles(&series.provider_id) {
+                if range.is_none() && self.series_uses_candles(series) {
                     self.transition_candle_series(
                         series,
                         super::lifecycle::SeriesInput::HistoryRequested(&ticket),
@@ -980,8 +980,22 @@ impl Coordinator<'_> {
             .cloned()
     }
 
-    fn provider_uses_candles(&self, provider_id: &str) -> bool {
-        self.providers.live_model(provider_id) == Some(super::LiveModel::ProviderCandles)
+    fn series_uses_candles(&self, series: &BarSeriesKey) -> bool {
+        if self.series.candle_contains_key(series) {
+            return true;
+        }
+        if self.series.trade_contains_key(series) {
+            return false;
+        }
+        self.providers
+            .descriptor(&series.provider_id)
+            .is_some_and(|descriptor| {
+                descriptor.capabilities.live_model == super::LiveModel::ProviderCandles
+                    && descriptor
+                        .capabilities
+                        .candle_wire_interval
+                        .is_some_and(|resolve| resolve(series.period).is_ok())
+            })
     }
     fn backwards_history_exhausted(
         &self,
@@ -1160,7 +1174,7 @@ impl Coordinator<'_> {
             }
             Err(error) => {
                 let retry = self.schedule_history_retry(series, generation, range, &error);
-                if retry && range.is_none() && self.provider_uses_candles(&series.provider_id) {
+                if retry && range.is_none() && self.series_uses_candles(series) {
                     self.transition_candle_series(
                         series,
                         super::lifecycle::SeriesInput::HistoryFailed,
@@ -1169,7 +1183,7 @@ impl Coordinator<'_> {
                 self.dispatch_deferred_history(ticket, generation);
                 if !retry {
                     if range.is_none() {
-                        if self.provider_uses_candles(&series.provider_id) {
+                        if self.series_uses_candles(series) {
                             self.transition_candle_series(
                                 series,
                                 super::lifecycle::SeriesInput::HistoryRetryExhausted,
@@ -1321,7 +1335,7 @@ impl Coordinator<'_> {
         let Some(forming) = snapshot.forming else {
             return false;
         };
-        if self.provider_uses_candles(&series.provider_id) {
+        if self.series_uses_candles(series) {
             return false;
         }
         let seed = TradeHandoffSeed {
@@ -1362,7 +1376,7 @@ impl Coordinator<'_> {
                 self.history_failed(series, generation);
                 return false;
             };
-            let realigned = if self.provider_uses_candles(&series.provider_id) {
+            let realigned = if self.series_uses_candles(series) {
                 self.restore_candle_from_snapshot(series, &canonical)
             } else {
                 self.restore_trade_from_snapshot(series, &canonical)
@@ -1447,7 +1461,7 @@ impl Coordinator<'_> {
             coverage.current_empty = Some(recorded);
         }
         self.pending.remove(series);
-        if self.provider_uses_candles(&series.provider_id) {
+        if self.series_uses_candles(series) {
             self.transition_candle_series(
                 series,
                 super::lifecycle::SeriesInput::HistoryEmpty(Some(ticket)),
@@ -1659,7 +1673,7 @@ impl Coordinator<'_> {
         if !install.reseeds_live() {
             return Some((bars, forming));
         }
-        if self.provider_uses_candles(&series.provider_id) {
+        if self.series_uses_candles(series) {
             if let Err(error) = self.install_candle_seed(
                 series,
                 generation,

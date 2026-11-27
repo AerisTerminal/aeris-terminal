@@ -399,14 +399,14 @@ pub struct ChartChromePreferences {
 /// stay `Copy`. On disk they are the interval labels; unknown labels are skipped so a newer
 /// document never fails to load.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct TimeframeFavorites(u32);
+pub struct TimeframeFavorites(u64);
 
 impl TimeframeFavorites {
-    fn bit(interval: ChartInterval) -> u32 {
+    fn bit(interval: ChartInterval) -> u64 {
         ChartInterval::ALL
             .iter()
             .position(|candidate| *candidate == interval)
-            .map_or(0, |index| 1 << index)
+            .map_or(0, |index| 1_u64 << index)
     }
 
     #[must_use]

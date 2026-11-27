@@ -56,7 +56,7 @@ pub(crate) const COINBASE_PRESENTATION: ProviderPresentationDescriptor =
     ProviderPresentationDescriptor {
         id: "coinbase",
         display_name: "Coinbase",
-        chart_interval_labels: &["1m", "5m", "15m", "30m", "1h", "2h", "6h", "1D"],
+        chart_interval_labels: crate::resample::DERIVED_CRYPTO_INTERVAL_LABELS,
         daily_bars: ProviderDailyBarCadence::FixedDay,
         search_hint: "Search Coinbase spot pairs",
         logo_key: "coinbase",
@@ -138,10 +138,14 @@ pub(crate) fn provider_spec(
     )
 }
 
+pub(crate) const COINBASE_NATIVE_SECONDS: &[u32] =
+    &[60, 300, 900, 1_800, 3_600, 7_200, 21_600, 86_400];
+
 pub(crate) fn coinbase_supported_period(period: BarPeriod) -> Result<(), String> {
-    coinbase_interval_for_period(period)
-        .map(|_| ())
-        .map_err(|_| "Provider history is unavailable for this interval".to_string())
+    if coinbase_interval_for_period(period).is_ok() {
+        return Ok(());
+    }
+    crate::resample::supports_or_derives(period, COINBASE_NATIVE_SECONDS)
 }
 
 #[allow(clippy::too_many_lines)]

@@ -58,9 +58,7 @@ pub(crate) const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor =
     ProviderPresentationDescriptor {
         id: "hyperliquid",
         display_name: "Hyperliquid",
-        chart_interval_labels: &[
-            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
-        ],
+        chart_interval_labels: crate::resample::DERIVED_CRYPTO_INTERVAL_LABELS,
         daily_bars: ProviderDailyBarCadence::FixedDay,
         search_hint: "Search Hyperliquid markets",
         logo_key: "hyperliquid",
@@ -141,6 +139,10 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
 #[derive(Default)]
 pub(crate) struct LiveHyperliquidHistory(HyperliquidHttpClient);
 
+const HYPERLIQUID_NATIVE_SECONDS: &[u32] = &[
+    60, 180, 300, 900, 1_800, 3_600, 7_200, 14_400, 28_800, 43_200, 86_400, 259_200,
+];
+
 impl HistorySource for LiveHyperliquidHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
         let installed = request
@@ -148,14 +150,31 @@ impl HistorySource for LiveHyperliquidHistory {
             .as_ref()
             .ok_or_else(|| "Provider instrument is not installed".to_string())?;
         let instrument = history_instrument_from_install(installed);
-        aeris_hyperliquid_market_adapter::history::fetch(
+        if hyperliquid_interval_for_period(request.series.period).is_ok() {
+            return aeris_hyperliquid_market_adapter::history::fetch(
+                &mut self.0,
+                &request.series,
+                request.provider_generation.0.get(),
+                &instrument,
+                request.req_window(),
+                &request.stop,
+            );
+        }
+        let Some((base_period, ratio)) =
+            crate::resample::select_base_period(request.series.period, HYPERLIQUID_NATIVE_SECONDS)
+        else {
+            return Err("Provider history is unavailable for this interval".to_string());
+        };
+        let base_req = crate::resample::derive_base_request(request, base_period, ratio);
+        let base_snap = aeris_hyperliquid_market_adapter::history::fetch(
             &mut self.0,
-            &request.series,
-            request.provider_generation.0.get(),
+            &base_req.series,
+            base_req.provider_generation.0.get(),
             &instrument,
-            request.req_window(),
-            &request.stop,
-        )
+            base_req.req_window(),
+            &base_req.stop,
+        )?;
+        crate::resample::resample_snapshot(request.series.period, base_snap)
     }
 }
 
@@ -165,10 +184,9 @@ pub(crate) fn hyperliquid_wire(demand: &ProviderDemand) -> HyperliquidDemand {
     let mut quotes = BTreeSet::new();
     let mut books = BTreeSet::new();
     for (series, streams, instrument) in &demand.candle_series {
-        let (Ok(price_scale), Ok(quantity_scale), Ok(interval)) = (
+        let (Ok(price_scale), Ok(quantity_scale)) = (
             u8::try_from(instrument.price_scale),
             u8::try_from(instrument.quantity_scale),
-            hyperliquid_interval_for_period(series.period),
         ) else {
             continue;
         };
@@ -180,10 +198,14 @@ pub(crate) fn hyperliquid_wire(demand: &ProviderDemand) -> HyperliquidDemand {
             quantity_scale,
         };
         if streams.contains(MarketStream::Bars) {
-            candles.insert(HyperliquidCandleDemand {
-                instrument: mapping.clone(),
-                interval: interval.to_string(),
-            });
+            if let Ok(interval) = hyperliquid_interval_for_period(series.period) {
+                candles.insert(HyperliquidCandleDemand {
+                    instrument: mapping.clone(),
+                    interval: interval.to_string(),
+                });
+            } else {
+                trades.insert(mapping.clone());
+            }
         }
         if streams.contains(MarketStream::Trades) {
             trades.insert(mapping.clone());
@@ -435,9 +457,10 @@ fn hyperliquid_candle_interval(period: BarPeriod) -> Result<String, String> {
 }
 
 fn hyperliquid_supported_period(period: BarPeriod) -> Result<(), String> {
-    hyperliquid_interval_for_period(period)
-        .map(|_| ())
-        .map_err(|_| "Provider history is unavailable for this interval".to_string())
+    if hyperliquid_interval_for_period(period).is_ok() {
+        return Ok(());
+    }
+    crate::resample::supports_or_derives(period, HYPERLIQUID_NATIVE_SECONDS)
 }
 
 fn start_hyperliquid_runtime(

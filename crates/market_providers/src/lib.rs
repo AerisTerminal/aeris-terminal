@@ -18,6 +18,7 @@ mod hyperliquid;
 mod hyperliquid_market_scan;
 mod hyperliquid_realtime;
 mod okx;
+mod resample;
 mod rithmic;
 mod rithmic_realtime;
 

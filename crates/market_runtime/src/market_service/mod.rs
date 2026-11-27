@@ -696,6 +696,7 @@ impl ProviderDemand {
     fn has_dirty_stream_demand(
         &self,
         candle_wire_interval: Option<fn(BarPeriod) -> Result<String, String>>,
+        allow_trade_fallback: bool,
     ) -> bool {
         let has_candle_series = self
             .candle_series
@@ -703,7 +704,8 @@ impl ProviderDemand {
             .any(|(series, streams, instrument)| {
                 u8::try_from(instrument.price_scale).is_ok()
                     && u8::try_from(instrument.quantity_scale).is_ok()
-                    && candle_wire_interval.is_none_or(|resolve| resolve(series.period).is_ok())
+                    && (allow_trade_fallback
+                        || candle_wire_interval.is_none_or(|resolve| resolve(series.period).is_ok()))
                     && (streams.contains(MarketStream::Bars)
                         || streams.contains(MarketStream::Trades)
                         || streams.contains(MarketStream::Quotes)

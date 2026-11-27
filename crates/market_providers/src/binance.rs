@@ -56,10 +56,7 @@ pub(crate) const BINANCE_PRESENTATION: ProviderPresentationDescriptor =
     ProviderPresentationDescriptor {
         id: "binance",
         display_name: "Binance",
-        chart_interval_labels: &[
-            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1D", "3D", "1W",
-            "1M",
-        ],
+        chart_interval_labels: crate::resample::DERIVED_CRYPTO_INTERVAL_LABELS,
         daily_bars: ProviderDailyBarCadence::FixedDay,
         search_hint: "Search Binance perpetuals & spot",
         logo_key: "binance",
@@ -161,10 +158,15 @@ pub(crate) fn binance_candle_interval(period: BarPeriod) -> Result<String, Strin
         .map_err(|_| "Binance history is unavailable for this interval".to_string())
 }
 
+pub(crate) const BINANCE_NATIVE_SECONDS: &[u32] = &[
+    60, 180, 300, 900, 1_800, 3_600, 7_200, 14_400, 21_600, 28_800, 43_200, 86_400, 259_200,
+];
+
 pub(crate) fn binance_supported_period(period: BarPeriod) -> Result<(), String> {
-    binance_interval_for_period(period)
-        .map(|_| ())
-        .map_err(|_| "Provider history is unavailable for this interval".to_string())
+    if binance_interval_for_period(period).is_ok() {
+        return Ok(());
+    }
+    crate::resample::supports_or_derives(period, BINANCE_NATIVE_SECONDS)
 }
 
 #[allow(clippy::too_many_lines)]

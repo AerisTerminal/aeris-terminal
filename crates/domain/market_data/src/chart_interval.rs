@@ -10,44 +10,68 @@ pub enum ChartInterval {
     Second10,
     Second15,
     Second30,
+    Second45,
     Minute1,
+    Minute2,
     Minute3,
     Minute5,
+    Minute10,
     Minute15,
     Minute30,
+    Minute45,
     Hour1,
     Hour2,
+    Hour3,
     Hour4,
+    Hour6,
     Hour8,
     Hour12,
     Day1,
+    Day2,
     Day3,
+    Day5,
     Week1,
+    Week2,
     Month1,
+    Month3,
+    Month6,
+    Month12,
 }
 
 impl ChartInterval {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 32] = [
         Self::Tick100,
         Self::Second1,
         Self::Second5,
         Self::Second10,
         Self::Second15,
         Self::Second30,
+        Self::Second45,
         Self::Minute1,
+        Self::Minute2,
         Self::Minute3,
         Self::Minute5,
+        Self::Minute10,
         Self::Minute15,
         Self::Minute30,
+        Self::Minute45,
         Self::Hour1,
         Self::Hour2,
+        Self::Hour3,
         Self::Hour4,
+        Self::Hour6,
         Self::Hour8,
         Self::Hour12,
         Self::Day1,
+        Self::Day2,
         Self::Day3,
+        Self::Day5,
         Self::Week1,
+        Self::Week2,
         Self::Month1,
+        Self::Month3,
+        Self::Month6,
+        Self::Month12,
     ];
 
     #[must_use]
@@ -59,20 +83,32 @@ impl ChartInterval {
             Self::Second10 => "10s",
             Self::Second15 => "15s",
             Self::Second30 => "30s",
+            Self::Second45 => "45s",
             Self::Minute1 => "1m",
+            Self::Minute2 => "2m",
             Self::Minute3 => "3m",
             Self::Minute5 => "5m",
+            Self::Minute10 => "10m",
             Self::Minute15 => "15m",
             Self::Minute30 => "30m",
+            Self::Minute45 => "45m",
             Self::Hour1 => "1h",
             Self::Hour2 => "2h",
+            Self::Hour3 => "3h",
             Self::Hour4 => "4h",
+            Self::Hour6 => "6h",
             Self::Hour8 => "8h",
             Self::Hour12 => "12h",
             Self::Day1 => "1D",
+            Self::Day2 => "2D",
             Self::Day3 => "3D",
+            Self::Day5 => "5D",
             Self::Week1 => "1W",
+            Self::Week2 => "2W",
             Self::Month1 => "1M",
+            Self::Month3 => "3M",
+            Self::Month6 => "6M",
+            Self::Month12 => "12M",
         }
     }
 
@@ -122,20 +158,32 @@ impl ChartInterval {
             Self::Second10 => (10, 's'),
             Self::Second15 => (15, 's'),
             Self::Second30 => (30, 's'),
+            Self::Second45 => (45, 's'),
             Self::Minute1 => (1, 'm'),
+            Self::Minute2 => (2, 'm'),
             Self::Minute3 => (3, 'm'),
             Self::Minute5 => (5, 'm'),
+            Self::Minute10 => (10, 'm'),
             Self::Minute15 => (15, 'm'),
             Self::Minute30 => (30, 'm'),
+            Self::Minute45 => (45, 'm'),
             Self::Hour1 => (1, 'h'),
             Self::Hour2 => (2, 'h'),
+            Self::Hour3 => (3, 'h'),
             Self::Hour4 => (4, 'h'),
+            Self::Hour6 => (6, 'h'),
             Self::Hour8 => (8, 'h'),
             Self::Hour12 => (12, 'h'),
             Self::Day1 => (1, 'D'),
+            Self::Day2 => (2, 'D'),
             Self::Day3 => (3, 'D'),
+            Self::Day5 => (5, 'D'),
             Self::Week1 => (1, 'W'),
+            Self::Week2 => (2, 'W'),
             Self::Month1 => (1, 'M'),
+            Self::Month3 => (3, 'M'),
+            Self::Month6 => (6, 'M'),
+            Self::Month12 => (12, 'M'),
         }
     }
 
@@ -150,20 +198,31 @@ impl ChartInterval {
             Self::Second10 => fixed_seconds(10),
             Self::Second15 => fixed_seconds(15),
             Self::Second30 => fixed_seconds(30),
+            Self::Second45 => fixed_seconds(45),
             Self::Minute1 => fixed_seconds(60),
+            Self::Minute2 => fixed_seconds(2 * 60),
             Self::Minute3 => fixed_seconds(3 * 60),
             Self::Minute5 => fixed_seconds(5 * 60),
+            Self::Minute10 => fixed_seconds(10 * 60),
             Self::Minute15 => fixed_seconds(15 * 60),
             Self::Minute30 => fixed_seconds(30 * 60),
+            Self::Minute45 => fixed_seconds(45 * 60),
             Self::Hour1 => fixed_seconds(60 * 60),
             Self::Hour2 => fixed_seconds(2 * 60 * 60),
+            Self::Hour3 => fixed_seconds(3 * 60 * 60),
             Self::Hour4 => fixed_seconds(4 * 60 * 60),
+            Self::Hour6 => fixed_seconds(6 * 60 * 60),
             Self::Hour8 => fixed_seconds(8 * 60 * 60),
             Self::Hour12 => fixed_seconds(12 * 60 * 60),
             Self::Day1 => fixed_seconds(24 * 60 * 60),
+            Self::Day2 => fixed_seconds(2 * 24 * 60 * 60),
             Self::Day3 => fixed_seconds(3 * 24 * 60 * 60),
+            Self::Day5 => fixed_seconds(5 * 24 * 60 * 60),
             Self::Week1 => fixed_seconds(7 * 24 * 60 * 60),
-            Self::Month1 => ChartAggregation::CalendarMonth,
+            Self::Week2 => fixed_seconds(14 * 24 * 60 * 60),
+            Self::Month1 | Self::Month3 | Self::Month6 | Self::Month12 => {
+                ChartAggregation::CalendarMonth
+            }
         }
     }
 }
@@ -246,12 +305,13 @@ mod tests {
 
     #[test]
     fn catalog_matches_legacy_intervals_plus_rithmic_ticks() {
-        assert_eq!(ChartInterval::ALL.len(), 20);
+        assert_eq!(ChartInterval::ALL.len(), 32);
         assert_eq!(ChartInterval::ALL[0].label(), "100t");
         assert_eq!(ChartInterval::ALL[1].label(), "1s");
-        assert_eq!(ChartInterval::ALL[5].label(), "30s");
-        assert_eq!(ChartInterval::ALL[6].label(), "1m");
-        assert_eq!(ChartInterval::ALL[19].label(), "1M");
+        assert_eq!(ChartInterval::ALL[6].label(), "45s");
+        assert_eq!(ChartInterval::ALL[7].label(), "1m");
+        assert_eq!(ChartInterval::ALL[11].label(), "10m");
+        assert_eq!(ChartInterval::ALL[31].label(), "12M");
     }
 
     #[test]

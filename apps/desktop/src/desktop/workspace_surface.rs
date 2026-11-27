@@ -1089,13 +1089,18 @@ impl WorkspaceSurface {
             || matches!(
                 interval,
                 ChartInterval::Minute1
+                    | ChartInterval::Minute2
                     | ChartInterval::Minute3
                     | ChartInterval::Minute5
+                    | ChartInterval::Minute10
                     | ChartInterval::Minute15
                     | ChartInterval::Minute30
+                    | ChartInterval::Minute45
                     | ChartInterval::Hour1
                     | ChartInterval::Hour2
+                    | ChartInterval::Hour3
                     | ChartInterval::Hour4
+                    | ChartInterval::Hour6
                     | ChartInterval::Hour8
                     | ChartInterval::Hour12
                     | ChartInterval::Day1

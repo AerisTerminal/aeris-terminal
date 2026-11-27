@@ -48,8 +48,9 @@ pub(crate) const RITHMIC_PRESENTATION: ProviderPresentationDescriptor =
         id: "rithmic",
         display_name: "Rithmic",
         chart_interval_labels: &[
-            "1s", "5s", "10s", "15s", "30s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
-            "8h", "12h", "1D", "1W", "1M",
+            "1s", "5s", "10s", "15s", "30s", "45s", "1m", "2m", "3m", "5m", "10m", "15m", "30m",
+            "45m", "1h", "2h", "3h", "4h", "6h", "8h", "12h", "1D", "2D", "3D", "5D", "1W", "2W",
+            "1M", "3M", "6M", "12M",
         ],
         daily_bars: ProviderDailyBarCadence::TradingSession,
         search_hint: "Search Rithmic symbols",

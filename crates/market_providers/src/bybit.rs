@@ -55,9 +55,7 @@ pub(crate) const BYBIT_PRESENTATION: ProviderPresentationDescriptor =
     ProviderPresentationDescriptor {
         id: "bybit",
         display_name: "Bybit",
-        chart_interval_labels: &[
-            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1D", "1W", "1M",
-        ],
+        chart_interval_labels: crate::resample::DERIVED_CRYPTO_INTERVAL_LABELS,
         daily_bars: ProviderDailyBarCadence::FixedDay,
         search_hint: "Search Bybit perpetuals & spot",
         logo_key: "bybit",
@@ -159,10 +157,15 @@ fn bybit_candle_interval(period: BarPeriod) -> Result<String, String> {
         .map_err(|_| "Bybit history is unavailable for this interval".to_string())
 }
 
+pub(crate) const BYBIT_NATIVE_SECONDS: &[u32] = &[
+    60, 180, 300, 900, 1_800, 3_600, 7_200, 14_400, 21_600, 43_200, 86_400,
+];
+
 pub(crate) fn bybit_supported_period(period: BarPeriod) -> Result<(), String> {
-    bybit_interval_for_period(period)
-        .map(|_| ())
-        .map_err(|_| "Provider history is unavailable for this interval".to_string())
+    if bybit_interval_for_period(period).is_ok() {
+        return Ok(());
+    }
+    crate::resample::supports_or_derives(period, BYBIT_NATIVE_SECONDS)
 }
 
 #[allow(clippy::too_many_lines)]

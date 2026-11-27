@@ -54,18 +54,12 @@ impl Coordinator<'_> {
             let series = self
                 .series
                 .keys()
-                .filter(|series| {
-                    series.provider_id == provider
-                        && (self.series.trade_contains_key(series)
-                            == (model == LiveModel::TradeBuilt))
-                })
+                .filter(|series| series.provider_id == provider)
                 .cloned()
                 .collect::<Vec<_>>();
             for selected in &series {
-                if model == LiveModel::TradeBuilt {
-                    if let Some(live) = self.series.trade_lifecycle_mut(selected) {
-                        live.reset_trade(generation);
-                    }
+                if let Some(live) = self.series.trade_lifecycle_mut(selected) {
+                    live.reset_trade(generation);
                 } else if let Some(live) = self.series.candle_mut(selected) {
                     live.reset(generation);
                 }
@@ -91,7 +85,7 @@ impl Coordinator<'_> {
         &mut self,
         provider: &str,
         generation: u64,
-        model: LiveModel,
+        _model: LiveModel,
     ) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
@@ -110,48 +104,46 @@ impl Coordinator<'_> {
         }
         self.broadcast_provider_for(provider, None);
         let mut ready = Vec::new();
-        let missing = self
+        let mut missing_candles = Vec::new();
+        let mut missing_trades = Vec::new();
+        for (series, live) in self
             .series
             .iter_mut()
             .filter(|(series, _)| series.provider_id == provider)
-            .filter_map(|(series, live)| {
-                if live.generation != generation
-                    || live.is_candle() != (model == LiveModel::ProviderCandles)
-                {
-                    return None;
-                }
-                let is_ready = if model == LiveModel::TradeBuilt {
-                    live.mark_trade_online()
-                } else {
-                    live.connected = true;
-                    live.history_ready()
-                };
-                if is_ready {
-                    ready.push(series.clone());
-                    None
-                } else {
-                    Some(series.clone())
-                }
-            })
-            .collect::<Vec<_>>();
+        {
+            if live.generation != generation {
+                continue;
+            }
+            let is_candle = live.is_candle();
+            let is_ready = if is_candle {
+                live.connected = true;
+                live.history_ready()
+            } else {
+                live.mark_trade_online()
+            };
+            if is_ready {
+                ready.push(series.clone());
+            } else if is_candle {
+                missing_candles.push(series.clone());
+            } else {
+                missing_trades.push(series.clone());
+            }
+        }
         for series in ready {
             self.series_live_if_ready(&series);
         }
-        if model == LiveModel::ProviderCandles {
-            if let Some(epoch) = self.provider_epochs.current(provider, generation.0.get()) {
-                for series in missing {
-                    self.transition_candle_series(&series, SeriesInput::Online(epoch));
-                }
+        if let Some(epoch) = self.provider_epochs.current(provider, generation.0.get()) {
+            for series in missing_candles {
+                self.transition_candle_series(&series, SeriesInput::Online(epoch));
             }
-        } else {
-            for series in missing {
-                if self
-                    .provider_epochs
-                    .current(&series.provider_id, generation.0.get())
-                    .is_none_or(|epoch| self.history.inflight(&series, epoch).is_none())
-                {
-                    self.request_series_history_recovery(&series, generation);
-                }
+        }
+        for series in missing_trades {
+            if self
+                .provider_epochs
+                .current(&series.provider_id, generation.0.get())
+                .is_none_or(|epoch| self.history.inflight(&series, epoch).is_none())
+            {
+                self.request_series_history_recovery(&series, generation);
             }
         }
     }

@@ -160,10 +160,9 @@ pub(crate) fn crypto_demand_from_provider(
     let mut books = BTreeSet::new();
 
     for (series, streams, instrument) in &demand.candle_series {
-        let (Ok(price_scale), Ok(quantity_scale), Ok(interval)) = (
+        let (Ok(price_scale), Ok(quantity_scale)) = (
             u8::try_from(instrument.price_scale),
             u8::try_from(instrument.quantity_scale),
-            interval_for_period(series.period),
         ) else {
             continue;
         };
@@ -175,10 +174,14 @@ pub(crate) fn crypto_demand_from_provider(
             quantity_scale,
         };
         if streams.contains(MarketStream::Bars) {
-            candles.insert(CryptoCandleDemand {
-                instrument: mapping.clone(),
-                interval: interval.to_string(),
-            });
+            if let Ok(interval) = interval_for_period(series.period) {
+                candles.insert(CryptoCandleDemand {
+                    instrument: mapping.clone(),
+                    interval: interval.to_string(),
+                });
+            } else {
+                trades.insert(mapping.clone());
+            }
         }
         if streams.contains(MarketStream::Trades) {
             trades.insert(mapping.clone());
@@ -343,12 +346,52 @@ impl HistorySource for CryptoHistorySource {
             .ok_or_else(|| "Provider instrument is not installed".to_string())?;
         let instrument = history_instrument_from_install(installed);
         let provider_gen = request.provider_generation.0.get();
+        let target = request.series.period;
+        let native_ok = match self {
+            Self::Binance(_) | Self::Aggregated(_) => {
+                aeris_binance_market_adapter::candles::binance_interval_for_period(target).is_ok()
+            }
+            Self::Bybit(_) => {
+                aeris_bybit_market_adapter::candles::bybit_interval_for_period(target).is_ok()
+            }
+            Self::Okx(_) => {
+                aeris_okx_market_adapter::candles::okx_interval_for_period(target).is_ok()
+            }
+            Self::Coinbase(_) => {
+                aeris_coinbase_market_adapter::candles::coinbase_interval_for_period(target).is_ok()
+            }
+        };
+        if native_ok {
+            return self.fetch_direct(request, &instrument, provider_gen);
+        }
+        let native_secs = match self {
+            Self::Binance(_) | Self::Aggregated(_) => crate::binance::BINANCE_NATIVE_SECONDS,
+            Self::Bybit(_) | Self::Okx(_) => crate::bybit::BYBIT_NATIVE_SECONDS,
+            Self::Coinbase(_) => crate::coinbase::COINBASE_NATIVE_SECONDS,
+        };
+        let Some((base_period, ratio)) = crate::resample::select_base_period(target, native_secs)
+        else {
+            return Err("Provider history is unavailable for this interval".to_string());
+        };
+        let base_req = crate::resample::derive_base_request(request, base_period, ratio);
+        let base_snap = self.fetch_direct(&base_req, &instrument, provider_gen)?;
+        crate::resample::resample_snapshot(target, base_snap)
+    }
+}
+
+impl CryptoHistorySource {
+    fn fetch_direct(
+        &mut self,
+        request: &HistoryRequest,
+        instrument: &aeris_provider_spi::HistoryInstrument,
+        provider_gen: u64,
+    ) -> Result<HistorySnapshot, String> {
         match self {
             Self::Binance(client) => aeris_binance_market_adapter::history::fetch(
                 client,
                 &request.series,
                 provider_gen,
-                &instrument,
+                instrument,
                 request.req_window(),
                 &request.stop,
             )
@@ -357,7 +400,7 @@ impl HistorySource for CryptoHistorySource {
                 client,
                 &request.series,
                 provider_gen,
-                &instrument,
+                instrument,
                 request.req_window(),
                 &request.stop,
             )
@@ -366,7 +409,7 @@ impl HistorySource for CryptoHistorySource {
                 client,
                 &request.series,
                 provider_gen,
-                &instrument,
+                instrument,
                 request.req_window(),
                 &request.stop,
             )
@@ -375,7 +418,7 @@ impl HistorySource for CryptoHistorySource {
                 client,
                 &request.series,
                 provider_gen,
-                &instrument,
+                instrument,
                 request.req_window(),
                 &request.stop,
             )
@@ -389,7 +432,7 @@ impl HistorySource for CryptoHistorySource {
                 &mut agg.coinbase,
                 &mut agg.hyperliquid,
                 request,
-                &instrument,
+                instrument,
                 provider_gen,
             )
             .map_err(CryptoError::into_message),

@@ -831,24 +831,50 @@ impl Coordinator<'_> {
                     // Disconnected event. Retire that fence when demand resumes.
                     self.session_mut(&series.provider_id).stop_pending = None;
                 }
-                if !self.series.candle_contains_key(series) {
+                if !self.series.candle_contains_key(series)
+                    && !self.series.trade_contains_key(series)
+                {
                     let generation = self.provider_generation_for_series(series)?;
                     let instrument = self.installed_instrument(series)?.clone();
-                    let interval = descriptor
+                    match descriptor
                         .capabilities
                         .candle_wire_interval
-                        .ok_or_else(|| "provider candle interval is unavailable".to_string())?(
-                        series.period,
-                    )?;
-                    let mut handoff = SeriesLifecycle::with_clock(
-                        series.clone(),
-                        generation,
-                        &instrument.provider_symbol,
-                        &interval,
-                        std::sync::Arc::clone(&self.clock),
-                    );
-                    handoff.connected = connected;
-                    self.series.insert_candle(series.clone(), handoff);
+                        .ok_or_else(|| "provider candle interval is unavailable".to_string())
+                        .and_then(|resolve| resolve(series.period))
+                    {
+                        Ok(interval) => {
+                            let mut handoff = SeriesLifecycle::with_clock(
+                                series.clone(),
+                                generation,
+                                &instrument.provider_symbol,
+                                &interval,
+                                std::sync::Arc::clone(&self.clock),
+                            );
+                            handoff.connected = connected;
+                            self.series.insert_candle(series.clone(), handoff);
+                        }
+                        Err(err) => {
+                            if descriptor
+                                .capabilities
+                                .engine
+                                .streams
+                                .contains(MarketStream::Trades)
+                            {
+                                if let Some(mut handoff) = TradeModel::with_calendar(
+                                    series,
+                                    generation,
+                                    std::sync::Arc::clone(&self.clock),
+                                    self.calendar.for_instrument(&instrument.instrument_id),
+                                    descriptor.capabilities.calendar_bar_stamp,
+                                ) {
+                                    handoff.connected = connected;
+                                    self.series.insert_trade(series.clone(), handoff);
+                                }
+                            } else {
+                                return Err(err);
+                            }
+                        }
+                    }
                 }
                 if descriptor.capabilities.candle_demand_policy
                     == super::CandleDemandPolicy::ReconcileAfterSelection
@@ -1172,6 +1198,15 @@ impl Coordinator<'_> {
             }
             for instrument_id in dirty_books {
                 self.broadcast_order_book(provider, &instrument_id);
+            }
+            if self
+                .series
+                .trade_keys()
+                .any(|series| series.provider_id == provider)
+            {
+                for trade in trades {
+                    self.accept_lifecycle_trade(provider, generation, trade);
+                }
             }
         }
         self.request_history_after_live_trades(provider, generation, trades);
@@ -1992,12 +2027,18 @@ impl Coordinator<'_> {
             return;
         }
         let neutral = self.provider_demand(provider);
-        let candle_wire_interval = self
-            .providers
-            .descriptor(provider)
-            .and_then(|descriptor| descriptor.capabilities.candle_wire_interval);
+        let descriptor = self.providers.descriptor(provider);
+        let candle_wire_interval =
+            descriptor.and_then(|descriptor| descriptor.capabilities.candle_wire_interval);
+        let allow_trade_fallback = descriptor.is_some_and(|descriptor| {
+            descriptor
+                .capabilities
+                .engine
+                .streams
+                .contains(MarketStream::Trades)
+        });
         let display_requests = self.display_depth_requests(provider, &neutral);
-        let empty = !neutral.has_dirty_stream_demand(candle_wire_interval);
+        let empty = !neutral.has_dirty_stream_demand(candle_wire_interval, allow_trade_fallback);
         if empty && !self.session(provider).engaged {
             self.session_mut(provider).demand_dirty = false;
             return;

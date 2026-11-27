@@ -809,20 +809,31 @@ pub(super) const fn timeframe_interval_group(interval: ChartInterval) -> Timefra
         | ChartInterval::Second5
         | ChartInterval::Second10
         | ChartInterval::Second15
-        | ChartInterval::Second30 => TimeframeMenuGroup::Seconds,
+        | ChartInterval::Second30
+        | ChartInterval::Second45 => TimeframeMenuGroup::Seconds,
         ChartInterval::Minute1
+        | ChartInterval::Minute2
         | ChartInterval::Minute3
         | ChartInterval::Minute5
+        | ChartInterval::Minute10
         | ChartInterval::Minute15
-        | ChartInterval::Minute30 => TimeframeMenuGroup::Minutes,
+        | ChartInterval::Minute30
+        | ChartInterval::Minute45 => TimeframeMenuGroup::Minutes,
         ChartInterval::Hour1
         | ChartInterval::Hour2
+        | ChartInterval::Hour3
         | ChartInterval::Hour4
+        | ChartInterval::Hour6
         | ChartInterval::Hour8
         | ChartInterval::Hour12 => TimeframeMenuGroup::Hours,
-        ChartInterval::Day1 | ChartInterval::Day3 => TimeframeMenuGroup::Days,
-        ChartInterval::Week1 => TimeframeMenuGroup::Weeks,
-        ChartInterval::Month1 => TimeframeMenuGroup::Months,
+        ChartInterval::Day1 | ChartInterval::Day2 | ChartInterval::Day3 | ChartInterval::Day5 => {
+            TimeframeMenuGroup::Days
+        }
+        ChartInterval::Week1 | ChartInterval::Week2 => TimeframeMenuGroup::Weeks,
+        ChartInterval::Month1
+        | ChartInterval::Month3
+        | ChartInterval::Month6
+        | ChartInterval::Month12 => TimeframeMenuGroup::Months,
     }
 }
 
@@ -856,20 +867,32 @@ pub(super) fn timeframe_menu_row_label(interval: ChartInterval) -> &'static str 
         ChartInterval::Second10 => tr!(chart_menu::INTERVAL_10_SECONDS),
         ChartInterval::Second15 => tr!(chart_menu::INTERVAL_15_SECONDS),
         ChartInterval::Second30 => tr!(chart_menu::INTERVAL_30_SECONDS),
+        ChartInterval::Second45 => tr!(chart_menu::INTERVAL_45_SECONDS),
         ChartInterval::Minute1 => tr!(chart_menu::INTERVAL_1_MINUTE),
+        ChartInterval::Minute2 => tr!(chart_menu::INTERVAL_2_MINUTES),
         ChartInterval::Minute3 => tr!(chart_menu::INTERVAL_3_MINUTES),
         ChartInterval::Minute5 => tr!(chart_menu::INTERVAL_5_MINUTES),
+        ChartInterval::Minute10 => tr!(chart_menu::INTERVAL_10_MINUTES),
         ChartInterval::Minute15 => tr!(chart_menu::INTERVAL_15_MINUTES),
         ChartInterval::Minute30 => tr!(chart_menu::INTERVAL_30_MINUTES),
+        ChartInterval::Minute45 => tr!(chart_menu::INTERVAL_45_MINUTES),
         ChartInterval::Hour1 => tr!(chart_menu::INTERVAL_1_HOUR),
         ChartInterval::Hour2 => tr!(chart_menu::INTERVAL_2_HOURS),
+        ChartInterval::Hour3 => tr!(chart_menu::INTERVAL_3_HOURS),
         ChartInterval::Hour4 => tr!(chart_menu::INTERVAL_4_HOURS),
+        ChartInterval::Hour6 => tr!(chart_menu::INTERVAL_6_HOURS),
         ChartInterval::Hour8 => tr!(chart_menu::INTERVAL_8_HOURS),
         ChartInterval::Hour12 => tr!(chart_menu::INTERVAL_12_HOURS),
         ChartInterval::Day1 => tr!(chart_menu::INTERVAL_1_DAY),
+        ChartInterval::Day2 => tr!(chart_menu::INTERVAL_2_DAYS),
         ChartInterval::Day3 => tr!(chart_menu::INTERVAL_3_DAYS),
+        ChartInterval::Day5 => tr!(chart_menu::INTERVAL_5_DAYS),
         ChartInterval::Week1 => tr!(chart_menu::INTERVAL_1_WEEK),
+        ChartInterval::Week2 => tr!(chart_menu::INTERVAL_2_WEEKS),
         ChartInterval::Month1 => tr!(chart_menu::INTERVAL_1_MONTH),
+        ChartInterval::Month3 => tr!(chart_menu::INTERVAL_3_MONTHS),
+        ChartInterval::Month6 => tr!(chart_menu::INTERVAL_6_MONTHS),
+        ChartInterval::Month12 => tr!(chart_menu::INTERVAL_12_MONTHS),
     }
 }
 

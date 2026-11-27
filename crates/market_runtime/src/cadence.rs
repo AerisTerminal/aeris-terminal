@@ -54,27 +54,35 @@ pub fn resolve_cadence(
         ChartInterval::Second10 => BarPeriod::time(10),
         ChartInterval::Second15 => BarPeriod::time(15),
         ChartInterval::Second30 => BarPeriod::time(30),
+        ChartInterval::Second45 => BarPeriod::time(45),
         ChartInterval::Minute1 => BarPeriod::time(60),
+        ChartInterval::Minute2 => BarPeriod::time(120),
         ChartInterval::Minute3 => BarPeriod::time(180),
         ChartInterval::Minute5 => BarPeriod::time(300),
+        ChartInterval::Minute10 => BarPeriod::time(600),
         ChartInterval::Minute15 => BarPeriod::time(900),
         ChartInterval::Minute30 => BarPeriod::time(1_800),
+        ChartInterval::Minute45 => BarPeriod::time(2_700),
         ChartInterval::Hour1 => BarPeriod::time(3_600),
         ChartInterval::Hour2 => BarPeriod::time(7_200),
+        ChartInterval::Hour3 => BarPeriod::time(10_800),
         ChartInterval::Hour4 => BarPeriod::time(14_400),
+        ChartInterval::Hour6 => BarPeriod::time(21_600),
         ChartInterval::Hour8 => BarPeriod::time(28_800),
         ChartInterval::Hour12 => BarPeriod::time(43_200),
-        ChartInterval::Day1 | ChartInterval::Day3 => {
-            let days = if interval == ChartInterval::Day1 {
-                1
-            } else {
-                3
+        ChartInterval::Day1
+        | ChartInterval::Day2
+        | ChartInterval::Day3
+        | ChartInterval::Day5 => {
+            let days = match interval {
+                ChartInterval::Day1 => 1,
+                ChartInterval::Day2 => 2,
+                ChartInterval::Day3 => 3,
+                ChartInterval::Day5 => 5,
+                _ => 1,
             };
             match calendar {
                 CalendarSourceKind::AlwaysOpen => BarPeriod::time(days * 86_400),
-                // Older catalog entries may not publish contract hours yet.
-                // Preserve their advertised daily cadence; unlike week/month,
-                // the provider can still answer a single daily candle.
                 CalendarSourceKind::Unknown
                     if presentation.daily_bars == ProviderDailyBarCadence::FixedDay =>
                 {
@@ -84,8 +92,17 @@ pub fn resolve_cadence(
             }
         }
         ChartInterval::Week1 if calendar != CalendarSourceKind::Unknown => BarPeriod::week(1),
+        ChartInterval::Week2 if calendar != CalendarSourceKind::Unknown => BarPeriod::week(2),
         ChartInterval::Month1 if calendar != CalendarSourceKind::Unknown => BarPeriod::month(1),
-        ChartInterval::Week1 | ChartInterval::Month1 => {
+        ChartInterval::Month3 if calendar != CalendarSourceKind::Unknown => BarPeriod::month(3),
+        ChartInterval::Month6 if calendar != CalendarSourceKind::Unknown => BarPeriod::month(6),
+        ChartInterval::Month12 if calendar != CalendarSourceKind::Unknown => BarPeriod::month(12),
+        ChartInterval::Week1
+        | ChartInterval::Week2
+        | ChartInterval::Month1
+        | ChartInterval::Month3
+        | ChartInterval::Month6
+        | ChartInterval::Month12 => {
             return Err(unsupported(presentation, interval));
         }
     };
@@ -136,24 +153,40 @@ pub fn legacy_interval(series: &SeriesKey) -> Option<ChartInterval> {
         (SeriesCadence::FixedSeconds, 10) => Some(ChartInterval::Second10),
         (SeriesCadence::FixedSeconds, 15) => Some(ChartInterval::Second15),
         (SeriesCadence::FixedSeconds, 30) => Some(ChartInterval::Second30),
+        (SeriesCadence::FixedSeconds, 45) => Some(ChartInterval::Second45),
         (SeriesCadence::FixedSeconds, 60) => Some(ChartInterval::Minute1),
+        (SeriesCadence::FixedSeconds, 120) => Some(ChartInterval::Minute2),
         (SeriesCadence::FixedSeconds, 180) => Some(ChartInterval::Minute3),
         (SeriesCadence::FixedSeconds, 300) => Some(ChartInterval::Minute5),
+        (SeriesCadence::FixedSeconds, 600) => Some(ChartInterval::Minute10),
         (SeriesCadence::FixedSeconds, 900) => Some(ChartInterval::Minute15),
         (SeriesCadence::FixedSeconds, 1_800) => Some(ChartInterval::Minute30),
+        (SeriesCadence::FixedSeconds, 2_700) => Some(ChartInterval::Minute45),
         (SeriesCadence::FixedSeconds, 3_600) => Some(ChartInterval::Hour1),
         (SeriesCadence::FixedSeconds, 7_200) => Some(ChartInterval::Hour2),
+        (SeriesCadence::FixedSeconds, 10_800) => Some(ChartInterval::Hour3),
         (SeriesCadence::FixedSeconds, 14_400) => Some(ChartInterval::Hour4),
+        (SeriesCadence::FixedSeconds, 21_600) => Some(ChartInterval::Hour6),
         (SeriesCadence::FixedSeconds, 28_800) => Some(ChartInterval::Hour8),
         (SeriesCadence::FixedSeconds, 43_200) => Some(ChartInterval::Hour12),
         (SeriesCadence::FixedSeconds, 86_400) | (SeriesCadence::SessionDays, 1) => {
             Some(ChartInterval::Day1)
         }
+        (SeriesCadence::FixedSeconds, 172_800) | (SeriesCadence::SessionDays, 2) => {
+            Some(ChartInterval::Day2)
+        }
         (SeriesCadence::FixedSeconds, 259_200) | (SeriesCadence::SessionDays, 3) => {
             Some(ChartInterval::Day3)
         }
+        (SeriesCadence::FixedSeconds, 432_000) | (SeriesCadence::SessionDays, 5) => {
+            Some(ChartInterval::Day5)
+        }
         (SeriesCadence::CalendarWeeks, 1) => Some(ChartInterval::Week1),
+        (SeriesCadence::CalendarWeeks, 2) => Some(ChartInterval::Week2),
         (SeriesCadence::CalendarMonths, 1) => Some(ChartInterval::Month1),
+        (SeriesCadence::CalendarMonths, 3) => Some(ChartInterval::Month3),
+        (SeriesCadence::CalendarMonths, 6) => Some(ChartInterval::Month6),
+        (SeriesCadence::CalendarMonths, 12) => Some(ChartInterval::Month12),
         _ => None,
     }
 }
@@ -169,26 +202,44 @@ pub fn legacy_series_period(series: &SeriesKey) -> Option<BarPeriod> {
         ChartInterval::Second10 => BarPeriod::time(10).ok(),
         ChartInterval::Second15 => BarPeriod::time(15).ok(),
         ChartInterval::Second30 => BarPeriod::time(30).ok(),
+        ChartInterval::Second45 => BarPeriod::time(45).ok(),
         ChartInterval::Minute1 => BarPeriod::time(60).ok(),
+        ChartInterval::Minute2 => BarPeriod::time(120).ok(),
         ChartInterval::Minute3 => BarPeriod::time(180).ok(),
         ChartInterval::Minute5 => BarPeriod::time(300).ok(),
+        ChartInterval::Minute10 => BarPeriod::time(600).ok(),
         ChartInterval::Minute15 => BarPeriod::time(900).ok(),
         ChartInterval::Minute30 => BarPeriod::time(1_800).ok(),
+        ChartInterval::Minute45 => BarPeriod::time(2_700).ok(),
         ChartInterval::Hour1 => BarPeriod::time(3_600).ok(),
         ChartInterval::Hour2 => BarPeriod::time(7_200).ok(),
+        ChartInterval::Hour3 => BarPeriod::time(10_800).ok(),
         ChartInterval::Hour4 => BarPeriod::time(14_400).ok(),
+        ChartInterval::Hour6 => BarPeriod::time(21_600).ok(),
         ChartInterval::Hour8 => BarPeriod::time(28_800).ok(),
         ChartInterval::Hour12 => BarPeriod::time(43_200).ok(),
         ChartInterval::Day1 => match SeriesCadence::try_from(series.cadence).ok()? {
             SeriesCadence::SessionDays => BarPeriod::session(1).ok(),
             _ => BarPeriod::time(86_400).ok(),
         },
+        ChartInterval::Day2 => match SeriesCadence::try_from(series.cadence).ok()? {
+            SeriesCadence::SessionDays => BarPeriod::session(2).ok(),
+            _ => BarPeriod::time(172_800).ok(),
+        },
         ChartInterval::Day3 => match SeriesCadence::try_from(series.cadence).ok()? {
             SeriesCadence::SessionDays => BarPeriod::session(3).ok(),
             _ => BarPeriod::time(259_200).ok(),
         },
+        ChartInterval::Day5 => match SeriesCadence::try_from(series.cadence).ok()? {
+            SeriesCadence::SessionDays => BarPeriod::session(5).ok(),
+            _ => BarPeriod::time(432_000).ok(),
+        },
         ChartInterval::Week1 => BarPeriod::week(1).ok(),
+        ChartInterval::Week2 => BarPeriod::week(2).ok(),
         ChartInterval::Month1 => BarPeriod::month(1).ok(),
+        ChartInterval::Month3 => BarPeriod::month(3).ok(),
+        ChartInterval::Month6 => BarPeriod::month(6).ok(),
+        ChartInterval::Month12 => BarPeriod::month(12).ok(),
     }
 }
 
