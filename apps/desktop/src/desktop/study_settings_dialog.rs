@@ -361,30 +361,30 @@ fn session_control(
         .unwrap_or(&spec.default)
     {
         StudySettingValue::Session(session) => session.to_label(),
-        _ => "0930-1600 America/New_York".to_string(),
+        _ => "09:30-16:00 America/New_York".to_string(),
     };
     let menu = format!("study_session_{control_id}");
     let setting_identifier = spec.identifier.clone();
     let (label, _) = setting_text(dialog, spec);
     let mut options: Vec<(String, String)> = vec![
         (
-            "0930-1600 America/New_York".to_string(),
+            "09:30-16:00 America/New_York".to_string(),
             "US RTH (09:30–16:00 NY)".to_string(),
         ),
         (
-            "1800-1700 America/Chicago".to_string(),
+            "18:00-17:00 America/Chicago".to_string(),
             "CME Globex (18:00–17:00 CHI)".to_string(),
         ),
         (
-            "0800-1630 Europe/London".to_string(),
+            "08:00-16:30 Europe/London".to_string(),
             "London (08:00–16:30 LDN)".to_string(),
         ),
         (
-            "0900-1500 Asia/Tokyo".to_string(),
+            "09:00-15:00 Asia/Tokyo".to_string(),
             "Tokyo (09:00–15:00 TYO)".to_string(),
         ),
         (
-            "0000-2359 Etc/UTC".to_string(),
+            "00:00-23:59 Etc/UTC".to_string(),
             "24h UTC (00:00–23:59)".to_string(),
         ),
     ];

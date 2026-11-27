@@ -451,3 +451,144 @@ fn label_and_polyline_scene_deltas_remain_compact_under_churn() {
             .any(|d| matches!(d, StudySceneDelta::Update { id, .. } if *id == poly_id))
     );
 }
+
+#[test]
+fn historical_equivalence_semantic_codecs_sessions_and_event_timelines_match_reference() {
+    let ns = |s: i64| s * 1_000_000_000;
+
+    // 1. Semantic color / timeframe / source reference round-trips.
+    let color = StudyColor::parse_hex("#38bdf8cc").expect("valid RGBA hex");
+    assert_eq!(color.to_rgba_u32(), 0x38bd_f8cc);
+    assert_eq!(color.to_hex(), "#38bdf8cc");
+    assert_eq!(
+        StudyTimeframe::parse_label("1h").map(StudyTimeframe::to_label),
+        Some("1h".to_string())
+    );
+    assert_eq!(
+        StudySource::parse_label("hlc3").map(|src| src.to_label()),
+        Some("hlc3".to_string())
+    );
+
+    // 2. Overnight session wrap reference fixture (CME Globex 18:00-17:00 America/Chicago).
+    let globex = StudySession::parse_label("18:00-17:00 America/Chicago").expect("valid globex");
+    assert_eq!(globex.to_label(), "18:00-17:00 America/Chicago");
+    assert!(globex.contains_minute(18 * 60));
+    assert!(globex.contains_minute(0));
+    assert!(globex.contains_minute(16 * 60 + 59));
+    assert!(!globex.contains_minute(17 * 60));
+    assert!(!globex.contains_minute(17 * 60 + 30));
+
+    // 3. Pure non-bar event timeline deterministic second-projection fixture.
+    let mut timeline = StudyEventTimeline::new(64, StudyEventCoalescePolicy::ExactSequence);
+    for (seq, (ts_ms, val)) in [(1_100, 100.0), (1_500, 101.5), (2_050, 102.0)]
+        .into_iter()
+        .enumerate()
+    {
+        timeline
+            .push(StudyEventPoint {
+                timestamp_unix_nanos: ts_ms * 1_000_000,
+                source_sequence: seq as u64 + 1,
+                kind: StudyEventKind::Trade,
+                value: val,
+            })
+            .expect("pushes event");
+    }
+    let (ts, vals) = timeline.project_to_chart_seconds();
+    assert_eq!(ts, vec![ns(1), ns(2)]);
+    assert_eq!(vals, vec![Some(101.5), Some(102.0)]);
+}
+
+#[test]
+fn large_history_and_high_object_count_scene_soak_remains_strictly_bounded() {
+    let mut scene = StudySceneState::default();
+    let mut live_ids = Vec::with_capacity(400);
+    for i in 0..400_u32 {
+        let id = scene
+            .create_box(StudyBoxObject {
+                top_left: StudyPoint::new(i64::from(i) * 60_000_000_000, 100.0 + f64::from(i)),
+                bottom_right: StudyPoint::new(
+                    (i64::from(i) + 1) * 60_000_000_000,
+                    99.0 + f64::from(i),
+                ),
+                border_color: StudyColor::rgb(0x38, 0xbd, 0xf8),
+                border_width: 1,
+                border_style: StudyLineStyle::Solid,
+                fill_color: Some(StudyColor::rgba(0x38, 0xbd, 0xf8, 0x20)),
+                text: None,
+                text_color: None,
+            })
+            .expect("initial 400 boxes fit under bound");
+        live_ids.push(id);
+    }
+    assert_eq!(scene.len(), 400);
+
+    // 100 live churn waves: delete 5 oldest, create 5 newest, update 5 active -> O(changed) deltas.
+    for wave in 0..100_u32 {
+        let mut next = scene.clone();
+        for _ in 0..5 {
+            let oldest = live_ids.remove(0);
+            assert!(next.delete(oldest));
+        }
+        for k in 0..5_u32 {
+            let ts = (400 + i64::from(wave) * 5 + i64::from(k)) * 60_000_000_000;
+            let id = next
+                .create_box(StudyBoxObject {
+                    top_left: StudyPoint::new(ts, 500.0 + f64::from(k)),
+                    bottom_right: StudyPoint::new(ts + 60_000_000_000, 499.0 + f64::from(k)),
+                    border_color: StudyColor::rgb(0x22, 0xc5, 0x5e),
+                    border_width: 1,
+                    border_style: StudyLineStyle::Solid,
+                    fill_color: None,
+                    text: None,
+                    text_color: None,
+                })
+                .expect("steady-state create stays bounded");
+            live_ids.push(id);
+        }
+        for &target_id in live_ids.iter().take(5) {
+            next.update(
+                target_id,
+                StudySceneObject::Label(StudyLabelObject {
+                    point: StudyPoint::new(i64::from(wave) * 1_000_000_000, 250.0),
+                    text: format!("W{wave}"),
+                    style: StudyLabelStyle::TextOnly,
+                    color: StudyColor::rgb(0xf5, 0x9e, 0x0b),
+                    text_color: StudyColor::rgb(0xff, 0xff, 0xff),
+                }),
+            )
+            .expect("steady-state update stays bounded");
+        }
+        let deltas = scene.diff(&next);
+        assert_eq!(
+            deltas.len(),
+            15,
+            "delta count must be O(changed), never O(scene)"
+        );
+        assert_eq!(next.len(), 400);
+        scene = next;
+    }
+
+    // Fill to exact MAXIMUM_STUDY_SCENE_OBJECTS and confirm deterministic overflow rejection.
+    while scene.len() < aeris_study_sdk::MAXIMUM_STUDY_SCENE_OBJECTS {
+        scene
+            .create_label(StudyLabelObject {
+                point: StudyPoint::new(1_000_000_000, 1.0),
+                text: "cap".to_string(),
+                style: StudyLabelStyle::TextOnly,
+                color: StudyColor::rgb(0, 0, 0),
+                text_color: StudyColor::rgb(255, 255, 255),
+            })
+            .expect("fits up to exact cap");
+    }
+    assert!(
+        scene
+            .create_label(StudyLabelObject {
+                point: StudyPoint::new(2_000_000_000, 1.0),
+                text: "overflow".to_string(),
+                style: StudyLabelStyle::TextOnly,
+                color: StudyColor::rgb(0, 0, 0),
+                text_color: StudyColor::rgb(255, 255, 255),
+            })
+            .is_err()
+    );
+}

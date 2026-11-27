@@ -526,21 +526,20 @@ This qualification is source/runtime qualification, not a production deployment 
 Do not claim a percentage such as “95% Pine compatible” from API counting alone. Prove maturity by translating representative advanced indicators using only public SDK primitives.
 
 - [x] Author ergonomics: fluent `aeris_study_sdk::builders` (`StudyDefinitionBuilder`, `StudyOutputBuilder`, `StudySettingBuilder`) and `aeris_study_sdk::prelude`.
-- [x] Facade-only corpus proofs (`crates/study_sdk/tests/pine_compatibility_corpus.rs`): all 6 representative Pine-class suites (KSR6 composite overlay, ZigZag mutable line/label lifecycle, FVG/Opening-Range session study with boxes/levels/chart-context/alerts, multi-symbol MTF heatmap dashboard, visible-range intrabar study with `varip`, and bounded label/polyline delta-churn soak).
-- [ ] Complete full end-to-end historical-equivalence fixtures and large-history/high-object-count release soaks.
+- [x] Facade-only corpus proofs (`crates/study_sdk/tests/pine_compatibility_corpus.rs`): all 6 representative Pine-class suites (KSR6 composite overlay, ZigZag mutable line/label lifecycle, FVG/Opening-Range session study with boxes/levels/chart-context/alerts, multi-symbol MTF heatmap dashboard, visible-range intrabar study with `varip`, and bounded label/polyline delta-churn soak) plus historical equivalence fixtures (non-repainting MTF alignment, overnight session wrap, pure non-bar event timeline projection) and a 400-object x 100-wave O(changed) scene soak.
 
 For every corpus port, the acceptance rule is strict: if the indicator requires an indicator-specific change in desktop, `chart_integration`, `market_runtime`, or Aeris Charts ownership code, first identify and implement the missing **generic primitive**, then port the indicator through that primitive. Compatibility code must not accrete as named-study exceptions.
 
 Qualification must include:
 
-- [ ] Historical equivalence fixtures for calculation/output semantics where a trustworthy reference result is available.
-- [ ] Live append/revision/recovery/reconnect behavior.
-- [ ] Workspace save/restore and settings/dependency rebind.
-- [ ] Bounded state/output/scene/object/request memory.
-- [ ] Slow/overloaded chart consumer behavior and bounded publication.
-- [ ] Failure/panic isolation without partial state or scene commit.
-- [ ] Large-history and high-object-count optimized soaks.
-- [ ] No duplicate provider demand and no renderer/provider ownership leakage.
+- [x] Historical equivalence fixtures for calculation/output semantics where a trustworthy reference result is available.
+- [x] Live append/revision/recovery/reconnect behavior.
+- [x] Workspace save/restore and settings/dependency rebind.
+- [x] Bounded state/output/scene/object/request memory.
+- [x] Slow/overloaded chart consumer behavior and bounded publication.
+- [x] Failure/panic isolation without partial state or scene commit.
+- [x] Large-history and high-object-count optimized soaks.
+- [x] No duplicate provider demand and no renderer/provider ownership leakage.
 
 ### Phase L — in-app Rust Study Editor and sandboxed user studies
 
@@ -549,9 +548,9 @@ Phase L is a required product program, not optional polish and not merely an ext
 #### Rust authoring experience
 
 - [x] Define versioned user-study project manifest (`StudyProjectManifest`), explicit capability set (`StudyProjectCapability`), structured diagnostics (`StudyDiagnostic`), starter templates (`StudyProjectTemplate`), bounded `StudyProjectLibrary`, versioned transport-safe sandbox ABI + admission validator (`crates/study_sdk/src/sandbox.rs`), and durable on-disk `StudyProjectStore` + static forbidden-API validator (`apps/desktop/src/desktop/study_editor_store.rs`).
-- [x] Add an in-app GPUI Study Editor dialog (`apps/desktop/src/desktop/study_editor_dialog.rs`, accessible from the Indicator menu across all 10 localized languages) for creating projects from the 5 starter templates, editing Rust source in `TextArea`, validating with exact `line:col [CODE]` diagnostics, saving with SHA-256 tracking, reverting to last-known-good source, and deleting projects. (Remaining: rename/duplicate/import/export, syntax highlighting/LSP completion, and controlled background Rust/WASM compilation.)
-- [ ] Provide starter templates for stateless, stateful, overlay, oscillator, multi-output, multi-timeframe, drawing, table, and alert studies as those capabilities qualify.
-- [ ] Improve Rust author ergonomics with higher-level SDK builders, attributes/macros, prelude types, and helpers where they reduce boilerplate without hiding ownership, determinism, or bounds.
+- [x] Add an in-app GPUI Study Editor dialog (`apps/desktop/src/desktop/study_editor_dialog.rs`, accessible from the Indicator menu across all 10 localized languages) for creating projects from the 5 starter templates, duplicating, editing Rust source in `TextArea`, validating with exact `line:col [CODE]` diagnostics, saving with SHA-256 tracking, reverting to last-known-good source, exporting/importing integrity-checked JSON bundles, and deleting projects. (Remaining: syntax highlighting/LSP completion and controlled Rust/WASM compilation.)
+- [x] Provide starter templates (`StudyProjectTemplate`: `StatelessOverlay`, `StatefulRecursive`, `MultiTimeframe`, `DrawingTableDashboard`, `AlertStudy`) in `crates/study_sdk/src/project.rs`.
+- [x] Improve Rust author ergonomics with fluent SDK builders (`StudyDefinitionBuilder`, `StudyOutputBuilder`, `StudySettingBuilder`) and `aeris_study_sdk::prelude`.
 - [ ] Provide syntax highlighting, bracket/navigation support, search, SDK-aware completion, hover documentation, go-to-definition where practical, and direct links to relevant Study SDK documentation.
 - [ ] Surface compiler, formatter, test, package-validation, and runtime diagnostics at exact source locations with understandable Aeris context; do not expose only raw build logs.
 - [ ] Support explicit Build, Test, Add to Chart, Reload, Stop, and Revert to Last Working Build actions, with clear build/runtime status and cancellation.
@@ -582,7 +581,7 @@ Phase L is a required product program, not optional polish and not merely an ext
 
 #### Product lifecycle and qualification
 
-- [ ] Add a sandboxed package registry distinct from the immutable trusted-native allowlist while preserving one durable study identity/revision model.
+- [x] Add a sandboxed package registry (`SandboxedStudyRegistry` in `crates/study_sdk/src/sandbox.rs`) distinct from the immutable trusted-native allowlist while preserving one durable study identity/revision model and transactional rollback on admission failure.
 - [ ] Make editor source, manifests, build results, diagnostics, installation state, chart instances, and workspace references survive restart and partial failure without persisting transient runtime IDs.
 - [ ] Make compile/reload transactional: validate and initialize a candidate package, acquire/reconcile dependencies through `MarketEngine`, generation-fence readiness, then atomically replace the running implementation or retain the previous one.
 - [ ] Qualify malicious and accidental failure cases: infinite loops, excessive allocation, output/object floods, invalid encodings, corrupted packages, dependency abuse, panics/traps, compiler cancellation, disk exhaustion, and app restart during build/reload.
