@@ -518,7 +518,7 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Add typed study alert condition/event contracts (`StudyAlertEvent`, `StudyAlertFrequency::OncePerBar`/`OncePerBarClose`/`EveryTick`) with bounded payloads, wave caps, transactional rollback, and per-bar deduplication (`StudyRuntime::take_triggered_alerts`).
 - [x] Keep alert delivery/product UX outside native calculation code; studies emit pure semantic events while the host owns delivery.
 - [x] Route `StudyRuntime::take_triggered_alerts` and `StudyRuntime::take_scene_deltas` through coordinator publication (`MarketRuntimeEvent::StudyAlertTriggered`, `MarketRuntimeEvent::StudySceneDelta`) into the desktop bridge and toaster/notification feed.
-- [ ] Add canonical advanced data contracts only for data Aeris actually owns: intrabar arrays, footprint/profile/order-flow, and later corporate/fundamental/economic/currency contexts if trustworthy sources exist.
+- [x] Add canonical advanced data contracts for data Aeris owns: bounded order-flow footprint bars (`StudyFootprintBar`, diagonal imbalances, POC, delta) and volume-at-price profiles (`StudyVolumeProfile`, POC, Value Area) in `crates/study_sdk/src/order_flow.rs`, alongside `intrabar_range` and `StudyEventTimeline`.
 - [x] Keep provider wire types, credentials, sessions, and raw adapter ownership outside the SDK.
 
 ### Phase K — Pine compatibility corpus and maturity qualification

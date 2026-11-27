@@ -628,5 +628,6 @@ mod tests {
         assert_eq!(outcome.job_id, job_id);
         assert!(outcome.diagnostics.is_empty());
         assert!(!outcome.cancelled);
+        coordinator.cancel_active();
     }
 }
