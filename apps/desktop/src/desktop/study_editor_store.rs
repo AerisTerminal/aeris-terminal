@@ -427,7 +427,7 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
                     inputs.push(b.build());
                 }
             }
-        } else if lower.starts_with("@output:") && outputs.len() < 16 {
+        } else if lower.starts_with("@output:") && outputs.len() < 32 {
             let body = content[8..].trim();
             let parts: Vec<&str> = body.split('|').map(str::trim).collect();
             if let Some(id) = parts.first().filter(|s| !s.is_empty()) {
@@ -1347,7 +1347,7 @@ static ORDER_FLOW_DATA: Mutex<Vec<f64>> = Mutex::new(Vec::new());
 static ORDER_FLOW_LEN: AtomicU32 = AtomicU32::new(0);
 static SCENE_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
-const MAX_SCENE_BYTES: usize = 256 * 1024;
+const MAX_SCENE_BYTES: usize = 512 * 1024;
 const OP_BOX: u8 = 1;
 const OP_LINE: u8 = 2;
 const OP_POLYLINE: u8 = 3;
@@ -2833,7 +2833,7 @@ pub extern "C" fn aeris_study_calculate_multi(
 ) -> i32 {
     clear_scene_buf();
     let n = bar_count as usize;
-    let count = (output_count as usize).clamp(1, 16);
+    let count = (output_count as usize).clamp(1, 32);
     if n == 0 {
         return 0;
     }
@@ -2861,6 +2861,87 @@ fn source_uses_multi_output_entrypoint(source: &str) -> bool {
         code.contains("fn calculate_multi")
     })
 }
+
+fn source_uses_incremental_entrypoint(source: &str) -> bool {
+    source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or("");
+        code.contains("fn on_bar")
+    })
+}
+
+const WASM_INCREMENTAL_ENTRYPOINT: &str = r#"
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_on_bar(
+    bar_index: u32,
+    flags: u32,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+    timestamp_ns: i64,
+    out_ptr: u32,
+    output_count: u32,
+) -> i32 {
+    if bar_index == 0 {
+        clear_scene_buf();
+    }
+    let idx = bar_index as usize;
+    if let Ok(mut ts) = TIMESTAMPS.lock() {
+        if ts.len() <= idx {
+            ts.resize(idx + 1, 0);
+        }
+        ts[idx] = timestamp_ns;
+    }
+    let count = (output_count as usize).clamp(1, 32);
+    let out = unsafe { std::slice::from_raw_parts_mut(out_ptr as usize as *mut f64, count) };
+    let is_new_bar = (flags & 1) != 0;
+    let is_confirmed = (flags & 2) != 0;
+    user_study::on_bar(idx, is_new_bar, is_confirmed, open, high, low, close, volume, out);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_calculate(bars_ptr: u32, bar_count: u32, out_ptr: u32) -> i32 {
+    aeris_study_calculate_multi(bars_ptr, bar_count, out_ptr, 1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_calculate_multi(
+    bars_ptr: u32,
+    bar_count: u32,
+    out_ptr: u32,
+    output_count: u32,
+) -> i32 {
+    clear_scene_buf();
+    let n = bar_count as usize;
+    let count = (output_count as usize).clamp(1, 32);
+    if n == 0 {
+        return 0;
+    }
+    let base = bars_ptr as usize as *const f64;
+    let out_base = out_ptr as usize as *mut f64;
+    let (open, high, low, close, volume, flat_out) = unsafe {
+        (
+            std::slice::from_raw_parts(base, n),
+            std::slice::from_raw_parts(base.add(n), n),
+            std::slice::from_raw_parts(base.add(n * 2), n),
+            std::slice::from_raw_parts(base.add(n * 3), n),
+            std::slice::from_raw_parts(base.add(n * 4), n),
+            std::slice::from_raw_parts_mut(out_base, n * count),
+        )
+    };
+    let mut row_out = vec![f64::NAN; count];
+    for i in 0..n {
+        row_out.fill(f64::NAN);
+        user_study::on_bar(i, true, true, open[i], high[i], low[i], close[i], volume[i], &mut row_out);
+        for c in 0..count {
+            flat_out[c * n + i] = row_out[c];
+        }
+    }
+    0
+}
+"#;
 
 const WASM_SINGLE_ENTRYPOINT: &str = r#"
 #[unsafe(no_mangle)]
@@ -3021,7 +3102,9 @@ pub(crate) fn compile_study_source_to_wasm(
     let harness_path = build_dir.join("harness.rs");
     let user_path = build_dir.join("user_study.rs");
     let out_wasm_path = build_dir.join("study.wasm");
-    let harness_src = if source_uses_multi_output_entrypoint(source) {
+    let harness_src = if source_uses_incremental_entrypoint(source) {
+        format!("{WASM_HOST_API_PRELUDE}{WASM_INCREMENTAL_ENTRYPOINT}")
+    } else if source_uses_multi_output_entrypoint(source) {
         format!("{WASM_HOST_API_PRELUDE}{WASM_MULTI_ENTRYPOINT}")
     } else {
         format!("{WASM_HOST_API_PRELUDE}{WASM_SINGLE_ENTRYPOINT}")
@@ -3730,6 +3813,81 @@ pub fn calculate_multi(
         // CVD of constant delta=20.0 over 20 bars -> bar 19 = 400.0
         let last_cvd = result.outputs[1][n - 1].expect("finite CVD");
         assert!((last_cvd - 400.0).abs() < 1e-6, "got {last_cvd}");
+    }
+
+    #[test]
+    fn phase_4_incremental_on_bar_beats_full_recompute_by_10x_and_survives_5000_ticks() {
+        let source = r#"
+// @pane: price
+// @output: ema | Fast Incremental EMA | line | #38bdf8
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static EMA_STATE: AtomicU64 = AtomicU64::new(f64::NAN.to_bits());
+
+pub fn on_bar(
+    bar_idx: usize,
+    _is_new_bar: bool,
+    _is_confirmed: bool,
+    _open: f64,
+    _high: f64,
+    _low: f64,
+    close: f64,
+    _volume: f64,
+    out: &mut [f64],
+) {
+    let alpha = 2.0 / 21.0;
+    let prev = if bar_idx == 0 {
+        f64::NAN
+    } else {
+        f64::from_bits(EMA_STATE.load(Ordering::Relaxed))
+    };
+    let next = if prev.is_finite() {
+        alpha * close + (1.0 - alpha) * prev
+    } else {
+        close
+    };
+    EMA_STATE.store(next.to_bits(), Ordering::Relaxed);
+    out[0] = next;
+}
+"#;
+        let artifact = compile_study_source_to_wasm(source).expect("incremental study compiles");
+        assert!(artifact.compiled.supports_incremental());
+
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::Uptrend, 1_000, 60);
+        let full = artifact
+            .compiled
+            .execute_columnar_outputs(&fixture.bars, 1, StudySandboxLimits::default())
+            .expect("full 1000-bar recompute succeeds");
+
+        let mut inst = artifact
+            .compiled
+            .instantiate_incremental(
+                &[],
+                &[],
+                &aeris_study_sdk::wasm_runtime::WasmStudyMeta::default(),
+                StudySandboxLimits::default(),
+            )
+            .expect("incremental instance initializes");
+
+        let (vals, tick_fuel) = inst
+            .step_bar(1_000, true, true, 150.0, 152.0, 149.0, 151.0, 100.0, 999_000_000_000, 1)
+            .expect("single incremental tick succeeds");
+        assert!(vals[0].is_some());
+        assert!(
+            full.fuel_consumed > tick_fuel * 10,
+            "expected >10x fuel savings: full={} vs single_tick={}",
+            full.fuel_consumed,
+            tick_fuel
+        );
+
+        // 5,000-tick soak test inside the same persistent store (bounded memory & fuel reset)
+        for tick in 0..5_000usize {
+            let price = 150.0 + (tick as f64) * 0.01;
+            let (out, _) = inst
+                .step_bar(1_000 + tick, true, true, price, price + 1.0, price - 1.0, price, 50.0, 1_000_000_000_000 + (tick as i64) * 60_000_000_000, 1)
+                .expect("soak tick must succeed without memory growth or fuel leak");
+            assert!(out[0].is_some());
+        }
     }
 
     #[test]

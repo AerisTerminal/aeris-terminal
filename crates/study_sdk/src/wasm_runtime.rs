@@ -63,11 +63,14 @@ pub const WASM_EXPORT_SET_ORDER_FLOW: &str = "aeris_study_set_order_flow";
 pub const WASM_EXPORT_SCENE_PTR: &str = "aeris_study_scene_ptr";
 /// Optional guest export returning the byte length of the encoded scene command buffer.
 pub const WASM_EXPORT_SCENE_LEN: &str = "aeris_study_scene_len";
+/// Optional guest export computing one incremental bar step inside a persistent bounded store:
+/// `(bar_index: u32, flags: u32, open: f64, high: f64, low: f64, close: f64, volume: f64, timestamp_ns: i64, out_ptr: u32, output_count: u32) -> i32`.
+pub const WASM_EXPORT_ON_BAR: &str = "aeris_study_on_bar";
 /// Required guest linear memory export name.
 pub const WASM_EXPORT_MEMORY: &str = "memory";
 
-/// Maximum encoded scene command buffer size read from one sandbox execution (256 KiB).
-const MAX_WASM_SCENE_BYTES: usize = 256 * 1024;
+/// Maximum encoded scene command buffer size read from one sandbox execution (512 KiB).
+const MAX_WASM_SCENE_BYTES: usize = 512 * 1024;
 /// Maximum runtime log entries decoded from one sandbox execution wave.
 pub const MAX_WASM_LOGS_PER_WAVE: usize = 32;
 /// Maximum UTF-8 bytes retained per runtime log entry.
@@ -296,6 +299,104 @@ struct SandboxStoreState {
     limits: StoreLimits,
 }
 
+/// Persistent, bounded WebAssembly instance for O(dirty) incremental `aeris_study_on_bar` execution.
+///
+/// Reuses one `wasmi::Store` and one fixed 32-`f64` output scratch slot across live ticks while
+/// strictly resetting per-step instruction fuel and enforcing linear memory ceilings.
+pub struct WasmIncrementalInstance {
+    store: Store<SandboxStoreState>,
+    instance: wasmi::Instance,
+    memory: wasmi::Memory,
+    on_bar_fn: wasmi::TypedFunc<(u32, u32, f64, f64, f64, f64, f64, i64, u32, u32), i32>,
+    out_ptr: u32,
+    limits: StudySandboxLimits,
+    last_bar_count: usize,
+}
+
+impl WasmIncrementalInstance {
+    /// Steps one bar incrementally inside the persistent sandboxed store, returning `output_count`
+    /// values and the exact instruction fuel consumed by this single bar step.
+    ///
+    /// # Errors
+    /// Returns [`WasmSandboxError`] on fuel exhaustion, trap, guest error, or invalid output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_bar(
+        &mut self,
+        bar_index: usize,
+        is_new_bar: bool,
+        is_confirmed: bool,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: f64,
+        timestamp_ns: i64,
+        output_count: usize,
+    ) -> Result<(Vec<Option<f64>>, u64), WasmSandboxError> {
+        let count = output_count.clamp(1, 32);
+        let initial_fuel = self.limits.max_instruction_fuel;
+        self.store
+            .set_fuel(initial_fuel)
+            .map_err(|err| WasmSandboxError::InstantiationFailed(err.to_string()))?;
+        let out_byte_len = count * size_of::<f64>();
+        let nan_fill: Vec<u8> = f64::NAN
+            .to_le_bytes()
+            .into_iter()
+            .cycle()
+            .take(out_byte_len)
+            .collect();
+        self.memory
+            .write(&mut self.store, self.out_ptr as usize, &nan_fill)
+            .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
+        let mut flags = 0_u32;
+        if is_new_bar {
+            flags |= 1;
+        }
+        if is_confirmed {
+            flags |= 2;
+        }
+        let bar_u32 = u32::try_from(bar_index).unwrap_or(0);
+        let count_u32 = u32::try_from(count).unwrap_or(1);
+        let status = self
+            .on_bar_fn
+            .call(
+                &mut self.store,
+                (
+                    bar_u32,
+                    flags,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    timestamp_ns,
+                    self.out_ptr,
+                    count_u32,
+                ),
+            )
+            .map_err(|err| classify_wasmi_error(&err, false))?;
+        if status != 0 {
+            return Err(WasmSandboxError::GuestError(status));
+        }
+        let mut raw = vec![0_u8; out_byte_len];
+        self.memory
+            .read(&self.store, self.out_ptr as usize, &mut raw)
+            .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
+        let values = decode_output_f64_values(&raw, count)?;
+        let remaining = self.store.get_fuel().unwrap_or(0);
+        let fuel_consumed = initial_fuel.saturating_sub(remaining);
+        Ok((values, fuel_consumed))
+    }
+
+    /// Reads the scene command buffer emitted during the most recent `step_bar` wave.
+    ///
+    /// # Errors
+    /// Returns [`WasmSandboxError`] on trap or out-of-bounds memory read.
+    pub fn read_scene_bytes(&mut self) -> Result<Vec<u8>, WasmSandboxError> {
+        read_wasm_scene_buffer(self.instance, &mut self.store, self.memory)
+    }
+}
+
 /// Pre-compiled, zero-authority WebAssembly study module validated against
 /// `STUDY_SANDBOX_ABI_VERSION = 1`.
 #[derive(Clone)]
@@ -437,6 +538,61 @@ impl CompiledWasmStudy {
         limits: StudySandboxLimits,
     ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
         self.execute_columnar_full(bars, output_count, params, None, limits)
+    }
+
+    /// Returns `true` if this compiled module exports the optional O(dirty) incremental
+    /// `aeris_study_on_bar` entrypoint.
+    #[must_use]
+    pub fn supports_incremental(&self) -> bool {
+        self.module
+            .exports()
+            .any(|export| export.name() == WASM_EXPORT_ON_BAR)
+    }
+
+    /// Creates a persistent bounded [`WasmIncrementalInstance`] initialized with parameters and
+    /// instrument metadata, ready for O(dirty) live-tick `step_bar` calls.
+    ///
+    /// # Errors
+    /// Returns [`WasmSandboxError`] if the module does not export `aeris_study_on_bar` or fails
+    /// instantiation/initialization.
+    pub fn instantiate_incremental(
+        &self,
+        params: &[f64],
+        str_params: &[(usize, String)],
+        meta: &WasmStudyMeta,
+        limits: StudySandboxLimits,
+    ) -> Result<WasmIncrementalInstance, WasmSandboxError> {
+        let mut store = self.create_store(limits)?;
+        let linker = Linker::<SandboxStoreState>::new(&self.engine);
+        let instance = linker
+            .instantiate_and_start(&mut store, &self.module)
+            .map_err(|err| classify_wasmi_error(&err, true))?;
+        let memory = instance
+            .get_memory(&store, WASM_EXPORT_MEMORY)
+            .ok_or(WasmSandboxError::MissingExport(WASM_EXPORT_MEMORY))?;
+        let alloc_fn = instance
+            .get_typed_func::<u32, u32>(&store, WASM_EXPORT_ALLOC)
+            .map_err(|_| WasmSandboxError::MissingExport(WASM_EXPORT_ALLOC))?;
+        let on_bar_fn = instance
+            .get_typed_func::<(u32, u32, f64, f64, f64, f64, f64, i64, u32, u32), i32>(
+                &store,
+                WASM_EXPORT_ON_BAR,
+            )
+            .map_err(|_| WasmSandboxError::MissingExport(WASM_EXPORT_ON_BAR))?;
+        apply_wasm_params(instance, &mut store, params)?;
+        apply_wasm_str_params(instance, &mut store, memory, alloc_fn, str_params)?;
+        apply_wasm_meta(instance, &mut store, memory, alloc_fn, meta)?;
+        let scratch_bytes = 32 * size_of::<f64>();
+        let out_ptr = alloc_guest(&mut store, alloc_fn, scratch_bytes as u32, scratch_bytes)?;
+        Ok(WasmIncrementalInstance {
+            store,
+            instance,
+            memory,
+            on_bar_fn,
+            out_ptr,
+            limits,
+            last_bar_count: 0,
+        })
     }
 
     /// Executes a single- or multi-output sandboxed study with optional parameter overrides and
@@ -770,6 +926,8 @@ impl CompiledWasmStudy {
     ) -> NativeStudyProgram {
         let compiled = self;
         let count = output_count.clamp(1, 32);
+        let persistent_instance: Arc<Mutex<Option<WasmIncrementalInstance>>> =
+            Arc::new(Mutex::new(None));
         NativeStudyProgram::dynamic(Arc::new(move |context: &mut StudyExecutionContext<'_>| {
             let Some(StudyInputSeries::Market(market)) = context.input(0) else {
                 return Err("sandboxed study requires primary market bar input".to_string());
@@ -894,6 +1052,104 @@ impl CompiledWasmStudy {
                 is_new_bar: exec_meta.is_new_bar,
                 symbol,
             };
+            if compiled.supports_incremental() && secondary_specs.is_empty() && !include_order_flow
+            {
+                let started_at = Instant::now();
+                let mut guard = persistent_instance
+                    .lock()
+                    .map_err(|_| "incremental wasm store lock poisoned".to_string())?;
+                let needs_reset = dirty_start == 0
+                    || guard
+                        .as_ref()
+                        .is_none_or(|inst| bar_count < inst.last_bar_count);
+                if needs_reset {
+                    *guard = Some(
+                        compiled
+                            .instantiate_incremental(&params, &str_params, &wasm_meta, limits)
+                            .map_err(|err| err.to_string())?,
+                    );
+                }
+                let Some(inst) = guard.as_mut() else {
+                    return Err("incremental wasm instance unavailable".to_string());
+                };
+                let write_from = if needs_reset { start } else { dirty_start.max(start) };
+                let write_to = dirty_end.min(bar_count);
+                let mut total_fuel = 0_u64;
+                for row in write_from..write_to {
+                    let local = row - start;
+                    let o = fixed_point_to_f64(columnar.open[local], columnar.price_scale)
+                        .unwrap_or(f64::NAN);
+                    let h = fixed_point_to_f64(columnar.high[local], columnar.price_scale)
+                        .unwrap_or(f64::NAN);
+                    let l = fixed_point_to_f64(columnar.low[local], columnar.price_scale)
+                        .unwrap_or(f64::NAN);
+                    let c = fixed_point_to_f64(columnar.close[local], columnar.price_scale)
+                        .unwrap_or(f64::NAN);
+                    let v = fixed_point_to_f64(columnar.volume[local], columnar.quantity_scale)
+                        .unwrap_or(f64::NAN);
+                    let ts = columnar.timestamps_unix_nanos[local];
+                    let is_last = row + 1 == bar_count;
+                    let is_new = row >= inst.last_bar_count;
+                    let is_conf = !is_last || exec_meta.is_confirmed_bar;
+                    match inst.step_bar(local, is_new, is_conf, o, h, l, c, v, ts, count) {
+                        Ok((vals, fuel)) => {
+                            total_fuel = total_fuel.saturating_add(fuel);
+                            for (out_idx, val) in vals.into_iter().enumerate() {
+                                if let Some(output) = context.output(out_idx) {
+                                    output.set(row, val)?;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            *guard = None;
+                            return Err(err.to_string());
+                        }
+                    }
+                }
+                inst.last_bar_count = bar_count;
+                let scene_bytes = inst.read_scene_bytes().unwrap_or_default();
+                let mut scene_objs = 0usize;
+                let mut alert_count = 0usize;
+                let mut logs = Vec::new();
+                if !scene_bytes.is_empty() {
+                    let decoded = decode_wasm_scene_commands(&scene_bytes, &columnar);
+                    scene_objs = decoded.objects.len();
+                    alert_count = decoded.alerts.len();
+                    logs = decoded.logs;
+                    apply_decoded_wasm_scene(
+                        context,
+                        &scene_bytes,
+                        &columnar,
+                        start,
+                        write_from,
+                        write_to,
+                    )?;
+                }
+                if let Some(sink) = &telemetry_sink
+                    && let Ok(mut t) = sink.lock()
+                {
+                    *t = Some(WasmStudyTelemetry {
+                        fuel_consumed: total_fuel,
+                        fuel_limit: limits.max_instruction_fuel,
+                        elapsed_micros: u64::try_from(started_at.elapsed().as_micros())
+                            .unwrap_or(u64::MAX),
+                        bar_count: write_to.saturating_sub(write_from),
+                        scene_object_count: scene_objs,
+                        alert_count,
+                        logs,
+                    });
+                }
+                if dirty_start == 0 && dirty_end == bar_count {
+                    for &fill in &fills {
+                        context.add_fill(fill)?;
+                    }
+                    for level in &levels {
+                        context.add_level(level.clone())?;
+                    }
+                }
+                return Ok(());
+            }
+
             let secondaries: Vec<WasmAlignedSecondary> = secondary_specs
                 .iter()
                 .take(MAX_WASM_SECONDARY_SERIES)
