@@ -1,15 +1,16 @@
 use super::native_ui::input::{TextArea, TextareaState};
 use super::study_editor_store::{
-    StudyProjectStore, export_project_bundle_json, import_project_bundle_json,
-    probe_study_dev_pack, run_offline_preview_check, source_sha256_hex,
-    validate_study_source_static,
+    StudyProjectStore, compile_study_source_to_wasm, export_project_bundle_json,
+    import_project_bundle_json, probe_study_dev_pack, run_offline_preview_check,
 };
 use super::*;
 use aeris_localization::{common, panels, tr};
 use aeris_study_sdk::project::{
     StudyDiagnostic, StudyDiagnosticSeverity, StudyProjectLibrary, StudyProjectTemplate,
 };
+use aeris_study_sdk::sandbox::StudySandboxLimits;
 use aeris_study_sdk::toolchain::{PreviewFixturePreset, StudyDevPackStatus};
+use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
 use std::path::PathBuf;
 
 pub(super) struct StudyEditorDialogState {
@@ -147,35 +148,109 @@ impl StudyEditorDialogState {
             self.status_message = Some(format!("Update failed: {error:?}"));
             return;
         }
-        let diagnostics = validate_study_source_static(&source);
-        let has_errors = diagnostics
-            .iter()
-            .any(|diag| diag.severity == StudyDiagnosticSeverity::Error);
-        self.diagnostics = diagnostics.clone();
-        if has_errors {
-            let _ = self.library.record_build_failure(&identifier, diagnostics);
-            if let Some(project) = self.library.get(&identifier) {
-                let _ = self.store.save_project(project);
+        match compile_study_source_to_wasm(&source) {
+            Ok(artifact) => {
+                self.diagnostics.clear();
+                if let Err(error) = self.store.save_last_good_wasm(
+                    &identifier,
+                    &artifact.source_sha256,
+                    &artifact.toolchain_identity,
+                    &artifact.wasm_bytes,
+                ) {
+                    self.status_message = Some(error);
+                    return;
+                }
+                let _ = self.library.record_build_success(
+                    &identifier,
+                    artifact.source_sha256,
+                    artifact.artifact_sha256.clone(),
+                );
+                let kib = artifact.wasm_bytes.len().div_ceil(1024);
+                self.status_message = match self
+                    .library
+                    .get(&identifier)
+                    .map(|project| self.store.save_project(project))
+                {
+                    Some(Ok(())) => Some(format!(
+                        "Built WASM ({kib} KiB · {})",
+                        &artifact.artifact_sha256[..12]
+                    )),
+                    Some(Err(error)) => Some(error),
+                    None => None,
+                };
             }
-            self.status_message = Some(format!(
-                "Validation failed ({} diagnostic(s)); last-good artifact preserved",
-                self.diagnostics.len()
-            ));
-        } else {
-            let sha = source_sha256_hex(&source);
-            let _ = self
-                .library
-                .record_build_success(&identifier, sha.clone(), sha.clone());
-            self.status_message = match self
-                .library
-                .get(&identifier)
-                .map(|project| self.store.save_project(project))
-            {
-                Some(Ok(())) => Some(format!("Validated & saved ({})", &sha[..12])),
-                Some(Err(error)) => Some(error),
-                None => None,
-            };
+            Err(diagnostics) => {
+                self.diagnostics = diagnostics.clone();
+                let _ = self.library.record_build_failure(&identifier, diagnostics);
+                if let Some(project) = self.library.get(&identifier) {
+                    let _ = self.store.save_project(project);
+                }
+                self.status_message = Some(format!(
+                    "Build failed ({} diagnostic(s)); last-good artifact preserved",
+                    self.diagnostics.len()
+                ));
+            }
         }
+    }
+
+    pub(super) fn prepare_chart_artifact(
+        &mut self,
+        cx: &mut Context<WorkspaceSurface>,
+    ) -> Result<(String, String, u32, CompiledWasmStudy), String> {
+        let identifier = self
+            .selected_id
+            .clone()
+            .ok_or_else(|| "Select a study project first".to_string())?;
+        let source = self.source_input.read(cx).value().to_string();
+        if let Err(error) = self.library.update_source(&identifier, source.clone()) {
+            return Err(format!("Update failed: {error:?}"));
+        }
+        let compiled = match compile_study_source_to_wasm(&source) {
+            Ok(artifact) => {
+                self.diagnostics.clear();
+                let _ = self.store.save_last_good_wasm(
+                    &identifier,
+                    &artifact.source_sha256,
+                    &artifact.toolchain_identity,
+                    &artifact.wasm_bytes,
+                );
+                let _ = self.library.record_build_success(
+                    &identifier,
+                    artifact.source_sha256,
+                    artifact.artifact_sha256,
+                );
+                if let Some(project) = self.library.get(&identifier) {
+                    let _ = self.store.save_project(project);
+                }
+                artifact.compiled
+            }
+            Err(diagnostics) => {
+                self.diagnostics = diagnostics;
+                // Fall back to previously built `last_good.wasm` if available on disk.
+                let fallback = self
+                    .store
+                    .load_last_good_wasm(&identifier)
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| {
+                        CompiledWasmStudy::from_bytes(&bytes, StudySandboxLimits::default()).ok()
+                    });
+                let Some(compiled) = fallback else {
+                    let msg = format!(
+                        "Build failed ({} diagnostic(s)) and no last-good WASM exists",
+                        self.diagnostics.len()
+                    );
+                    self.status_message = Some(msg.clone());
+                    return Err(msg);
+                };
+                compiled
+            }
+        };
+        let (name, revision) = self.library.get(&identifier).map_or_else(
+            || (identifier.clone(), 1),
+            |p| (p.manifest.name.clone(), p.manifest.implementation_revision),
+        );
+        Ok((identifier, name, revision, compiled))
     }
 
     pub(super) fn revert_to_last_good(
@@ -454,6 +529,7 @@ pub(super) fn study_editor_dialog_layer(
     let export_bundle = app.clone();
     let import_bundle = app.clone();
     let preview = app.clone();
+    let add_to_chart = app.clone();
     let delete = app.clone();
     let cancel = app.clone();
     let save = app.clone();
@@ -572,6 +648,15 @@ pub(super) fn study_editor_dialog_layer(
             .disabled(!has_selection)
             .on_click(move |_, _, cx| {
                 preview.update(cx, WorkspaceSurface::run_study_editor_preview_test);
+            }),
+    )
+    .action(
+        Button::new("study_editor_add_chart", theme)
+            .variant(ButtonVariant::Secondary)
+            .label("Add to chart")
+            .disabled(!has_selection)
+            .on_click(move |_, _, cx| {
+                add_to_chart.update(cx, WorkspaceSurface::add_study_editor_project_to_chart);
             }),
     )
     .action(

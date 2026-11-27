@@ -14,16 +14,19 @@ use aeris_study_sdk::project::{
     StudyDiagnostic, StudyDiagnosticSeverity, StudyProject, StudyProjectCapability,
     StudyProjectLibrary, StudyProjectManifest, StudyProjectTemplate, validate_study_source,
 };
+use aeris_study_sdk::sandbox::{STUDY_SANDBOX_ABI_VERSION, StudySandboxLimits};
 use aeris_study_sdk::toolchain::{
-    PreviewFixturePreset, STUDY_SANDBOX_TARGET_TRIPLE, StudyArtifactCacheKey, StudyDevPackStatus,
-    StudyPreviewFixture,
+    PreviewFixturePreset, STUDY_SANDBOX_TARGET_TRIPLE, STUDY_TOOLCHAIN_POLICY_VERSION,
+    StudyArtifactCacheKey, StudyDevPackStatus, StudyPreviewFixture,
 };
+use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 const PROJECTS_DIR_NAME: &str = "study_projects";
@@ -32,6 +35,9 @@ const MAXIMUM_RETAINED_ARTIFACT_CACHE_ENTRIES: usize = 128;
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const SOURCE_FILE_NAME: &str = "lib.rs";
 const LAST_GOOD_FILE_NAME: &str = "last_good.rs";
+const LAST_GOOD_WASM_FILE_NAME: &str = "last_good.wasm";
+
+static BUILD_DIR_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Deserialize, Serialize)]
 struct StoredManifest {
@@ -114,16 +120,22 @@ impl TryFrom<StoredManifest> for StudyProjectManifest {
     }
 }
 
-/// Computes the canonical lowercase SHA-256 hex digest of a Rust source string.
+/// Computes the canonical lowercase SHA-256 hex digest of an arbitrary byte slice.
 #[must_use]
-pub(crate) fn source_sha256_hex(source: &str) -> String {
-    let digest = Sha256::digest(source.as_bytes());
+pub(crate) fn bytes_sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
     for byte in digest {
         use std::fmt::Write;
         let _ = write!(&mut out, "{byte:02x}");
     }
     out
+}
+
+/// Computes the canonical lowercase SHA-256 hex digest of a Rust source string.
+#[must_use]
+pub(crate) fn source_sha256_hex(source: &str) -> String {
+    bytes_sha256_hex(source.as_bytes())
 }
 
 /// Static pre-compile sandbox-policy check producing exact `line:column` diagnostics.
@@ -306,6 +318,54 @@ impl StudyProjectStore {
         Ok(())
     }
 
+    /// Atomically saves the last-known-good compiled `.wasm` artifact for `identifier`
+    /// and records its cache receipt under `.artifact_cache/`.
+    pub(crate) fn save_last_good_wasm(
+        &self,
+        identifier: &str,
+        source_sha256: &str,
+        toolchain_identity: &str,
+        wasm_bytes: &[u8],
+    ) -> Result<(), String> {
+        let dir = self.project_dir(identifier)?;
+        fs::create_dir_all(&dir).map_err(|error| format!("create project dir failed: {error}"))?;
+        atomic_write(&dir.join(LAST_GOOD_WASM_FILE_NAME), wasm_bytes)?;
+
+        let cache_dir = self.root.join(ARTIFACT_CACHE_DIR_NAME);
+        if fs::create_dir_all(&cache_dir).is_ok() {
+            let key =
+                StudyArtifactCacheKey::for_host(toolchain_identity, source_sha256, source_sha256);
+            let stored = StoredCacheKey {
+                policy_version: STUDY_TOOLCHAIN_POLICY_VERSION,
+                sdk_compatibility_epoch: key.sdk_compatibility_epoch,
+                sandbox_abi_version: STUDY_SANDBOX_ABI_VERSION,
+                toolchain_identity: key.toolchain_identity.clone(),
+                target_triple: key.target_triple.clone(),
+                source_sha256: key.source_sha256.clone(),
+                lockfile_sha256: key.lockfile_sha256.clone(),
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&stored) {
+                let _ = atomic_write(
+                    &cache_dir.join(format!("{}.json", key.cache_slug())),
+                    json.as_bytes(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Loads the persisted `last_good.wasm` artifact for `identifier`, if present.
+    pub(crate) fn load_last_good_wasm(&self, identifier: &str) -> Result<Option<Vec<u8>>, String> {
+        let dir = self.project_dir(identifier)?;
+        let path = dir.join(LAST_GOOD_WASM_FILE_NAME);
+        if !path.exists() {
+            return Ok(None);
+        }
+        fs::read(&path)
+            .map(Some)
+            .map_err(|error| format!("read last_good.wasm failed: {error}"))
+    }
+
     /// Deletes one persisted study project directory.
     ///
     /// # Errors
@@ -481,28 +541,327 @@ pub(crate) fn probe_study_dev_pack() -> StudyDevPackStatus {
     }
 }
 
-/// Runs static sandbox validation alongside a deterministic offline market preview fixture
+/// Validated output of one controlled Rust -> WebAssembly study compilation.
+#[derive(Clone, Debug)]
+pub(crate) struct CompiledStudyArtifact {
+    pub(crate) wasm_bytes: Vec<u8>,
+    pub(crate) artifact_sha256: String,
+    pub(crate) source_sha256: String,
+    pub(crate) toolchain_identity: String,
+    pub(crate) compiled: CompiledWasmStudy,
+}
+
+const WASM_HARNESS_SOURCE: &str = r#"#[forbid(unsafe_code)]
+mod user_study;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_abi_version() -> u32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_alloc(byte_len: u32) -> u32 {
+    let len = byte_len as usize;
+    let mut buf = Vec::<u8>::with_capacity(len);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_calculate(bars_ptr: u32, bar_count: u32, out_ptr: u32) -> i32 {
+    let n = bar_count as usize;
+    if n == 0 {
+        return 0;
+    }
+    let base = bars_ptr as usize as *const f64;
+    let out_base = out_ptr as usize as *mut f64;
+    let (open, high, low, close, volume, out) = unsafe {
+        (
+            std::slice::from_raw_parts(base, n),
+            std::slice::from_raw_parts(base.add(n), n),
+            std::slice::from_raw_parts(base.add(n * 2), n),
+            std::slice::from_raw_parts(base.add(n * 3), n),
+            std::slice::from_raw_parts(base.add(n * 4), n),
+            std::slice::from_raw_parts_mut(out_base, n),
+        )
+    };
+    user_study::calculate(open, high, low, close, volume, out);
+    0
+}
+"#;
+
+#[derive(Deserialize)]
+struct RustcJsonDiagnostic {
+    #[serde(default)]
+    level: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    code: Option<RustcJsonCode>,
+    #[serde(default)]
+    spans: Vec<RustcJsonSpan>,
+}
+
+#[derive(Deserialize)]
+struct RustcJsonCode {
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct RustcJsonSpan {
+    #[serde(default)]
+    file_name: String,
+    #[serde(default)]
+    line_start: u32,
+    #[serde(default)]
+    column_start: u32,
+    #[serde(default)]
+    is_primary: bool,
+}
+
+fn parse_rustc_json_diagnostics(stderr: &str) -> Vec<StudyDiagnostic> {
+    let mut out = Vec::new();
+    for line in stderr.lines() {
+        if out.len() >= MAXIMUM_STUDY_DIAGNOSTICS {
+            break;
+        }
+        let Ok(diag) = serde_json::from_str::<RustcJsonDiagnostic>(line) else {
+            continue;
+        };
+        let severity = match diag.level.as_str() {
+            "error" | "error: internal compiler error" => StudyDiagnosticSeverity::Error,
+            "warning" => StudyDiagnosticSeverity::Warning,
+            _ => continue,
+        };
+        let primary = diag
+            .spans
+            .iter()
+            .find(|span| span.is_primary && span.file_name.ends_with("user_study.rs"))
+            .or_else(|| diag.spans.iter().find(|span| span.is_primary))
+            .or_else(|| diag.spans.first());
+        let (line_no, col_no) = primary.map_or((1, 1), |span| {
+            (span.line_start.max(1), span.column_start.max(1))
+        });
+        out.push(StudyDiagnostic {
+            severity,
+            line: line_no,
+            column: col_no,
+            code: diag.code.map(|c| c.code),
+            message: diag.message,
+        });
+    }
+    if out.is_empty() && !stderr.trim().is_empty() {
+        out.push(StudyDiagnostic {
+            severity: StudyDiagnosticSeverity::Error,
+            line: 1,
+            column: 1,
+            code: Some("AERIS_RUSTC_ERROR".to_string()),
+            message: stderr.lines().take(3).collect::<Vec<_>>().join(" | "),
+        });
+    }
+    out
+}
+
+/// Compiles user-authored Rust study source into a zero-authority WebAssembly module
+/// (`wasm32-unknown-unknown`) using a controlled Aeris-owned ABI v1 harness, and validates
+/// the resulting `.wasm` bytes inside `wasmi`.
+///
+/// # Errors
+/// Returns bounded structured [`StudyDiagnostic`]s on static policy failure, missing dev pack,
+/// `rustc` compilation error, or `wasmi` zero-authority / ABI validation failure.
+pub(crate) fn compile_study_source_to_wasm(
+    source: &str,
+) -> Result<CompiledStudyArtifact, Vec<StudyDiagnostic>> {
+    let static_diags = validate_study_source_static(source);
+    if !static_diags.is_empty() {
+        return Err(static_diags);
+    }
+
+    let toolchain_identity = match probe_study_dev_pack() {
+        StudyDevPackStatus::Ready { rustc_version, .. } => rustc_version,
+        StudyDevPackStatus::MissingSandboxTarget {
+            required_target, ..
+        } => {
+            return Err(vec![StudyDiagnostic {
+                severity: StudyDiagnosticSeverity::Error,
+                line: 1,
+                column: 1,
+                code: Some("AERIS_DEV_PACK_TARGET".to_string()),
+                message: format!(
+                    "Missing WebAssembly target `{required_target}`. Install with: rustup target add {required_target}"
+                ),
+            }]);
+        }
+        StudyDevPackStatus::Unavailable => {
+            return Err(vec![StudyDiagnostic {
+                severity: StudyDiagnosticSeverity::Error,
+                line: 1,
+                column: 1,
+                code: Some("AERIS_DEV_PACK_MISSING".to_string()),
+                message: format!(
+                    "Rust compiler (`rustc`) not found. Install Rust and `{STUDY_SANDBOX_TARGET_TRIPLE}` to build user studies."
+                ),
+            }]);
+        }
+    };
+
+    let nonce = BUILD_DIR_NONCE.fetch_add(1, Ordering::Relaxed);
+    let build_dir =
+        std::env::temp_dir().join(format!("aeris_study_wasm_{}_{nonce}", std::process::id()));
+    let cleanup = |dir: &Path| {
+        let _ = fs::remove_dir_all(dir);
+    };
+    if let Err(err) = fs::create_dir_all(&build_dir) {
+        return Err(vec![StudyDiagnostic {
+            severity: StudyDiagnosticSeverity::Error,
+            line: 1,
+            column: 1,
+            code: Some("AERIS_BUILD_IO".to_string()),
+            message: format!("failed to create temporary build directory: {err}"),
+        }]);
+    }
+
+    let harness_path = build_dir.join("harness.rs");
+    let user_path = build_dir.join("user_study.rs");
+    let out_wasm_path = build_dir.join("study.wasm");
+    if let Err(err) =
+        fs::write(&harness_path, WASM_HARNESS_SOURCE).and_then(|()| fs::write(&user_path, source))
+    {
+        cleanup(&build_dir);
+        return Err(vec![StudyDiagnostic {
+            severity: StudyDiagnosticSeverity::Error,
+            line: 1,
+            column: 1,
+            code: Some("AERIS_BUILD_IO".to_string()),
+            message: format!("failed to stage study source for compilation: {err}"),
+        }]);
+    }
+
+    let output = std::process::Command::new("rustc")
+        .args([
+            "--edition",
+            "2024",
+            "--crate-type",
+            "cdylib",
+            "--target",
+            STUDY_SANDBOX_TARGET_TRIPLE,
+            "-O",
+            "--error-format=json",
+        ])
+        .arg("-o")
+        .arg(&out_wasm_path)
+        .arg(&harness_path)
+        .output();
+
+    let output = match output {
+        Ok(out) => out,
+        Err(err) => {
+            cleanup(&build_dir);
+            return Err(vec![StudyDiagnostic {
+                severity: StudyDiagnosticSeverity::Error,
+                line: 1,
+                column: 1,
+                code: Some("AERIS_RUSTC_SPAWN".to_string()),
+                message: format!("failed to invoke rustc: {err}"),
+            }]);
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let diags = parse_rustc_json_diagnostics(&stderr);
+        cleanup(&build_dir);
+        return Err(diags);
+    }
+
+    let wasm_bytes = match fs::read(&out_wasm_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            cleanup(&build_dir);
+            return Err(vec![StudyDiagnostic {
+                severity: StudyDiagnosticSeverity::Error,
+                line: 1,
+                column: 1,
+                code: Some("AERIS_BUILD_IO".to_string()),
+                message: format!("failed to read compiled wasm artifact: {err}"),
+            }]);
+        }
+    };
+    cleanup(&build_dir);
+
+    let compiled = CompiledWasmStudy::from_bytes(&wasm_bytes, StudySandboxLimits::default())
+        .map_err(|err| {
+            vec![StudyDiagnostic {
+                severity: StudyDiagnosticSeverity::Error,
+                line: 1,
+                column: 1,
+                code: Some("AERIS_SANDBOX_REJECTED".to_string()),
+                message: err.to_string(),
+            }]
+        })?;
+
+    Ok(CompiledStudyArtifact {
+        artifact_sha256: bytes_sha256_hex(&wasm_bytes),
+        source_sha256: source_sha256_hex(source),
+        toolchain_identity,
+        wasm_bytes,
+        compiled,
+    })
+}
+
+/// Runs static sandbox validation, compiles to WASM when the dev pack is ready, and executes
+/// the compiled study inside `wasmi` against a deterministic offline market preview fixture
 /// without opening any provider session.
 #[must_use]
 pub(crate) fn run_offline_preview_check(
     source: &str,
     preset: PreviewFixturePreset,
 ) -> (Vec<StudyDiagnostic>, String) {
-    let diagnostics = validate_study_source_static(source);
     let fixture = StudyPreviewFixture::generate(preset, 120, 60);
-    let summary = if diagnostics.is_empty() {
-        format!(
-            "Preview [{preset:?}]: {} bars, {} trades verified (0 diagnostics)",
-            fixture.bars.len(),
-            fixture.trades.len()
-        )
-    } else {
-        format!(
-            "Preview [{preset:?}] blocked: {} diagnostic(s) must be fixed",
-            diagnostics.len()
-        )
-    };
-    (diagnostics, summary)
+    match compile_study_source_to_wasm(source) {
+        Ok(artifact) => {
+            match artifact
+                .compiled
+                .execute_columnar(&fixture.bars, StudySandboxLimits::default())
+            {
+                Ok(result) => {
+                    let finite_count = result.values.iter().filter(|v| v.is_some()).count();
+                    let last_label = result
+                        .values
+                        .iter()
+                        .rev()
+                        .find_map(|v| *v)
+                        .map_or_else(|| "NaN".to_string(), |v| format!("{v:.2}"));
+                    (
+                        Vec::new(),
+                        format!(
+                            "WASM Preview [{preset:?}]: {finite_count}/{} pts, last={last_label}, fuel={}",
+                            fixture.bars.len(),
+                            result.fuel_consumed
+                        ),
+                    )
+                }
+                Err(err) => (
+                    vec![StudyDiagnostic {
+                        severity: StudyDiagnosticSeverity::Error,
+                        line: 1,
+                        column: 1,
+                        code: Some("AERIS_WASM_TRAP".to_string()),
+                        message: err.to_string(),
+                    }],
+                    format!("WASM Preview [{preset:?}] trapped: {err}"),
+                ),
+            }
+        }
+        Err(diagnostics) => {
+            let summary = format!(
+                "Preview [{preset:?}] blocked: {} diagnostic(s) must be fixed",
+                diagnostics.len()
+            );
+            (diagnostics, summary)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -809,9 +1168,52 @@ mod tests {
 
         let (_, clean_src) = StudyProjectTemplate::StatelessOverlay.scaffold("user.prev", "Prev");
         let (diags, summary) = run_offline_preview_check(&clean_src, PreviewFixturePreset::Uptrend);
-        assert!(diags.is_empty());
-        assert!(summary.contains("120 bars"));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        assert!(
+            summary.contains("120/120 pts"),
+            "unexpected summary: {summary}"
+        );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn controlled_rustc_compiles_all_templates_to_zero_authority_wasm_and_traps_infinite_loops() {
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::Uptrend, 40, 60);
+        for template in [
+            StudyProjectTemplate::StatelessOverlay,
+            StudyProjectTemplate::StatefulRecursive,
+            StudyProjectTemplate::MultiTimeframe,
+            StudyProjectTemplate::DrawingTableDashboard,
+            StudyProjectTemplate::AlertStudy,
+        ] {
+            let (_, src) = template.scaffold("user.tpl", "Template");
+            let artifact = compile_study_source_to_wasm(&src).unwrap_or_else(|diags| {
+                panic!("template {template:?} failed to compile: {diags:?}")
+            });
+            assert!(!artifact.wasm_bytes.is_empty());
+            assert_eq!(artifact.artifact_sha256.len(), 64);
+            let result = artifact
+                .compiled
+                .execute_columnar(&fixture.bars, StudySandboxLimits::default())
+                .unwrap_or_else(|err| panic!("template {template:?} failed to execute: {err}"));
+            assert_eq!(result.values.len(), 40);
+            assert!(result.fuel_consumed > 0);
+        }
+
+        // Syntax/type error produces structured rustc JSON diagnostic with exact line number.
+        let broken = "pub fn calculate(_o: &[f64], _h: &[f64], _l: &[f64], _c: &[f64], _v: &[f64], out: &mut [f64]) {\n    out[0] = \"not_a_float\";\n}\n";
+        let diags = compile_study_source_to_wasm(broken).expect_err("type error must fail");
+        assert!(!diags.is_empty());
+        assert_eq!(diags[0].line, 2);
+        assert_eq!(diags[0].code.as_deref(), Some("E0308"));
+
+        // Infinite loop compiles, then deterministically traps on fuel exhaustion during execution.
+        let loopy = "pub fn calculate(_o: &[f64], _h: &[f64], _l: &[f64], _c: &[f64], _v: &[f64], _out: &mut [f64]) { loop {} }";
+        let (loop_diags, loop_summary) =
+            run_offline_preview_check(loopy, PreviewFixturePreset::Uptrend);
+        assert_eq!(loop_diags.len(), 1);
+        assert_eq!(loop_diags[0].code.as_deref(), Some("AERIS_WASM_TRAP"));
+        assert!(loop_summary.contains("fuel"), "summary: {loop_summary}");
     }
 }

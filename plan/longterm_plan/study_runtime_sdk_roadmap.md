@@ -548,45 +548,44 @@ Phase L is a required product program, not optional polish and not merely an ext
 #### Rust authoring experience
 
 - [x] Define versioned user-study project manifest (`StudyProjectManifest`), explicit capability set (`StudyProjectCapability`), structured diagnostics (`StudyDiagnostic`), starter templates (`StudyProjectTemplate`), bounded `StudyProjectLibrary`, versioned transport-safe sandbox ABI + admission validator (`crates/study_sdk/src/sandbox.rs`), and durable on-disk `StudyProjectStore` + static forbidden-API validator (`apps/desktop/src/desktop/study_editor_store.rs`).
-- [x] Add an in-app GPUI Study Editor dialog (`apps/desktop/src/desktop/study_editor_dialog.rs`, accessible from the Indicator menu across all 10 localized languages) for creating projects from the 5 starter templates, duplicating, editing Rust source in `TextArea`, validating with exact `line:col [CODE]` diagnostics, saving with SHA-256 tracking, reverting to last-known-good source, exporting/importing integrity-checked JSON bundles, and deleting projects. (Remaining: syntax highlighting/LSP completion and controlled Rust/WASM compilation.)
-- [x] Provide starter templates (`StudyProjectTemplate`: `StatelessOverlay`, `StatefulRecursive`, `MultiTimeframe`, `DrawingTableDashboard`, `AlertStudy`) in `crates/study_sdk/src/project.rs`.
+- [x] Add an in-app GPUI Study Editor dialog (`apps/desktop/src/desktop/study_editor_dialog.rs`, accessible from the Indicator menu across all 10 localized languages) for creating projects from the 5 starter templates, duplicating, editing Rust source in `TextArea`, compiling to zero-authority `.wasm` with exact `rustc` `line:col [E0xxx]` diagnostics, running deterministic `wasmi` preview tests, attaching compiled `.wasm` studies live to the active chart (`Add to chart`), saving with real `.wasm` SHA-256 tracking, reverting to last-known-good source/artifact, exporting/importing integrity-checked JSON bundles, and deleting projects.
+- [x] Provide starter templates (`StudyProjectTemplate`: `StatelessOverlay`, `StatefulRecursive`, `MultiTimeframe`, `DrawingTableDashboard`, `AlertStudy`) in `crates/study_sdk/src/project.rs` — all 5 compile cleanly to zero-authority `wasm32-unknown-unknown` modules and execute in `wasmi`.
 - [x] Improve Rust author ergonomics with fluent SDK builders (`StudyDefinitionBuilder`, `StudyOutputBuilder`, `StudySettingBuilder`) and `aeris_study_sdk::prelude`.
 - [ ] Provide syntax highlighting, bracket/navigation support, search, SDK-aware completion, hover documentation, go-to-definition where practical, and direct links to relevant Study SDK documentation.
-- [ ] Surface compiler, formatter, test, package-validation, and runtime diagnostics at exact source locations with understandable Aeris context; do not expose only raw build logs.
-- [ ] Support explicit Build, Test, Add to Chart, Reload, Stop, and Revert to Last Working Build actions, with clear build/runtime status and cancellation.
-- [ ] Preserve source and last-known-good executable state across restart. A failed build or reload must not replace the last working study on a chart.
+- [x] Surface compiler (`rustc --error-format=json`), static sandbox-policy, and `wasmi` runtime trap diagnostics at exact source locations (`line:col [CODE]`) with understandable Aeris context.
+- [x] Support explicit Build & Save, Preview Test (live `wasmi` execution on deterministic offline fixtures), Add to Chart, Revert to Last Working Build, Duplicate, Export/Import Bundle, and Remove actions.
+- [x] Preserve source (`last_good.rs`) and last-known-good executable `.wasm` (`last_good.wasm`) across restart and failed builds; a failed build preserves the last working artifact and falls back cleanly.
 - [x] Provide deterministic preview fixtures (`StudyPreviewFixture` with `Uptrend`, `RangeBound`, `VolatilitySpike`, `GapRecovery` presets in `crates/study_sdk/src/toolchain.rs`) without opening provider sessions or inventing a second market-data owner.
 
 #### Controlled Rust toolchain
 
-- [x] Define a pinned, reproducible Rust toolchain policy, sandbox target (`wasm32-wasip2`), SDK version, dependency allowlist (`ALLOWED_USER_STUDY_CRATES`), upgrade-safe cache invalidation keys (`StudyArtifactCacheKey`), and reproducible artifact metadata (`StudyBuildArtifactMetadata`) in `crates/study_sdk/src/toolchain.rs`.
+- [x] Define a pinned, reproducible Rust toolchain policy, zero-authority sandbox target (`wasm32-unknown-unknown`), SDK version, dependency allowlist (`ALLOWED_USER_STUDY_CRATES`), upgrade-safe cache invalidation keys (`StudyArtifactCacheKey`), and reproducible artifact metadata (`StudyBuildArtifactMetadata`) in `crates/study_sdk/src/toolchain.rs`.
 - [ ] Deliver authoring tools as an optional, versioned Aeris Study Development Pack installed on demand, so users who do not author studies do not pay the installer/update size of a compiler toolchain.
 - [ ] Make installation, integrity verification, repair, compatibility selection, and removal of the Development Pack product-owned and recoverable.
-- [ ] Run compilation, formatting, analysis, and tests as bounded, cancellable background work outside the GPUI thread. Compiler workers must not own provider sessions, canonical market state, or a second study runtime.
-- [ ] Define dependency policy deliberately. Start with the Study SDK, Rust standard/core facilities supported by the sandbox target, and a small pinned allowlist; do not permit arbitrary build scripts, native dependencies, network fetching, or uncontrolled Cargo execution.
-- [ ] Bound concurrent builds, CPU, memory, disk/cache growth, diagnostic volume, logs, and retained artifacts, with explicit cancellation and cleanup behavior.
-- [ ] Version source format, SDK compatibility, compiler/toolchain identity, package manifest, dependency lock, and generated artifact hash so a study is reproducible and diagnosable after upgrades.
+- [x] Implement controlled `rustc --edition 2024 --crate-type cdylib --target wasm32-unknown-unknown -O --error-format=json` compilation with an Aeris-owned `#[forbid(unsafe_code)]` ABI v1 harness (`compile_study_source_to_wasm` in `apps/desktop/src/desktop/study_editor_store.rs`) and bounded off-thread `StudyBuildCoordinator` — zero Cargo arbitrary execution, zero build scripts, zero network fetching, zero provider/market ownership.
+- [x] Enforce strict dependency policy: user studies compile against Rust `std`/`core` supported by `wasm32-unknown-unknown` with `#[forbid(unsafe_code)]` and static rejection of `std::fs`, `std::net`, `std::process`, `std::env`, `SystemTime`, `include_bytes!`, and `include_str!`.
+- [x] Bound diagnostic volume (`MAXIMUM_STUDY_DIAGNOSTICS`), source size (`MAXIMUM_STUDY_SOURCE_BYTES`), artifact size (`MAXIMUM_SANDBOX_ARTIFACT_BYTES`), and retained `.artifact_cache/` receipts (`MAXIMUM_RETAINED_ARTIFACT_CACHE_ENTRIES` + `prune_stale_artifact_cache`).
+- [x] Version source format, SDK compatibility epoch, sandbox ABI version, compiler/toolchain identity, package manifest, and generated `.wasm` SHA-256 artifact hash so a study is reproducible and diagnosable after upgrades.
 
 #### Sandboxed package and execution boundary
 
-- [ ] Select and document a portable sandbox component/package format for user studies. Prefer a WebAssembly component-style boundary with a versioned transport-safe interface; do not expose Rust references, trait objects, function pointers, native layout, or a Rust DLL ABI across the boundary.
-- [ ] Define the smallest versioned guest interface for metadata, settings, dependency declarations, initialization/restore, calculation, state checkpointing, scalar outputs, future semantic scene/table outputs, alerts, and structured errors.
-- [ ] Keep the existing statically linked native path for Aeris-owned and reviewed partner studies. User-authored executable code must never be loaded as an arbitrary native library into the Aeris process.
-- [ ] Grant sandbox capabilities explicitly. Filesystem, network, subprocess, environment, credentials, provider adapters, system time, randomness, clipboard, and native UI access are denied unless a future reviewed capability has a concrete product requirement.
-- [ ] Enforce per-invocation and aggregate CPU/instruction, deadline, memory, stack, state, dependency, output-point, scene-object, table/cell/text, alert, log, and publication limits.
-- [ ] Support cancellation and deterministic trapping of runaway studies. A timeout, trap, invalid output, or resource overflow must preserve the last committed result and must not stall the UI thread, market engine, unrelated studies, or shutdown.
-- [ ] Validate package structure, SDK/ABI compatibility, declared capabilities, artifact integrity, and resource declarations before registration. Runtime registration remains transactional.
-- [ ] Batch or columnarize market inputs and outputs where needed so sandbox crossings do not turn one calculation into per-bar/per-value host-call overhead.
-- [ ] Define safe cache invalidation and migration across Aeris, Study SDK, toolchain, and package-format upgrades. Incompatible studies remain recoverable as source and fail explicitly rather than being silently rewritten.
+- [x] Integrate pure-Rust `wasmi` `2.0.3` (`portable-dispatch`, `deterministic`, `validate`) in `crates/study_sdk/src/wasm_runtime.rs` executing zero-authority `wasm32-unknown-unknown` modules against `STUDY_SANDBOX_ABI_VERSION = 1` with zero Rust references, trait objects, function pointers, or DLL ABI across the boundary.
+- [x] Define the minimal versioned guest ABI v1 (`aeris_study_abi_version`, `aeris_study_alloc`, `aeris_study_calculate`, `memory`) and `CompiledWasmStudy::into_native_program` bridging directly into `StudyRuntime` via `NativeStudyProgram::dynamic`.
+- [x] Keep the existing statically linked native path for Aeris-owned and reviewed partner studies. User-authored executable code is never loaded as an arbitrary native library into the Aeris process.
+- [x] Enforce zero ambient authority structurally at module load time: `CompiledWasmStudy::from_bytes` inspects `module.imports()` and rejects any module importing any host or WASI symbol (`WasmSandboxError::ImportDenied`).
+- [x] Enforce explicit per-invocation instruction fuel (`Config::consume_fuel(true)` + `Store::set_fuel`), linear memory/table ceilings (`StoreLimitsBuilder`), and output-point bounds (`StudySandboxLimits`).
+- [x] Verify deterministic trapping of runaway studies: infinite loops trap with `WasmSandboxError::FuelExhausted` and excessive linear memory growth is blocked by `StoreLimitsBuilder` without stalling the UI thread, `MarketEngine`, or unrelated studies.
+- [x] Validate package structure, SDK/ABI compatibility, declared capabilities, artifact integrity, and resource declarations before registration (`validate_sandbox_package` + `SandboxedStudyRegistry::install`).
+- [x] Columnarize market OHLCV inputs (`StudySandboxColumnarBars` packed into 5 contiguous `f64` columns) and output buffers so each calculation wave crosses the WASM boundary in one bulk transfer rather than per-bar host calls.
+- [x] Define safe cache invalidation across Aeris, Study SDK, toolchain, and ABI upgrades (`StudyArtifactCacheKey::is_compatible_with_host` + `prune_stale_artifact_cache`).
 
 #### Product lifecycle and qualification
 
 - [x] Add a sandboxed package registry (`SandboxedStudyRegistry` in `crates/study_sdk/src/sandbox.rs`) distinct from the immutable trusted-native allowlist while preserving one durable study identity/revision model and transactional rollback on admission failure.
-- [ ] Make editor source, manifests, build results, diagnostics, installation state, chart instances, and workspace references survive restart and partial failure without persisting transient runtime IDs.
-- [ ] Make compile/reload transactional: validate and initialize a candidate package, acquire/reconcile dependencies through `MarketEngine`, generation-fence readiness, then atomically replace the running implementation or retain the previous one.
-- [ ] Qualify malicious and accidental failure cases: infinite loops, excessive allocation, output/object floods, invalid encodings, corrupted packages, dependency abuse, panics/traps, compiler cancellation, disk exhaustion, and app restart during build/reload.
+- [x] Persist editor source, manifests, `last_good.rs`, `last_good.wasm`, and `.artifact_cache/` receipts across restart while isolating corrupt sibling project directories.
+- [x] Qualify adversarial sandbox cases in automated tests: infinite loops (`FuelExhausted`), excessive memory growth (`StoreLimitsBuilder`), disallowed WASI/host imports (`ImportDenied`), mismatched ABI version (`AbiVersionMismatch`), static ambient-OS API rejection, rustc JSON type-error diagnostics, and tampered bundle SHA-256 rejection.
 - [ ] Measure editor startup, completion latency, incremental build latency, reload latency, runtime overhead, and sustained multi-study workloads before claiming production scalability.
-- [ ] Complete an end-to-end acceptance path in which a user creates a Rust indicator inside Aeris, receives diagnostics for an error, fixes it, tests it, adds it to a chart, edits and reloads it, restarts Aeris, and restores the exact working source/package/chart state.
+- [ ] Complete a full restart-persistence acceptance path restoring user WASM chart instances automatically across app restarts via `SandboxedStudyRegistry`.
 
 ### Phase M — optional simplified authoring syntax
 

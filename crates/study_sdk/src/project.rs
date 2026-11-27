@@ -191,36 +191,144 @@ pub enum StudyProjectTemplate {
 
 fn stateless_overlay_source(identifier: &str, name: &str) -> String {
     format!(
-        r#"use aeris_study_sdk::prelude::*;
+        r"// Study: {name} ({identifier})
+// Stateless overlay computing the HL2 bar midpoint.
+// Return `f64::NAN` for bars that should render as a hard gap.
 
-pub fn definition(series: BarSeriesKey) -> StudyDefinition {{
-    StudyDefinitionBuilder::new("{identifier}")
-        .market(series, StreamRequirements::BARS)
-        .output(StudyOutputBuilder::line("mid", "{name}").build())
-        .invalidation(StudyInvalidationPolicy::SameRange)
-        .build()
-}}
-
-pub fn calculate(ctx: &mut StudyExecutionContext<'_>) -> Result<(), String> {{
-    let (inputs, outputs) = ctx.split();
-    let Some(StudyInputSeries::Market(market)) = inputs.input(0) else {{
-        return Ok(());
-    }};
-    let high = market.field(StudyBarField::High);
-    let low = market.field(StudyBarField::Low);
-    let dirty = inputs.dirty_range();
-    let end = dirty.end_exclusive.unwrap_or(outputs[0].len());
-    for row in dirty.start..end {{
-        let mid = high.value(row).zip(low.value(row)).and_then(|(h, l)| {{
-            let hf = fixed_point_to_f64(h, high.scale())?;
-            let lf = fixed_point_to_f64(l, low.scale())?;
-            Some((hf + lf) * 0.5)
-        }});
-        outputs[0].set(row, mid)?;
+pub fn calculate(
+    _open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    _close: &[f64],
+    _volume: &[f64],
+    out: &mut [f64],
+) {{
+    for i in 0..out.len() {{
+        out[i] = (high[i] + low[i]) * 0.5;
     }}
-    Ok(())
 }}
-"#
+"
+    )
+}
+
+fn stateful_recursive_source(identifier: &str, name: &str) -> String {
+    format!(
+        r"// Study: {name} ({identifier})
+// Recursive 20-period Exponential Moving Average (EMA).
+
+pub fn calculate(
+    _open: &[f64],
+    _high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    _volume: &[f64],
+    out: &mut [f64],
+) {{
+    let period = 20.0;
+    let alpha = 2.0 / (period + 1.0);
+    let mut ema = f64::NAN;
+    for i in 0..out.len() {{
+        let c = close[i];
+        if !c.is_finite() {{
+            ema = f64::NAN;
+        }} else if !ema.is_finite() {{
+            ema = c;
+        }} else {{
+            ema = alpha * c + (1.0 - alpha) * ema;
+        }}
+        out[i] = ema;
+    }}
+}}
+"
+    )
+}
+
+fn multi_timeframe_source(identifier: &str, name: &str) -> String {
+    format!(
+        r"// Study: {name} ({identifier})
+// Non-repainting 5-bar higher-timeframe stepped close.
+
+pub fn calculate(
+    _open: &[f64],
+    _high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    _volume: &[f64],
+    out: &mut [f64],
+) {{
+    let bucket = 5usize;
+    let mut confirmed_close = f64::NAN;
+    for i in 0..out.len() {{
+        if i >= bucket && i % bucket == 0 {{
+            confirmed_close = close[i - 1];
+        }}
+        out[i] = confirmed_close;
+    }}
+}}
+"
+    )
+}
+
+fn donchian_midline_source(identifier: &str, name: &str) -> String {
+    format!(
+        r"// Study: {name} ({identifier})
+// Rolling 20-bar Donchian channel midline.
+
+pub fn calculate(
+    _open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    _close: &[f64],
+    _volume: &[f64],
+    out: &mut [f64],
+) {{
+    let lookback = 20usize;
+    for i in 0..out.len() {{
+        if i + 1 < lookback {{
+            out[i] = f64::NAN;
+            continue;
+        }}
+        let start = i + 1 - lookback;
+        let mut hh = f64::NEG_INFINITY;
+        let mut ll = f64::INFINITY;
+        for j in start..=i {{
+            if high[j] > hh {{ hh = high[j]; }}
+            if low[j] < ll {{ ll = low[j]; }}
+        }}
+        out[i] = (hh + ll) * 0.5;
+    }}
+}}
+"
+    )
+}
+
+fn breakout_alert_source(identifier: &str, name: &str) -> String {
+    format!(
+        r"// Study: {name} ({identifier})
+// Breakout level: plots close when breaking above the prior 10-bar high.
+
+pub fn calculate(
+    _open: &[f64],
+    high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    _volume: &[f64],
+    out: &mut [f64],
+) {{
+    let lookback = 10usize;
+    for i in 0..out.len() {{
+        if i < lookback {{
+            out[i] = f64::NAN;
+            continue;
+        }}
+        let mut prev_high = f64::NEG_INFINITY;
+        for j in (i - lookback)..i {{
+            if high[j] > prev_high {{ prev_high = high[j]; }}
+        }}
+        out[i] = if close[i] > prev_high {{ close[i] }} else {{ prev_high }};
+    }}
+}}
+"
     )
 }
 
@@ -231,79 +339,24 @@ impl StudyProjectTemplate {
         let mut manifest = StudyProjectManifest::new(identifier, name);
         let source = match self {
             Self::StatelessOverlay => stateless_overlay_source(identifier, name),
-            Self::StatefulRecursive => format!(
-                r#"use aeris_study_sdk::prelude::*;
-
-#[derive(Clone, Copy, Default)]
-pub struct RunningState {{
-    pub last_value: Option<f64>,
-}}
-
-pub fn definition(series: BarSeriesKey) -> StudyDefinition {{
-    StudyDefinitionBuilder::new("{identifier}")
-        .market(series, StreamRequirements::BARS)
-        .output(StudyOutputBuilder::line("value", "{name}").build())
-        .invalidation(StudyInvalidationPolicy::FromFirstChanged)
-        .build()
-}}
-"#
-            ),
+            Self::StatefulRecursive => stateful_recursive_source(identifier, name),
             Self::MultiTimeframe => {
                 manifest
                     .capabilities
                     .insert(StudyProjectCapability::MultiContextRequests);
-                format!(
-                    r#"use aeris_study_sdk::prelude::*;
-
-pub fn definition(primary: BarSeriesKey, higher_tf: BarSeriesKey) -> StudyDefinition {{
-    StudyDefinitionBuilder::new("{identifier}")
-        .market(primary, StreamRequirements::BARS)
-        .market(higher_tf, StreamRequirements::BARS)
-        .setting(
-            StudySettingBuilder::timeframe("htf", StudyTimeframe::parse_label("1D").unwrap(), false)
-                .label("Higher Timeframe")
-                .build(),
-        )
-        .output(StudyOutputBuilder::line("htf_close", "{name}").build())
-        .invalidation(StudyInvalidationPolicy::FromFirstChanged)
-        .build()
-}}
-"#
-                )
+                multi_timeframe_source(identifier, name)
             }
             Self::DrawingTableDashboard => {
                 manifest
                     .capabilities
                     .insert(StudyProjectCapability::SemanticScene);
-                format!(
-                    r#"use aeris_study_sdk::prelude::*;
-
-pub fn definition(series: BarSeriesKey) -> StudyDefinition {{
-    StudyDefinitionBuilder::new("{identifier}")
-        .market(series, StreamRequirements::BARS)
-        .output(StudyOutputBuilder::line("anchor", "{name}").build())
-        .invalidation(StudyInvalidationPolicy::FromFirstChanged)
-        .build()
-}}
-"#
-                )
+                donchian_midline_source(identifier, name)
             }
             Self::AlertStudy => {
                 manifest
                     .capabilities
                     .insert(StudyProjectCapability::StudyAlerts);
-                format!(
-                    r#"use aeris_study_sdk::prelude::*;
-
-pub fn definition(series: BarSeriesKey) -> StudyDefinition {{
-    StudyDefinitionBuilder::new("{identifier}")
-        .market(series, StreamRequirements::BARS)
-        .output(StudyOutputBuilder::line("signal", "{name}").build())
-        .invalidation(StudyInvalidationPolicy::SameRange)
-        .build()
-}}
-"#
-                )
+                breakout_alert_source(identifier, name)
             }
         };
         (manifest, source)

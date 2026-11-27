@@ -6614,6 +6614,91 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn add_study_editor_project_to_chart(&mut self, cx: &mut Context<Self>) {
+        let prepared = match self.indicator_settings_dialog.as_mut() {
+            Some(IndicatorSettingsDialog::StudyEditor(dialog)) => dialog.prepare_chart_artifact(cx),
+            _ => return,
+        };
+        let (identifier, display_name, revision, compiled) = match prepared {
+            Ok(parts) => parts,
+            Err(_) => {
+                cx.notify();
+                return;
+            }
+        };
+        let status = match self.current_runtime_series() {
+            Err(error) => format!("Chart not ready: {error}"),
+            Ok(series) => match self.studies.allocate_local_id() {
+                None => "Study identity limit reached".to_string(),
+                Some(local_id) => {
+                    let definition =
+                        aeris_study_sdk::builders::StudyDefinitionBuilder::new(&identifier)
+                            .market(series.clone(), aeris_study_sdk::StreamRequirements::BARS)
+                            .output(
+                                aeris_study_sdk::builders::StudyOutputBuilder::line(
+                                    "value",
+                                    &display_name,
+                                )
+                                .build(),
+                            )
+                            .invalidation(
+                                aeris_study_sdk::StudyInvalidationPolicy::FromFirstChanged,
+                            )
+                            .build();
+                    let registration = NativeStudyRegistration {
+                        settings: aeris_study_sdk::StudySettings::default(),
+                        definition,
+                        program: compiled.into_native_program(
+                            aeris_study_sdk::sandbox::StudySandboxLimits::default(),
+                        ),
+                    };
+                    let persisted = WorkspaceChartStudyState {
+                        line_width: 0,
+                        output_colors: Vec::new(),
+                        local_id,
+                        identifier: identifier.clone(),
+                        implementation_revision: revision,
+                        settings: Vec::new(),
+                        dependencies: vec![WorkspaceStudyDependencyState {
+                            kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+                            streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+                            ..WorkspaceStudyDependencyState::default()
+                        }],
+                        visible: true,
+                        output_identifiers: vec!["value".to_string()],
+                    };
+                    match self.market_worker.try_register_study(registration) {
+                        Ok(sequence) => {
+                            self.studies.insert_pending(
+                                sequence,
+                                PendingRuntimeStudyState {
+                                    persisted,
+                                    resolved_chart_series: Some(series),
+                                    remove_on_registration: false,
+                                    persist_on_registration: false,
+                                    blocked: false,
+                                },
+                            );
+                            format!("Added sandboxed WASM study `{identifier}` to chart")
+                        }
+                        Err(TrySendError::Full(_)) => {
+                            "Study request queue is busy; try again".to_string()
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            "Study runtime is unavailable".to_string()
+                        }
+                    }
+                }
+            },
+        };
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.status_message = Some(status);
+        }
+        cx.notify();
+    }
+
     pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
         let Some((study_id, original)) = self
             .study_settings_dialog()
