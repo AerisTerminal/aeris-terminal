@@ -2453,9 +2453,9 @@ fn decode_wasm_scene_commands(bytes: &[u8], bars: &StudySandboxColumnarBars) -> 
             objects.push(StudySceneObject::Label(StudyLabelObject {
                 point: StudyPoint::new(trade.exit_timestamp_ns, trade.exit_price),
                 text: format!("{:+.2}", trade.net_pnl),
-                style: StudyLabelStyle::TextOnly,
+                style: StudyLabelStyle::LabelDown,
                 color: exit_color,
-                text_color: exit_color,
+                text_color: StudyColor::rgb(255, 255, 255),
             }));
         }
     }
