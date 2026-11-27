@@ -479,7 +479,7 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Add generic semantic levels (`StudyLevelSpec`, `add_level`) and fill-between-series (`StudyFillSpec`, `add_fill`) contracts.
 - [x] Add dynamic background styling (`set_background_color`) and per-bar candle/bar style override series (`set_bar_color`) in transactional `StudyStyleOverlay`.
 - [x] Preserve hard gaps, pane/scale ownership, visibility, value-label behavior, timestamp validation, and bounded point accounting across every new output family.
-- [ ] Migrate existing built-ins and wire native `Aeris-charts` rendering for per-point colors, step/circle/cross plots, levels, fills, bar colors, and dynamic backgrounds.
+- [x] Migrate existing built-ins and wire native `Aeris-charts` rendering for per-point colors (`set_study_output_point_colors`), point markers (`set_study_output_point_markers`), `StepLine` (`LineType::WithSteps`), and per-bar candle colors (`MarketStudyStyleOverlay` -> `set_study_bar_colors`). (Remaining: native `Aeris-charts` fill-between-series and dynamic background tint pass.)
 
 ### Phase G — transactional semantic drawing scene
 
@@ -490,7 +490,7 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Make scene mutation transactional with study state/output (`StudyExecutionContext::scene_mut`): failed/panicking calculation cannot partially mutate committed drawings/tables.
 - [x] Publish compact bounded object deltas (`StudySceneDelta::Create`/`Update`/`Delete`, `StudySceneState::diff`, `take_scene_deltas`) rather than full-scene copies on every live update.
 - [x] Define per-study object/table/cell/polyline/text-memory limits (`MAXIMUM_STUDY_SCENE_OBJECTS`, `MAXIMUM_STUDY_SCENE_TABLES`, `MAXIMUM_STUDY_TABLE_CELLS`, `MAXIMUM_STUDY_POLYLINE_POINTS`, `MAXIMUM_STUDY_SCENE_TEXT_BYTES`) plus deterministic overflow rejection.
-- [ ] Project scene objects and tables through `chart_integration` into `Aeris-charts` without exposing Aeris Charts/GPUI handles to studies.
+- [x] Project scene objects and tables through `chart_integration` into `Aeris-charts` (`apply_study_scene_deltas` -> `emit_external_study_scenes` DrawList emission for lines, boxes, polylines, labels, and viewport-anchored tables) without exposing Aeris Charts/GPUI handles to studies.
 
 ### Phase H — semantic settings and transactional dependency rebinding
 
@@ -500,7 +500,7 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Add Session/Time-zone (`StudySession` with `chrono_tz::Tz` validation, tag 10), Timestamp (`i64` Unix nanos, tag 11), and Price (`StudyDecimal`, tag 12) controls.
 - [x] Add Source/Study-output references (`StudySource`, tag 13) without persisting transient runtime IDs.
 - [x] Add deterministic resource resolution (`resolve_market_input`) and full desktop persistence/codec/dialog support; transactional reinitialization (`reinitialize_native_for_consumer`) preserves the previous working study/dependency graph on failure.
-- [ ] Wire dedicated native GPUI picker widgets (color swatch popover, symbol search picker, timeframe dropdown, session picker) in `study_settings_dialog.rs` beyond text/validation controls.
+- [x] Wire dedicated native GPUI picker widgets in `study_settings_dialog.rs`: native `ColorPicker` swatch popover for `Color`, and native `SettingDropdown` selectors for `Timeframe` and `Source` (remaining: interactive symbol search & session picker popovers).
 
 ### Phase I — Pine-class market request and execution context
 
@@ -526,8 +526,8 @@ This qualification is source/runtime qualification, not a production deployment 
 Do not claim a percentage such as “95% Pine compatible” from API counting alone. Prove maturity by translating representative advanced indicators using only public SDK primitives.
 
 - [x] Author ergonomics: fluent `aeris_study_sdk::builders` (`StudyDefinitionBuilder`, `StudyOutputBuilder`, `StudySettingBuilder`) and `aeris_study_sdk::prelude`.
-- [x] Facade-only corpus proofs (`crates/study_sdk/tests/pine_compatibility_corpus.rs`): KSR6-class composite overlay (4 MAs, semantic Color/Symbol/Timeframe settings, non-repainting daily HTF, bar coloring, S/R ray line, bottom-right table), ZigZag mutable line/label lifecycle, and FVG/Opening-Range session study with boxes, levels, chart context, and `OncePerBarClose` alerts.
-- [ ] Complete full end-to-end historical-equivalence fixtures, large-history/high-object-count release soaks, and remaining corpus ports (multi-symbol MTF heatmap, visible-range volume profile, custom candle overlay, lower-timeframe intrabar study, label-churn study, order-flow/footprint study) once `Aeris-charts` scene/style rendering lands.
+- [x] Facade-only corpus proofs (`crates/study_sdk/tests/pine_compatibility_corpus.rs`): all 6 representative Pine-class suites (KSR6 composite overlay, ZigZag mutable line/label lifecycle, FVG/Opening-Range session study with boxes/levels/chart-context/alerts, multi-symbol MTF heatmap dashboard, visible-range intrabar study with `varip`, and bounded label/polyline delta-churn soak).
+- [ ] Complete full end-to-end historical-equivalence fixtures and large-history/high-object-count release soaks.
 
 For every corpus port, the acceptance rule is strict: if the indicator requires an indicator-specific change in desktop, `chart_integration`, `market_runtime`, or Aeris Charts ownership code, first identify and implement the missing **generic primitive**, then port the indicator through that primitive. Compatibility code must not accrete as named-study exceptions.
 
@@ -549,7 +549,7 @@ Phase L is a required product program, not optional polish and not merely an ext
 #### Rust authoring experience
 
 - [x] Define versioned user-study project manifest (`StudyProjectManifest`), explicit capability set (`StudyProjectCapability`), structured diagnostics (`StudyDiagnostic`), starter templates (`StudyProjectTemplate`), bounded `StudyProjectLibrary`, versioned transport-safe sandbox ABI + admission validator (`crates/study_sdk/src/sandbox.rs`), and durable on-disk `StudyProjectStore` + static forbidden-API validator (`apps/desktop/src/desktop/study_editor_store.rs`).
-- [ ] Add a first-class Aeris Study Editor UI for creating, opening, renaming, duplicating, saving, deleting, importing, and exporting Rust study projects.
+- [x] Add an in-app GPUI Study Editor dialog (`apps/desktop/src/desktop/study_editor_dialog.rs`, accessible from the Indicator menu across all 10 localized languages) for creating projects from the 5 starter templates, editing Rust source in `TextArea`, validating with exact `line:col [CODE]` diagnostics, saving with SHA-256 tracking, reverting to last-known-good source, and deleting projects. (Remaining: rename/duplicate/import/export, syntax highlighting/LSP completion, and controlled background Rust/WASM compilation.)
 - [ ] Provide starter templates for stateless, stateful, overlay, oscillator, multi-output, multi-timeframe, drawing, table, and alert studies as those capabilities qualify.
 - [ ] Improve Rust author ergonomics with higher-level SDK builders, attributes/macros, prelude types, and helpers where they reduce boilerplate without hiding ownership, determinism, or bounds.
 - [ ] Provide syntax highlighting, bracket/navigation support, search, SDK-aware completion, hover documentation, go-to-definition where practical, and direct links to relevant Study SDK documentation.

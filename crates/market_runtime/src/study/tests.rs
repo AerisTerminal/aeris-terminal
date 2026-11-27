@@ -4082,3 +4082,74 @@ fn generalized_styles_transactional_scene_tables_and_deduplicated_alerts_commit_
     assert_eq!(runtime.scene(study_id).expect("scene preserved").len(), 4);
     assert_eq!(runtime.take_triggered_alerts(study_id), Vec::new());
 }
+
+#[test]
+fn pure_non_bar_event_timeline_enforces_ordering_coalescing_retention_and_chart_mapping() {
+    let mut timeline = StudyEventTimeline::new(3, StudyEventCoalescePolicy::LatestPerTimestamp);
+    assert!(
+        timeline
+            .push(StudyEventPoint {
+                timestamp_unix_nanos: 1_100_000_000,
+                source_sequence: 1,
+                kind: StudyEventKind::Trade,
+                value: 10.0,
+            })
+            .expect("first event")
+    );
+    // Same timestamp coalesces in place.
+    assert!(
+        timeline
+            .push(StudyEventPoint {
+                timestamp_unix_nanos: 1_100_000_000,
+                source_sequence: 2,
+                kind: StudyEventKind::Trade,
+                value: 12.5,
+            })
+            .expect("coalesced event")
+    );
+    assert_eq!(timeline.len(), 1);
+    // Out-of-order timestamp is safely ignored.
+    assert!(
+        !timeline
+            .push(StudyEventPoint {
+                timestamp_unix_nanos: 1_000_000_000,
+                source_sequence: 3,
+                kind: StudyEventKind::Quote,
+                value: 9.0,
+            })
+            .expect("out-of-order ignored")
+    );
+    // Non-finite values are rejected.
+    assert!(
+        timeline
+            .push(StudyEventPoint {
+                timestamp_unix_nanos: 1_500_000_000,
+                source_sequence: 4,
+                kind: StudyEventKind::Depth,
+                value: f64::NAN,
+            })
+            .is_err()
+    );
+    // Retention bound evicts oldest.
+    for (i, ts) in [
+        (0_u32, 1_600_000_000),
+        (1_u32, 2_100_000_000),
+        (2_u32, 3_200_000_000),
+    ] {
+        assert!(
+            timeline
+                .push(StudyEventPoint {
+                    timestamp_unix_nanos: ts,
+                    source_sequence: 10 + u64::from(i),
+                    kind: StudyEventKind::Trade,
+                    value: 20.0 + f64::from(i),
+                })
+                .expect("bounded push")
+        );
+    }
+    assert_eq!(timeline.len(), 3);
+    assert_eq!(timeline.evicted_count(), 1);
+    let (chart_ts, chart_vals) = timeline.project_to_chart_seconds();
+    assert_eq!(chart_ts, vec![1_000_000_000, 2_000_000_000, 3_000_000_000]);
+    assert_eq!(chart_vals, vec![Some(20.0), Some(21.0), Some(22.0)]);
+}

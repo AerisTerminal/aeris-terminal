@@ -442,3 +442,157 @@ impl StudyBarFieldSeries<'_> {
             .map(|bar| bar.exchange_timestamp_unix_nanos)
     }
 }
+
+/// Hard retention bound for one pure non-bar study event timeline.
+pub const MAXIMUM_STUDY_EVENT_TIMELINE_POINTS: usize = 8_192;
+
+/// Non-bar microstructure event stream kind carried by a [`StudyEventPoint`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StudyEventKind {
+    Trade,
+    Quote,
+    Depth,
+}
+
+/// Explicit coalescing policy for a pure non-bar [`StudyEventTimeline`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StudyEventCoalescePolicy {
+    /// Retain every monotonically ordered `(timestamp_unix_nanos, source_sequence)` event.
+    ExactSequence,
+    /// Coalesce events sharing the same `timestamp_unix_nanos` into the newest event.
+    LatestPerTimestamp,
+    /// Bucket events into fixed nanosecond windows and retain the latest event per bucket.
+    WindowBucketNanos(std::num::NonZeroI64),
+}
+
+/// One bounded non-bar event sample emitted onto a [`StudyEventTimeline`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StudyEventPoint {
+    pub timestamp_unix_nanos: i64,
+    pub source_sequence: u64,
+    pub kind: StudyEventKind,
+    pub value: f64,
+}
+
+/// Bounded, ordered pure non-bar event timeline for trade/quote/depth studies.
+///
+/// Provides explicit retention, coalescing, monotonic ordering, and deterministic
+/// whole-second chart projection without requiring a bar primary dependency.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StudyEventTimeline {
+    capacity: usize,
+    coalesce: StudyEventCoalescePolicy,
+    points: VecDeque<StudyEventPoint>,
+    evicted: u64,
+}
+
+impl StudyEventTimeline {
+    /// Creates a bounded event timeline clamped to `1..=MAXIMUM_STUDY_EVENT_TIMELINE_POINTS`.
+    #[must_use]
+    pub fn new(capacity: usize, coalesce: StudyEventCoalescePolicy) -> Self {
+        let capacity = capacity.clamp(1, MAXIMUM_STUDY_EVENT_TIMELINE_POINTS);
+        Self {
+            capacity,
+            coalesce,
+            points: VecDeque::new(),
+            evicted: 0,
+        }
+    }
+
+    /// Returns the number of retained event points.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    /// Returns whether no event points are currently retained.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// Returns the total number of oldest points evicted due to retention bounds.
+    #[must_use]
+    pub const fn evicted_count(&self) -> u64 {
+        self.evicted
+    }
+
+    /// Iterates retained event points from oldest to newest.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &StudyEventPoint> {
+        self.points.iter()
+    }
+
+    /// Clears all retained points without resetting capacity or coalescing policy.
+    pub fn clear(&mut self) {
+        self.points.clear();
+    }
+
+    /// Appends or coalesces one event point under the configured ordering and retention policy.
+    ///
+    /// Out-of-order events older than the newest retained `(timestamp_unix_nanos, source_sequence)`
+    /// are ignored (`Ok(false)`).
+    ///
+    /// # Errors
+    /// Returns an error if `point.value` is non-finite.
+    pub fn push(&mut self, mut point: StudyEventPoint) -> Result<bool, String> {
+        if !point.value.is_finite() {
+            return Err("study event timeline value must be finite".to_string());
+        }
+        if let StudyEventCoalescePolicy::WindowBucketNanos(bucket) = self.coalesce {
+            let step = bucket.get();
+            point.timestamp_unix_nanos = point.timestamp_unix_nanos.div_euclid(step) * step;
+        }
+        if let Some(last) = self.points.back_mut() {
+            if point.timestamp_unix_nanos < last.timestamp_unix_nanos
+                || (point.timestamp_unix_nanos == last.timestamp_unix_nanos
+                    && point.source_sequence < last.source_sequence)
+            {
+                return Ok(false);
+            }
+            let same_bucket = match self.coalesce {
+                StudyEventCoalescePolicy::ExactSequence => {
+                    point.timestamp_unix_nanos == last.timestamp_unix_nanos
+                        && point.source_sequence == last.source_sequence
+                }
+                StudyEventCoalescePolicy::LatestPerTimestamp
+                | StudyEventCoalescePolicy::WindowBucketNanos(_) => {
+                    point.timestamp_unix_nanos == last.timestamp_unix_nanos
+                }
+            };
+            if same_bucket {
+                *last = point;
+                return Ok(true);
+            }
+        }
+        if self.points.len() >= self.capacity {
+            let _ = self.points.pop_front();
+            self.evicted = self.evicted.saturating_add(1);
+        }
+        self.points.push_back(point);
+        Ok(true)
+    }
+
+    /// Projects retained sub-second events deterministically onto strictly increasing whole-second
+    /// chart timestamps (in Unix nanoseconds), keeping the latest value within each second.
+    #[must_use]
+    pub fn project_to_chart_seconds(&self) -> (Vec<i64>, Vec<Option<f64>>) {
+        const NANOS_PER_SECOND: i64 = 1_000_000_000;
+        let mut timestamps: Vec<i64> = Vec::new();
+        let mut values: Vec<Option<f64>> = Vec::new();
+        for point in &self.points {
+            let sec_ns = point
+                .timestamp_unix_nanos
+                .div_euclid(NANOS_PER_SECOND)
+                .saturating_mul(NANOS_PER_SECOND);
+            if timestamps.last().copied() == Some(sec_ns) {
+                if let Some(last) = values.last_mut() {
+                    *last = Some(point.value);
+                }
+            } else {
+                timestamps.push(sec_ns);
+                values.push(Some(point.value));
+            }
+        }
+        (timestamps, values)
+    }
+}

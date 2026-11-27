@@ -39,9 +39,10 @@ pub use context::{
 pub use error::StudyRuntimeError;
 pub(crate) use market_views::StudyNonBarChange;
 pub use market_views::{
-    StudyBarField, StudyBarFieldSeries, StudyDepthView, StudyInstanceId, StudyLiveMarketData,
-    StudyMarketInput, StudyMarketSeries, StudyOutputId, StudyQuoteView, StudyTradeSample,
-    StudyTradeWindow,
+    MAXIMUM_STUDY_EVENT_TIMELINE_POINTS, StudyBarField, StudyBarFieldSeries, StudyDepthView,
+    StudyEventCoalescePolicy, StudyEventKind, StudyEventPoint, StudyEventTimeline, StudyInstanceId,
+    StudyLiveMarketData, StudyMarketInput, StudyMarketSeries, StudyOutputId, StudyQuoteView,
+    StudyTradeSample, StudyTradeWindow,
 };
 pub use output::{
     MAXIMUM_STUDY_FILLS, MAXIMUM_STUDY_LEVELS, StudyDefinition, StudyDependency,
