@@ -203,6 +203,36 @@ impl Coordinator<'_> {
                     ));
                 }
             }
+            let generation = self
+                .engine
+                .current_demand(owner)
+                .and_then(|demand| demand.generation);
+            let deltas = self.studies.take_scene_deltas(study_id);
+            let alerts = self.studies.take_triggered_alerts(study_id);
+            if let Some(events) = self.events.get_mut(&owner) {
+                if !deltas.is_empty() {
+                    events.publish_study_scene_delta(MarketRuntimeEvent::StudySceneDelta(
+                        crate::MarketStudySceneDelta {
+                            consumer_id: owner,
+                            generation,
+                            study_id,
+                            study_identifier: study_identifier.clone(),
+                            deltas,
+                        },
+                    ));
+                }
+                for alert in alerts {
+                    events.publish_study_alert(MarketRuntimeEvent::StudyAlertTriggered(
+                        crate::MarketStudyAlertTriggered {
+                            consumer_id: owner,
+                            generation,
+                            study_id,
+                            study_identifier: study_identifier.clone(),
+                            event: alert,
+                        },
+                    ));
+                }
+            }
         }
     }
 

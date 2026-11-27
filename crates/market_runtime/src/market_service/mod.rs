@@ -777,6 +777,10 @@ struct ConsumerEvents {
     /// Removal is infrequent and subtree-sized. Consecutive removals are merged
     /// into one bounded event before reaching presentation.
     study_removed: Option<MarketRuntimeEvent>,
+    /// Bounded compact scene deltas coalesced per study instance.
+    study_scene_deltas: BTreeMap<StudyInstanceId, MarketRuntimeEvent>,
+    /// Bounded FIFO of committed study alerts awaiting host delivery.
+    study_alerts: VecDeque<MarketRuntimeEvent>,
     order_book: Option<MarketRuntimeEvent>,
     /// The consumer's incremental tape stream. A `Reset` always covers
     /// everything queued before it, so overflow replaces the queue with one

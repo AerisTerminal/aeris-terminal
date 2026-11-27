@@ -517,7 +517,7 @@ This qualification is source/runtime qualification, not a production deployment 
 
 - [x] Add typed study alert condition/event contracts (`StudyAlertEvent`, `StudyAlertFrequency::OncePerBar`/`OncePerBarClose`/`EveryTick`) with bounded payloads, wave caps, transactional rollback, and per-bar deduplication (`StudyRuntime::take_triggered_alerts`).
 - [x] Keep alert delivery/product UX outside native calculation code; studies emit pure semantic events while the host owns delivery.
-- [ ] Route `StudyRuntime::take_triggered_alerts` through coordinator publication into the desktop toaster/notification feed.
+- [x] Route `StudyRuntime::take_triggered_alerts` and `StudyRuntime::take_scene_deltas` through coordinator publication (`MarketRuntimeEvent::StudyAlertTriggered`, `MarketRuntimeEvent::StudySceneDelta`) into the desktop bridge and toaster/notification feed.
 - [ ] Add canonical advanced data contracts only for data Aeris actually owns: intrabar arrays, footprint/profile/order-flow, and later corporate/fundamental/economic/currency contexts if trustworthy sources exist.
 - [x] Keep provider wire types, credentials, sessions, and raw adapter ownership outside the SDK.
 
@@ -548,7 +548,8 @@ Phase L is a required product program, not optional polish and not merely an ext
 
 #### Rust authoring experience
 
-- [ ] Add a first-class Aeris Study Editor for creating, opening, renaming, duplicating, saving, deleting, importing, and exporting Rust study projects.
+- [x] Define versioned user-study project manifest (`StudyProjectManifest`), explicit capability set (`StudyProjectCapability`), structured diagnostics (`StudyDiagnostic`), and starter templates (`StudyProjectTemplate`: stateless, stateful, MTF, drawing/table, alert) in `crates/study_sdk/src/project.rs`.
+- [ ] Add a first-class Aeris Study Editor UI for creating, opening, renaming, duplicating, saving, deleting, importing, and exporting Rust study projects.
 - [ ] Provide starter templates for stateless, stateful, overlay, oscillator, multi-output, multi-timeframe, drawing, table, and alert studies as those capabilities qualify.
 - [ ] Improve Rust author ergonomics with higher-level SDK builders, attributes/macros, prelude types, and helpers where they reduce boilerplate without hiding ownership, determinism, or bounds.
 - [ ] Provide syntax highlighting, bracket/navigation support, search, SDK-aware completion, hover documentation, go-to-definition where practical, and direct links to relevant Study SDK documentation.

@@ -2670,7 +2670,9 @@ impl WorkspaceSurface {
             }
             aeris_market_runtime::MarketRuntimeEvent::StudyOutputSnapshot(_)
             | aeris_market_runtime::MarketRuntimeEvent::StudyOutputsInvalidated(_)
-            | aeris_market_runtime::MarketRuntimeEvent::StudyRemoved(_) => {
+            | aeris_market_runtime::MarketRuntimeEvent::StudyRemoved(_)
+            | aeris_market_runtime::MarketRuntimeEvent::StudySceneDelta(_)
+            | aeris_market_runtime::MarketRuntimeEvent::StudyAlertTriggered(_) => {
                 self.apply_runtime_study(event, cx);
             }
             aeris_market_runtime::MarketRuntimeEvent::PriceAlertTriggered(_) => {
@@ -2854,6 +2856,43 @@ impl WorkspaceSurface {
             }
             aeris_market_runtime::MarketRuntimeEvent::StudyRemoved(removed) => {
                 self.apply_study_removal_message(&removed, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::StudySceneDelta(delta) => {
+                if let Some(generation) = delta.generation
+                    && !self
+                        .chart_pane_controller
+                        .accept_publication(generation.0.get())
+                {
+                    return;
+                }
+            }
+            aeris_market_runtime::MarketRuntimeEvent::StudyAlertTriggered(alert) => {
+                if let Some(generation) = alert.generation
+                    && !self
+                        .chart_pane_controller
+                        .accept_publication(generation.0.get())
+                {
+                    return;
+                }
+                let detail = if alert.event.message.is_empty() {
+                    format!("{}: {}", alert.study_identifier, alert.event.condition_id)
+                } else {
+                    format!("{}: {}", alert.study_identifier, alert.event.message)
+                };
+                cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+                    key: notification_center::NoticeKey {
+                        scope: cx.entity_id().as_u64(),
+                        kind: "study_alert",
+                    },
+                    severity: notification_center::NoticeSeverity::Info,
+                    tone: notification_center::NoticeTone::Info,
+                    source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
+                    title: tr!(panels::STUDY_SETTINGS),
+                    detail,
+                    action: None,
+                    lifetime: notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
+                }));
+                cx.notify();
             }
             _ => diagnostic!("Aeris pane received an unexpected runtime study event"),
         }

@@ -318,6 +318,8 @@ impl ConsumerEvents {
             || !self.series.is_empty()
             || self.study_invalidated.is_some()
             || !self.study_outputs.is_empty()
+            || !self.study_scene_deltas.is_empty()
+            || !self.study_alerts.is_empty()
             || self.study_removed.is_some()
             || self.series_state.is_some()
             || self.demand_error.is_some()
@@ -342,6 +344,8 @@ impl ConsumerEvents {
                     .or_else(|| self.series.pop_front())
                     .or_else(|| self.study_invalidated.take())
                     .or_else(|| self.study_outputs.pop_first().map(|(_, event)| event))
+                    .or_else(|| self.study_scene_deltas.pop_first().map(|(_, event)| event))
+                    .or_else(|| self.study_alerts.pop_front())
                     .or_else(|| self.study_removed.take())
                     .or_else(|| self.series_state.take())
                     .or_else(|| self.demand_error.take())
@@ -421,6 +425,43 @@ impl ConsumerEvents {
         self.study_outputs.insert(snapshot.output_id, event);
     }
 
+    /// Merges or replaces pending semantic scene deltas for one study instance, bounded to
+    /// `MAXIMUM_STUDY_SCENE_OBJECTS * 2` entries per queued envelope.
+    pub(super) fn publish_study_scene_delta(&mut self, event: MarketRuntimeEvent) {
+        let MarketRuntimeEvent::StudySceneDelta(mut next) = event else {
+            return;
+        };
+        let cap = crate::study::MAXIMUM_STUDY_SCENE_OBJECTS * 2;
+        if let Some(MarketRuntimeEvent::StudySceneDelta(existing)) =
+            self.study_scene_deltas.get_mut(&next.study_id)
+            && existing.generation == next.generation
+        {
+            existing.deltas.append(&mut next.deltas);
+            if existing.deltas.len() > cap {
+                let excess = existing.deltas.len() - cap;
+                existing.deltas.drain(..excess);
+            }
+            return;
+        }
+        if next.deltas.len() > cap {
+            let excess = next.deltas.len() - cap;
+            next.deltas.drain(..excess);
+        }
+        self.study_scene_deltas
+            .insert(next.study_id, MarketRuntimeEvent::StudySceneDelta(next));
+    }
+
+    /// Queues one committed study alert in a bounded 64-entry FIFO (dropping oldest on overflow).
+    pub(super) fn publish_study_alert(&mut self, event: MarketRuntimeEvent) {
+        if !matches!(event, MarketRuntimeEvent::StudyAlertTriggered(_)) {
+            return;
+        }
+        if self.study_alerts.len() >= 64 {
+            let _ = self.study_alerts.pop_front();
+        }
+        self.study_alerts.push_back(event);
+    }
+
     /// Removes queued output images for a deleted subtree and merges the
     /// presentation removal notice with any earlier unconsumed removal.
     pub(super) fn publish_study_removed(
@@ -438,6 +479,8 @@ impl ConsumerEvents {
             .collect::<std::collections::BTreeSet<_>>();
         self.study_outputs
             .retain(|output, _| !removed_set.contains(&output.study_id));
+        self.study_scene_deltas
+            .retain(|study_id, _| !removed_set.contains(study_id));
 
         let mut study_ids = match self.study_removed.take() {
             Some(MarketRuntimeEvent::StudyRemoved(previous))
@@ -474,6 +517,8 @@ impl ConsumerEvents {
             .collect::<std::collections::BTreeSet<_>>();
         self.study_outputs
             .retain(|output, _| !invalidated_set.contains(&output.study_id));
+        self.study_scene_deltas
+            .retain(|study_id, _| !invalidated_set.contains(study_id));
         let mut study_ids = match self.study_invalidated.take() {
             Some(MarketRuntimeEvent::StudyOutputsInvalidated(previous))
                 if previous.consumer_id == consumer_id && previous.generation == generation =>

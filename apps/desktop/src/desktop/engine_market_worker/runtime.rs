@@ -468,6 +468,8 @@ fn apply_received_event(
                 | MarketRuntimeEvent::StudyOutputSnapshot(_)
                 | MarketRuntimeEvent::StudyOutputsInvalidated(_)
                 | MarketRuntimeEvent::StudyRemoved(_)
+                | MarketRuntimeEvent::StudySceneDelta(_)
+                | MarketRuntimeEvent::StudyAlertTriggered(_)
                 | MarketRuntimeEvent::PriceAlertTriggered(_)
                 | MarketRuntimeEvent::ProviderState(_)
         )
@@ -564,7 +566,9 @@ fn deliver_fenced_pane_event(
         MarketRuntimeEvent::TradeTapeUpdate(_) => deliver_runtime_trade_tape(endpoint, event),
         MarketRuntimeEvent::StudyOutputSnapshot(_)
         | MarketRuntimeEvent::StudyOutputsInvalidated(_)
-        | MarketRuntimeEvent::StudyRemoved(_) => deliver_runtime_study(endpoint, event),
+        | MarketRuntimeEvent::StudyRemoved(_)
+        | MarketRuntimeEvent::StudySceneDelta(_)
+        | MarketRuntimeEvent::StudyAlertTriggered(_) => deliver_runtime_study(endpoint, event),
         MarketRuntimeEvent::PriceAlertTriggered(_) => deliver_runtime_price_alert(endpoint, event),
         MarketRuntimeEvent::ProviderState(_) => {
             deliver_runtime_provider_state(endpoint, expected_provider, event)
@@ -733,6 +737,8 @@ pub(super) fn deliver_runtime_study(
             (invalidated.consumer_id, invalidated.generation)
         }
         MarketRuntimeEvent::StudyRemoved(removed) => (removed.consumer_id, removed.generation),
+        MarketRuntimeEvent::StudySceneDelta(delta) => (delta.consumer_id, delta.generation),
+        MarketRuntimeEvent::StudyAlertTriggered(alert) => (alert.consumer_id, alert.generation),
         _ => return Err("unexpected runtime study event".into()),
     };
     if consumer_id.0.get() != endpoint.consumer_id {

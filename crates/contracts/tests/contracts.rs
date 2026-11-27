@@ -310,6 +310,85 @@ fn market_recording_round_trips_and_older_workspaces_keep_their_bytes() {
 }
 
 #[test]
+fn semantic_study_settings_round_trip_and_older_studies_keep_their_bytes() {
+    use aeris_contracts::{
+        WorkspaceStudyDecimalState, WorkspaceStudySessionState, WorkspaceStudySourceState,
+        WorkspaceStudySymbolState, WorkspaceStudyTimeframeState,
+    };
+
+    let study = WorkspaceChartStudyState {
+        local_id: 7,
+        identifier: "corpus.ksr6".into(),
+        implementation_revision: 1,
+        visible: true,
+        output_identifiers: vec!["ma_10".into()],
+        settings: vec![
+            WorkspaceStudySettingState {
+                identifier: "bull_color".into(),
+                value: Some(workspace_study_setting_state::Value::Color(0x22c5_5eff)),
+            },
+            WorkspaceStudySettingState {
+                identifier: "rs_symbol".into(),
+                value: Some(workspace_study_setting_state::Value::Symbol(
+                    WorkspaceStudySymbolState {
+                        provider_id: "rithmic".into(),
+                        instrument_id: "ES".into(),
+                    },
+                )),
+            },
+            WorkspaceStudySettingState {
+                identifier: "adr_tf".into(),
+                value: Some(workspace_study_setting_state::Value::Timeframe(
+                    WorkspaceStudyTimeframeState {
+                        interval: "1D".into(),
+                    },
+                )),
+            },
+            WorkspaceStudySettingState {
+                identifier: "rth".into(),
+                value: Some(workspace_study_setting_state::Value::Session(
+                    WorkspaceStudySessionState {
+                        start_minute: 570,
+                        end_minute: 960,
+                        time_zone: "America/New_York".into(),
+                    },
+                )),
+            },
+            WorkspaceStudySettingState {
+                identifier: "anchor".into(),
+                value: Some(workspace_study_setting_state::Value::Timestamp(
+                    1_700_000_000_000_000_000,
+                )),
+            },
+            WorkspaceStudySettingState {
+                identifier: "level".into(),
+                value: Some(workspace_study_setting_state::Value::Price(
+                    WorkspaceStudyDecimalState {
+                        mantissa: 500_025,
+                        scale: 2,
+                    },
+                )),
+            },
+            WorkspaceStudySettingState {
+                identifier: "src".into(),
+                value: Some(workspace_study_setting_state::Value::Source(
+                    WorkspaceStudySourceState {
+                        kind: 9,
+                        study_local_id: 2,
+                        output_identifier: "ema".into(),
+                    },
+                )),
+            },
+        ],
+        ..WorkspaceChartStudyState::default()
+    };
+
+    let decoded = WorkspaceChartStudyState::decode(study.encode_to_vec().as_slice())
+        .expect("semantic study settings decode");
+    assert_eq!(decoded, study);
+}
+
+#[test]
 fn panes_written_before_order_book_settings_open_with_none_and_keep_their_bytes() {
     let mut pane = workspace_tab().panes.remove(0);
     pane.order_book = None;

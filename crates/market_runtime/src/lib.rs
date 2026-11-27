@@ -351,6 +351,26 @@ pub struct MarketStudyOutputsInvalidated {
     pub study_ids: Vec<study::StudyInstanceId>,
 }
 
+/// Compact incremental semantic drawing/table deltas emitted by one committed study wave.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketStudySceneDelta {
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: Option<aeris_market_engine::GenerationId>,
+    pub study_id: study::StudyInstanceId,
+    pub study_identifier: String,
+    pub deltas: Vec<study::StudySceneDelta>,
+}
+
+/// One committed, deduplicated study alert emitted for product-owned notification delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketStudyAlertTriggered {
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: Option<aeris_market_engine::GenerationId>,
+    pub study_id: study::StudyInstanceId,
+    pub study_identifier: String,
+    pub event: study::StudyAlertEvent,
+}
+
 /// Direct in-process market event delivered from the runtime to desktop panes.
 ///
 /// This is an ordinary typed in-process event boundary. The variants are
@@ -372,6 +392,8 @@ pub enum MarketRuntimeEvent {
     StudyOutputSnapshot(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),
+    StudySceneDelta(MarketStudySceneDelta),
+    StudyAlertTriggered(MarketStudyAlertTriggered),
     PriceAlertTriggered(MarketPriceAlertTrigger),
     ProviderInstrumentSearchResult(crate::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),
@@ -402,6 +424,8 @@ impl MarketRuntimeEvent {
             Self::StudyOutputSnapshot(event) => event.generation,
             Self::StudyOutputsInvalidated(event) => event.generation,
             Self::StudyRemoved(event) => event.generation,
+            Self::StudySceneDelta(event) => event.generation,
+            Self::StudyAlertTriggered(event) => event.generation,
             Self::SelectionOutcome(_)
             | Self::CatalogReady { .. }
             | Self::ProviderState(_)
