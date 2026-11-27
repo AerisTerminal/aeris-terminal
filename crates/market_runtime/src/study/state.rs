@@ -5,6 +5,7 @@ use super::{
 use aeris_market_data::BarSeriesKey;
 use aeris_market_engine::{MarketDataLeaseId, StreamRequirements};
 use std::any::Any;
+use std::sync::Arc;
 
 struct NativeStudyStateValue<T> {
     value: T,
@@ -122,13 +123,23 @@ impl NativeStudyState {
 
 /// Trusted native Rust calculation entry point.
 pub type NativeStudyCalculate = for<'a> fn(&mut StudyExecutionContext<'a>) -> Result<(), String>;
+/// Dynamically bound calculation closure used by sandboxed WebAssembly studies.
+pub type DynamicStudyCalculate =
+    Arc<dyn for<'a> Fn(&mut StudyExecutionContext<'a>) -> Result<(), String> + Send + Sync>;
 /// Trusted native Rust factory for one fresh per-instance runtime state value.
 pub type NativeStudyStateFactory = fn(&StudySettings) -> Result<NativeStudyState, String>;
 
+fn dynamic_placeholder_calculate(_context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+    Err("dynamic study invoked without dynamic_calculate handler".to_string())
+}
+
 /// Executable code handle kept separate from the durable study definition.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct NativeStudyProgram {
     pub calculate: NativeStudyCalculate,
+    /// Optional dynamically-bound calculation closure (for example a sandboxed WASM study).
+    /// When `Some`, the worker invokes this closure instead of `calculate`.
+    pub dynamic_calculate: Option<DynamicStudyCalculate>,
     /// Optional factory for recursive/checkpoint state. Stateless studies leave
     /// this `None`. The runtime invokes it for registration, reinitialization,
     /// and every covering/full execution so stale checkpoints cannot cross a
@@ -147,6 +158,20 @@ impl NativeStudyProgram {
     pub const fn stateless(calculate: NativeStudyCalculate) -> Self {
         Self {
             calculate,
+            dynamic_calculate: None,
+            state_factory: None,
+            intrabar_state_factory: None,
+            observes_chart_context: false,
+        }
+    }
+
+    /// Builds a dynamically-bound program (such as a sandboxed WebAssembly study)
+    /// that executes on the same bounded worker and transactional commit path.
+    #[must_use]
+    pub fn dynamic(calculate: DynamicStudyCalculate) -> Self {
+        Self {
+            calculate: dynamic_placeholder_calculate,
+            dynamic_calculate: Some(calculate),
             state_factory: None,
             intrabar_state_factory: None,
             observes_chart_context: false,
@@ -162,6 +187,7 @@ impl NativeStudyProgram {
     ) -> Self {
         Self {
             calculate,
+            dynamic_calculate: None,
             state_factory: Some(state_factory),
             intrabar_state_factory: None,
             observes_chart_context: false,

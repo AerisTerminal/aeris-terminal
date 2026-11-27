@@ -6,11 +6,11 @@ use aeris_market_data::{OrderBook, TopOfBookQuote};
 use std::collections::VecDeque;
 
 use super::{
-    AssertUnwindSafe, NativeStudyCalculate, NativeStudyCalculation, NativeStudyState,
-    ResolvedStudyInput, StudyAlertEvent, StudyChartContext, StudyDepthView, StudyDirtyRange,
-    StudyExecutionContext, StudyExecutionMeta, StudyLiveMarketData, StudyOutputBuffer,
-    StudyOutputTimeline, StudyQuoteView, StudySceneState, StudySettings, StudyStyleOverlay,
-    StudyTradeWindow, bounded_execution_detail, catch_unwind,
+    AssertUnwindSafe, DynamicStudyCalculate, NativeStudyCalculate, NativeStudyCalculation,
+    NativeStudyState, ResolvedStudyInput, StudyAlertEvent, StudyChartContext, StudyDepthView,
+    StudyDirtyRange, StudyExecutionContext, StudyExecutionMeta, StudyLiveMarketData,
+    StudyOutputBuffer, StudyOutputTimeline, StudyQuoteView, StudySceneState, StudySettings,
+    StudyStyleOverlay, StudyTradeWindow, bounded_execution_detail, catch_unwind,
 };
 use crate::RetainedMarketTrade;
 use std::{
@@ -90,6 +90,7 @@ struct Job {
     meta: StudyExecutionMeta,
     chart_context: StudyChartContext,
     calculate: NativeStudyCalculate,
+    dynamic_calculate: Option<DynamicStudyCalculate>,
     outputs: Vec<StudyOutputBuffer>,
     style_overlay: StudyStyleOverlay,
     scene: StudySceneState,
@@ -138,7 +139,11 @@ impl Executor {
                             state: job.state.as_mut(),
                             intrabar_state: job.intrabar_state.as_mut(),
                         };
-                        (job.calculate)(&mut context)
+                        if let Some(dynamic) = job.dynamic_calculate.as_ref() {
+                            dynamic(&mut context)
+                        } else {
+                            (job.calculate)(&mut context)
+                        }
                     }));
                     let result = match result {
                         Ok(Ok(())) => Ok(ExecutionOutput {
@@ -214,6 +219,7 @@ impl Executor {
             meta: calculation.meta,
             chart_context: calculation.chart_context,
             calculate: calculation.program.calculate,
+            dynamic_calculate: calculation.program.dynamic_calculate.clone(),
             outputs,
             style_overlay,
             scene,

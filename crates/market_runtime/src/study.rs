@@ -67,9 +67,9 @@ pub use settings::{
 use settings::{validate_setting_specs, validate_settings};
 pub(crate) use state::StudyExecutionBatch;
 pub use state::{
-    NativeStudyCalculate, NativeStudyProgram, NativeStudyRegistration, NativeStudyState,
-    NativeStudyStateFactory, StudyCalculation, StudyDirtyRange, StudyMarketLeaseChange,
-    StudyMarketLeaseChangeKind,
+    DynamicStudyCalculate, NativeStudyCalculate, NativeStudyProgram, NativeStudyRegistration,
+    NativeStudyState, NativeStudyStateFactory, StudyCalculation, StudyDirtyRange,
+    StudyMarketLeaseChange, StudyMarketLeaseChangeKind,
 };
 
 /// Maximum UTF-8 bytes accepted in one stable study identifier.
@@ -348,6 +348,7 @@ impl StudyRuntime {
                 (node.owner == Some(owner)
                     && node
                         .program
+                        .as_ref()
                         .is_some_and(|program| program.observes_chart_context))
                 .then_some(*study_id)
             })
@@ -473,7 +474,7 @@ impl StudyRuntime {
         } = self.fresh_states_for_reinitialization(
             study_id,
             &affected,
-            registration.program,
+            &registration.program,
             &registration.settings,
         )?;
         let (root_state, root_state_bytes, root_intrabar_state, root_intrabar_state_bytes) =
@@ -540,9 +541,9 @@ impl StudyRuntime {
     ) -> Result<StudyInstanceId, StudyRuntimeError> {
         self.validate_definition(owner, &definition)?;
         validate_settings(&definition.settings, &settings)?;
-        let state = Self::fresh_state(program, &settings)?;
+        let state = Self::fresh_state(program.as_ref(), &settings)?;
         let state_bytes = Self::reported_state_bytes(state.as_ref())?;
-        let intrabar_state = Self::fresh_intrabar_state(program, &settings)?;
+        let intrabar_state = Self::fresh_intrabar_state(program.as_ref(), &settings)?;
         let intrabar_state_bytes = Self::reported_state_bytes(intrabar_state.as_ref())?;
         let combined_bytes = state_bytes
             .checked_add(intrabar_state_bytes)
@@ -611,7 +612,7 @@ impl StudyRuntime {
         Some(NativeStudyRegistration {
             definition: node.definition.clone(),
             settings: node.settings.clone(),
-            program: node.program?,
+            program: node.program.clone()?,
         })
     }
 
@@ -983,6 +984,7 @@ impl StudyRuntime {
                 node.definition.clone(),
                 node.settings.clone(),
                 node.program
+                    .clone()
                     .ok_or(StudyRuntimeError::StudyNotExecutable(study_id))?,
                 node.state_bytes.saturating_add(node.intrabar_state_bytes),
             )
@@ -1029,7 +1031,7 @@ impl StudyRuntime {
             .and_then(|id| self.chart_contexts.get(&id).copied())
             .unwrap_or_default();
         let (mut candidate_state, mut candidate_intrabar_state) =
-            self.prepare_candidate_states(study_id, program, &settings, covering_execution)?;
+            self.prepare_candidate_states(study_id, &program, &settings, covering_execution)?;
         let calculated = self.calculate_outputs(
             &NativeStudyCalculation {
                 study_id,
@@ -1109,7 +1111,7 @@ impl StudyRuntime {
     fn prepare_candidate_states(
         &self,
         study_id: StudyInstanceId,
-        program: NativeStudyProgram,
+        program: &NativeStudyProgram,
         settings: &StudySettings,
         covering_execution: bool,
     ) -> Result<(Option<NativeStudyState>, Option<NativeStudyState>), StudyRuntimeError> {
@@ -1257,7 +1259,7 @@ impl StudyRuntime {
     }
 
     fn fresh_state(
-        program: Option<NativeStudyProgram>,
+        program: Option<&NativeStudyProgram>,
         settings: &StudySettings,
     ) -> Result<Option<NativeStudyState>, StudyRuntimeError> {
         let Some(factory) = program.and_then(|program| program.state_factory) else {
@@ -1275,7 +1277,7 @@ impl StudyRuntime {
     }
 
     fn fresh_intrabar_state(
-        program: Option<NativeStudyProgram>,
+        program: Option<&NativeStudyProgram>,
         settings: &StudySettings,
     ) -> Result<Option<NativeStudyState>, StudyRuntimeError> {
         let Some(factory) = program.and_then(|program| program.intrabar_state_factory) else {
@@ -1296,7 +1298,7 @@ impl StudyRuntime {
         &self,
         study_id: StudyInstanceId,
         affected: &BTreeSet<StudyInstanceId>,
-        root_program: NativeStudyProgram,
+        root_program: &NativeStudyProgram,
         root_settings: &StudySettings,
     ) -> Result<PreparedStudyStates, StudyRuntimeError> {
         let replaced_bytes = affected
@@ -1322,8 +1324,8 @@ impl StudyRuntime {
                     .get(affected_id)
                     .ok_or(StudyRuntimeError::UnknownStudy(*affected_id))?;
                 (
-                    Self::fresh_state(node.program, &node.settings)?,
-                    Self::fresh_intrabar_state(node.program, &node.settings)?,
+                    Self::fresh_state(node.program.as_ref(), &node.settings)?,
+                    Self::fresh_intrabar_state(node.program.as_ref(), &node.settings)?,
                 )
             };
             let state_bytes = Self::reported_state_bytes(state.as_ref())?;

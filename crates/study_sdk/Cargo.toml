@@ -11,6 +11,10 @@ aeris_market_data = { path = "../domain/market_data" }
 aeris_market_runtime = { path = "../market_runtime" }
 aeris_charts_indicators.workspace = true
 num-traits.workspace = true
+wasmi.workspace = true
+
+[dev-dependencies]
+wasmi = { workspace = true, features = ["wat"] }
 
 [lints]
 workspace = true

@@ -48,6 +48,7 @@ pub mod order_flow;
 pub mod project;
 pub mod sandbox;
 pub mod toolchain;
+pub mod wasm_runtime;
 
 /// Convenient one-line import for Aeris Study SDK authors.
 pub mod prelude {
