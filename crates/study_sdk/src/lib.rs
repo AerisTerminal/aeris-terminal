@@ -47,6 +47,7 @@ pub mod builders;
 pub mod order_flow;
 pub mod project;
 pub mod sandbox;
+pub mod scanner;
 pub mod strategy;
 pub mod toolchain;
 pub mod wasm_runtime;

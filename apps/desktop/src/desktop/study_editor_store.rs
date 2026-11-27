@@ -3588,20 +3588,67 @@ struct StudyProjectBundle {
     manifest: StoredManifest,
     source: String,
     source_sha256: String,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    sdk_abi_version: u32,
 }
 
-/// Serializes one user-authored study project into a portable, integrity-checked JSON bundle.
+fn extract_bundle_metadata(source: &str) -> (Option<String>, Option<String>, Vec<String>) {
+    let mut author = None;
+    let mut description = None;
+    let mut tags = Vec::new();
+    for raw in source.lines().take(40) {
+        let Some(comment) = raw.trim().strip_prefix("//") else {
+            continue;
+        };
+        let content = comment.trim();
+        let lower = content.to_ascii_lowercase();
+        if lower.starts_with("@author:") {
+            let v = content[8..].trim();
+            if !v.is_empty() {
+                author = Some(v.chars().take(64).collect());
+            }
+        } else if lower.starts_with("@description:") {
+            let v = content[13..].trim();
+            if !v.is_empty() {
+                description = Some(v.chars().take(256).collect());
+            }
+        } else if lower.starts_with("@tags:") {
+            tags = content[6..]
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .take(8)
+                .map(|s| s.chars().take(32).collect())
+                .collect();
+        }
+    }
+    (author, description, tags)
+}
+
+/// Serializes one user-authored study project into a portable, integrity-checked JSON bundle
+/// (including optional `@author:`, `@description:`, `@tags:` metadata and SDK ABI version).
 pub(crate) fn export_project_bundle_json(project: &StudyProject) -> Result<String, String> {
     project
         .manifest
         .validate()
         .map_err(|error| format!("invalid manifest: {error:?}"))?;
     validate_study_source(&project.source).map_err(|error| format!("invalid source: {error:?}"))?;
+    let (author, description, tags) = extract_bundle_metadata(&project.source);
     let bundle = StudyProjectBundle {
         bundle_version: STUDY_PROJECT_BUNDLE_VERSION,
         manifest: StoredManifest::from(&project.manifest),
         source_sha256: source_sha256_hex(&project.source),
         source: project.source.clone(),
+        author,
+        description,
+        tags,
+        sdk_abi_version: STUDY_SANDBOX_ABI_VERSION,
     };
     serde_json::to_string_pretty(&bundle)
         .map_err(|error| format!("serialize study bundle failed: {error}"))
@@ -4320,6 +4367,68 @@ pub fn calculate(_o: &[f64], high: &[f64], low: &[f64], _c: &[f64], _v: &[f64], 
         assert!(formatted.contains("    let x = 1;"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn phase_7_bundle_metadata_and_wasm_scanner_work_end_to_end() {
+        let mut library = StudyProjectLibrary::new();
+        library
+            .create_from_template(
+                "user.momentum_scan",
+                "Momentum Scan",
+                StudyProjectTemplate::StatelessOverlay,
+            )
+            .expect("creates project");
+        let src = r#"
+// @author: Aeris Quant
+// @description: Momentum scanner using built-in RSI
+// @tags: momentum, rsi, scanner
+pub fn calculate(_o: &[f64], _h: &[f64], _l: &[f64], close: &[f64], _v: &[f64], out: &mut [f64]) {
+    let rsi = super::ta::rsi(close, 14);
+    out.copy_from_slice(&rsi);
+}
+"#;
+        library
+            .update_source("user.momentum_scan", src.to_string())
+            .expect("updates source");
+        let project = library.get("user.momentum_scan").unwrap();
+        let json = export_project_bundle_json(project).expect("exports bundle with metadata");
+        assert!(json.contains("\"author\": \"Aeris Quant\""));
+        assert!(json.contains("\"momentum\""));
+        let (manifest, restored_src) =
+            import_project_bundle_json(&json).expect("imports v1+metadata bundle");
+        assert_eq!(manifest.identifier, "user.momentum_scan");
+        assert_eq!(restored_src, src);
+
+        // Run custom WASM study scanner across uptrend & downtrend symbols
+        let artifact = compile_study_source_to_wasm(src).expect("scanner study compiles");
+        let up = StudyPreviewFixture::generate(PreviewFixturePreset::Uptrend, 40, 60);
+        let range = StudyPreviewFixture::generate(PreviewFixturePreset::RangeBound, 40, 60);
+        let summary = aeris_study_sdk::scanner::evaluate_wasm_scan(
+            &artifact.compiled,
+            1,
+            &[],
+            &[],
+            aeris_study_sdk::scanner::WasmScanPredicate::GreaterThan {
+                output_index: 0,
+                threshold: 60.0,
+            },
+            &[
+                aeris_study_sdk::scanner::WasmScanSymbolInput {
+                    symbol: "BULL",
+                    bars: &up.bars,
+                },
+                aeris_study_sdk::scanner::WasmScanSymbolInput {
+                    symbol: "RANGE",
+                    bars: &range.bars,
+                },
+            ],
+            None,
+        );
+        assert_eq!(summary.scanned_symbols, 2);
+        assert_eq!(summary.failed_symbols, 0);
+        assert_eq!(summary.matches.len(), 1);
+        assert_eq!(summary.matches[0].symbol, "BULL");
     }
 
     #[test]
