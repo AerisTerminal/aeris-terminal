@@ -958,16 +958,29 @@ pub(crate) struct CompiledStudyArtifact {
     pub(crate) compiled: CompiledWasmStudy,
 }
 
-const WASM_MULTI_HARNESS_SOURCE: &str = r#"#[forbid(unsafe_code)]
+const WASM_HOST_API_PRELUDE: &str = r#"#[forbid(unsafe_code)]
 mod user_study;
 
-static PARAMS: [std::sync::atomic::AtomicU64; 16] = [
-    const { std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()) }; 16
-];
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+static PARAMS: [AtomicU64; 16] = [const { AtomicU64::new(f64::NAN.to_bits()) }; 16];
+static VIEWPORT_LEFT: AtomicU32 = AtomicU32::new(0);
+static VIEWPORT_RIGHT: AtomicU32 = AtomicU32::new(u32::MAX);
+static SCENE_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+const MAX_SCENE_BYTES: usize = 256 * 1024;
+const OP_BOX: u8 = 1;
+const OP_LINE: u8 = 2;
+const OP_POLYLINE: u8 = 3;
+const OP_LABEL: u8 = 4;
+const OP_TABLE_CELL: u8 = 5;
+const OP_BAR_COLOR: u8 = 6;
+const OP_BG_COLOR: u8 = 7;
 
 pub fn param(index: usize, default: f64) -> f64 {
     if let Some(slot) = PARAMS.get(index) {
-        let v = f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed));
+        let v = f64::from_bits(slot.load(Ordering::Relaxed));
         if v.is_finite() {
             return v;
         }
@@ -975,11 +988,203 @@ pub fn param(index: usize, default: f64) -> f64 {
     default
 }
 
+pub fn visible_range() -> (usize, usize) {
+    (
+        VIEWPORT_LEFT.load(Ordering::Relaxed) as usize,
+        VIEWPORT_RIGHT.load(Ordering::Relaxed) as usize,
+    )
+}
+
+pub const fn rgba(hex_rgb: u32, alpha: u8) -> u32 {
+    ((hex_rgb & 0x00FF_FFFF) << 8) | (alpha as u32)
+}
+
+fn clear_scene_buf() {
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        buf.clear();
+    }
+}
+
+pub fn draw_box(
+    x1_bar: f64,
+    top: f64,
+    x2_bar: f64,
+    bottom: f64,
+    border_rgba: u32,
+    fill_rgba: u32,
+    border_width: u8,
+) {
+    if !x1_bar.is_finite() || !x2_bar.is_finite() || !top.is_finite() || !bottom.is_finite() {
+        return;
+    }
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        if buf.len() + 42 > MAX_SCENE_BYTES {
+            return;
+        }
+        buf.push(OP_BOX);
+        buf.extend_from_slice(&x1_bar.to_le_bytes());
+        buf.extend_from_slice(&top.to_le_bytes());
+        buf.extend_from_slice(&x2_bar.to_le_bytes());
+        buf.extend_from_slice(&bottom.to_le_bytes());
+        buf.extend_from_slice(&border_rgba.to_le_bytes());
+        buf.extend_from_slice(&fill_rgba.to_le_bytes());
+        buf.push(border_width);
+    }
+}
+
+pub fn draw_line(
+    x1_bar: f64,
+    y1: f64,
+    x2_bar: f64,
+    y2: f64,
+    color_rgba: u32,
+    width: u8,
+    style: u8,
+    extend: u8,
+) {
+    if !x1_bar.is_finite() || !y1.is_finite() || !x2_bar.is_finite() || !y2.is_finite() {
+        return;
+    }
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        if buf.len() + 40 > MAX_SCENE_BYTES {
+            return;
+        }
+        buf.push(OP_LINE);
+        buf.extend_from_slice(&x1_bar.to_le_bytes());
+        buf.extend_from_slice(&y1.to_le_bytes());
+        buf.extend_from_slice(&x2_bar.to_le_bytes());
+        buf.extend_from_slice(&y2.to_le_bytes());
+        buf.extend_from_slice(&color_rgba.to_le_bytes());
+        buf.push(width);
+        buf.push(style);
+        buf.push(extend);
+    }
+}
+
+pub fn draw_polyline(xs_bars: &[f64], ys_prices: &[f64], color_rgba: u32, width: u8, closed: bool) {
+    let count = xs_bars.len().min(ys_prices.len()).min(512);
+    if count < 2 {
+        return;
+    }
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        let needed = 9 + count * 16;
+        if buf.len() + needed > MAX_SCENE_BYTES {
+            return;
+        }
+        buf.push(OP_POLYLINE);
+        buf.extend_from_slice(&(count as u16).to_le_bytes());
+        buf.extend_from_slice(&color_rgba.to_le_bytes());
+        buf.push(width);
+        buf.push(u8::from(closed));
+        for i in 0..count {
+            buf.extend_from_slice(&xs_bars[i].to_le_bytes());
+            buf.extend_from_slice(&ys_prices[i].to_le_bytes());
+        }
+    }
+}
+
+pub fn draw_label(
+    x_bar: f64,
+    y: f64,
+    text: &str,
+    bg_rgba: u32,
+    text_rgba: u32,
+    style: u8,
+) {
+    if !x_bar.is_finite() || !y.is_finite() {
+        return;
+    }
+    let bytes = text.as_bytes();
+    let len = bytes.len().min(256);
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        if buf.len() + 28 + len > MAX_SCENE_BYTES {
+            return;
+        }
+        buf.push(OP_LABEL);
+        buf.extend_from_slice(&x_bar.to_le_bytes());
+        buf.extend_from_slice(&y.to_le_bytes());
+        buf.extend_from_slice(&bg_rgba.to_le_bytes());
+        buf.extend_from_slice(&text_rgba.to_le_bytes());
+        buf.push(style);
+        buf.extend_from_slice(&(len as u16).to_le_bytes());
+        buf.extend_from_slice(&bytes[..len]);
+    }
+}
+
+pub fn draw_table_cell(
+    position: u8,
+    cols: u16,
+    rows: u16,
+    col: u16,
+    row: u16,
+    text: &str,
+    text_rgba: u32,
+    bg_rgba: u32,
+    align: u8,
+) {
+    let bytes = text.as_bytes();
+    let len = bytes.len().min(256);
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        if buf.len() + 21 + len > MAX_SCENE_BYTES {
+            return;
+        }
+        buf.push(OP_TABLE_CELL);
+        buf.push(position);
+        buf.extend_from_slice(&cols.to_le_bytes());
+        buf.extend_from_slice(&rows.to_le_bytes());
+        buf.extend_from_slice(&col.to_le_bytes());
+        buf.extend_from_slice(&row.to_le_bytes());
+        buf.extend_from_slice(&text_rgba.to_le_bytes());
+        buf.extend_from_slice(&bg_rgba.to_le_bytes());
+        buf.push(align);
+        buf.extend_from_slice(&(len as u16).to_le_bytes());
+        buf.extend_from_slice(&bytes[..len]);
+    }
+}
+
+pub fn set_bar_color(bar_index: usize, color_rgba: u32) {
+    if let Ok(idx) = u32::try_from(bar_index)
+        && let Ok(mut buf) = SCENE_BUF.lock()
+        && buf.len() + 9 <= MAX_SCENE_BYTES
+    {
+        buf.push(OP_BAR_COLOR);
+        buf.extend_from_slice(&idx.to_le_bytes());
+        buf.extend_from_slice(&color_rgba.to_le_bytes());
+    }
+}
+
+pub fn set_bg_color(bar_index: usize, color_rgba: u32) {
+    if let Ok(idx) = u32::try_from(bar_index)
+        && let Ok(mut buf) = SCENE_BUF.lock()
+        && buf.len() + 9 <= MAX_SCENE_BYTES
+    {
+        buf.push(OP_BG_COLOR);
+        buf.extend_from_slice(&idx.to_le_bytes());
+        buf.extend_from_slice(&color_rgba.to_le_bytes());
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn aeris_study_set_param(index: u32, value: f64) {
     if let Some(slot) = PARAMS.get(index as usize) {
-        slot.store(value.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        slot.store(value.to_bits(), Ordering::Relaxed);
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_set_viewport(left: u32, right: u32) {
+    VIEWPORT_LEFT.store(left, Ordering::Relaxed);
+    VIEWPORT_RIGHT.store(right, Ordering::Relaxed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_scene_ptr() -> u32 {
+    SCENE_BUF.lock().map_or(0, |buf| buf.as_ptr() as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_scene_len() -> u32 {
+    SCENE_BUF.lock().map_or(0, |buf| buf.len() as u32)
 }
 
 #[unsafe(no_mangle)]
@@ -995,7 +1200,9 @@ pub extern "C" fn aeris_study_alloc(byte_len: u32) -> u32 {
     std::mem::forget(buf);
     ptr as u32
 }
+"#;
 
+const WASM_MULTI_ENTRYPOINT: &str = r#"
 #[unsafe(no_mangle)]
 pub extern "C" fn aeris_study_calculate(bars_ptr: u32, bar_count: u32, out_ptr: u32) -> i32 {
     aeris_study_calculate_multi(bars_ptr, bar_count, out_ptr, 1)
@@ -1008,6 +1215,7 @@ pub extern "C" fn aeris_study_calculate_multi(
     out_ptr: u32,
     output_count: u32,
 ) -> i32 {
+    clear_scene_buf();
     let n = bar_count as usize;
     let count = (output_count as usize).clamp(1, 16);
     if n == 0 {
@@ -1038,46 +1246,10 @@ fn source_uses_multi_output_entrypoint(source: &str) -> bool {
     })
 }
 
-const WASM_HARNESS_SOURCE: &str = r#"#[forbid(unsafe_code)]
-mod user_study;
-
-static PARAMS: [std::sync::atomic::AtomicU64; 16] = [
-    const { std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()) }; 16
-];
-
-pub fn param(index: usize, default: f64) -> f64 {
-    if let Some(slot) = PARAMS.get(index) {
-        let v = f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed));
-        if v.is_finite() {
-            return v;
-        }
-    }
-    default
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn aeris_study_set_param(index: u32, value: f64) {
-    if let Some(slot) = PARAMS.get(index as usize) {
-        slot.store(value.to_bits(), std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn aeris_study_abi_version() -> u32 {
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn aeris_study_alloc(byte_len: u32) -> u32 {
-    let words = (byte_len as usize).div_ceil(std::mem::size_of::<f64>()).max(1);
-    let mut buf = Vec::<f64>::with_capacity(words);
-    let ptr = buf.as_mut_ptr();
-    std::mem::forget(buf);
-    ptr as u32
-}
-
+const WASM_SINGLE_ENTRYPOINT: &str = r#"
 #[unsafe(no_mangle)]
 pub extern "C" fn aeris_study_calculate(bars_ptr: u32, bar_count: u32, out_ptr: u32) -> i32 {
+    clear_scene_buf();
     let n = bar_count as usize;
     if n == 0 {
         return 0;
@@ -1234,9 +1406,9 @@ pub(crate) fn compile_study_source_to_wasm(
     let user_path = build_dir.join("user_study.rs");
     let out_wasm_path = build_dir.join("study.wasm");
     let harness_src = if source_uses_multi_output_entrypoint(source) {
-        WASM_MULTI_HARNESS_SOURCE
+        format!("{WASM_HOST_API_PRELUDE}{WASM_MULTI_ENTRYPOINT}")
     } else {
-        WASM_HARNESS_SOURCE
+        format!("{WASM_HOST_API_PRELUDE}{WASM_SINGLE_ENTRYPOINT}")
     };
     if let Err(err) =
         fs::write(&harness_path, harness_src).and_then(|()| fs::write(&user_path, source))
@@ -2037,5 +2209,75 @@ pub fn calculate_multi(
             upper_4x > upper_2x,
             "increasing atr_mult param from 2.0 to 4.0 must widen upper band ({upper_4x} vs {upper_2x})"
         );
+    }
+
+    #[test]
+    fn wasm_scene_api_emits_boxes_lines_polylines_labels_tables_and_bar_colors() {
+        let src = r#"
+// @pane: price
+// @input: rows | int | 24 | Rows
+pub fn calculate(
+    _open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &mut [f64],
+) {
+    let n = close.len();
+    if n < 10 {
+        return;
+    }
+    let rows = (super::param(0, 24.0).round() as usize).clamp(4, 100);
+    let (_vl, _vr) = super::visible_range();
+    let mut hi = f64::NEG_INFINITY;
+    let mut lo = f64::INFINITY;
+    for i in 0..n {
+        if high[i] > hi { hi = high[i]; }
+        if low[i] < lo { lo = low[i]; }
+        out[i] = close[i];
+    }
+    let step = ((hi - lo) / (rows as f64)).max(1e-6);
+    let last = (n - 1) as f64;
+    for r in 0..rows {
+        let y0 = lo + (r as f64) * step;
+        let y1 = y0 + step * 0.85;
+        super::draw_box(
+            last + 4.0,
+            y1,
+            last + 18.0,
+            y0,
+            0,
+            super::rgba(0x2962ff, 180),
+            0,
+        );
+    }
+    super::draw_line(0.0, hi, last + 20.0, hi, super::rgba(0xf44336, 255), 2, 0, 0);
+    super::draw_polyline(&[0.0, last * 0.5, last], &[lo, (lo + hi) * 0.5, hi], super::rgba(0x2962ff, 255), 1, false);
+    super::draw_label(last + 20.0, hi, "Profile High", super::rgba(0x1e293b, 220), super::rgba(0xf8fafc, 255), 2);
+    super::draw_table_cell(2, 2, 2, 0, 0, "Profile High", super::rgba(0xe2e8f0, 255), super::rgba(0x1e293b, 200), 0);
+    super::draw_table_cell(2, 2, 2, 1, 0, &format!("{hi:.2}"), super::rgba(0xe2e8f0, 255), super::rgba(0x1e293b, 200), 2);
+    if volume[n - 1] > 0.0 {
+        super::set_bar_color(n - 1, super::rgba(0x26a69a, 255));
+    }
+}
+"#;
+        let artifact = compile_study_source_to_wasm(src).expect("scene study compiles to wasm");
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::RangeBound, 80, 60);
+        let res = artifact
+            .compiled
+            .execute_columnar_full(
+                &fixture.bars,
+                1,
+                &[24.0],
+                Some((20, 79)),
+                StudySandboxLimits::default(),
+            )
+            .expect("scene study executes in wasmi");
+        assert!(
+            !res.scene_bytes.is_empty(),
+            "scene study must emit binary scene commands"
+        );
+        assert!(res.scene_bytes.len() > 24 * 40);
     }
 }

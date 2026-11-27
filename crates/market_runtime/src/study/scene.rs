@@ -10,9 +10,9 @@ use super::{StudyColor, StudyLineStyle};
 use std::collections::BTreeMap;
 
 /// Maximum semantic scene objects owned by one study instance.
-pub const MAXIMUM_STUDY_SCENE_OBJECTS: usize = 500;
+pub const MAXIMUM_STUDY_SCENE_OBJECTS: usize = 1_200;
 /// Maximum vertices in one study polyline object.
-pub const MAXIMUM_STUDY_POLYLINE_POINTS: usize = 256;
+pub const MAXIMUM_STUDY_POLYLINE_POINTS: usize = 512;
 /// Maximum dashboard table objects owned by one study instance.
 pub const MAXIMUM_STUDY_SCENE_TABLES: usize = 8;
 /// Maximum populated cells in one study table object.
