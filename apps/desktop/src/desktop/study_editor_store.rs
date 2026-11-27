@@ -3528,10 +3528,29 @@ pub(crate) fn run_offline_preview_check(
     let limits = StudySandboxLimits::default();
     match compile_study_source_to_wasm(source) {
         Ok(artifact) => {
-            match artifact
-                .compiled
-                .execute_columnar_outputs(&fixture.bars, spec.outputs.len(), limits)
-            {
+            let preview_of = spec.requires_order_flow.then(|| {
+                aeris_study_sdk::wasm_runtime::aggregate_order_flow_columns(&fixture.bars, None)
+            });
+            let preview_meta = aeris_study_sdk::wasm_runtime::WasmStudyMeta {
+                timeframe_seconds: 60,
+                price_scale: fixture.bars.price_scale,
+                quantity_scale: fixture.bars.quantity_scale,
+                is_realtime: false,
+                is_confirmed_bar: true,
+                is_new_bar: false,
+                symbol: "PREVIEW".to_string(),
+            };
+            match artifact.compiled.execute_columnar_extended(
+                &fixture.bars,
+                spec.outputs.len(),
+                &[],
+                &[],
+                &[],
+                preview_of.as_ref(),
+                None,
+                &preview_meta,
+                limits,
+            ) {
                 Ok(result) => {
                     let primary = result.outputs.first().map_or(&[][..], Vec::as_slice);
                     let finite_count = primary.iter().filter(|v| v.is_some()).count();

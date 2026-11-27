@@ -2,7 +2,7 @@ use crate::input::InputModeKind;
 use gpui::Corners;
 use gpui::Half;
 use gpui::{
-    AnyElement, App, Bounds, Edges, Element, ElementId, ElementInputHandler, Entity,
+    AnyElement, App, Bounds, ContentMask, Edges, Element, ElementId, ElementInputHandler, Entity,
     GlobalElementId,
 };
 use gpui::{
@@ -27,6 +27,9 @@ use super::{
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
 pub(super) const RIGHT_MARGIN: Pixels = px(10.);
+/// Viewport clearance reserved for the overlay vertical/horizontal scrollbars in multi-line mode
+/// so rendered code lines, selection highlights, and caret never paint over the scrollbars.
+const SCROLLBAR_CLEARANCE: Pixels = px(14.);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct EditorScrollbarLayout {
@@ -1016,7 +1019,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         bounds.origin.x += gutter_width;
         bounds.size.width = (bounds.size.width - gutter_width).max(px(1.));
         let wrap_width = if multi_line && state.soft_wrap {
-            Some(bounds.size.width - RIGHT_MARGIN)
+            Some((bounds.size.width - RIGHT_MARGIN - SCROLLBAR_CLEARANCE).max(px(1.)))
         } else {
             None
         };
@@ -1262,18 +1265,38 @@ impl<M: InputModeKind> Element for TextElement<M> {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus_handle, show_cursor, selected_range, editor_style) = {
+        let (focus_handle, show_cursor, selected_range, editor_style, multi_line, soft_wrap) = {
             let state = self.state.read(cx);
             (
                 state.focus_handle.clone(),
                 state.show_cursor(window, cx),
                 state.selected_range,
                 state.editor_style.clone(),
+                state.is_multi_line(),
+                state.soft_wrap,
             )
         };
         let focused = focus_handle.is_focused(window);
         let bounds = prepaint.bounds;
         let text_align = prepaint.last_layout.text_align;
+
+        let right_clearance = if multi_line {
+            SCROLLBAR_CLEARANCE
+        } else {
+            px(0.)
+        };
+        let bottom_clearance = if multi_line && !soft_wrap {
+            SCROLLBAR_CLEARANCE
+        } else {
+            px(0.)
+        };
+        let text_clip_bounds = Bounds::new(
+            bounds.origin,
+            size(
+                (bounds.size.width - right_clearance).max(px(0.)),
+                (bounds.size.height - bottom_clearance).max(px(0.)),
+            ),
+        );
 
         window.handle_input(
             &focus_handle,
@@ -1322,7 +1345,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
                         Bounds::new(
                             point(gutter_sep_x + px(1.), origin.y + gutter_y),
                             size(
-                                (input_bounds.right() - gutter_sep_x - px(1.)).max(px(0.)),
+                                (input_bounds.right() - right_clearance - gutter_sep_x - px(1.))
+                                    .max(px(0.)),
                                 row_h,
                             ),
                         ),
@@ -1361,33 +1385,40 @@ impl<M: InputModeKind> Element for TextElement<M> {
             }
         }
 
-        if window.is_window_active()
-            && let Some(path) = prepaint.selection_path.take()
-        {
-            window.paint_path(path, editor_style.selection);
-        }
+        let selection_path = if window.is_window_active() {
+            prepaint.selection_path.take()
+        } else {
+            None
+        };
+        let caret_bounds = if focused && show_cursor {
+            prepaint.cursor_bounds_with_scroll()
+        } else {
+            None
+        };
+        window.with_content_mask(Some(ContentMask { bounds: text_clip_bounds }), |window| {
+            if let Some(path) = selection_path {
+                window.paint_path(path, editor_style.selection);
+            }
 
-        let mut offset_y = prepaint.last_layout.visible_top;
-        for line in prepaint.last_layout.lines.iter() {
-            let p = point(origin.x + scroll_offset, origin.y + offset_y);
-            line.paint(
-                p,
-                line_height,
-                text_align,
-                Some(prepaint.last_layout.content_width),
-                window,
-                cx,
-            );
-            offset_y += line.size(line_height).height;
-        }
+            let mut offset_y = prepaint.last_layout.visible_top;
+            for line in prepaint.last_layout.lines.iter() {
+                let p = point(origin.x + scroll_offset, origin.y + offset_y);
+                line.paint(
+                    p,
+                    line_height,
+                    text_align,
+                    Some(prepaint.last_layout.content_width),
+                    window,
+                    cx,
+                );
+                offset_y += line.size(line_height).height;
+            }
 
-        if focused
-            && show_cursor
-            && let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll()
-        {
-            let caret = device_pixel_caret(cursor_bounds, window.scale_factor());
-            window.paint_quad(fill(caret, editor_style.caret));
-        }
+            if let Some(cursor_bounds) = caret_bounds {
+                let caret = device_pixel_caret(cursor_bounds, window.scale_factor());
+                window.paint_quad(fill(caret, editor_style.caret));
+            }
+        });
 
         self.state.update(cx, |state, cx| {
             state.last_layout = Some(prepaint.last_layout.clone());

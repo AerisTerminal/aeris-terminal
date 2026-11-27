@@ -1200,7 +1200,7 @@ impl CompiledWasmStudy {
                 .collect();
             let order_flow = include_order_flow.then(|| {
                 aggregate_order_flow_columns(
-                    &columnar.timestamps_unix_nanos,
+                    &columnar,
                     context.live_market(0).and_then(|m| m.trades()),
                 )
             });
@@ -1461,58 +1461,85 @@ fn align_secondary_market_to_primary(
     }
 }
 
-fn aggregate_order_flow_columns(
-    timestamps: &[i64],
+/// Builds per-bar order-flow columns (`buy_vol`, `sell_vol`, `delta`, `trade_count`, `poc`).
+///
+/// Uses exact aggressor `Buy`/`Sell` prints from `trades` for every bar covered by the live trade
+/// window, and falls back to standard OHLCV intrabar close-location polarity for historical bars
+/// outside the live trade window so CVD and Bar Delta remain populated across full chart history.
+#[must_use]
+pub fn aggregate_order_flow_columns(
+    bars: &StudySandboxColumnarBars,
     trades: Option<crate::StudyTradeWindow<'_>>,
 ) -> WasmOrderFlowColumns {
+    let timestamps = &bars.timestamps_unix_nanos;
     let n = timestamps.len();
     let mut buy_vol = vec![0.0; n];
     let mut sell_vol = vec![0.0; n];
     let mut delta = vec![0.0; n];
     let mut trade_count = vec![0.0; n];
     let mut poc = vec![f64::NAN; n];
-    let Some(window) = trades else {
-        return WasmOrderFlowColumns {
-            buy_vol,
-            sell_vol,
-            delta,
-            trade_count,
-            poc,
-        };
-    };
-    let p_scale = window.price_scale();
-    let q_scale = window.quantity_scale();
-    let mut per_bar_bins: BTreeMap<usize, BTreeMap<i64, i64>> = BTreeMap::new();
-    for sample in window.iter() {
-        let idx = timestamps
-            .partition_point(|&t| t <= sample.observed_unix_nanos)
-            .checked_sub(1);
-        let Some(bar_idx) = idx else {
-            continue;
-        };
-        if bar_idx >= n {
-            continue;
+
+    if let Some(window) = trades {
+        let p_scale = window.price_scale();
+        let q_scale = window.quantity_scale();
+        let mut per_bar_bins: BTreeMap<usize, BTreeMap<i64, i64>> = BTreeMap::new();
+        for sample in window.iter() {
+            let idx = timestamps
+                .partition_point(|&t| t <= sample.observed_unix_nanos)
+                .checked_sub(1);
+            let Some(bar_idx) = idx else {
+                continue;
+            };
+            if bar_idx >= n {
+                continue;
+            }
+            let qty = fixed_point_to_f64(sample.quantity, q_scale).unwrap_or(0.0);
+            match sample.aggressor {
+                AggressorSide::Buy => buy_vol[bar_idx] += qty,
+                AggressorSide::Sell => sell_vol[bar_idx] += qty,
+                AggressorSide::Unknown => {}
+            }
+            trade_count[bar_idx] += 1.0;
+            let bins = per_bar_bins.entry(bar_idx).or_default();
+            if bins.len() < 256 || bins.contains_key(&sample.price) {
+                *bins.entry(sample.price).or_insert(0) += sample.quantity.max(0);
+            }
         }
-        let qty = fixed_point_to_f64(sample.quantity, q_scale).unwrap_or(0.0);
-        match sample.aggressor {
-            AggressorSide::Buy => buy_vol[bar_idx] += qty,
-            AggressorSide::Sell => sell_vol[bar_idx] += qty,
-            AggressorSide::Unknown => {}
-        }
-        trade_count[bar_idx] += 1.0;
-        let bins = per_bar_bins.entry(bar_idx).or_default();
-        if bins.len() < 256 || bins.contains_key(&sample.price) {
-            *bins.entry(sample.price).or_insert(0) += sample.quantity.max(0);
+        for (bar_idx, bins) in per_bar_bins {
+            if let Some((&best_price, _)) = bins.iter().max_by_key(|(_, vol)| **vol) {
+                poc[bar_idx] = fixed_point_to_f64(best_price, p_scale).unwrap_or(f64::NAN);
+            }
         }
     }
+
+    // For historical bars with no retained live trade prints, estimate buy/sell split from
+    // intrabar OHLCV close-location polarity so historical delta & CVD are never flat zero.
     for i in 0..n {
+        if trade_count[i] == 0.0 {
+            let vol = fixed_point_to_f64(bars.volume[i], bars.quantity_scale).unwrap_or(0.0);
+            if vol > 0.0 {
+                let o = fixed_point_to_f64(bars.open[i], bars.price_scale).unwrap_or(0.0);
+                let h = fixed_point_to_f64(bars.high[i], bars.price_scale).unwrap_or(0.0);
+                let l = fixed_point_to_f64(bars.low[i], bars.price_scale).unwrap_or(0.0);
+                let c = fixed_point_to_f64(bars.close[i], bars.price_scale).unwrap_or(0.0);
+                let range = h - l;
+                let buy_ratio = if range > 0.0 {
+                    ((c - l) / range).clamp(0.0, 1.0)
+                } else if c > o {
+                    1.0
+                } else if c < o {
+                    0.0
+                } else {
+                    0.5
+                };
+                buy_vol[i] = vol * buy_ratio;
+                sell_vol[i] = vol - buy_vol[i];
+                poc[i] = (h + l + c) / 3.0;
+            }
+        }
         delta[i] = buy_vol[i] - sell_vol[i];
     }
-    for (bar_idx, bins) in per_bar_bins {
-        if let Some((&best_price, _)) = bins.iter().max_by_key(|(_, vol)| **vol) {
-            poc[bar_idx] = fixed_point_to_f64(best_price, p_scale).unwrap_or(f64::NAN);
-        }
-    }
+
     WasmOrderFlowColumns {
         buy_vol,
         sell_vol,
