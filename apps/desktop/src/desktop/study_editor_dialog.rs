@@ -374,10 +374,12 @@ impl StudyEditorDialogState {
                     if dialog.active_job_id != job_id {
                         return;
                     }
-                    let has_logs = telemetry.as_ref().is_some_and(|t| !t.logs.is_empty());
+                    let has_console_output = telemetry
+                        .as_ref()
+                        .is_some_and(|t| !t.logs.is_empty() || t.strategy_report.is_some());
                     dialog.busy_label = None;
                     dialog.active_task = None;
-                    dialog.console_open = !diagnostics.is_empty() || has_logs;
+                    dialog.console_open = !diagnostics.is_empty() || has_console_output;
                     dialog.diagnostics = diagnostics;
                     dialog.preview_telemetry = telemetry;
                     dialog.status_message = Some(summary);
@@ -1708,6 +1710,60 @@ fn diagnostics_drawer(
                 .text_color(gpui_color(colors.text_muted))
                 .child(summary_line),
         );
+        if let Some(report) = &telemetry.strategy_report {
+            let pnl_color = if report.net_profit >= 0.0 {
+                gpui_color(colors.positive)
+            } else {
+                gpui_color(colors.danger)
+            };
+            let pf_text = if report.profit_factor.is_infinite() {
+                "∞".to_string()
+            } else {
+                format!("{:.2}", report.profit_factor)
+            };
+            list = list.child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(pnl_color)
+                    .child(format!(
+                        "Strategy Tester: Net {:+.2} ({:+.2}%) · {} trades · Win {:.1}% · PF {pf_text} · Max DD {:.2}% · Sharpe {:.2} · B&H {:+.2}%",
+                        report.net_profit,
+                        report.net_profit_pct,
+                        report.total_trades,
+                        report.win_rate_pct,
+                        report.max_drawdown_pct,
+                        report.sharpe_ratio,
+                        report.buy_and_hold_return_pct,
+                    )),
+            );
+            for trade in report.trades.iter().rev().take(6) {
+                let side = match trade.direction {
+                    aeris_study_sdk::strategy::StrategyDirection::Long => "LONG",
+                    aeris_study_sdk::strategy::StrategyDirection::Short => "SHORT",
+                };
+                let t_color = if trade.net_pnl >= 0.0 {
+                    gpui_color(colors.positive)
+                } else {
+                    gpui_color(colors.danger)
+                };
+                list = list.child(
+                    div()
+                        .text_xs()
+                        .text_color(t_color)
+                        .child(format!(
+                            "  #{}-{} {side} {} → {} | {:.2} → {:.2} | Net {:+.2}",
+                            trade.entry_bar,
+                            trade.exit_bar,
+                            trade.entry_id,
+                            trade.exit_id,
+                            trade.entry_price,
+                            trade.exit_price,
+                            trade.net_pnl,
+                        )),
+                );
+            }
+        }
         for entry in &telemetry.logs {
             let (tag, color) = match entry.level {
                 WasmStudyLogLevel::Info => ("INFO", gpui_color(colors.text_secondary)),

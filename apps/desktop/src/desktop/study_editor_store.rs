@@ -1361,6 +1361,10 @@ const OP_BOX_EX: u8 = 10;
 const OP_LINE_FILL: u8 = 11;
 const OP_PLOT_COLOR: u8 = 12;
 const OP_PLOT_SHAPE: u8 = 13;
+const OP_STRATEGY_ENTRY: u8 = 14;
+const OP_STRATEGY_EXIT: u8 = 15;
+const OP_STRATEGY_CLOSE: u8 = 16;
+const OP_STRATEGY_CLOSE_ALL: u8 = 17;
 
 #[allow(dead_code)]
 pub const LABEL_UP: u8 = 0;
@@ -1710,6 +1714,91 @@ pub mod of {
             out.push(acc);
         }
         out
+    }
+}
+
+/// Backtesting strategy order intent helpers (`super::strategy::*`).
+#[allow(dead_code)]
+pub mod strategy {
+    use super::*;
+
+    pub fn entry(bar_index: usize, id: &str, is_long: bool, qty: f64) {
+        entry_limit(bar_index, id, is_long, qty, f64::NAN);
+    }
+
+    pub fn entry_limit(bar_index: usize, id: &str, is_long: bool, qty: f64, limit_price: f64) {
+        let Ok(idx) = u32::try_from(bar_index) else {
+            return;
+        };
+        let bytes = id.as_bytes();
+        let len = bytes.len().min(64);
+        if let Ok(mut buf) = SCENE_BUF.lock()
+            && buf.len() + 24 + len <= MAX_SCENE_BYTES
+        {
+            buf.push(OP_STRATEGY_ENTRY);
+            buf.extend_from_slice(&idx.to_le_bytes());
+            buf.push(if is_long { 0 } else { 1 });
+            buf.extend_from_slice(&qty.to_le_bytes());
+            buf.extend_from_slice(&limit_price.to_le_bytes());
+            buf.extend_from_slice(&(len as u16).to_le_bytes());
+            buf.extend_from_slice(&bytes[..len]);
+        }
+    }
+
+    pub fn exit(
+        bar_index: usize,
+        id: &str,
+        from_entry: &str,
+        profit_price: f64,
+        loss_price: f64,
+    ) {
+        let Ok(idx) = u32::try_from(bar_index) else {
+            return;
+        };
+        let id_b = id.as_bytes();
+        let id_len = id_b.len().min(64);
+        let from_b = from_entry.as_bytes();
+        let from_len = from_b.len().min(64);
+        if let Ok(mut buf) = SCENE_BUF.lock()
+            && buf.len() + 25 + id_len + from_len <= MAX_SCENE_BYTES
+        {
+            buf.push(OP_STRATEGY_EXIT);
+            buf.extend_from_slice(&idx.to_le_bytes());
+            buf.extend_from_slice(&profit_price.to_le_bytes());
+            buf.extend_from_slice(&loss_price.to_le_bytes());
+            buf.extend_from_slice(&(id_len as u16).to_le_bytes());
+            buf.extend_from_slice(&id_b[..id_len]);
+            buf.extend_from_slice(&(from_len as u16).to_le_bytes());
+            buf.extend_from_slice(&from_b[..from_len]);
+        }
+    }
+
+    pub fn close(bar_index: usize, id: &str) {
+        let Ok(idx) = u32::try_from(bar_index) else {
+            return;
+        };
+        let bytes = id.as_bytes();
+        let len = bytes.len().min(64);
+        if let Ok(mut buf) = SCENE_BUF.lock()
+            && buf.len() + 7 + len <= MAX_SCENE_BYTES
+        {
+            buf.push(OP_STRATEGY_CLOSE);
+            buf.extend_from_slice(&idx.to_le_bytes());
+            buf.extend_from_slice(&(len as u16).to_le_bytes());
+            buf.extend_from_slice(&bytes[..len]);
+        }
+    }
+
+    pub fn close_all(bar_index: usize) {
+        let Ok(idx) = u32::try_from(bar_index) else {
+            return;
+        };
+        if let Ok(mut buf) = SCENE_BUF.lock()
+            && buf.len() + 5 <= MAX_SCENE_BYTES
+        {
+            buf.push(OP_STRATEGY_CLOSE_ALL);
+            buf.extend_from_slice(&idx.to_le_bytes());
+        }
     }
 }
 
@@ -3239,6 +3328,7 @@ pub(crate) fn run_offline_preview_check(
                         scene_object_count: result.scene_object_count,
                         alert_count: result.alerts.len(),
                         logs: result.logs,
+                        strategy_report: result.strategy_report,
                     };
                     (Vec::new(), summary, Some(telemetry))
                 }
@@ -3888,6 +3978,49 @@ pub fn on_bar(
                 .expect("soak tick must succeed without memory growth or fuel leak");
             assert!(out[0].is_some());
         }
+    }
+
+    #[test]
+    fn phase_5_wasm_strategy_backtest_computes_report_and_emits_chart_markers() {
+        let source = r#"
+// @pane: price
+// @output: fast | Fast EMA | line | #38bdf8
+// @output: slow | Slow EMA | line | #f59e0b
+pub fn calculate_multi(
+    _open: &[f64],
+    _high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    _volume: &[f64],
+    outs: &mut [&mut [f64]],
+) {
+    let fast = super::ta::ema(close, 5);
+    let slow = super::ta::ema(close, 15);
+    outs[0].copy_from_slice(&fast);
+    outs[1].copy_from_slice(&slow);
+    for i in 15..close.len() {
+        if i == 20 {
+            super::strategy::entry(i, "Long1", true, 10.0);
+        } else if i == 60 {
+            super::strategy::close(i, "Long1");
+        } else if i == 70 {
+            super::strategy::entry(i, "Long2", true, 10.0);
+        } else if i == 110 {
+            super::strategy::close_all(i);
+        }
+    }
+}
+"#;
+        let (diags, _summary, telemetry) =
+            run_offline_preview_check(source, PreviewFixturePreset::Uptrend);
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        let telemetry = telemetry.expect("telemetry must exist");
+        let report = telemetry
+            .strategy_report
+            .expect("strategy_report must be populated");
+        assert_eq!(report.total_trades, 2);
+        assert!(report.net_profit > 0.0, "uptrend longs should profit: {report:?}");
+        assert!(telemetry.scene_object_count >= 4, "expected entry/exit chart markers");
     }
 
     #[test]

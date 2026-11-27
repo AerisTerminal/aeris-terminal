@@ -91,6 +91,10 @@ const OP_BOX_EX: u8 = 10;
 const OP_LINE_FILL: u8 = 11;
 const OP_PLOT_COLOR: u8 = 12;
 const OP_PLOT_SHAPE: u8 = 13;
+const OP_STRATEGY_ENTRY: u8 = 14;
+const OP_STRATEGY_EXIT: u8 = 15;
+const OP_STRATEGY_CLOSE: u8 = 16;
+const OP_STRATEGY_CLOSE_ALL: u8 = 17;
 
 /// Maximum numeric/string input parameters passed across the WASM boundary.
 const MAX_WASM_PARAMS: usize = 32;
@@ -261,7 +265,7 @@ pub struct WasmStudyMeta {
 }
 
 /// Bounded execution telemetry captured from the most recent sandboxed WASM study wave.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WasmStudyTelemetry {
     pub fuel_consumed: u64,
     pub fuel_limit: u64,
@@ -270,6 +274,7 @@ pub struct WasmStudyTelemetry {
     pub scene_object_count: usize,
     pub alert_count: usize,
     pub logs: Vec<WasmStudyLogEntry>,
+    pub strategy_report: Option<crate::strategy::StrategyReport>,
 }
 
 /// Shared bounded sink for reading the latest execution telemetry of one live WASM study.
@@ -281,7 +286,7 @@ pub struct WasmMultiExecutionResult {
     /// One output vector per declared output series, each aligned 1:1 with the input bars.
     pub outputs: Vec<Vec<Option<f64>>>,
     /// Optional binary scene command buffer emitted by the guest study (boxes, lines, polylines,
-    /// labels, tables, per-bar colors, background colors, alerts, logs).
+    /// labels, tables, per-bar colors, background colors, alerts, logs, strategy commands).
     pub scene_bytes: Vec<u8>,
     /// Exact instruction fuel consumed by this execution wave.
     pub fuel_consumed: u64,
@@ -293,6 +298,8 @@ pub struct WasmMultiExecutionResult {
     pub logs: Vec<WasmStudyLogEntry>,
     /// Count of decoded scene objects in this wave.
     pub scene_object_count: usize,
+    /// Strategy backtest report populated whenever the study emits strategy commands.
+    pub strategy_report: Option<crate::strategy::StrategyReport>,
 }
 
 struct SandboxStoreState {
@@ -714,6 +721,7 @@ impl CompiledWasmStudy {
                 alerts: Vec::new(),
                 logs: Vec::new(),
                 scene_object_count: 0,
+                strategy_report: None,
             });
         }
         if bar_count > limits.max_output_points {
@@ -815,11 +823,22 @@ impl CompiledWasmStudy {
             .map(<[Option<f64>]>::to_vec)
             .collect();
         let scene_bytes = read_wasm_scene_buffer(instance, &mut store, memory)?;
-        let (alerts, logs, scene_object_count) = if scene_bytes.is_empty() {
-            (Vec::new(), Vec::new(), 0)
+        let (alerts, logs, scene_object_count, strategy_report) = if scene_bytes.is_empty() {
+            (Vec::new(), Vec::new(), 0, None)
         } else {
             let decoded = decode_wasm_scene_commands(&scene_bytes, bars);
-            (decoded.alerts, decoded.logs, decoded.objects.len())
+            let report = (!decoded.strategy_commands.is_empty()).then(|| {
+                let tick_size = 10_f64.powi(-i32::from(bars.price_scale));
+                crate::strategy::evaluate_strategy(
+                    bars,
+                    &decoded.strategy_commands,
+                    crate::strategy::StrategyConfig {
+                        tick_size,
+                        ..crate::strategy::StrategyConfig::default()
+                    },
+                )
+            });
+            (decoded.alerts, decoded.logs, decoded.objects.len(), report)
         };
 
         let remaining_fuel = store.get_fuel().unwrap_or(0);
@@ -833,6 +852,7 @@ impl CompiledWasmStudy {
             alerts,
             logs,
             scene_object_count,
+            strategy_report,
         })
     }
 
@@ -1137,6 +1157,7 @@ impl CompiledWasmStudy {
                         scene_object_count: scene_objs,
                         alert_count,
                         logs,
+                        strategy_report: None,
                     });
                 }
                 if dirty_start == 0 && dirty_end == bar_count {
@@ -1230,6 +1251,7 @@ impl CompiledWasmStudy {
                     scene_object_count: result.scene_object_count,
                     alert_count: result.alerts.len(),
                     logs: result.logs,
+                    strategy_report: result.strategy_report,
                 });
             }
             if dirty_start == 0 && dirty_end == bar_count {
@@ -1824,6 +1846,7 @@ struct DecodedWasmScene {
     plot_colors: Vec<(usize, usize, StudyColor)>,
     alerts: Vec<StudyAlertEvent>,
     logs: Vec<WasmStudyLogEntry>,
+    strategy_commands: Vec<crate::strategy::StrategyCommand>,
 }
 
 fn decode_box_ex_cmd(
@@ -2226,6 +2249,7 @@ fn decode_wasm_scene_commands(bytes: &[u8], bars: &StudySandboxColumnarBars) -> 
     let mut plot_colors: Vec<(usize, usize, StudyColor)> = Vec::new();
     let mut alerts: Vec<StudyAlertEvent> = Vec::new();
     let mut logs: Vec<WasmStudyLogEntry> = Vec::new();
+    let mut strategy_commands: Vec<crate::strategy::StrategyCommand> = Vec::new();
 
     while let Some(op) = cursor.u8() {
         let ok = match op {
@@ -2283,10 +2307,129 @@ fn decode_wasm_scene_commands(bytes: &[u8], bars: &StudySandboxColumnarBars) -> 
             },
             OP_ALERT => decode_alert_cmd(&mut cursor, timestamps, &mut alerts),
             OP_LOG => decode_log_cmd(&mut cursor, &mut logs),
+            OP_STRATEGY_ENTRY => match (
+                cursor.u32(),
+                cursor.u8(),
+                cursor.f64(),
+                cursor.f64(),
+                cursor.text(),
+            ) {
+                (Some(bar_idx), Some(dir), Some(qty), Some(limit), Some(id)) => {
+                    if strategy_commands.len() < crate::strategy::MAX_STRATEGY_TRADES * 2 {
+                        let direction = if dir == 0 {
+                            crate::strategy::StrategyDirection::Long
+                        } else {
+                            crate::strategy::StrategyDirection::Short
+                        };
+                        strategy_commands.push(crate::strategy::StrategyCommand::Entry {
+                            bar_index: bar_idx as usize,
+                            id,
+                            direction,
+                            qty,
+                            limit_price: limit.is_finite().then_some(limit),
+                        });
+                    }
+                    true
+                }
+                _ => false,
+            },
+            OP_STRATEGY_EXIT => match (
+                cursor.u32(),
+                cursor.f64(),
+                cursor.f64(),
+                cursor.text(),
+                cursor.text(),
+            ) {
+                (Some(bar_idx), Some(tp), Some(sl), Some(id), Some(from_entry)) => {
+                    if strategy_commands.len() < crate::strategy::MAX_STRATEGY_TRADES * 2 {
+                        strategy_commands.push(crate::strategy::StrategyCommand::Exit {
+                            bar_index: bar_idx as usize,
+                            id,
+                            from_entry,
+                            profit_price: tp.is_finite().then_some(tp),
+                            loss_price: sl.is_finite().then_some(sl),
+                        });
+                    }
+                    true
+                }
+                _ => false,
+            },
+            OP_STRATEGY_CLOSE => match (cursor.u32(), cursor.text()) {
+                (Some(bar_idx), Some(id)) => {
+                    if strategy_commands.len() < crate::strategy::MAX_STRATEGY_TRADES * 2 {
+                        strategy_commands.push(crate::strategy::StrategyCommand::Close {
+                            bar_index: bar_idx as usize,
+                            id,
+                        });
+                    }
+                    true
+                }
+                _ => false,
+            },
+            OP_STRATEGY_CLOSE_ALL => match cursor.u32() {
+                Some(bar_idx) => {
+                    if strategy_commands.len() < crate::strategy::MAX_STRATEGY_TRADES * 2 {
+                        strategy_commands.push(crate::strategy::StrategyCommand::CloseAll {
+                            bar_index: bar_idx as usize,
+                        });
+                    }
+                    true
+                }
+                None => false,
+            },
             _ => false,
         };
         if !ok {
             break;
+        }
+    }
+
+    // Auto-emit crisp chart entry/exit markers for strategy trades when room remains in scene.
+    if !strategy_commands.is_empty() {
+        let tick_size = 10_f64.powi(-i32::from(bars.price_scale));
+        let report = crate::strategy::evaluate_strategy(
+            bars,
+            &strategy_commands,
+            crate::strategy::StrategyConfig {
+                tick_size,
+                ..crate::strategy::StrategyConfig::default()
+            },
+        );
+        for trade in report.trades.iter().rev().take(128).rev() {
+            if objects.len() + 2 > MAXIMUM_STUDY_SCENE_OBJECTS {
+                break;
+            }
+            let (entry_style, entry_color, entry_label) = match trade.direction {
+                crate::strategy::StrategyDirection::Long => (
+                    StudyLabelStyle::ArrowUp,
+                    StudyColor::rgb(34, 197, 94),
+                    format!("L {}", trade.entry_id),
+                ),
+                crate::strategy::StrategyDirection::Short => (
+                    StudyLabelStyle::ArrowDown,
+                    StudyColor::rgb(239, 68, 68),
+                    format!("S {}", trade.entry_id),
+                ),
+            };
+            objects.push(StudySceneObject::Label(StudyLabelObject {
+                point: StudyPoint::new(trade.entry_timestamp_ns, trade.entry_price),
+                text: entry_label,
+                style: entry_style,
+                color: entry_color,
+                text_color: StudyColor::rgb(255, 255, 255),
+            }));
+            let exit_color = if trade.net_pnl >= 0.0 {
+                StudyColor::rgb(34, 197, 94)
+            } else {
+                StudyColor::rgb(239, 68, 68)
+            };
+            objects.push(StudySceneObject::Label(StudyLabelObject {
+                point: StudyPoint::new(trade.exit_timestamp_ns, trade.exit_price),
+                text: format!("{:+.2}", trade.net_pnl),
+                style: StudyLabelStyle::TextOnly,
+                color: exit_color,
+                text_color: exit_color,
+            }));
         }
     }
 
@@ -2303,6 +2446,7 @@ fn decode_wasm_scene_commands(bytes: &[u8], bars: &StudySandboxColumnarBars) -> 
         plot_colors,
         alerts,
         logs,
+        strategy_commands,
     }
 }
 
