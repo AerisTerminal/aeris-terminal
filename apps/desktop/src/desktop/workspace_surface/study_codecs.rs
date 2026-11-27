@@ -309,12 +309,12 @@ pub(super) fn study_setting_input_text(value: &StudySettingValue) -> Option<Stri
             Some(study_decimal_text(*value))
         }
         StudySettingValue::Text(value) => Some(value.clone()),
-        StudySettingValue::Color(color) => Some(color.to_hex()),
         StudySettingValue::Symbol(symbol) => Some(symbol.to_label()),
         StudySettingValue::Session(session) => Some(session.to_label()),
         StudySettingValue::Timestamp(nanos) => Some(nanos.to_string()),
         StudySettingValue::Boolean(_)
         | StudySettingValue::Choice(_)
+        | StudySettingValue::Color(_)
         | StudySettingValue::Timeframe(_)
         | StudySettingValue::Source(_) => None,
     }
@@ -325,10 +325,11 @@ pub(super) fn study_setting_value_from_dialog(
     spec: &StudySettingSpec,
     cx: &App,
 ) -> Result<StudySettingValue, String> {
-    use aeris_market_runtime::study::{StudyColor, StudySession, StudySymbolRef};
+    use aeris_market_runtime::study::{StudySession, StudySymbolRef};
     match &spec.presentation.control {
         StudySettingControl::Boolean
         | StudySettingControl::Choice { .. }
+        | StudySettingControl::Color
         | StudySettingControl::Timeframe { .. }
         | StudySettingControl::Source { .. } => dialog
             .draft_values
@@ -397,23 +398,6 @@ pub(super) fn study_setting_value_from_dialog(
                 )
             })?;
             Ok(StudySettingValue::Text(input.read(cx).value().to_string()))
-        }
-        StudySettingControl::Color => {
-            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
-                tr!(
-                    workspace::SETTING_EDITOR_UNAVAILABLE,
-                    label = spec.presentation.label
-                )
-            })?;
-            StudyColor::parse_hex(input.read(cx).value().as_ref())
-                .map(StudySettingValue::Color)
-                .ok_or_else(|| {
-                    tr!(
-                        workspace::SETTING_PARSE_ERROR,
-                        label = spec.presentation.label,
-                        error = "expected #RRGGBB or #RRGGBBAA"
-                    )
-                })
         }
         StudySettingControl::Symbol { .. } => {
             let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {

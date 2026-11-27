@@ -6222,7 +6222,7 @@ impl WorkspaceSurface {
 
     pub(super) fn toggle_study_dialog_color_picker(
         &mut self,
-        output_index: usize,
+        target: StudyColorPickerTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -6233,24 +6233,36 @@ impl WorkspaceSurface {
         if dialog
             .color_picker
             .as_ref()
-            .is_some_and(|picker| picker.target == output_index)
+            .is_some_and(|picker| picker.target == target)
         {
             dialog.color_picker = None;
-        } else if let Some(draft) = dialog
-            .output_colors
-            .iter()
-            .find(|draft| draft.output_index == output_index)
-        {
-            let current = draft.effective_color().to_ascii_uppercase();
-            let input = cx.new(|input_cx| InputState::new(window, input_cx));
-            input.update(cx, |input, input_cx| {
-                input.set_value(current, window, input_cx);
-            });
-            dialog.color_picker = Some(DialogColorPickerState {
-                target: output_index,
-                input,
-                error: None,
-            });
+        } else {
+            let current = match &target {
+                StudyColorPickerTarget::Output(output_index) => dialog
+                    .output_colors
+                    .iter()
+                    .find(|draft| draft.output_index == *output_index)
+                    .map(|draft| draft.effective_color().to_ascii_uppercase()),
+                StudyColorPickerTarget::Setting(identifier) => {
+                    match dialog.draft_values.get(identifier) {
+                        Some(StudySettingValue::Color(color)) => {
+                            Some(color.to_hex().to_ascii_uppercase())
+                        }
+                        _ => None,
+                    }
+                }
+            };
+            if let Some(current) = current {
+                let input = cx.new(|input_cx| InputState::new(window, input_cx));
+                input.update(cx, |input, input_cx| {
+                    input.set_value(current, window, input_cx);
+                });
+                dialog.color_picker = Some(DialogColorPickerState {
+                    target,
+                    input,
+                    error: None,
+                });
+            }
         }
         cx.notify();
     }
@@ -6265,7 +6277,7 @@ impl WorkspaceSurface {
 
     pub(super) fn set_study_dialog_color(
         &mut self,
-        output_index: usize,
+        target: StudyColorPickerTarget,
         color: &str,
         cx: &mut Context<Self>,
     ) {
@@ -6274,20 +6286,35 @@ impl WorkspaceSurface {
         };
         let normalized = normalize_hex_color(color);
         if let Some(picker) = &mut dialog.color_picker
-            && picker.target == output_index
+            && picker.target == target
         {
             picker.error = normalized
                 .is_none()
                 .then(|| tr!(workspace::HEX_COLOR_HINT).to_string());
         }
-        if let Some(color) = normalized
-            && let Some(draft) = dialog
-                .output_colors
-                .iter_mut()
-                .find(|draft| draft.output_index == output_index)
-        {
-            draft.color = (!color.eq_ignore_ascii_case(&draft.default_color)).then_some(color);
-            return self.preview_study_settings_dialog(cx);
+        if let Some(color) = normalized {
+            match target {
+                StudyColorPickerTarget::Output(output_index) => {
+                    if let Some(draft) = dialog
+                        .output_colors
+                        .iter_mut()
+                        .find(|draft| draft.output_index == output_index)
+                    {
+                        draft.color =
+                            (!color.eq_ignore_ascii_case(&draft.default_color)).then_some(color);
+                        return self.preview_study_settings_dialog(cx);
+                    }
+                }
+                StudyColorPickerTarget::Setting(identifier) => {
+                    if let Some(parsed) = aeris_market_runtime::study::StudyColor::parse_hex(&color)
+                    {
+                        dialog
+                            .draft_values
+                            .insert(identifier, StudySettingValue::Color(parsed));
+                        return self.preview_study_settings_dialog(cx);
+                    }
+                }
+            }
         }
         cx.notify();
     }

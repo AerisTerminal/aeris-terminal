@@ -293,3 +293,161 @@ fn fvg_and_session_opening_range_with_alerts_are_expressible_through_public_sdk_
 
     assert!(registration.program.observes_chart_context);
 }
+
+/// 4. Multi-symbol / MTF heatmap dashboard using semantic Symbol/Timeframe inputs and tables.
+#[test]
+fn multi_symbol_mtf_heatmap_dashboard_is_expressible_through_public_sdk_only() {
+    let base = sample_series("ES", BarPeriod::time(60).expect("1m"));
+    let sym_a = resolve_market_input(
+        &base,
+        Some(&StudySymbolRef::new("corpus_provider", "NQ")),
+        Some(StudyTimeframe::parse_label("5m").expect("5m")),
+        StreamRequirements::BARS,
+    )
+    .expect("NQ 5m");
+    let sym_b = resolve_market_input(
+        &base,
+        Some(&StudySymbolRef::new("corpus_provider", "YM")),
+        Some(StudyTimeframe::parse_label("15m").expect("15m")),
+        StreamRequirements::BARS,
+    )
+    .expect("YM 15m");
+
+    let definition = StudyDefinitionBuilder::new("corpus.mtf_heatmap")
+        .market(base, StreamRequirements::BARS)
+        .market(sym_a.series, sym_a.streams)
+        .market(sym_b.series, sym_b.streams)
+        .output(StudyOutputBuilder::line("anchor", "Heatmap Anchor").build())
+        .invalidation(StudyInvalidationPolicy::SameRange)
+        .build();
+
+    let registration = NativeStudyRegistration {
+        settings: StudySettings::defaults(&definition.settings).expect("valid heatmap settings"),
+        definition,
+        program: NativeStudyProgram::stateless(|ctx| {
+            let table = ctx.scene_mut().create_table(
+                StudyTablePosition::TopRight,
+                3,
+                3,
+                Some(StudyColor::rgb(0x47, 0x55, 0x69)),
+                1,
+            )?;
+            for (row, label) in ["ES", "NQ", "YM"].into_iter().enumerate() {
+                let row_u16 = u16::try_from(row).unwrap_or(0);
+                ctx.scene_mut().set_table_cell(
+                    table,
+                    0,
+                    row_u16,
+                    StudyTableCell {
+                        text: label.to_string(),
+                        text_color: Some(StudyColor::rgb(0xf8, 0xfa, 0xfc)),
+                        background_color: Some(StudyColor::rgb(0x1e, 0x29, 0x3b)),
+                        align: StudyTextAlign::Left,
+                    },
+                )?;
+            }
+            Ok(())
+        }),
+    };
+    assert_eq!(registration.definition.dependencies.len(), 3);
+}
+
+/// 5. Visible-range volume profile + custom candle + lower-timeframe intrabar study.
+#[test]
+fn visible_range_and_lower_timeframe_intrabar_studies_are_expressible_through_public_sdk_only() {
+    let primary = sample_series("ES", BarPeriod::time(300).expect("5m"));
+    let ltf = sample_series("ES", BarPeriod::time(60).expect("1m"));
+    let definition = StudyDefinitionBuilder::new("corpus.vr_intrabar")
+        .market(primary, StreamRequirements::BARS)
+        .market(ltf, StreamRequirements::BARS)
+        .output(
+            StudyOutputBuilder::new("poc", "Visible POC", StudyPlotKind::StepLine)
+                .point_style(StudyPointStyle::PerPoint)
+                .build(),
+        )
+        .invalidation(StudyInvalidationPolicy::FromFirstChanged)
+        .build();
+
+    let registration = NativeStudyRegistration {
+        settings: StudySettings::defaults(&definition.settings).expect("valid settings"),
+        definition,
+        program: NativeStudyProgram::stateless(|ctx| {
+            let chart = ctx.chart_context();
+            let timestamps = ctx.timestamps().to_vec();
+            if let (Some(&first), Some(&last)) = (timestamps.first(), timestamps.last())
+                && chart.contains_timestamp(last)
+            {
+                if let Some(StudyInputSeries::Market(ltf_series)) = ctx.input(1) {
+                    let _sub_bars = intrabar_range(first, last.saturating_add(1), ltf_series);
+                }
+                ctx.set_bar_color(
+                    timestamps.len() - 1,
+                    Some(StudyColor::rgb(0x38, 0xbd, 0xf8)),
+                )?;
+            }
+            Ok(())
+        })
+        .with_chart_context()
+        .with_intrabar_state(|_| Ok(NativeStudyState::new(0u64, |_| size_of::<u64>()))),
+    };
+
+    assert!(registration.program.observes_chart_context);
+    assert!(registration.program.intrabar_state_factory.is_some());
+}
+
+/// 6. Label/polyline churn study verifying compact `Create`/`Update`/`Delete` scene deltas.
+#[test]
+fn label_and_polyline_scene_deltas_remain_compact_under_churn() {
+    let mut prev = StudySceneState::default();
+    let poly_id = prev
+        .create_polyline(StudyPolylineObject {
+            points: vec![StudyPoint::new(100, 10.0), StudyPoint::new(200, 12.0)],
+            color: StudyColor::rgb(0x38, 0xbd, 0xf8),
+            width: 2,
+            style: StudyLineStyle::Solid,
+            fill_color: None,
+            closed: false,
+        })
+        .expect("polyline creates");
+    let label_id = prev
+        .create_label(StudyLabelObject {
+            point: StudyPoint::new(200, 12.0),
+            text: "Swing".to_string(),
+            style: StudyLabelStyle::Circle,
+            color: StudyColor::rgb(0x22, 0xc5, 0x5e),
+            text_color: StudyColor::rgb(0xff, 0xff, 0xff),
+        })
+        .expect("label creates");
+
+    let mut next = prev.clone();
+    next.update(
+        poly_id,
+        StudySceneObject::Polyline(StudyPolylineObject {
+            points: vec![
+                StudyPoint::new(100, 10.0),
+                StudyPoint::new(200, 12.0),
+                StudyPoint::new(300, 11.5),
+            ],
+            color: StudyColor::rgb(0x38, 0xbd, 0xf8),
+            width: 2,
+            style: StudyLineStyle::Solid,
+            fill_color: None,
+            closed: false,
+        }),
+    )
+    .expect("polyline updates");
+    assert!(next.delete(label_id));
+
+    let deltas = prev.diff(&next);
+    assert_eq!(deltas.len(), 2);
+    assert!(
+        deltas
+            .iter()
+            .any(|d| matches!(d, StudySceneDelta::Delete { id } if *id == label_id))
+    );
+    assert!(
+        deltas
+            .iter()
+            .any(|d| matches!(d, StudySceneDelta::Update { id, .. } if *id == poly_id))
+    );
+}

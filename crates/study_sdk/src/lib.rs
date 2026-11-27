@@ -43,6 +43,7 @@ use std::{
 
 pub mod builders;
 pub mod project;
+pub mod sandbox;
 
 /// Convenient one-line import for Aeris Study SDK authors.
 pub mod prelude {

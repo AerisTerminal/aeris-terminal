@@ -347,6 +347,79 @@ fn source_control(
     )
 }
 
+fn color_setting_control(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &StudySettingsDialogState,
+    control_id: usize,
+    spec: &StudySettingSpec,
+    label: &SharedString,
+    enabled: bool,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let value = match dialog
+        .draft_values
+        .get(&spec.identifier)
+        .unwrap_or(&spec.default)
+    {
+        StudySettingValue::Color(color) => color.to_hex(),
+        _ => String::new(),
+    };
+    let target = StudyColorPickerTarget::Setting(spec.identifier.clone());
+    let open_picker = dialog
+        .color_picker
+        .as_ref()
+        .filter(|picker| picker.target == target);
+    let open = open_picker.is_some();
+    let toggle = app.clone();
+    let toggle_target = target.clone();
+    let mut control = div()
+        .relative()
+        .flex()
+        .opacity(if enabled { 1.0 } else { 0.55 })
+        .child(
+            color_swatch_button(
+                ("study_setting_color", control_id),
+                label.clone(),
+                &value,
+                open,
+                theme,
+            )
+            .on_press(move |_, window, cx| {
+                if !enabled {
+                    return;
+                }
+                let target = toggle_target.clone();
+                toggle.update(cx, |surface, surface_cx| {
+                    surface.toggle_study_dialog_color_picker(target, window, surface_cx);
+                });
+            }),
+        );
+    if let Some(picker) = open_picker {
+        let select = app.clone();
+        let select_target = target;
+        let dismiss = app.clone();
+        control = control.child(gpui::deferred(
+            ColorPicker::new(
+                ("study_setting_color_popover", control_id),
+                value,
+                &picker.input,
+                theme,
+            )
+            .error(picker.error.as_deref())
+            .on_select(move |value, _, cx| {
+                let target = select_target.clone();
+                select.update(cx, |surface, surface_cx| {
+                    surface.set_study_dialog_color(target, &value, surface_cx);
+                });
+            })
+            .on_dismiss(move |_, cx| {
+                dismiss.update(cx, WorkspaceSurface::close_study_dialog_color_picker);
+            }),
+        ));
+    }
+    control.into_any_element()
+}
+
 fn setting_control(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
@@ -372,6 +445,9 @@ fn setting_control(
         StudySettingControl::Choice { options } => {
             choice_control(app, dialog, control_id, spec, options, enabled, theme)
         }
+        StudySettingControl::Color => {
+            color_setting_control(app, dialog, control_id, spec, label, enabled, theme)
+        }
         StudySettingControl::Timeframe {
             allow_current_chart,
         } => timeframe_control(
@@ -390,7 +466,6 @@ fn setting_control(
         | StudySettingControl::Decimal { .. }
         | StudySettingControl::Price { .. }
         | StudySettingControl::Text
-        | StudySettingControl::Color
         | StudySettingControl::Symbol { .. }
         | StudySettingControl::Session
         | StudySettingControl::Timestamp => {
@@ -431,10 +506,11 @@ fn output_color_control(
 ) -> AnyElement {
     let output_index = draft.output_index;
     let value = draft.effective_color().to_string();
+    let target = StudyColorPickerTarget::Output(output_index);
     let open_picker = dialog
         .color_picker
         .as_ref()
-        .filter(|picker| picker.target == output_index);
+        .filter(|picker| picker.target == target);
     let toggle = app.clone();
     let id = ("study_output_color", output_index);
     let open = open_picker.is_some();
@@ -448,7 +524,11 @@ fn output_color_control(
         .flex()
         .child(button.on_press(move |_, window, cx| {
             toggle.update(cx, |surface, surface_cx| {
-                surface.toggle_study_dialog_color_picker(output_index, window, surface_cx);
+                surface.toggle_study_dialog_color_picker(
+                    StudyColorPickerTarget::Output(output_index),
+                    window,
+                    surface_cx,
+                );
             });
         }));
     if let Some(picker) = open_picker {
@@ -464,7 +544,11 @@ fn output_color_control(
             .error(picker.error.as_deref())
             .on_select(move |value, _, cx| {
                 select.update(cx, |surface, surface_cx| {
-                    surface.set_study_dialog_color(output_index, &value, surface_cx);
+                    surface.set_study_dialog_color(
+                        StudyColorPickerTarget::Output(output_index),
+                        &value,
+                        surface_cx,
+                    );
                 });
             })
             .on_dismiss(move |_, cx| {

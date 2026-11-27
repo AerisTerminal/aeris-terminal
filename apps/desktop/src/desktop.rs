@@ -1284,6 +1284,12 @@ struct BigTradesDialogState {
 /// Study settings being edited. Style edits preview on the chart at once and calculation edits
 /// reinitialize the study as they are made; Apply keeps them and Cancel restores the style and
 /// settings of `original`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StudyColorPickerTarget {
+    Output(usize),
+    Setting(String),
+}
+
 struct StudySettingsDialogState {
     study_id: StudyInstanceId,
     title: String,
@@ -1295,8 +1301,8 @@ struct StudySettingsDialogState {
     line_width: u8,
     /// Host-owned line colors, presentation only like `line_width`.
     output_colors: Vec<StudyOutputColorDraft>,
-    /// The picker's target is the output index of the edited line.
-    color_picker: Option<DialogColorPickerState<usize>>,
+    /// The picker's target: either an output line or a semantic `Color` study setting.
+    color_picker: Option<DialogColorPickerState<StudyColorPickerTarget>>,
     inputs: HashMap<String, Entity<InputState>>,
     _subscriptions: Vec<gpui::Subscription>,
     /// The setting whose dropdown is open.
