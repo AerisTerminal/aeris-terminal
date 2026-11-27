@@ -6761,6 +6761,38 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn format_study_editor_source(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
+            dialog.format_current_source(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn save_study_editor_snapshot(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
+            dialog.save_current_snapshot(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn restore_study_editor_snapshot(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
+            dialog.restore_latest_snapshot(window, cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn add_study_editor_project_to_chart(&mut self, cx: &mut Context<Self>) {
         if let Some(dialog) = self.study_editor.as_mut() {
             dialog.popover = StudyEditorPopover::None;

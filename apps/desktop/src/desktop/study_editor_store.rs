@@ -45,6 +45,9 @@ use std::{
 };
 
 const PROJECTS_DIR_NAME: &str = "study_projects";
+const HISTORY_DIR_NAME: &str = "history";
+const MAXIMUM_HISTORY_SNAPSHOTS: usize = 16;
+const MAXIMUM_LIBRARY_IMPORTS: usize = 4;
 const ARTIFACT_CACHE_DIR_NAME: &str = ".artifact_cache";
 const MAXIMUM_RETAINED_ARTIFACT_CACHE_ENTRIES: usize = 128;
 const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -989,6 +992,84 @@ impl StudyProjectStore {
             overrides,
             compiled,
         ))
+    }
+
+    /// Saves a bounded local version-history snapshot of `source` under `<project>/history/`.
+    /// Retains at most [`MAXIMUM_HISTORY_SNAPSHOTS`] newest snapshots per project.
+    pub(crate) fn save_history_snapshot(
+        &self,
+        identifier: &str,
+        source: &str,
+    ) -> Result<String, String> {
+        validate_study_source(source).map_err(|err| format!("invalid snapshot source: {err:?}"))?;
+        let hist_dir = self.project_dir(identifier)?.join(HISTORY_DIR_NAME);
+        fs::create_dir_all(&hist_dir)
+            .map_err(|err| format!("create history dir failed: {err}"))?;
+        let seq = BUILD_DIR_NONCE.fetch_add(1, Ordering::Relaxed);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let name = format!("snap_{ts:012}_{seq:06}.rs");
+        fs::write(hist_dir.join(&name), source)
+            .map_err(|err| format!("write history snapshot failed: {err}"))?;
+
+        if let Ok(entries) = fs::read_dir(&hist_dir) {
+            let mut files: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .collect();
+            files.sort();
+            while files.len() > MAXIMUM_HISTORY_SNAPSHOTS {
+                if let Some(oldest) = files.first().cloned() {
+                    let _ = fs::remove_file(oldest);
+                    files.remove(0);
+                }
+            }
+        }
+        Ok(name)
+    }
+
+    /// Lists saved snapshot filenames for `identifier` from newest to oldest.
+    #[must_use]
+    pub(crate) fn list_history_snapshots(&self, identifier: &str) -> Vec<String> {
+        let Ok(dir) = self.project_dir(identifier) else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(dir.join(HISTORY_DIR_NAME)) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_file())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        names.reverse();
+        names
+    }
+
+    /// Loads one saved version-history snapshot by filename.
+    pub(crate) fn load_history_snapshot(
+        &self,
+        identifier: &str,
+        snapshot_name: &str,
+    ) -> Result<String, String> {
+        if snapshot_name.contains('/') || snapshot_name.contains('\\') || snapshot_name.contains("..")
+        {
+            return Err("invalid snapshot filename".to_string());
+        }
+        let path = self
+            .project_dir(identifier)?
+            .join(HISTORY_DIR_NAME)
+            .join(snapshot_name);
+        fs::read_to_string(path).map_err(|err| format!("read snapshot failed: {err}"))
+    }
+
+    /// Reads the current editable `lib.rs` of another study project for `// @use: <id>` imports.
+    pub(crate) fn load_project_source(&self, identifier: &str) -> Result<String, String> {
+        let path = self.project_dir(identifier)?.join(SOURCE_FILE_NAME);
+        fs::read_to_string(path).map_err(|err| format!("library `{identifier}` not found: {err}"))
     }
 
     /// Deletes one persisted study project directory.
@@ -3129,6 +3210,95 @@ fn parse_rustc_json_diagnostics(stderr: &str) -> Vec<StudyDiagnostic> {
     out
 }
 
+/// Parses up to [`MAXIMUM_LIBRARY_IMPORTS`] `// @use: <project_id>` library import directives.
+#[must_use]
+pub(crate) fn parse_library_imports(source: &str) -> Vec<String> {
+    let mut libs = Vec::new();
+    for raw_line in source.lines().take(80) {
+        let Some(comment) = raw_line.trim().strip_prefix("//") else {
+            continue;
+        };
+        let content = comment.trim();
+        if content.len() >= 5 && content[..5].eq_ignore_ascii_case("@use:") {
+            let id = content[5..].trim();
+            if !id.is_empty() && !libs.iter().any(|existing| existing == id) {
+                libs.push(id.to_string());
+                if libs.len() >= MAXIMUM_LIBRARY_IMPORTS {
+                    break;
+                }
+            }
+        }
+    }
+    libs
+}
+
+fn sanitize_library_module_name(identifier: &str) -> String {
+    let raw = identifier.rsplit('.').next().unwrap_or(identifier);
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() || out.as_bytes()[0].is_ascii_digit() {
+        out.insert_str(0, "lib_");
+    }
+    out
+}
+
+/// Formats Rust study source using `rustfmt` when available, falling back to deterministic
+/// indentation normalization when `rustfmt` is not installed.
+#[must_use]
+pub(crate) fn format_study_source(source: &str) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+    if let Ok(mut child) = hidden_command(resolve_toolchain_binary("rustfmt"))
+        .args(["--edition", "2024", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(source.as_bytes());
+        }
+        if let Ok(out) = child.wait_with_output()
+            && out.status.success()
+            && let Ok(formatted) = String::from_utf8(out.stdout)
+            && !formatted.trim().is_empty()
+        {
+            return formatted;
+        }
+    }
+    let mut depth: usize = 0;
+    let mut out = String::with_capacity(source.len());
+    for raw in source.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        if trimmed.starts_with('}') || trimmed.starts_with("})") {
+            depth = depth.saturating_sub(1);
+        }
+        for _ in 0..depth {
+            out.push_str("    ");
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+        let code = trimmed.split("//").next().unwrap_or("");
+        let opens = code.bytes().filter(|&b| b == b'{').count();
+        let closes = code.bytes().filter(|&b| b == b'}').count();
+        let leading_close = usize::from(trimmed.starts_with('}') || trimmed.starts_with("})"));
+        depth = depth
+            .saturating_add(opens)
+            .saturating_sub(closes.saturating_sub(leading_close));
+    }
+    out
+}
+
 /// Compiles user-authored Rust study source into a zero-authority WebAssembly module
 /// (`wasm32-unknown-unknown`) using a controlled Aeris-owned ABI v1 harness, and validates
 /// the resulting `.wasm` bytes inside `wasmi`.
@@ -3138,6 +3308,15 @@ fn parse_rustc_json_diagnostics(stderr: &str) -> Vec<StudyDiagnostic> {
 /// `rustc` compilation error, or `wasmi` zero-authority / ABI validation failure.
 pub(crate) fn compile_study_source_to_wasm(
     source: &str,
+) -> Result<CompiledStudyArtifact, Vec<StudyDiagnostic>> {
+    compile_study_source_to_wasm_with_store(source, None)
+}
+
+/// Compiles user-authored Rust study source into a zero-authority WebAssembly module, resolving
+/// any `// @use: <lib_id>` library imports from `store`.
+pub(crate) fn compile_study_source_to_wasm_with_store(
+    source: &str,
+    store: Option<&StudyProjectStore>,
 ) -> Result<CompiledStudyArtifact, Vec<StudyDiagnostic>> {
     let static_diags = validate_study_source_static(source);
     if !static_diags.is_empty() {
@@ -3191,12 +3370,60 @@ pub(crate) fn compile_study_source_to_wasm(
     let harness_path = build_dir.join("harness.rs");
     let user_path = build_dir.join("user_study.rs");
     let out_wasm_path = build_dir.join("study.wasm");
+
+    let mut lib_decls = String::new();
+    for lib_id in parse_library_imports(source) {
+        let Some(project_store) = store else {
+            cleanup(&build_dir);
+            return Err(vec![StudyDiagnostic {
+                severity: StudyDiagnosticSeverity::Error,
+                line: 1,
+                column: 1,
+                code: Some("AERIS_LIB_UNAVAILABLE".to_string()),
+                message: format!("library import `@use: {lib_id}` requires an active project store"),
+            }]);
+        };
+        let lib_src = match project_store.load_project_source(&lib_id) {
+            Ok(s) => s,
+            Err(err) => {
+                cleanup(&build_dir);
+                return Err(vec![StudyDiagnostic {
+                    severity: StudyDiagnosticSeverity::Error,
+                    line: 1,
+                    column: 1,
+                    code: Some("AERIS_LIB_NOT_FOUND".to_string()),
+                    message: err,
+                }]);
+            }
+        };
+        let lib_diags = validate_study_source_static(&lib_src);
+        if !lib_diags.is_empty() {
+            cleanup(&build_dir);
+            return Err(lib_diags);
+        }
+        let mod_name = sanitize_library_module_name(&lib_id);
+        let lib_file = build_dir.join(format!("{mod_name}.rs"));
+        if let Err(err) = fs::write(&lib_file, &lib_src) {
+            cleanup(&build_dir);
+            return Err(vec![StudyDiagnostic {
+                severity: StudyDiagnosticSeverity::Error,
+                line: 1,
+                column: 1,
+                code: Some("AERIS_BUILD_IO".to_string()),
+                message: format!("failed to stage library `{lib_id}`: {err}"),
+            }]);
+        }
+        lib_decls.push_str(&format!(
+            "#[forbid(unsafe_code)]\n#[allow(dead_code)]\npub mod {mod_name};\n"
+        ));
+    }
+
     let harness_src = if source_uses_incremental_entrypoint(source) {
-        format!("{WASM_HOST_API_PRELUDE}{WASM_INCREMENTAL_ENTRYPOINT}")
+        format!("{lib_decls}{WASM_HOST_API_PRELUDE}{WASM_INCREMENTAL_ENTRYPOINT}")
     } else if source_uses_multi_output_entrypoint(source) {
-        format!("{WASM_HOST_API_PRELUDE}{WASM_MULTI_ENTRYPOINT}")
+        format!("{lib_decls}{WASM_HOST_API_PRELUDE}{WASM_MULTI_ENTRYPOINT}")
     } else {
-        format!("{WASM_HOST_API_PRELUDE}{WASM_SINGLE_ENTRYPOINT}")
+        format!("{lib_decls}{WASM_HOST_API_PRELUDE}{WASM_SINGLE_ENTRYPOINT}")
     };
     if let Err(err) =
         fs::write(&harness_path, harness_src).and_then(|()| fs::write(&user_path, source))
@@ -4021,6 +4248,78 @@ pub fn calculate_multi(
         assert_eq!(report.total_trades, 2);
         assert!(report.net_profit > 0.0, "uptrend longs should profit: {report:?}");
         assert!(telemetry.scene_object_count >= 4, "expected entry/exit chart markers");
+    }
+
+    #[test]
+    fn phase_6_libraries_version_history_and_formatting_work_end_to_end() {
+        let root = std::env::temp_dir().join(format!(
+            "aeris_study_phase6_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = StudyProjectStore::new(&root);
+
+        // 1. Create a reusable library project `user.math_lib`
+        let mut library = StudyProjectLibrary::new();
+        library
+            .create_from_template(
+                "user.math_lib",
+                "Math Lib",
+                StudyProjectTemplate::StatelessOverlay,
+            )
+            .expect("creates library project");
+        library
+            .update_source(
+                "user.math_lib",
+                "pub fn midpoint(a: f64, b: f64) -> f64 { (a + b) * 0.5 }\n".to_string(),
+            )
+            .expect("updates library source");
+        store
+            .save_project(library.get("user.math_lib").unwrap())
+            .expect("saves library");
+
+        // 2. Compile a consumer study importing `// @use: user.math_lib`
+        let consumer = r#"
+// @use: user.math_lib
+// @pane: price
+pub fn calculate(_o: &[f64], high: &[f64], low: &[f64], _c: &[f64], _v: &[f64], out: &mut [f64]) {
+    for i in 0..out.len() {
+        out[i] = super::math_lib::midpoint(high[i], low[i]);
+    }
+}
+"#;
+        let artifact = compile_study_source_to_wasm_with_store(consumer, Some(&store))
+            .expect("consumer study with @use library compiles");
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::Uptrend, 10, 60);
+        let res = artifact
+            .compiled
+            .execute_columnar(&fixture.bars, StudySandboxLimits::default())
+            .expect("consumer study executes");
+        assert_eq!(res.values.len(), 10);
+        assert!(res.values[9].is_some());
+
+        // 3. Bounded version history save/list/load (capped at 16)
+        for v in 0..20 {
+            let _ = store
+                .save_history_snapshot("user.math_lib", &format!("// v{v}\npub fn x() {{}}\n"))
+                .expect("saves snapshot");
+        }
+        let snaps = store.list_history_snapshots("user.math_lib");
+        assert_eq!(snaps.len(), MAXIMUM_HISTORY_SNAPSHOTS);
+        let newest = store
+            .load_history_snapshot("user.math_lib", &snaps[0])
+            .expect("loads newest snapshot");
+        assert!(newest.contains("// v19"));
+
+        // 4. Formatter produces clean indented Rust code
+        let ugly = "pub fn f() {\nlet x = 1;\n}";
+        let formatted = format_study_source(ugly);
+        assert!(formatted.contains("    let x = 1;"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

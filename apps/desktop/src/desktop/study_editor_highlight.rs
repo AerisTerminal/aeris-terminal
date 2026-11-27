@@ -20,6 +20,185 @@ pub(super) struct StudySnippet {
     pub(super) body: &'static str,
 }
 
+/// Context-aware API autocomplete item for the Study Editor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct StudyCompletion {
+    pub(super) trigger: &'static str,
+    pub(super) insert: &'static str,
+    pub(super) signature: &'static str,
+    pub(super) doc: &'static str,
+}
+
+/// Complete autocomplete catalog for Aeris Study SDK directives, `ta::*`, `of::*`, `strategy::*`,
+/// and scene drawing helpers.
+pub(super) const STUDY_COMPLETIONS: &[StudyCompletion] = &[
+    StudyCompletion {
+        trigger: "ta::sma",
+        insert: "super::ta::sma(close, 20)",
+        signature: "ta::sma(src: &[f64], period: usize) -> Vec<f64>",
+        doc: "Simple Moving Average",
+    },
+    StudyCompletion {
+        trigger: "ta::ema",
+        insert: "super::ta::ema(close, 20)",
+        signature: "ta::ema(src: &[f64], period: usize) -> Vec<f64>",
+        doc: "Exponential Moving Average",
+    },
+    StudyCompletion {
+        trigger: "ta::rma",
+        insert: "super::ta::rma(close, 14)",
+        signature: "ta::rma(src: &[f64], period: usize) -> Vec<f64>",
+        doc: "Wilder's Moving Average",
+    },
+    StudyCompletion {
+        trigger: "ta::rsi",
+        insert: "super::ta::rsi(close, 14)",
+        signature: "ta::rsi(src: &[f64], period: usize) -> Vec<f64>",
+        doc: "Relative Strength Index (0..100)",
+    },
+    StudyCompletion {
+        trigger: "ta::atr",
+        insert: "super::ta::atr(high, low, close, 14)",
+        signature: "ta::atr(high, low, close, period) -> Vec<f64>",
+        doc: "Average True Range",
+    },
+    StudyCompletion {
+        trigger: "ta::bb",
+        insert: "super::ta::bb(close, 20, 2.0)",
+        signature: "ta::bb(src, period, mult) -> (Vec<f64>, Vec<f64>, Vec<f64>)",
+        doc: "Bollinger Bands (upper, middle, lower)",
+    },
+    StudyCompletion {
+        trigger: "ta::macd",
+        insert: "super::ta::macd(close, 12, 26, 9)",
+        signature: "ta::macd(src, fast, slow, signal) -> (Vec<f64>, Vec<f64>, Vec<f64>)",
+        doc: "MACD (line, signal, histogram)",
+    },
+    StudyCompletion {
+        trigger: "ta::session_vwap",
+        insert: "super::ta::session_vwap(high, low, close, volume)",
+        signature: "ta::session_vwap(high, low, close, volume) -> Vec<f64>",
+        doc: "Daily-resetting Session VWAP",
+    },
+    StudyCompletion {
+        trigger: "ta::pivothigh",
+        insert: "super::ta::pivothigh(high, i, 5, 5)",
+        signature: "ta::pivothigh(src, bar_idx, left, right) -> Option<f64>",
+        doc: "Confirmed swing pivot high",
+    },
+    StudyCompletion {
+        trigger: "ta::pivotlow",
+        insert: "super::ta::pivotlow(low, i, 5, 5)",
+        signature: "ta::pivotlow(src, bar_idx, left, right) -> Option<f64>",
+        doc: "Confirmed swing pivot low",
+    },
+    StudyCompletion {
+        trigger: "ta::crossover",
+        insert: "super::ta::crossover(&a, &b, i)",
+        signature: "ta::crossover(a, b, i) -> bool",
+        doc: "True when series `a` crosses above `b` at bar `i`",
+    },
+    StudyCompletion {
+        trigger: "ta::crossunder",
+        insert: "super::ta::crossunder(&a, &b, i)",
+        signature: "ta::crossunder(a, b, i) -> bool",
+        doc: "True when series `a` crosses below `b` at bar `i`",
+    },
+    StudyCompletion {
+        trigger: "of::cvd",
+        insert: "super::of::cvd(close.len())",
+        signature: "of::cvd(len: usize) -> Vec<f64>",
+        doc: "Cumulative Volume Delta (requires `// @require: order_flow`)",
+    },
+    StudyCompletion {
+        trigger: "of::delta",
+        insert: "super::of::delta(i)",
+        signature: "of::delta(bar_index: usize) -> f64",
+        doc: "Per-bar aggressor delta (buy_vol - sell_vol)",
+    },
+    StudyCompletion {
+        trigger: "strategy::entry",
+        insert: "super::strategy::entry(i, \"Long\", true, 1.0);",
+        signature: "strategy::entry(bar_idx, id, is_long, qty)",
+        doc: "Open or reverse a backtest position",
+    },
+    StudyCompletion {
+        trigger: "strategy::exit",
+        insert: "super::strategy::exit(i, \"Exit\", \"Long\", tp, sl);",
+        signature: "strategy::exit(bar_idx, id, from_entry, tp, sl)",
+        doc: "Attach take-profit / stop-loss bracket",
+    },
+    StudyCompletion {
+        trigger: "draw_box_text",
+        insert: "super::draw_box_text(x1, top, x2, bot, border, fill, 1, super::LINE_SOLID, text_col, \"FVG\");",
+        signature: "draw_box_text(x1, top, x2, bot, border, fill, w, style, text_col, text)",
+        doc: "Draw rectangular zone with label text",
+    },
+    StudyCompletion {
+        trigger: "draw_line_fill",
+        insert: "super::draw_line_fill(line_a, line_b, fill_rgba);",
+        signature: "draw_line_fill(line_a, line_b, color_rgba)",
+        doc: "Shade region between two drawn lines",
+    },
+    StudyCompletion {
+        trigger: "plot_shape",
+        insert: "super::plot_shape(i, super::LOC_BELOW_BAR, 0.0, super::LABEL_TRIANGLE_UP, col, white, \"BUY\");",
+        signature: "plot_shape(bar_idx, location, price, shape, color, text_color, text)",
+        doc: "Plot marker above/below bar or at price",
+    },
+    StudyCompletion {
+        trigger: "set_plot_color",
+        insert: "super::set_plot_color(0, i, color_rgba);",
+        signature: "set_plot_color(output_idx, bar_idx, color_rgba)",
+        doc: "Dynamic per-bar plot color override",
+    },
+    StudyCompletion {
+        trigger: "emit_alert",
+        insert: "super::emit_alert(i, \"signal\", \"Alert triggered\", super::ALERT_ONCE_PER_BAR_CLOSE);",
+        signature: "emit_alert(bar_idx, condition_id, message, frequency)",
+        doc: "Emit deduplicated alert to Aeris notification center",
+    },
+    StudyCompletion {
+        trigger: "log_info",
+        insert: "super::log_info(&format!(\"val={}\", close[i]));",
+        signature: "log_info(message: &str)",
+        doc: "Print debug message to Study Editor Console",
+    },
+    StudyCompletion {
+        trigger: "@input:",
+        insert: "// @input: len | int | 20 | Length | min=1 | max=200 | group=Core",
+        signature: "// @input: id | type | default | label | ...",
+        doc: "Declare typed Settings UI input",
+    },
+    StudyCompletion {
+        trigger: "@request_tf:",
+        insert: "// @request_tf: htf | 15m | confirmed | carry",
+        signature: "// @request_tf: alias | tf | confirmed|forming | carry|gaps",
+        doc: "Request non-repainting higher-timeframe series",
+    },
+    StudyCompletion {
+        trigger: "@use:",
+        insert: "// @use: user.my_lib",
+        signature: "// @use: <library_project_id>",
+        doc: "Import reusable helper functions from another study project",
+    },
+];
+
+/// Returns up to `limit` API completions matching `query` (case-insensitive substring match).
+#[must_use]
+pub(super) fn matching_completions(query: &str, limit: usize) -> Vec<&'static StudyCompletion> {
+    let q = query.trim().to_ascii_lowercase();
+    STUDY_COMPLETIONS
+        .iter()
+        .filter(|c| {
+            q.is_empty()
+                || c.trigger.to_ascii_lowercase().contains(&q)
+                || c.doc.to_ascii_lowercase().contains(&q)
+        })
+        .take(limit)
+        .collect()
+}
+
 /// Curated Study SDK snippets for rapid indicator authoring.
 pub(super) const STUDY_SNIPPETS: &[StudySnippet] = &[
     StudySnippet {

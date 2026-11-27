@@ -1,12 +1,13 @@
 use super::native_ui::input::{SyntaxHighlighter, TextArea, TextareaState};
 use super::study_editor_highlight::{
-    STUDY_API_QUICK_REF, STUDY_SNIPPETS, line_column_to_byte_range, rust_syntax_highlighter,
+    STUDY_API_QUICK_REF, STUDY_SNIPPETS, line_column_to_byte_range, matching_completions,
+    rust_syntax_highlighter,
 };
 use super::study_editor_store::{
-    CompiledStudyArtifact, StudyProjectStore, compile_study_source_to_wasm,
-    export_project_bundle_json, import_project_bundle_json, install_rust_dev_pack,
-    install_wasm_sandbox_target, parse_study_source_spec, probe_study_dev_pack,
-    probe_study_dev_pack_fresh, run_offline_preview_check,
+    CompiledStudyArtifact, StudyProjectStore, compile_study_source_to_wasm_with_store,
+    export_project_bundle_json, format_study_source, import_project_bundle_json,
+    install_rust_dev_pack, install_wasm_sandbox_target, parse_study_source_spec,
+    probe_study_dev_pack, probe_study_dev_pack_fresh, run_offline_preview_check,
 };
 use super::*;
 use aeris_localization::{panels, tr};
@@ -266,6 +267,54 @@ impl StudyEditorDialogState {
         }
     }
 
+    pub(super) fn format_current_source(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceSurface>,
+    ) {
+        let current = self.source_input.read(cx).value().to_string();
+        let formatted = format_study_source(&current);
+        self.source_input.update(cx, |input, input_cx| {
+            input.set_value(formatted, window, input_cx);
+        });
+        self.status_message = Some("Formatted Rust study source".to_string());
+    }
+
+    pub(super) fn save_current_snapshot(&mut self, cx: &mut Context<WorkspaceSurface>) {
+        let Some(identifier) = self.selected_id.clone() else {
+            return;
+        };
+        let source = self.source_input.read(cx).value().to_string();
+        self.status_message = match self.store.save_history_snapshot(&identifier, &source) {
+            Ok(name) => Some(format!("Saved snapshot `{name}`")),
+            Err(err) => Some(err),
+        };
+    }
+
+    pub(super) fn restore_latest_snapshot(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceSurface>,
+    ) {
+        let Some(identifier) = self.selected_id.clone() else {
+            return;
+        };
+        let snapshots = self.store.list_history_snapshots(&identifier);
+        let Some(latest) = snapshots.first() else {
+            self.status_message = Some("No saved snapshots for this script".to_string());
+            return;
+        };
+        match self.store.load_history_snapshot(&identifier, latest) {
+            Ok(restored) => {
+                self.source_input.update(cx, |input, input_cx| {
+                    input.set_value(restored, window, input_cx);
+                });
+                self.status_message = Some(format!("Restored snapshot `{latest}`"));
+            }
+            Err(err) => self.status_message = Some(err),
+        }
+    }
+
     pub(super) fn start_build_and_save(&mut self, cx: &mut Context<WorkspaceSurface>) {
         let Some(identifier) = self.selected_id.clone() else {
             return;
@@ -280,10 +329,13 @@ impl StudyEditorDialogState {
         self.busy_label = Some(format!("Compiling `{identifier}` to WASM..."));
         self.status_message = None;
 
+        let store_clone = self.store.clone();
         self.active_task = Some(cx.spawn(async move |surface, cx| {
             let build_result = cx
                 .background_executor()
-                .spawn(async move { compile_study_source_to_wasm(&source) })
+                .spawn(async move {
+                    compile_study_source_to_wasm_with_store(&source, Some(&store_clone))
+                })
                 .await;
             let _ = surface.update(cx, |surface, surface_cx| {
                 if let Some(dialog) = surface.study_editor.as_mut() {
@@ -414,7 +466,7 @@ impl StudyEditorDialogState {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    match compile_study_source_to_wasm(&source) {
+                    match compile_study_source_to_wasm_with_store(&source, Some(&fallback_store)) {
                         Ok(artifact) => Ok((Some(artifact.clone()), artifact.compiled)),
                         Err(diagnostics) => {
                             let fallback = fallback_store
@@ -1365,6 +1417,52 @@ fn more_popover(
             },
         ))
         .child(popover_menu_row(
+            "se_more_format",
+            "Format code",
+            Some(HugeIcon::Template),
+            false,
+            false,
+            theme,
+            {
+                let fmt_app = app.clone();
+                move |window, cx| {
+                    fmt_app.update(cx, |surface, surface_cx| {
+                        surface.format_study_editor_source(window, surface_cx);
+                    });
+                }
+            },
+        ))
+        .child(popover_menu_row(
+            "se_more_snap_save",
+            "Save version snapshot",
+            Some(HugeIcon::CheckIcon),
+            false,
+            false,
+            theme,
+            {
+                let snap_app = app.clone();
+                move |_, cx| {
+                    snap_app.update(cx, WorkspaceSurface::save_study_editor_snapshot);
+                }
+            },
+        ))
+        .child(popover_menu_row(
+            "se_more_snap_restore",
+            "Restore latest snapshot",
+            Some(HugeIcon::Refresh),
+            false,
+            false,
+            theme,
+            {
+                let rest_app = app.clone();
+                move |window, cx| {
+                    rest_app.update(cx, |surface, surface_cx| {
+                        surface.restore_study_editor_snapshot(window, surface_cx);
+                    });
+                }
+            },
+        ))
+        .child(popover_menu_row(
             "se_more_console",
             if editor.console_open {
                 "Hide Diagnostics console"
@@ -1627,6 +1725,23 @@ fn snippets_strip(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> AnyElem
                 }),
         );
     }
+    let mut api_row = div().flex().flex_wrap().items_center().gap_1();
+    for (idx, item) in matching_completions("", 10).into_iter().enumerate() {
+        let insert_app = app.clone();
+        let insert_text = item.insert;
+        let doc_text = item.signature;
+        api_row = api_row.child(
+            Button::new(("study_editor_api", idx), theme)
+                .variant(ButtonVariant::Ghost)
+                .button_size(ButtonSize::Sm)
+                .label(item.trigger)
+                .on_click(move |_, window, cx| {
+                    insert_app.update(cx, |surface, surface_cx| {
+                        surface.insert_study_editor_snippet(insert_text, doc_text, window, surface_cx);
+                    });
+                }),
+        );
+    }
     div()
         .px_3()
         .py_1p5()
@@ -1638,6 +1753,7 @@ fn snippets_strip(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> AnyElem
         .border_b_1()
         .border_color(gpui_color(colors.border_subtle))
         .child(row)
+        .child(api_row)
         .child(
             div()
                 .text_xs()
