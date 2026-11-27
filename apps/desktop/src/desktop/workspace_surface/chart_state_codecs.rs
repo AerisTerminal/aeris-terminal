@@ -608,13 +608,144 @@ impl RejectedSavedPresentation {
 
 pub(super) const fn chart_study_plot(plot: StudyPlotKind) -> ChartStudyPlotKind {
     match plot {
-        StudyPlotKind::Line
-        | StudyPlotKind::StepLine
-        | StudyPlotKind::Circles
-        | StudyPlotKind::Cross => ChartStudyPlotKind::Line,
+        StudyPlotKind::Line | StudyPlotKind::Circles | StudyPlotKind::Cross => {
+            ChartStudyPlotKind::Line
+        }
+        StudyPlotKind::StepLine => ChartStudyPlotKind::StepLine,
         StudyPlotKind::Histogram | StudyPlotKind::Columns => ChartStudyPlotKind::Histogram,
         StudyPlotKind::Area => ChartStudyPlotKind::Area,
     }
+}
+
+pub(super) fn chart_study_scene_deltas(
+    deltas: &[aeris_market_runtime::study::StudySceneDelta],
+) -> Vec<aeris_chart_integration::ChartStudySceneDelta> {
+    use aeris_chart_integration::{
+        ChartStudySceneBox, ChartStudySceneDelta, ChartStudySceneLabel, ChartStudySceneLine,
+        ChartStudySceneObject, ChartStudyScenePolyline, ChartStudySceneTable,
+        ChartStudySceneTableCell, ChartStudyTablePosition,
+    };
+    use aeris_market_runtime::study::{
+        StudyLineExtend, StudySceneDelta, StudySceneObject, StudyTablePosition,
+    };
+
+    let convert_object = |object: &StudySceneObject| -> Option<ChartStudySceneObject> {
+        match object {
+            StudySceneObject::Line(line) => {
+                Some(ChartStudySceneObject::Line(ChartStudySceneLine {
+                    x1_unix_nanos: line.start.timestamp_unix_nanos,
+                    y1: line.start.price,
+                    x2_unix_nanos: line.end.timestamp_unix_nanos,
+                    y2: line.end.price,
+                    color_rgba: line.color.to_rgba_u32(),
+                    width: line.width,
+                    extend_left: matches!(
+                        line.extend,
+                        StudyLineExtend::Left | StudyLineExtend::Both
+                    ),
+                    extend_right: matches!(
+                        line.extend,
+                        StudyLineExtend::Right | StudyLineExtend::Both
+                    ),
+                }))
+            }
+            StudySceneObject::Box(rect) => Some(ChartStudySceneObject::Box(ChartStudySceneBox {
+                left_unix_nanos: rect.top_left.timestamp_unix_nanos,
+                top: rect.top_left.price,
+                right_unix_nanos: rect.bottom_right.timestamp_unix_nanos,
+                bottom: rect.bottom_right.price,
+                border_color_rgba: Some(rect.border_color.to_rgba_u32()),
+                fill_color_rgba: rect
+                    .fill_color
+                    .map(aeris_market_runtime::study::StudyColor::to_rgba_u32),
+                border_width: rect.border_width,
+            })),
+            StudySceneObject::Polyline(poly) => {
+                Some(ChartStudySceneObject::Polyline(ChartStudyScenePolyline {
+                    points: poly
+                        .points
+                        .iter()
+                        .map(|pt| (pt.timestamp_unix_nanos, pt.price))
+                        .collect(),
+                    closed: poly.closed,
+                    line_color_rgba: poly.color.to_rgba_u32(),
+                    fill_color_rgba: poly
+                        .fill_color
+                        .map(aeris_market_runtime::study::StudyColor::to_rgba_u32),
+                    width: poly.width,
+                }))
+            }
+            StudySceneObject::Label(label) => {
+                Some(ChartStudySceneObject::Label(ChartStudySceneLabel {
+                    x_unix_nanos: label.point.timestamp_unix_nanos,
+                    y: label.point.price,
+                    text: label.text.clone(),
+                    text_color_rgba: label.text_color.to_rgba_u32(),
+                    background_color_rgba: Some(label.color.to_rgba_u32()),
+                }))
+            }
+            StudySceneObject::Table(table) => {
+                let position = match table.position {
+                    StudyTablePosition::TopLeft => ChartStudyTablePosition::TopLeft,
+                    StudyTablePosition::TopCenter => ChartStudyTablePosition::TopCenter,
+                    StudyTablePosition::TopRight => ChartStudyTablePosition::TopRight,
+                    StudyTablePosition::MiddleLeft => ChartStudyTablePosition::MiddleLeft,
+                    StudyTablePosition::MiddleCenter => ChartStudyTablePosition::MiddleCenter,
+                    StudyTablePosition::MiddleRight => ChartStudyTablePosition::MiddleRight,
+                    StudyTablePosition::BottomLeft => ChartStudyTablePosition::BottomLeft,
+                    StudyTablePosition::BottomCenter => ChartStudyTablePosition::BottomCenter,
+                    StudyTablePosition::BottomRight => ChartStudyTablePosition::BottomRight,
+                };
+                let cells = table
+                    .cells
+                    .iter()
+                    .map(|(&(row, col), cell)| ChartStudySceneTableCell {
+                        row,
+                        col,
+                        text: cell.text.clone(),
+                        text_color_rgba: cell
+                            .text_color
+                            .map(aeris_market_runtime::study::StudyColor::to_rgba_u32),
+                        background_color_rgba: cell
+                            .background_color
+                            .map(aeris_market_runtime::study::StudyColor::to_rgba_u32),
+                    })
+                    .collect();
+                Some(ChartStudySceneObject::Table(ChartStudySceneTable {
+                    position,
+                    rows: table.rows,
+                    cols: table.columns,
+                    border_color_rgba: table
+                        .border_color
+                        .map(aeris_market_runtime::study::StudyColor::to_rgba_u32),
+                    background_color_rgba: None,
+                    cells,
+                }))
+            }
+            StudySceneObject::LineFill(_) => None,
+        }
+    };
+
+    deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            StudySceneDelta::Create { id, object } => {
+                convert_object(object).map(|object| ChartStudySceneDelta::Create {
+                    object_id: id.0,
+                    object,
+                })
+            }
+            StudySceneDelta::Update { id, object } => {
+                convert_object(object).map(|object| ChartStudySceneDelta::Update {
+                    object_id: id.0,
+                    object,
+                })
+            }
+            StudySceneDelta::Delete { id } => {
+                Some(ChartStudySceneDelta::Delete { object_id: id.0 })
+            }
+        })
+        .collect()
 }
 
 pub(super) const fn chart_study_pane(pane: StudyPaneTarget) -> ChartStudyPaneTarget {

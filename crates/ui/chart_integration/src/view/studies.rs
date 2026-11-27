@@ -267,6 +267,30 @@ impl AerisChartView {
         changed
     }
 
+    /// Applies one transactional batch of study-owned semantic scene deltas through Aeris Charts.
+    ///
+    /// # Errors
+    /// Returns the engine's typed validation or bounded-capacity error without partial mutation.
+    pub fn apply_study_scene_deltas(
+        &mut self,
+        study_id: u64,
+        deltas: &[super::ChartStudySceneDelta],
+    ) -> Result<bool, ChartStudyOutputError> {
+        let changed = self
+            .engine
+            .apply_external_study_scene_deltas(study_id, deltas)?;
+        if changed {
+            self.invalidate_series_frame();
+        }
+        Ok(changed)
+    }
+
+    /// Returns all currently committed study-owned scene objects for `study_id`.
+    #[must_use]
+    pub fn study_scene_objects(&self, study_id: u64) -> Vec<(u64, &super::ChartStudySceneObject)> {
+        self.engine.external_study_scene_objects(study_id)
+    }
+
     fn apply_study_styles(&mut self, study_id: u64) -> bool {
         let outputs = self
             .engine

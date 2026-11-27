@@ -2875,12 +2875,26 @@ impl WorkspaceSurface {
                 }
             }
             aeris_market_runtime::MarketRuntimeEvent::StudySceneDelta(delta) => {
-                if let Some(generation) = delta.generation
-                    && !self
-                        .chart_pane_controller
-                        .accept_publication(generation.0.get())
+                if !self
+                    .chart_pane_controller
+                    .accept_study_publication(delta.generation.map(|generation| generation.0.get()))
+                    || self.studies.suppresses_output(delta.study_id)
                 {
                     return;
+                }
+                let converted = chart_state_codecs::chart_study_scene_deltas(&delta.deltas);
+                if !converted.is_empty()
+                    && let Some(chart) = &self.chart
+                {
+                    chart.update(cx, |chart, chart_cx| {
+                        match chart.apply_study_scene_deltas(delta.study_id.get(), &converted) {
+                            Ok(true) => chart_cx.notify(),
+                            Ok(false) => {}
+                            Err(error) => {
+                                diagnostic!("Aeris study scene delta rejected: {error}");
+                            }
+                        }
+                    });
                 }
             }
             aeris_market_runtime::MarketRuntimeEvent::StudyAlertTriggered(alert) => {

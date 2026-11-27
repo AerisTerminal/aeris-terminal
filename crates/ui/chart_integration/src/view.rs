@@ -35,7 +35,14 @@ pub use aeris_charts_engine::{
     ExternalStudyOutputDescriptor as ChartStudyOutputDescriptor,
     ExternalStudyPaneTarget as ChartStudyPaneTarget, ExternalStudyPlotKind as ChartStudyPlotKind,
     ExternalStudyPointStyle as ChartStudyPointStyle,
-    ExternalStudyScaleTarget as ChartStudyScaleTarget,
+    ExternalStudyScaleTarget as ChartStudyScaleTarget, ExternalStudySceneBox as ChartStudySceneBox,
+    ExternalStudySceneDelta as ChartStudySceneDelta,
+    ExternalStudySceneLabel as ChartStudySceneLabel, ExternalStudySceneLine as ChartStudySceneLine,
+    ExternalStudySceneObject as ChartStudySceneObject,
+    ExternalStudyScenePolyline as ChartStudyScenePolyline,
+    ExternalStudySceneTable as ChartStudySceneTable,
+    ExternalStudySceneTableCell as ChartStudySceneTableCell,
+    ExternalStudyTablePosition as ChartStudyTablePosition,
     ExternalStudyThresholdRegion as ChartStudyThresholdRegion,
 };
 use aeris_charts_render::color::Color;
