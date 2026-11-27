@@ -5,12 +5,14 @@
 //! never receive Rust references, trait objects, function pointers, or ambient OS authority.
 //! Any future WebAssembly component runtime binds to this versioned transport contract.
 
-use crate::project::{StudyProjectCapability, StudyProjectValidationError};
+use crate::project::{
+    MAXIMUM_USER_STUDY_PROJECTS, StudyProjectCapability, StudyProjectValidationError,
+};
 use crate::{
     MAXIMUM_STUDY_ALERTS_PER_WAVE, MAXIMUM_STUDY_IDENTIFIER_BYTES, MAXIMUM_STUDY_SCENE_OBJECTS,
     MAXIMUM_STUDY_TABLE_CELLS, STUDY_SDK_COMPATIBILITY_EPOCH,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Current version of the transport-safe sandbox guest/host ABI.
 pub const STUDY_SANDBOX_ABI_VERSION: u32 = 1;
@@ -80,6 +82,8 @@ pub enum StudySandboxAdmissionError {
     ArtifactEmpty,
     ArtifactTooLarge { maximum: usize, actual: usize },
     InvalidArtifactDigest,
+    ArtifactLengthMismatch { declared: usize, actual: usize },
+    RegistryFull { maximum: usize },
     ResourceLimitExceeded(&'static str),
 }
 
@@ -248,6 +252,111 @@ impl StudySandboxColumnarBars {
     }
 }
 
+/// One admitted sandboxed user-study package stored in [`SandboxedStudyRegistry`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedSandboxPackage {
+    pub header: StudySandboxPackageHeader,
+    pub artifact_bytes: Vec<u8>,
+}
+
+/// Bounded registry of admitted sandboxed user-study packages, strictly separate from the
+/// immutable trusted-native allowlist.
+///
+/// Transactional install/replace preserves the previous admitted package whenever a candidate
+/// fails ABI, SDK epoch, capability, size, or resource-ceiling admission.
+#[derive(Clone, Debug)]
+pub struct SandboxedStudyRegistry {
+    allowed_capabilities: BTreeSet<StudyProjectCapability>,
+    host_limits: StudySandboxLimits,
+    packages: BTreeMap<String, AdmittedSandboxPackage>,
+}
+
+impl SandboxedStudyRegistry {
+    /// Creates an empty sandboxed package registry with explicit host policy.
+    #[must_use]
+    pub const fn new(
+        allowed_capabilities: BTreeSet<StudyProjectCapability>,
+        host_limits: StudySandboxLimits,
+    ) -> Self {
+        Self {
+            allowed_capabilities,
+            host_limits,
+            packages: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the number of admitted packages.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.packages.len()
+    }
+
+    /// Returns whether no sandboxed packages are admitted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.packages.is_empty()
+    }
+
+    /// Resolves one admitted package by exact `(identifier, implementation_revision)`.
+    #[must_use]
+    pub fn resolve_exact(
+        &self,
+        identifier: &str,
+        implementation_revision: u32,
+    ) -> Option<&AdmittedSandboxPackage> {
+        self.packages
+            .get(identifier)
+            .filter(|pkg| pkg.header.implementation_revision == implementation_revision)
+    }
+
+    /// Resolves the currently admitted package for `identifier`.
+    #[must_use]
+    pub fn get(&self, identifier: &str) -> Option<&AdmittedSandboxPackage> {
+        self.packages.get(identifier)
+    }
+
+    /// Transactionally validates and admits or replaces a sandboxed study package.
+    ///
+    /// On error, any previously admitted package for the same identifier stays intact.
+    ///
+    /// # Errors
+    /// Returns [`StudySandboxAdmissionError`] if validation fails or the registry is full.
+    pub fn install(
+        &mut self,
+        header: StudySandboxPackageHeader,
+        artifact_bytes: Vec<u8>,
+    ) -> Result<&AdmittedSandboxPackage, StudySandboxAdmissionError> {
+        validate_sandbox_package(&header, &self.allowed_capabilities, &self.host_limits)?;
+        if artifact_bytes.len() != header.artifact_bytes {
+            return Err(StudySandboxAdmissionError::ArtifactLengthMismatch {
+                declared: header.artifact_bytes,
+                actual: artifact_bytes.len(),
+            });
+        }
+        if !self.packages.contains_key(&header.identifier)
+            && self.packages.len() >= MAXIMUM_USER_STUDY_PROJECTS
+        {
+            return Err(StudySandboxAdmissionError::RegistryFull {
+                maximum: MAXIMUM_USER_STUDY_PROJECTS,
+            });
+        }
+        let id = header.identifier.clone();
+        self.packages.insert(
+            id.clone(),
+            AdmittedSandboxPackage {
+                header,
+                artifact_bytes,
+            },
+        );
+        Ok(&self.packages[&id])
+    }
+
+    /// Removes one admitted package by identifier.
+    pub fn remove(&mut self, identifier: &str) -> bool {
+        self.packages.remove(identifier).is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +425,39 @@ mod tests {
         };
         assert!(batch.is_consistent());
         assert_eq!(batch.len(), 2);
+    }
+
+    #[test]
+    fn sandboxed_registry_admits_resolves_exact_revision_and_preserves_prior_on_rejection() {
+        let allowed = BTreeSet::from([
+            StudyProjectCapability::MarketBars,
+            StudyProjectCapability::SemanticScene,
+        ]);
+        let limits = StudySandboxLimits::default();
+        let mut registry = SandboxedStudyRegistry::new(allowed, limits);
+
+        let mut header = valid_header();
+        header.artifact_bytes = 4;
+        registry
+            .install(header.clone(), vec![0, 97, 115, 109])
+            .expect("rev 1 admitted");
+        assert_eq!(registry.len(), 1);
+        assert!(registry.resolve_exact("user.ksr6", 1).is_some());
+        assert!(registry.resolve_exact("user.ksr6", 2).is_none());
+
+        // Length mismatch rejects without disturbing rev 1.
+        let mut bad_len = header.clone();
+        bad_len.implementation_revision = 2;
+        bad_len.artifact_bytes = 16;
+        assert_eq!(
+            registry.install(bad_len, vec![1, 2, 3]),
+            Err(StudySandboxAdmissionError::ArtifactLengthMismatch {
+                declared: 16,
+                actual: 3,
+            })
+        );
+        assert!(registry.resolve_exact("user.ksr6", 1).is_some());
+        assert!(registry.remove("user.ksr6"));
+        assert!(registry.is_empty());
     }
 }
