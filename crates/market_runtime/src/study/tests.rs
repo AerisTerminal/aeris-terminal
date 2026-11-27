@@ -491,10 +491,7 @@ fn stateful_registration_with_dependency(
     NativeStudyRegistration {
         settings,
         definition,
-        program: NativeStudyProgram {
-            calculate: calculate_stateful_counter,
-            state_factory: Some(create_test_native_state),
-        },
+        program: NativeStudyProgram::stateful(calculate_stateful_counter, create_test_native_state),
     }
 }
 
@@ -924,10 +921,7 @@ fn scaled_close_registration(source: BarSeriesKey, multiplier: i64) -> NativeStu
     NativeStudyRegistration {
         definition,
         settings,
-        program: NativeStudyProgram {
-            calculate: calculate_scaled_close,
-            state_factory: None,
-        },
+        program: NativeStudyProgram::stateless(calculate_scaled_close),
     }
 }
 
@@ -969,10 +963,7 @@ fn native_chain(multiplier: i64) -> NativeChainFixture {
                 settings: StudySettings::defaults(&consumer_definition.settings)
                     .expect("consumer defaults"),
                 definition: consumer_definition,
-                program: NativeStudyProgram {
-                    calculate: calculate_double_output,
-                    state_factory: None,
-                },
+                program: NativeStudyProgram::stateless(calculate_double_output),
             },
         )
         .expect("consumer registers");
@@ -1187,10 +1178,7 @@ fn mtf_fixture() -> MtfFixture {
             NativeStudyRegistration {
                 settings: StudySettings::defaults(&definition.settings).expect("defaults"),
                 definition,
-                program: NativeStudyProgram {
-                    calculate: calculate_secondary_asof,
-                    state_factory: None,
-                },
+                program: NativeStudyProgram::stateless(calculate_secondary_asof),
             },
         )
         .expect("MTF study registers");
@@ -2399,10 +2387,7 @@ fn rejected_native_execution_preserves_the_last_committed_output() {
         .studies
         .get_mut(&study)
         .expect("study remains live")
-        .program = Some(NativeStudyProgram {
-        calculate: calculate_then_fail,
-        state_factory: None,
-    });
+        .program = Some(NativeStudyProgram::stateless(calculate_then_fail));
 
     assert!(matches!(
         runtime.execute_ready(&engine, study),
@@ -3617,4 +3602,483 @@ fn output_presentation_semantics_are_validated_before_registration() {
     runtime
         .validate_definition(None, &valid)
         .expect("valid threshold presentation is accepted");
+}
+
+#[test]
+fn semantic_settings_validate_and_round_trip_labels_and_resource_resolution() {
+    let color = StudyColor::parse_hex("#1e90ff").expect("opaque hex parses");
+    assert_eq!(color, StudyColor::rgb(0x1e, 0x90, 0xff));
+    assert_eq!(color.to_hex(), "#1e90ff");
+    assert_eq!(StudyColor::from_rgba_u32(color.to_rgba_u32()), color);
+
+    let translucent = StudyColor::parse_hex("#1e90ff80").expect("alpha hex parses");
+    assert_eq!(translucent.a, 0x80);
+    assert_eq!(translucent.to_hex(), "#1e90ff80");
+    assert!(StudyColor::parse_hex("#12345").is_none());
+
+    let tf_chart = StudyTimeframe::parse_label("").expect("empty is current chart");
+    assert_eq!(tf_chart, StudyTimeframe::CurrentChart);
+    let tf_daily = StudyTimeframe::parse_label("1D").expect("1D parses");
+    assert_eq!(tf_daily.to_label(), "1D");
+    assert!(StudyTimeframe::parse_label("999m").is_none());
+
+    let session =
+        StudySession::parse_label("09:30-16:00 America/New_York").expect("session parses");
+    assert_eq!(session.start_minute, 9 * 60 + 30);
+    assert_eq!(session.end_minute, 16 * 60);
+    assert!(session.contains_minute(10 * 60));
+    assert!(!session.contains_minute(16 * 60));
+    assert_eq!(session.to_label(), "09:30-16:00 America/New_York");
+    assert!(StudySession::parse_label("09:30-16:00 Mars/Olympus").is_none());
+
+    let source = StudySource::parse_label("study:3:ema").expect("study output source parses");
+    assert_eq!(source.to_label(), "study:3:ema");
+    assert_eq!(StudySource::parse_label("hlc3"), Some(StudySource::Hlc3));
+
+    let specs = vec![
+        StudySettingSpec::new("line_color", StudySettingValue::Color(color)),
+        StudySettingSpec::new(
+            "ref_symbol",
+            StudySettingValue::Symbol(StudySymbolRef::current_chart()),
+        ),
+        StudySettingSpec::new("htf", StudySettingValue::Timeframe(tf_daily)),
+        StudySettingSpec::new("rth", StudySettingValue::Session(session.clone())),
+        StudySettingSpec::new(
+            "anchor_time",
+            StudySettingValue::Timestamp(1_700_000_000_000_000_000),
+        ),
+        StudySettingSpec::new(
+            "level_price",
+            StudySettingValue::Price(StudyDecimal {
+                mantissa: 500_050,
+                scale: 2,
+            }),
+        ),
+        StudySettingSpec::new("src", StudySettingValue::Source(StudySource::Close)),
+    ];
+
+    let defaults = StudySettings::defaults(&specs).expect("semantic defaults validate");
+    assert_eq!(defaults.color("line_color"), Some(color));
+    assert_eq!(defaults.timeframe("htf"), Some(tf_daily));
+    assert_eq!(defaults.session("rth"), Some(&session));
+    assert_eq!(
+        defaults.timestamp("anchor_time"),
+        Some(1_700_000_000_000_000_000)
+    );
+    assert_eq!(defaults.source("src"), Some(&StudySource::Close));
+
+    // Reject CurrentChart timeframe when allow_current_chart is false.
+    let rejected = StudySettings::with_overrides(
+        &specs,
+        BTreeMap::from([(
+            "htf".to_string(),
+            StudySettingValue::Timeframe(StudyTimeframe::CurrentChart),
+        )]),
+    );
+    assert_eq!(rejected, Err(StudyRuntimeError::InvalidSettingValue));
+
+    // Resolve semantic symbol + timeframe into a canonical MarketEngine BarSeriesKey.
+    let base = series("ES");
+    let resolved = resolve_market_input(
+        &base,
+        Some(&StudySymbolRef::new("rithmic", "NQ")),
+        Some(tf_daily),
+        StreamRequirements::BARS,
+    )
+    .expect("semantic resource resolves");
+    assert_eq!(resolved.series.provider_id, "rithmic");
+    assert_eq!(resolved.series.instrument_id, "NQ");
+    assert_eq!(resolved.series.period, BarPeriod::Session { days: 1 });
+}
+
+#[test]
+fn execution_meta_chart_context_and_intrabar_state_track_live_updates() {
+    let mut runtime = StudyRuntime::new(config(8));
+    let mut engine = engine(4);
+    let owner = ConsumerId(NonZeroU64::MIN);
+    let primary = series("ES");
+
+    let study_id = runtime
+        .register_native_for_consumer(
+            owner,
+            NativeStudyRegistration {
+                definition: definition(
+                    "phase_i_probe",
+                    vec![market(primary.clone(), StreamRequirements::BARS)],
+                    2,
+                    StudyInvalidationPolicy::FromFirstChanged,
+                ),
+                settings: StudySettings::default(),
+                program: NativeStudyProgram::stateless(|context| {
+                    let meta = context.meta();
+                    let chart = context.chart_context();
+                    let intrabar = context
+                        .intrabar_state_mut::<u32>()
+                        .ok_or_else(|| "intrabar state missing".to_string())?;
+                    *intrabar += 1;
+                    let ticks = f64::from(*intrabar);
+                    let visible_flag = if chart.visible_bar_count == Some(10) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    let end = context.timestamps().len();
+                    for row in context.dirty_range().start..end {
+                        context.output(0).unwrap().set(
+                            row,
+                            Some(if meta.is_historical { 100.0 } else { 200.0 } + visible_flag),
+                        )?;
+                        context.output(1).unwrap().set(row, Some(ticks))?;
+                    }
+                    Ok(())
+                })
+                .with_intrabar_state(|_| Ok(NativeStudyState::new(0u32, |_| size_of::<u32>())))
+                .with_chart_context(),
+            },
+        )
+        .expect("phase I study registers");
+
+    runtime
+        .reconcile_market_leases(&mut engine)
+        .expect("leases install");
+    engine
+        .install_history(ProviderGeneration(NonZeroU64::MIN), &primary, 2, 3, bars())
+        .expect("primary installs");
+
+    let notified = runtime.set_chart_context(
+        owner,
+        StudyChartContext {
+            visible_start_unix_nanos: Some(1_700_000_000_000_000_000),
+            visible_end_unix_nanos: Some(1_700_000_120_000_000_000),
+            visible_bar_count: Some(10),
+        },
+    );
+    assert_eq!(notified, vec![study_id]);
+
+    assert!(
+        runtime
+            .execute_ready(&engine, study_id)
+            .expect("covering runs")
+    );
+    assert_eq!(
+        runtime.output_series(study_id.output(0)).unwrap().values(),
+        &[Some(101.0), Some(101.0)]
+    );
+    assert_eq!(
+        runtime.output_series(study_id.output(1)).unwrap().values(),
+        &[Some(1.0), Some(1.0)]
+    );
+
+    let live_bar = bar(3, 120, 10_800);
+    let live_ts = live_bar.exchange_timestamp_unix_nanos;
+    engine
+        .install_realtime_tail(
+            ProviderGeneration(NonZeroU64::MIN),
+            &primary,
+            2,
+            3,
+            live_bar,
+            true,
+        )
+        .expect("live bar applies");
+    runtime
+        .execute_live_market_change(&engine, &primary, live_ts)
+        .expect("live execution runs");
+    assert_eq!(
+        runtime.output_series(study_id.output(0)).unwrap().values()[2],
+        Some(201.0)
+    );
+    assert_eq!(
+        runtime.output_series(study_id.output(1)).unwrap().values()[2],
+        Some(2.0)
+    );
+}
+
+#[test]
+fn non_repainting_mtf_alignment_and_intrabar_range_helpers_prevent_lookahead() {
+    let mut runtime = StudyRuntime::new(config(8));
+    let mut engine = engine(4);
+    let primary = series("ES");
+    let mut htf = series("ES");
+    htf.period = BarPeriod::time(300).expect("5m period");
+    let study_id = runtime
+        .register(definition(
+            "mtf_align_probe",
+            vec![
+                market(primary.clone(), StreamRequirements::BARS),
+                market(htf.clone(), StreamRequirements::BARS),
+            ],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        ))
+        .expect("study registers");
+    runtime
+        .reconcile_market_leases(&mut engine)
+        .expect("leases install");
+    engine
+        .install_history(ProviderGeneration(NonZeroU64::MIN), &primary, 2, 3, bars())
+        .expect("primary installs");
+    engine
+        .install_history(
+            ProviderGeneration(NonZeroU64::MIN),
+            &htf,
+            2,
+            3,
+            vec![bar(1, 0, 10_200), bar(2, 300, 10_700)],
+        )
+        .expect("htf installs");
+
+    let htf_view = runtime
+        .market_input(&engine, study_id, 1)
+        .expect("valid dep")
+        .expect("htf ready");
+    let confirmed = StudyRequestContext {
+        confirmation: StudyMtfConfirmation::ConfirmedOnly,
+        gaps: StudyMtfGapPolicy::CarryForward,
+    };
+    let base_ns = 1_700_000_000_i64 * 1_000_000_000;
+    assert_eq!(
+        align_higher_timeframe_bar(base_ns + 60_000_000_000, None, &htf_view, confirmed),
+        None
+    );
+    assert_eq!(
+        align_higher_timeframe_bar(
+            base_ns + 300_000_000_000,
+            Some(base_ns + 240_000_000_000),
+            &htf_view,
+            confirmed
+        ),
+        Some(0)
+    );
+    let gaps = StudyRequestContext {
+        confirmation: StudyMtfConfirmation::ConfirmedOnly,
+        gaps: StudyMtfGapPolicy::Gaps,
+    };
+    assert_eq!(
+        align_higher_timeframe_bar(
+            base_ns + 360_000_000_000,
+            Some(base_ns + 300_000_000_000),
+            &htf_view,
+            gaps
+        ),
+        None
+    );
+
+    let primary_view = runtime
+        .market_input(&engine, study_id, 0)
+        .expect("valid dep")
+        .expect("primary ready");
+    assert_eq!(
+        intrabar_range(base_ns, base_ns + 120_000_000_000, &primary_view),
+        0..2
+    );
+}
+
+fn calculate_phase_fgj_probe(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+    let green = StudyColor::rgb(0x22, 0xc5, 0x5e);
+    let red = StudyColor::rgb(0xef, 0x44, 0x44);
+    let timestamps = context.timestamps().to_vec();
+    let dirty = context.dirty_range();
+    let end = dirty.end_exclusive.unwrap_or(timestamps.len());
+    for row in dirty.start..end {
+        let color = if row % 2 == 0 { green } else { red };
+        let offset = f64::from(u32::try_from(row).unwrap_or(0));
+        {
+            let out0 = context.output(0).unwrap();
+            out0.set(row, Some(100.0 + offset))?;
+            out0.set_point_color(row, Some(color))?;
+        }
+        context.output(1).unwrap().set(row, Some(10.0))?;
+        context.set_bar_color(row, Some(color))?;
+        context.set_background_color(row, Some(StudyColor::rgba(0, 0, 255, 24)))?;
+    }
+    if dirty.start == 0 {
+        populate_phase_fgj_scene_and_overlays(context, &timestamps, green, red)?;
+    }
+    let tail_ts = *timestamps.last().unwrap();
+    context.emit_alert(StudyAlertEvent {
+        condition_id: "breakout".to_string(),
+        message: "Price crossed pivot".to_string(),
+        bar_timestamp_unix_nanos: tail_ts,
+        frequency: StudyAlertFrequency::OncePerBar,
+    })?;
+    context.emit_alert(StudyAlertEvent {
+        condition_id: "close_confirm".to_string(),
+        message: "Confirmed bar close".to_string(),
+        bar_timestamp_unix_nanos: tail_ts,
+        frequency: StudyAlertFrequency::OncePerBarClose,
+    })?;
+    Ok(())
+}
+
+fn populate_phase_fgj_scene_and_overlays(
+    context: &mut StudyExecutionContext<'_>,
+    timestamps: &[i64],
+    green: StudyColor,
+    red: StudyColor,
+) -> Result<(), String> {
+    context.add_level(StudyLevelSpec {
+        value: StudyDecimal {
+            mantissa: 100,
+            scale: 0,
+        },
+        color: green,
+        style: StudyLineStyle::Dashed,
+        title: Some("Pivot".to_string()),
+    })?;
+    context.add_fill(StudyFillSpec {
+        first_output_index: 0,
+        second_output_index: 1,
+        color: StudyColor::rgba(34, 197, 94, 40),
+    })?;
+    let line_a = context.scene_mut().create_line(StudyLineObject {
+        start: StudyPoint::new(timestamps[0], 100.0),
+        end: StudyPoint::new(timestamps[timestamps.len() - 1], 105.0),
+        color: green,
+        width: 2,
+        style: StudyLineStyle::Solid,
+        extend: StudyLineExtend::Right,
+    })?;
+    let line_b = context.scene_mut().create_line(StudyLineObject {
+        start: StudyPoint::new(timestamps[0], 95.0),
+        end: StudyPoint::new(timestamps[timestamps.len() - 1], 95.0),
+        color: red,
+        width: 1,
+        style: StudyLineStyle::Dotted,
+        extend: StudyLineExtend::None,
+    })?;
+    let _fill = context.scene_mut().create_line_fill(StudyLineFillObject {
+        first_line: line_a,
+        second_line: line_b,
+        color: StudyColor::rgba(34, 197, 94, 30),
+    })?;
+    let table =
+        context
+            .scene_mut()
+            .create_table(StudyTablePosition::BottomRight, 2, 1, Some(green), 1)?;
+    context.scene_mut().set_table_cell(
+        table,
+        0,
+        0,
+        StudyTableCell {
+            text: "ADR".to_string(),
+            text_color: Some(green),
+            background_color: None,
+            align: StudyTextAlign::Left,
+        },
+    )?;
+    context.scene_mut().set_table_cell(
+        table,
+        1,
+        0,
+        StudyTableCell {
+            text: "2.4%".to_string(),
+            text_color: None,
+            background_color: None,
+            align: StudyTextAlign::Right,
+        },
+    )?;
+    Ok(())
+}
+
+#[test]
+fn generalized_styles_transactional_scene_tables_and_deduplicated_alerts_commit_and_rollback() {
+    let mut runtime = StudyRuntime::new(config(8));
+    let mut engine = engine(2);
+    let owner = ConsumerId(NonZeroU64::MIN);
+    let source = series("ES");
+
+    let mut def = definition(
+        "phase_fgj_probe",
+        vec![market(source.clone(), StreamRequirements::BARS)],
+        2,
+        StudyInvalidationPolicy::FromFirstChanged,
+    );
+    def.outputs[0].plot = StudyPlotKind::StepLine;
+    def.outputs[0].point_style = StudyPointStyle::PerPoint;
+    def.outputs[1].plot = StudyPlotKind::Columns;
+
+    let study_id = runtime
+        .register_native_for_consumer(
+            owner,
+            NativeStudyRegistration {
+                definition: def,
+                settings: StudySettings::default(),
+                program: NativeStudyProgram::stateless(calculate_phase_fgj_probe),
+            },
+        )
+        .expect("phase F/G/J study registers");
+
+    runtime
+        .reconcile_market_leases(&mut engine)
+        .expect("lease installs");
+    engine
+        .install_history(ProviderGeneration(NonZeroU64::MIN), &source, 2, 3, bars())
+        .expect("history installs");
+
+    assert!(
+        runtime
+            .execute_ready(&engine, study_id)
+            .expect("covering executes")
+    );
+
+    let out0 = runtime.output_series(study_id.output(0)).expect("out0");
+    assert_eq!(out0.point_color(0), Some(StudyColor::rgb(0x22, 0xc5, 0x5e)));
+    assert_eq!(out0.point_color(1), Some(StudyColor::rgb(0xef, 0x44, 0x44)));
+    let overlay = runtime.style_overlay(study_id).expect("overlay committed");
+    assert_eq!(overlay.bar_colors.len(), 2);
+    assert_eq!(overlay.background_colors.len(), 2);
+    assert_eq!(overlay.levels.len(), 1);
+    assert_eq!(overlay.fills.len(), 1);
+
+    assert_eq!(runtime.scene(study_id).expect("scene committed").len(), 4);
+    let deltas = runtime.take_scene_deltas(study_id);
+    assert_eq!(deltas.len(), 4);
+    assert!(
+        deltas
+            .iter()
+            .all(|d| matches!(d, StudySceneDelta::Create { .. }))
+    );
+    assert_eq!(runtime.take_triggered_alerts(study_id).len(), 2);
+
+    let forming_bar = bar(3, 120, 10_800);
+    let forming_ts = forming_bar.exchange_timestamp_unix_nanos;
+    let generation = ProviderGeneration(NonZeroU64::MIN);
+    engine
+        .install_realtime_tail(generation, &source, 2, 3, forming_bar, true)
+        .expect("forming bar installs");
+    runtime
+        .execute_live_market_change(&engine, &source, forming_ts)
+        .expect("forming bar executes");
+    let forming_alerts = runtime.take_triggered_alerts(study_id);
+    assert_eq!(forming_alerts.len(), 1);
+    assert_eq!(forming_alerts[0].condition_id, "breakout");
+
+    let revised_bar = MarketBar {
+        close: forming_bar.close + 100,
+        high: forming_bar.high + 100,
+        ..forming_bar
+    };
+    engine
+        .install_realtime_tail(generation, &source, 2, 3, revised_bar, true)
+        .expect("tail revision installs");
+    runtime
+        .execute_live_market_change(&engine, &source, forming_ts)
+        .expect("live revision executes");
+    assert_eq!(runtime.take_triggered_alerts(study_id), Vec::new());
+
+    runtime.studies.get_mut(&study_id).unwrap().program =
+        Some(NativeStudyProgram::stateless(|ctx| {
+            ctx.scene_mut().clear();
+            ctx.emit_alert(StudyAlertEvent {
+                condition_id: "should_rollback".to_string(),
+                message: "rollback".to_string(),
+                bar_timestamp_unix_nanos: 0,
+                frequency: StudyAlertFrequency::EveryTick,
+            })?;
+            Err("boom".to_string())
+        }));
+    assert!(runtime.execute_ready(&engine, study_id).is_err());
+    assert_eq!(runtime.scene(study_id).expect("scene preserved").len(), 4);
+    assert_eq!(runtime.take_triggered_alerts(study_id), Vec::new());
 }

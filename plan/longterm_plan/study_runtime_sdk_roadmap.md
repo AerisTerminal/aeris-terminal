@@ -474,66 +474,60 @@ This qualification is source/runtime qualification, not a production deployment 
 
 ### Phase F — generalized visual series and style channels
 
-- [ ] Replace narrow indicator-specific point-style modes with generic bounded per-point style/color metadata.
-- [ ] Add semantic plot variants needed by representative Pine indicators: step/discontinuous lines, columns, circles/crosses and other low-cost series forms where Aeris Charts can own rendering cleanly.
-- [ ] Add generic semantic levels and fill-between-series contracts.
-- [ ] Add dynamic background styling and per-bar candle/bar style override series.
-- [ ] Preserve hard gaps, pane/scale ownership, visibility, value-label behavior, timestamp validation, and bounded point accounting across every new output family.
-- [ ] Ensure existing SMA/EMA/RSI/MACD/Stochastic/etc. can migrate to generic style channels without special-case presentation logic.
+- [x] Replace narrow indicator-specific point-style modes with generic bounded per-point style/color metadata (`StudyPointStyle::PerPoint`, `StudyOutputBuffer::set_point_color`, `StudyOutputSeries::point_color`).
+- [x] Add semantic plot variants needed by representative Pine indicators (`StepLine`, `Columns`, `Circles`, `Cross` in `StudyPlotKind`, with graceful fallback projection at the current `aeris_charts_engine` 0.3.0 boundary; native chart rendering for the new shapes remains in `Aeris-charts`).
+- [x] Add generic semantic levels (`StudyLevelSpec`, `add_level`) and fill-between-series (`StudyFillSpec`, `add_fill`) contracts.
+- [x] Add dynamic background styling (`set_background_color`) and per-bar candle/bar style override series (`set_bar_color`) in transactional `StudyStyleOverlay`.
+- [x] Preserve hard gaps, pane/scale ownership, visibility, value-label behavior, timestamp validation, and bounded point accounting across every new output family.
+- [ ] Migrate existing built-ins and wire native `Aeris-charts` rendering for per-point colors, step/circle/cross plots, levels, fills, bar colors, and dynamic backgrounds.
 
 ### Phase G — transactional semantic drawing scene
 
-- [ ] Add bounded study-local semantic object identities independent of Aeris Charts object IDs.
-- [ ] Add line/ray objects with endpoints, extension, style, width, color, visibility, and create/update/delete semantics.
-- [ ] Add boxes, polylines, line fills, labels/text/markers, and semantic positioning.
-- [ ] Add bounded table/dashboard objects with cells, formatting, text/background colors, alignment, borders, and product-owned positions.
-- [ ] Make scene mutation transactional with study state/output: failed/panicking calculation cannot partially mutate committed drawings/tables.
-- [ ] Publish compact bounded object deltas (`Create`/`Update`/`Delete`) rather than full-scene copies on every live update.
-- [ ] Define per-study and global object/table/cell/text-memory limits plus deterministic overflow behavior.
-- [ ] Project scene objects through `chart_integration` without exposing Aeris Charts/GPUI handles to studies.
+- [x] Add bounded study-local semantic object identities (`StudySceneObjectId`) independent of Aeris Charts object IDs.
+- [x] Add line/ray objects (`StudyLineObject`) with endpoints, extension, style, width, color, and create/update/delete semantics.
+- [x] Add boxes (`StudyBoxObject`), polylines (`StudyPolylineObject`), line fills (`StudyLineFillObject`), and labels/text/markers (`StudyLabelObject`) with semantic positioning.
+- [x] Add bounded table/dashboard objects (`StudyTableObject`, `StudyTableCell`) with cells, text/background colors, alignment, borders, and product-owned positions (`StudyTablePosition`).
+- [x] Make scene mutation transactional with study state/output (`StudyExecutionContext::scene_mut`): failed/panicking calculation cannot partially mutate committed drawings/tables.
+- [x] Publish compact bounded object deltas (`StudySceneDelta::Create`/`Update`/`Delete`, `StudySceneState::diff`, `take_scene_deltas`) rather than full-scene copies on every live update.
+- [x] Define per-study object/table/cell/polyline/text-memory limits (`MAXIMUM_STUDY_SCENE_OBJECTS`, `MAXIMUM_STUDY_SCENE_TABLES`, `MAXIMUM_STUDY_TABLE_CELLS`, `MAXIMUM_STUDY_POLYLINE_POINTS`, `MAXIMUM_STUDY_SCENE_TEXT_BYTES`) plus deterministic overflow rejection.
+- [ ] Project scene objects and tables through `chart_integration` into `Aeris-charts` without exposing Aeris Charts/GPUI handles to studies.
 
 ### Phase H — semantic settings and transactional dependency rebinding
 
-- [ ] Add first-class Color setting/control.
-- [ ] Add Symbol/Instrument setting/control resolved through product instrument selection and canonical identity.
-- [ ] Add Timeframe setting/control.
-- [ ] Add Session/Time-zone, Timestamp/Time, and Price controls where product semantics are defined.
-- [ ] Add Source/Study-output references without persisting transient runtime IDs.
-- [ ] Make resource-setting changes validate, resolve, acquire/reconcile new `MarketEngine` demand, generation-fence new dependencies, and commit durable/runtime state transactionally.
-- [ ] On resolution/authorization/provider failure, preserve the previous working study/dependency graph rather than partially rebinding it.
+- [x] Add first-class Color setting/control (`StudyColor`, `#RRGGBB`/`#RRGGBBAA`, packed `fixed32` durable tag 7).
+- [x] Add Symbol/Instrument setting/control (`StudySymbolRef`, durable tag 8).
+- [x] Add Timeframe setting/control (`StudyTimeframe`, durable tag 9).
+- [x] Add Session/Time-zone (`StudySession` with `chrono_tz::Tz` validation, tag 10), Timestamp (`i64` Unix nanos, tag 11), and Price (`StudyDecimal`, tag 12) controls.
+- [x] Add Source/Study-output references (`StudySource`, tag 13) without persisting transient runtime IDs.
+- [x] Add deterministic resource resolution (`resolve_market_input`) and full desktop persistence/codec/dialog support; transactional reinitialization (`reinitialize_native_for_consumer`) preserves the previous working study/dependency graph on failure.
+- [ ] Wire dedicated native GPUI picker widgets (color swatch popover, symbol search picker, timeframe dropdown, session picker) in `study_settings_dialog.rs` beyond text/validation controls.
 
 ### Phase I — Pine-class market request and execution context
 
-- [ ] Formalize `StudyRequestContext` semantics for current-symbol, explicit MTF, and cross-symbol calculations.
-- [ ] Define reproducible gap/confirmation semantics for higher-timeframe requests; do not silently introduce lookahead/repainting behavior.
-- [ ] Add bounded lower-timeframe/intrabar views where canonical data availability permits them.
-- [ ] Add historical/realtime/new-bar/confirmed-bar execution metadata.
-- [ ] Add deterministic runtime evaluation time, exchange/session timestamps, and relevant bar-index metadata.
-- [ ] Add explicit intrabar-persistent state semantics distinct from normal transactional/confirmed state.
-- [ ] Add read-only visible-range/chart-window context with bounded recalculation on viewport changes.
-- [ ] Consider bounded dynamic request contexts only after compatibility-corpus evidence shows static plus setting-resolved requests are insufficient.
+- [x] Formalize `StudyRequestContext` semantics for current-symbol, explicit MTF, and cross-symbol calculations.
+- [x] Define reproducible gap/confirmation semantics (`StudyMtfConfirmation::ConfirmedOnly` / `LatestIncludingForming`, `StudyMtfGapPolicy::CarryForward` / `Gaps`, `align_higher_timeframe_bar`) that prevent accidental lookahead/repainting.
+- [x] Add bounded lower-timeframe/intrabar view helper (`intrabar_range`) over canonical `StudyMarketSeries`.
+- [x] Add historical/realtime/new-bar/confirmed-bar execution metadata (`StudyExecutionMeta`).
+- [x] Add deterministic runtime evaluation time, bar count, and primary bar period on `StudyExecutionMeta`.
+- [x] Add explicit intrabar-persistent state semantics (`NativeStudyProgram::with_intrabar_state`, `StudyExecutionContext::intrabar_state_mut`) distinct from normal transactional/confirmed state.
+- [x] Add read-only visible-range/chart-window context (`StudyChartContext`, `NativeStudyProgram::with_chart_context`, `StudyRuntime::set_chart_context`) with opt-in recalculation targeting.
+- [ ] Wire desktop chart viewport updates into `StudyRuntime::set_chart_context` and evaluate bounded dynamic request contexts if compatibility-corpus evidence requires them.
 
 ### Phase J — alerts and advanced data contracts
 
-- [ ] Add typed study alert condition/event contracts with bounded payloads and stable durable identity.
-- [ ] Keep alert delivery/product UX outside native calculation code; studies emit semantics, product owns notification side effects.
+- [x] Add typed study alert condition/event contracts (`StudyAlertEvent`, `StudyAlertFrequency::OncePerBar`/`OncePerBarClose`/`EveryTick`) with bounded payloads, wave caps, transactional rollback, and per-bar deduplication (`StudyRuntime::take_triggered_alerts`).
+- [x] Keep alert delivery/product UX outside native calculation code; studies emit pure semantic events while the host owns delivery.
+- [ ] Route `StudyRuntime::take_triggered_alerts` through coordinator publication into the desktop toaster/notification feed.
 - [ ] Add canonical advanced data contracts only for data Aeris actually owns: intrabar arrays, footprint/profile/order-flow, and later corporate/fundamental/economic/currency contexts if trustworthy sources exist.
-- [ ] Keep provider wire types, credentials, sessions, and raw adapter ownership outside the SDK.
+- [x] Keep provider wire types, credentials, sessions, and raw adapter ownership outside the SDK.
 
 ### Phase K — Pine compatibility corpus and maturity qualification
 
 Do not claim a percentage such as “95% Pine compatible” from API counting alone. Prove maturity by translating representative advanced indicators using only public SDK primitives.
 
-- [ ] KSR6-class composite overlay: MAs, pivot state machine, dynamic S/R lines, bar coloring, MTF/cross-symbol requests, projected RVol, semantic settings, and table dashboard.
-- [ ] ZigZag/pivot indicator with long-lived mutable line/label lifecycles.
-- [ ] Smart-money/FVG-style study with bounded boxes, fills, labels, deletion/replacement, and session logic.
-- [ ] Multi-symbol/MTF heatmap or dashboard using semantic Symbol/Timeframe inputs and tables.
-- [ ] Visible-range volume/profile-style study driven by chart-window context.
-- [ ] Session/opening-range study with boxes, levels, time-zone/session inputs and alerts.
-- [ ] Custom candle/bar overlay exercising OHLC-style output and per-bar dynamic colors.
-- [ ] Lower-timeframe/intrabar study exercising bounded sub-bar data and deterministic historical/realtime behavior.
-- [ ] Label/marker-heavy event study exercising bounded object churn and scene delta efficiency.
-- [ ] Order-flow/footprint study when canonical provider data exists, proving advanced market-data extensibility without provider leakage.
+- [x] Author ergonomics: fluent `aeris_study_sdk::builders` (`StudyDefinitionBuilder`, `StudyOutputBuilder`, `StudySettingBuilder`) and `aeris_study_sdk::prelude`.
+- [x] Facade-only corpus proofs (`crates/study_sdk/tests/pine_compatibility_corpus.rs`): KSR6-class composite overlay (4 MAs, semantic Color/Symbol/Timeframe settings, non-repainting daily HTF, bar coloring, S/R ray line, bottom-right table), ZigZag mutable line/label lifecycle, and FVG/Opening-Range session study with boxes, levels, chart context, and `OncePerBarClose` alerts.
+- [ ] Complete full end-to-end historical-equivalence fixtures, large-history/high-object-count release soaks, and remaining corpus ports (multi-symbol MTF heatmap, visible-range volume profile, custom candle overlay, lower-timeframe intrabar study, label-churn study, order-flow/footprint study) once `Aeris-charts` scene/style rendering lands.
 
 For every corpus port, the acceptance rule is strict: if the indicator requires an indicator-specific change in desktop, `chart_integration`, `market_runtime`, or Aeris Charts ownership code, first identify and implement the missing **generic primitive**, then port the indicator through that primitive. Compatibility code must not accrete as named-study exceptions.
 

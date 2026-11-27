@@ -972,12 +972,54 @@ pub struct WorkspaceStudyDecimalState {
     pub scale: u32,
 }
 
+/// Durable canonical instrument reference used by a semantic Symbol study setting.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceStudySymbolState {
+    #[prost(string, tag = "1")]
+    pub provider_id: String,
+    #[prost(string, tag = "2")]
+    pub instrument_id: String,
+}
+
+/// Durable semantic Timeframe study setting. Empty `interval` means the current chart period.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceStudyTimeframeState {
+    #[prost(string, tag = "1")]
+    pub interval: String,
+}
+
+/// Durable semantic Session study setting (minutes from midnight in `time_zone`).
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceStudySessionState {
+    #[prost(uint32, tag = "1")]
+    pub start_minute: u32,
+    #[prost(uint32, tag = "2")]
+    pub end_minute: u32,
+    #[prost(string, tag = "3")]
+    pub time_zone: String,
+}
+
+/// Durable semantic Source study setting (bar field or prior study output by durable `local_id`).
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceStudySourceState {
+    /// 1=Open, 2=High, 3=Low, 4=Close, 5=Hl2, 6=Hlc3, 7=Ohlc4, 8=Volume, 9=StudyOutput.
+    #[prost(uint32, tag = "1")]
+    pub kind: u32,
+    #[prost(uint64, tag = "2")]
+    pub study_local_id: u64,
+    #[prost(string, tag = "3")]
+    pub output_identifier: String,
+}
+
 /// Durable typed setting value for one native study.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct WorkspaceStudySettingState {
     #[prost(string, tag = "1")]
     pub identifier: String,
-    #[prost(oneof = "workspace_study_setting_state::Value", tags = "2, 3, 4, 5, 6")]
+    #[prost(
+        oneof = "workspace_study_setting_state::Value",
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13"
+    )]
     pub value: Option<workspace_study_setting_state::Value>,
 }
 
@@ -995,6 +1037,22 @@ pub mod workspace_study_setting_state {
         Text(String),
         #[prost(string, tag = "6")]
         Choice(String),
+        /// Packed 8-bit RGBA color (`0xRRGGBBAA`).
+        #[prost(fixed32, tag = "7")]
+        Color(u32),
+        #[prost(message, tag = "8")]
+        Symbol(super::WorkspaceStudySymbolState),
+        #[prost(message, tag = "9")]
+        Timeframe(super::WorkspaceStudyTimeframeState),
+        #[prost(message, tag = "10")]
+        Session(super::WorkspaceStudySessionState),
+        /// Exact UTC timestamp in Unix nanoseconds.
+        #[prost(sint64, tag = "11")]
+        Timestamp(i64),
+        #[prost(message, tag = "12")]
+        Price(super::WorkspaceStudyDecimalState),
+        #[prost(message, tag = "13")]
+        Source(super::WorkspaceStudySourceState),
     }
 }
 

@@ -24,7 +24,8 @@ pub use messages::{
     WorkspaceScanOperandState, WorkspaceScanStudyParameterState, WorkspaceScreenerScanState,
     WorkspaceSessionProfileState, WorkspaceShortcutOverrideState, WorkspaceSplitAxis,
     WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySessionState,
+    WorkspaceStudySettingState, WorkspaceStudySourceState, WorkspaceStudySymbolState,
+    WorkspaceStudyTimeframeState, WorkspaceTabState, WorkspaceVolumeSettingsState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };

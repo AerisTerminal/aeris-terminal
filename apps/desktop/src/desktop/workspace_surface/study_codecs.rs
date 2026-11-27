@@ -70,6 +70,9 @@ pub(super) fn runtime_study_registration_with_registry(
 pub(super) fn runtime_study_setting_value(
     value: &workspace_study_setting_state::Value,
 ) -> Result<StudySettingValue, String> {
+    use aeris_market_runtime::study::{
+        StudyColor, StudySession, StudySource, StudySymbolRef, StudyTimeframe,
+    };
     Ok(match value {
         workspace_study_setting_state::Value::Boolean(value) => StudySettingValue::Boolean(*value),
         workspace_study_setting_state::Value::Integer(value) => StudySettingValue::Integer(*value),
@@ -84,12 +87,68 @@ pub(super) fn runtime_study_setting_value(
         workspace_study_setting_state::Value::Choice(value) => {
             StudySettingValue::Choice(value.clone())
         }
+        workspace_study_setting_state::Value::Color(packed) => {
+            StudySettingValue::Color(StudyColor::from_rgba_u32(*packed))
+        }
+        workspace_study_setting_state::Value::Symbol(symbol) => {
+            StudySettingValue::Symbol(StudySymbolRef {
+                provider_id: symbol.provider_id.clone(),
+                instrument_id: symbol.instrument_id.clone(),
+            })
+        }
+        workspace_study_setting_state::Value::Timeframe(tf) => StudySettingValue::Timeframe(
+            StudyTimeframe::parse_label(&tf.interval)
+                .ok_or_else(|| tr!(workspace::STUDY_CADENCE_UNSUPPORTED).to_string())?,
+        ),
+        workspace_study_setting_state::Value::Session(session) => {
+            let start_minute = u16::try_from(session.start_minute)
+                .map_err(|_| "study session start minute is out of range".to_string())?;
+            let end_minute = u16::try_from(session.end_minute)
+                .map_err(|_| "study session end minute is out of range".to_string())?;
+            StudySettingValue::Session(StudySession {
+                start_minute,
+                end_minute,
+                time_zone: session.time_zone.clone(),
+            })
+        }
+        workspace_study_setting_state::Value::Timestamp(nanos) => {
+            StudySettingValue::Timestamp(*nanos)
+        }
+        workspace_study_setting_state::Value::Price(value) => {
+            StudySettingValue::Price(StudyDecimal {
+                mantissa: value.mantissa,
+                scale: u8::try_from(value.scale)
+                    .map_err(|_| tr!(workspace::STUDY_DECIMAL_SCALE_RANGE).to_string())?,
+            })
+        }
+        workspace_study_setting_state::Value::Source(source) => {
+            StudySettingValue::Source(match source.kind {
+                1 => StudySource::Open,
+                2 => StudySource::High,
+                3 => StudySource::Low,
+                4 => StudySource::Close,
+                5 => StudySource::Hl2,
+                6 => StudySource::Hlc3,
+                7 => StudySource::Ohlc4,
+                8 => StudySource::Volume,
+                9 => StudySource::StudyOutput {
+                    study_local_id: source.study_local_id,
+                    output_identifier: source.output_identifier.clone(),
+                },
+                _ => return Err("unknown study source kind".to_string()),
+            })
+        }
     })
 }
 
 pub(super) fn persisted_study_setting_value(
     value: &StudySettingValue,
 ) -> workspace_study_setting_state::Value {
+    use aeris_contracts::{
+        WorkspaceStudySessionState, WorkspaceStudySourceState, WorkspaceStudySymbolState,
+        WorkspaceStudyTimeframeState,
+    };
+    use aeris_market_runtime::study::StudySource;
     match value {
         StudySettingValue::Boolean(value) => workspace_study_setting_state::Value::Boolean(*value),
         StudySettingValue::Integer(value) => workspace_study_setting_state::Value::Integer(*value),
@@ -102,6 +161,81 @@ pub(super) fn persisted_study_setting_value(
         StudySettingValue::Text(value) => workspace_study_setting_state::Value::Text(value.clone()),
         StudySettingValue::Choice(value) => {
             workspace_study_setting_state::Value::Choice(value.clone())
+        }
+        StudySettingValue::Color(color) => {
+            workspace_study_setting_state::Value::Color(color.to_rgba_u32())
+        }
+        StudySettingValue::Symbol(symbol) => {
+            workspace_study_setting_state::Value::Symbol(WorkspaceStudySymbolState {
+                provider_id: symbol.provider_id.clone(),
+                instrument_id: symbol.instrument_id.clone(),
+            })
+        }
+        StudySettingValue::Timeframe(tf) => {
+            workspace_study_setting_state::Value::Timeframe(WorkspaceStudyTimeframeState {
+                interval: tf.to_label(),
+            })
+        }
+        StudySettingValue::Session(session) => {
+            workspace_study_setting_state::Value::Session(WorkspaceStudySessionState {
+                start_minute: u32::from(session.start_minute),
+                end_minute: u32::from(session.end_minute),
+                time_zone: session.time_zone.clone(),
+            })
+        }
+        StudySettingValue::Timestamp(nanos) => {
+            workspace_study_setting_state::Value::Timestamp(*nanos)
+        }
+        StudySettingValue::Price(value) => {
+            workspace_study_setting_state::Value::Price(WorkspaceStudyDecimalState {
+                mantissa: value.mantissa,
+                scale: u32::from(value.scale),
+            })
+        }
+        StudySettingValue::Source(source) => {
+            let state = match source {
+                StudySource::Open => WorkspaceStudySourceState {
+                    kind: 1,
+                    ..WorkspaceStudySourceState::default()
+                },
+                StudySource::High => WorkspaceStudySourceState {
+                    kind: 2,
+                    ..WorkspaceStudySourceState::default()
+                },
+                StudySource::Low => WorkspaceStudySourceState {
+                    kind: 3,
+                    ..WorkspaceStudySourceState::default()
+                },
+                StudySource::Close => WorkspaceStudySourceState {
+                    kind: 4,
+                    ..WorkspaceStudySourceState::default()
+                },
+                StudySource::Hl2 => WorkspaceStudySourceState {
+                    kind: 5,
+                    ..WorkspaceStudySourceState::default()
+                },
+                StudySource::Hlc3 => WorkspaceStudySourceState {
+                    kind: 6,
+                    ..WorkspaceStudySourceState::default()
+                },
+                StudySource::Ohlc4 => WorkspaceStudySourceState {
+                    kind: 7,
+                    ..WorkspaceStudySourceState::default()
+                },
+                StudySource::Volume => WorkspaceStudySourceState {
+                    kind: 8,
+                    ..WorkspaceStudySourceState::default()
+                },
+                StudySource::StudyOutput {
+                    study_local_id,
+                    output_identifier,
+                } => WorkspaceStudySourceState {
+                    kind: 9,
+                    study_local_id: *study_local_id,
+                    output_identifier: output_identifier.clone(),
+                },
+            };
+            workspace_study_setting_state::Value::Source(state)
         }
     }
 }
@@ -171,8 +305,16 @@ pub(super) fn parse_study_decimal(text: &str) -> Result<StudyDecimal, String> {
 pub(super) fn study_setting_input_text(value: &StudySettingValue) -> Option<String> {
     match value {
         StudySettingValue::Integer(value) => Some(value.to_string()),
-        StudySettingValue::Decimal(value) => Some(study_decimal_text(*value)),
+        StudySettingValue::Decimal(value) | StudySettingValue::Price(value) => {
+            Some(study_decimal_text(*value))
+        }
         StudySettingValue::Text(value) => Some(value.clone()),
+        StudySettingValue::Color(color) => Some(color.to_hex()),
+        StudySettingValue::Symbol(symbol) => Some(symbol.to_label()),
+        StudySettingValue::Timeframe(tf) => Some(tf.to_label()),
+        StudySettingValue::Session(session) => Some(session.to_label()),
+        StudySettingValue::Timestamp(nanos) => Some(nanos.to_string()),
+        StudySettingValue::Source(source) => Some(source.to_label()),
         StudySettingValue::Boolean(_) | StudySettingValue::Choice(_) => None,
     }
 }
@@ -182,6 +324,9 @@ pub(super) fn study_setting_value_from_dialog(
     spec: &StudySettingSpec,
     cx: &App,
 ) -> Result<StudySettingValue, String> {
+    use aeris_market_runtime::study::{
+        StudyColor, StudySession, StudySource, StudySymbolRef, StudyTimeframe,
+    };
     match &spec.presentation.control {
         StudySettingControl::Boolean | StudySettingControl::Choice { .. } => dialog
             .draft_values
@@ -225,6 +370,23 @@ pub(super) fn study_setting_value_from_dialog(
                     )
                 })
         }
+        StudySettingControl::Price { .. } => {
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
+            parse_study_decimal(input.read(cx).value().as_ref())
+                .map(StudySettingValue::Price)
+                .map_err(|error| {
+                    tr!(
+                        workspace::SETTING_PARSE_ERROR,
+                        label = spec.presentation.label,
+                        error = error
+                    )
+                })
+        }
         StudySettingControl::Text => {
             let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
                 tr!(
@@ -233,6 +395,111 @@ pub(super) fn study_setting_value_from_dialog(
                 )
             })?;
             Ok(StudySettingValue::Text(input.read(cx).value().to_string()))
+        }
+        StudySettingControl::Color => {
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
+            StudyColor::parse_hex(input.read(cx).value().as_ref())
+                .map(StudySettingValue::Color)
+                .ok_or_else(|| {
+                    tr!(
+                        workspace::SETTING_PARSE_ERROR,
+                        label = spec.presentation.label,
+                        error = "expected #RRGGBB or #RRGGBBAA"
+                    )
+                })
+        }
+        StudySettingControl::Symbol { .. } => {
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
+            StudySymbolRef::parse_label(input.read(cx).value().as_ref())
+                .map(StudySettingValue::Symbol)
+                .ok_or_else(|| {
+                    tr!(
+                        workspace::SETTING_PARSE_ERROR,
+                        label = spec.presentation.label,
+                        error = "expected provider/instrument"
+                    )
+                })
+        }
+        StudySettingControl::Timeframe { .. } => {
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
+            StudyTimeframe::parse_label(input.read(cx).value().as_ref())
+                .map(StudySettingValue::Timeframe)
+                .ok_or_else(|| {
+                    tr!(
+                        workspace::SETTING_PARSE_ERROR,
+                        label = spec.presentation.label,
+                        error = "unsupported timeframe"
+                    )
+                })
+        }
+        StudySettingControl::Session => {
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
+            StudySession::parse_label(input.read(cx).value().as_ref())
+                .map(StudySettingValue::Session)
+                .ok_or_else(|| {
+                    tr!(
+                        workspace::SETTING_PARSE_ERROR,
+                        label = spec.presentation.label,
+                        error = "expected HH:MM-HH:MM [TimeZone]"
+                    )
+                })
+        }
+        StudySettingControl::Timestamp => {
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
+            input
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<i64>()
+                .map(StudySettingValue::Timestamp)
+                .map_err(|_| {
+                    tr!(
+                        workspace::SETTING_WHOLE_NUMBER,
+                        label = spec.presentation.label
+                    )
+                })
+        }
+        StudySettingControl::Source { .. } => {
+            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
+                tr!(
+                    workspace::SETTING_EDITOR_UNAVAILABLE,
+                    label = spec.presentation.label
+                )
+            })?;
+            StudySource::parse_label(input.read(cx).value().as_ref())
+                .map(StudySettingValue::Source)
+                .ok_or_else(|| {
+                    tr!(
+                        workspace::SETTING_PARSE_ERROR,
+                        label = spec.presentation.label,
+                        error = "expected open, high, low, close, hl2, hlc3, ohlc4, volume, or study:<id>:<output>"
+                    )
+                })
         }
     }
 }

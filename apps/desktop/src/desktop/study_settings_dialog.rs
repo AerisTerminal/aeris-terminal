@@ -108,6 +108,11 @@ fn constraint_hint(control: &StudySettingControl) -> Option<String> {
             minimum,
             maximum,
             step,
+        }
+        | StudySettingControl::Price {
+            minimum,
+            maximum,
+            step,
         } => {
             let mut parts = Vec::new();
             if let Some(value) = minimum {
@@ -132,7 +137,13 @@ fn constraint_hint(control: &StudySettingControl) -> Option<String> {
         }
         StudySettingControl::Boolean
         | StudySettingControl::Text
-        | StudySettingControl::Choice { .. } => None,
+        | StudySettingControl::Choice { .. }
+        | StudySettingControl::Color
+        | StudySettingControl::Symbol { .. }
+        | StudySettingControl::Timeframe { .. }
+        | StudySettingControl::Session
+        | StudySettingControl::Timestamp
+        | StudySettingControl::Source { .. } => None,
     }
 }
 
@@ -260,7 +271,14 @@ fn setting_control(
         }
         StudySettingControl::Integer { .. }
         | StudySettingControl::Decimal { .. }
-        | StudySettingControl::Text => {
+        | StudySettingControl::Price { .. }
+        | StudySettingControl::Text
+        | StudySettingControl::Color
+        | StudySettingControl::Symbol { .. }
+        | StudySettingControl::Timeframe { .. }
+        | StudySettingControl::Session
+        | StudySettingControl::Timestamp
+        | StudySettingControl::Source { .. } => {
             text_control(dialog.inputs.get(&spec.identifier), enabled, theme)
         }
     }

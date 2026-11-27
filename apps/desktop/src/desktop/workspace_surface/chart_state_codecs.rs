@@ -608,8 +608,11 @@ impl RejectedSavedPresentation {
 
 pub(super) const fn chart_study_plot(plot: StudyPlotKind) -> ChartStudyPlotKind {
     match plot {
-        StudyPlotKind::Line => ChartStudyPlotKind::Line,
-        StudyPlotKind::Histogram => ChartStudyPlotKind::Histogram,
+        StudyPlotKind::Line
+        | StudyPlotKind::StepLine
+        | StudyPlotKind::Circles
+        | StudyPlotKind::Cross => ChartStudyPlotKind::Line,
+        StudyPlotKind::Histogram | StudyPlotKind::Columns => ChartStudyPlotKind::Histogram,
         StudyPlotKind::Area => ChartStudyPlotKind::Area,
     }
 }
@@ -631,7 +634,7 @@ pub(super) const fn chart_study_scale(scale: StudyScaleTarget) -> ChartStudyScal
 
 pub(super) const fn chart_study_point_style(style: StudyPointStyle) -> ChartStudyPointStyle {
     match style {
-        StudyPointStyle::Uniform => ChartStudyPointStyle::Uniform,
+        StudyPointStyle::Uniform | StudyPointStyle::PerPoint => ChartStudyPointStyle::Uniform,
         StudyPointStyle::MomentumHistogram => ChartStudyPointStyle::MomentumHistogram,
     }
 }

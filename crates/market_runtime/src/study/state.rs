@@ -134,6 +134,11 @@ pub struct NativeStudyProgram {
     /// and every covering/full execution so stale checkpoints cannot cross a
     /// changed definition or a full rebuild boundary.
     pub state_factory: Option<NativeStudyStateFactory>,
+    /// Optional factory for explicit intrabar-persistent state (Pine `varip` equivalent).
+    /// Persists across intrabar updates of a forming bar; resets on covering rebuild or reinit.
+    pub intrabar_state_factory: Option<NativeStudyStateFactory>,
+    /// When `true`, the study opts into read-only [`super::StudyChartContext`] updates.
+    pub observes_chart_context: bool,
 }
 
 impl NativeStudyProgram {
@@ -143,6 +148,8 @@ impl NativeStudyProgram {
         Self {
             calculate,
             state_factory: None,
+            intrabar_state_factory: None,
+            observes_chart_context: false,
         }
     }
 
@@ -156,7 +163,23 @@ impl NativeStudyProgram {
         Self {
             calculate,
             state_factory: Some(state_factory),
+            intrabar_state_factory: None,
+            observes_chart_context: false,
         }
+    }
+
+    /// Attaches an optional intrabar-persistent state factory (Pine `varip` equivalent).
+    #[must_use]
+    pub const fn with_intrabar_state(mut self, factory: NativeStudyStateFactory) -> Self {
+        self.intrabar_state_factory = Some(factory);
+        self
+    }
+
+    /// Opts this study into read-only visible-range chart context recalculations.
+    #[must_use]
+    pub const fn with_chart_context(mut self) -> Self {
+        self.observes_chart_context = true;
+        self
     }
 }
 

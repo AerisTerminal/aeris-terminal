@@ -777,8 +777,11 @@ fn valid_study_settings(study: &WorkspaceChartStudyState) -> bool {
             && identifiers.insert(setting.identifier.as_str())
             && setting.value.as_ref().is_some_and(|value| match value {
                 workspace_study_setting_state::Value::Boolean(_)
-                | workspace_study_setting_state::Value::Integer(_) => true,
-                workspace_study_setting_state::Value::Decimal(value) => {
+                | workspace_study_setting_state::Value::Integer(_)
+                | workspace_study_setting_state::Value::Color(_)
+                | workspace_study_setting_state::Value::Timestamp(_) => true,
+                workspace_study_setting_state::Value::Decimal(value)
+                | workspace_study_setting_state::Value::Price(value) => {
                     value.scale
                         <= u32::from(
                             aeris_market_runtime::study::MAXIMUM_STUDY_SETTING_DECIMAL_SCALE,
@@ -787,6 +790,33 @@ fn valid_study_settings(study: &WorkspaceChartStudyState) -> bool {
                 workspace_study_setting_state::Value::Text(value)
                 | workspace_study_setting_state::Value::Choice(value) => {
                     value.len() <= aeris_market_runtime::study::MAXIMUM_STUDY_SETTING_TEXT_BYTES
+                }
+                workspace_study_setting_state::Value::Symbol(symbol) => {
+                    (symbol.provider_id.is_empty() && symbol.instrument_id.is_empty())
+                        || (!symbol.provider_id.trim().is_empty()
+                            && symbol.provider_id.len()
+                                <= aeris_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES
+                            && !symbol.instrument_id.trim().is_empty()
+                            && symbol.instrument_id.len()
+                                <= aeris_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES)
+                }
+                workspace_study_setting_state::Value::Timeframe(tf) => {
+                    aeris_market_runtime::study::StudyTimeframe::parse_label(&tf.interval).is_some()
+                }
+                workspace_study_setting_state::Value::Session(session) => {
+                    session.start_minute < 1_440
+                        && session.end_minute <= 1_440
+                        && session.start_minute != session.end_minute
+                        && session.time_zone.len()
+                            <= aeris_market_runtime::study::MAXIMUM_STUDY_SETTING_IDENTIFIER_BYTES
+                }
+                workspace_study_setting_state::Value::Source(source) => {
+                    (1..=8).contains(&source.kind)
+                        || (source.kind == 9
+                            && source.study_local_id > 0
+                            && !source.output_identifier.trim().is_empty()
+                            && source.output_identifier.len()
+                                <= aeris_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES)
                 }
             })
     })

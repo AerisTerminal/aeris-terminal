@@ -17,13 +17,25 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+mod alerts;
+mod context;
 mod error;
 mod execution;
 mod market_views;
 mod output;
+mod scene;
 mod settings;
 mod state;
 
+use alerts::StudyAlertLedger;
+pub use alerts::{
+    MAXIMUM_STUDY_ALERT_MESSAGE_BYTES, MAXIMUM_STUDY_ALERTS_PER_WAVE, StudyAlertEvent,
+    StudyAlertFrequency,
+};
+pub use context::{
+    StudyChartContext, StudyExecutionMeta, StudyMtfConfirmation, StudyMtfGapPolicy,
+    StudyRequestContext, align_higher_timeframe_bar, intrabar_range,
+};
 pub use error::StudyRuntimeError;
 pub(crate) use market_views::StudyNonBarChange;
 pub use market_views::{
@@ -31,16 +43,25 @@ pub use market_views::{
     StudyMarketInput, StudyMarketSeries, StudyOutputId, StudyQuoteView, StudyTradeSample,
     StudyTradeWindow,
 };
-use output::{ResolvedStudyInput, StudyOutputTimeline};
 pub use output::{
-    StudyDefinition, StudyDependency, StudyExecutionContext, StudyExecutionInputs,
-    StudyInputSeries, StudyInvalidationPolicy, StudyOutputBuffer, StudyOutputSeries,
+    MAXIMUM_STUDY_FILLS, MAXIMUM_STUDY_LEVELS, StudyDefinition, StudyDependency,
+    StudyExecutionContext, StudyExecutionInputs, StudyFillSpec, StudyInputSeries,
+    StudyInvalidationPolicy, StudyLevelSpec, StudyLineStyle, StudyOutputBuffer, StudyOutputSeries,
     StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyRuntimeConfig,
-    StudyScaleTarget, StudyThresholdRegion,
+    StudyScaleTarget, StudyStyleOverlay, StudyThresholdRegion,
+};
+use output::{ResolvedStudyInput, StudyOutputTimeline};
+pub use scene::{
+    MAXIMUM_STUDY_POLYLINE_POINTS, MAXIMUM_STUDY_SCENE_OBJECTS, MAXIMUM_STUDY_SCENE_TABLES,
+    MAXIMUM_STUDY_SCENE_TEXT_BYTES, MAXIMUM_STUDY_TABLE_CELLS, StudyBoxObject, StudyLabelObject,
+    StudyLabelStyle, StudyLineExtend, StudyLineFillObject, StudyLineObject, StudyPoint,
+    StudyPolylineObject, StudySceneDelta, StudySceneObject, StudySceneObjectId, StudySceneState,
+    StudyTableCell, StudyTableObject, StudyTablePosition, StudyTextAlign,
 };
 pub use settings::{
-    StudyDecimal, StudySettingChoiceOption, StudySettingCondition, StudySettingControl,
-    StudySettingPresentation, StudySettingSpec, StudySettingValue, StudySettings,
+    StudyColor, StudyDecimal, StudySession, StudySettingChoiceOption, StudySettingCondition,
+    StudySettingControl, StudySettingPresentation, StudySettingSpec, StudySettingValue,
+    StudySettings, StudySource, StudySymbolRef, StudyTimeframe, resolve_market_input,
 };
 use settings::{validate_setting_specs, validate_settings};
 pub(crate) use state::StudyExecutionBatch;
@@ -76,11 +97,16 @@ struct StudyNode {
     program: Option<NativeStudyProgram>,
     state: Option<NativeStudyState>,
     state_bytes: usize,
+    intrabar_state: Option<NativeStudyState>,
+    intrabar_state_bytes: usize,
 }
 
 pub(crate) struct StudySubtreeCheckpoint {
     nodes: BTreeMap<StudyInstanceId, StudyNode>,
     outputs: BTreeMap<StudyOutputId, StudyOutputSeries>,
+    style_overlays: BTreeMap<StudyInstanceId, StudyStyleOverlay>,
+    scenes: BTreeMap<StudyInstanceId, StudySceneState>,
+    alert_ledgers: BTreeMap<StudyInstanceId, StudyAlertLedger>,
     output_points: usize,
     state_bytes: usize,
 }
@@ -94,16 +120,29 @@ struct NativeStudyCalculation<'a> {
     live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
     timeline: &'a StudyOutputTimeline,
     dirty: StudyDirtyRange,
+    meta: StudyExecutionMeta,
+    chart_context: StudyChartContext,
 }
 
 struct CalculatedStudyOutputs {
     outputs: Vec<StudyOutputBuffer>,
+    style_overlay: StudyStyleOverlay,
+    scene: StudySceneState,
+    alerts: Vec<StudyAlertEvent>,
     #[cfg(test)]
     preparation_work_rows: usize,
 }
 
 struct PreparedStudyStates {
-    states: BTreeMap<StudyInstanceId, (Option<NativeStudyState>, usize)>,
+    states: BTreeMap<
+        StudyInstanceId,
+        (
+            Option<NativeStudyState>,
+            usize,
+            Option<NativeStudyState>,
+            usize,
+        ),
+    >,
     total_bytes: usize,
 }
 
@@ -124,7 +163,13 @@ pub struct StudyRuntime {
     market_dependents: BTreeMap<BarSeriesKey, BTreeSet<StudyInstanceId>>,
     output_dependents: BTreeMap<StudyOutputId, BTreeSet<StudyInstanceId>>,
     market_leases: BTreeMap<BarSeriesKey, StudyMarketLease>,
+    chart_contexts: BTreeMap<ConsumerId, StudyChartContext>,
     outputs: BTreeMap<StudyOutputId, StudyOutputSeries>,
+    style_overlays: BTreeMap<StudyInstanceId, StudyStyleOverlay>,
+    scenes: BTreeMap<StudyInstanceId, StudySceneState>,
+    scene_deltas: BTreeMap<StudyInstanceId, Vec<StudySceneDelta>>,
+    alert_ledgers: BTreeMap<StudyInstanceId, StudyAlertLedger>,
+    pending_alerts: BTreeMap<StudyInstanceId, Vec<StudyAlertEvent>>,
     output_points: usize,
     state_bytes: usize,
     next_id: u64,
@@ -199,7 +244,13 @@ impl StudyRuntime {
             market_dependents: BTreeMap::new(),
             output_dependents: BTreeMap::new(),
             market_leases: BTreeMap::new(),
+            chart_contexts: BTreeMap::new(),
             outputs: BTreeMap::new(),
+            style_overlays: BTreeMap::new(),
+            scenes: BTreeMap::new(),
+            scene_deltas: BTreeMap::new(),
+            alert_ledgers: BTreeMap::new(),
+            pending_alerts: BTreeMap::new(),
             output_points: 0,
             state_bytes: 0,
             next_id: 1,
@@ -207,6 +258,51 @@ impl StudyRuntime {
             #[cfg(test)]
             last_output_preparation_work_rows: 0,
         }
+    }
+
+    /// Returns the last committed per-bar style overlay, levels, and fills for one study.
+    #[must_use]
+    pub fn style_overlay(&self, study_id: StudyInstanceId) -> Option<&StudyStyleOverlay> {
+        self.style_overlays.get(&study_id)
+    }
+
+    /// Returns the last committed semantic drawing/table scene for one study.
+    #[must_use]
+    pub fn scene(&self, study_id: StudyInstanceId) -> Option<&StudySceneState> {
+        self.scenes.get(&study_id)
+    }
+
+    /// Drains the compact `Create`/`Update`/`Delete` scene deltas emitted since the last drain.
+    pub fn take_scene_deltas(&mut self, study_id: StudyInstanceId) -> Vec<StudySceneDelta> {
+        self.scene_deltas.remove(&study_id).unwrap_or_default()
+    }
+
+    /// Drains the committed, deduplicated alert events emitted by one study for host delivery.
+    pub fn take_triggered_alerts(&mut self, study_id: StudyInstanceId) -> Vec<StudyAlertEvent> {
+        self.pending_alerts.remove(&study_id).unwrap_or_default()
+    }
+
+    /// Updates the read-only visible chart viewport context for one consumer and returns
+    /// the consumer's studies that explicitly opted into chart-context recalculations.
+    pub fn set_chart_context(
+        &mut self,
+        owner: ConsumerId,
+        context: StudyChartContext,
+    ) -> Vec<StudyInstanceId> {
+        let previous = self.chart_contexts.insert(owner, context);
+        if previous == Some(context) {
+            return Vec::new();
+        }
+        self.studies
+            .iter()
+            .filter_map(|(study_id, node)| {
+                (node.owner == Some(owner)
+                    && node
+                        .program
+                        .is_some_and(|program| program.observes_chart_context))
+                .then_some(*study_id)
+            })
+            .collect()
     }
 
     pub(crate) fn begin_turn(&self) {
@@ -331,9 +427,10 @@ impl StudyRuntime {
             registration.program,
             &registration.settings,
         )?;
-        let (root_state, root_state_bytes) = fresh_states
-            .remove(&study_id)
-            .ok_or(StudyRuntimeError::UnknownStudy(study_id))?;
+        let (root_state, root_state_bytes, root_intrabar_state, root_intrabar_state_bytes) =
+            fresh_states
+                .remove(&study_id)
+                .ok_or(StudyRuntimeError::UnknownStudy(study_id))?;
         self.studies.insert(
             study_id,
             StudyNode {
@@ -343,18 +440,25 @@ impl StudyRuntime {
                 program: Some(registration.program),
                 state: root_state,
                 state_bytes: root_state_bytes,
+                intrabar_state: root_intrabar_state,
+                intrabar_state_bytes: root_intrabar_state_bytes,
             },
         );
-        for (affected_id, (state, state_bytes)) in fresh_states {
+        for (affected_id, (state, state_bytes, intrabar_state, intrabar_state_bytes)) in
+            fresh_states
+        {
             if let Some(node) = self.studies.get_mut(&affected_id) {
                 node.state = state;
                 node.state_bytes = state_bytes;
+                node.intrabar_state = intrabar_state;
+                node.intrabar_state_bytes = intrabar_state_bytes;
             }
         }
         self.state_bytes = replacement_state_bytes;
         self.rebuild_dependency_indexes();
         for affected_id in &affected {
             self.remove_outputs_for_study(*affected_id);
+            self.remove_study_artifacts(*affected_id);
         }
         Ok(affected.into_iter().collect())
     }
@@ -389,7 +493,12 @@ impl StudyRuntime {
         validate_settings(&definition.settings, &settings)?;
         let state = Self::fresh_state(program, &settings)?;
         let state_bytes = Self::reported_state_bytes(state.as_ref())?;
-        let next_state_bytes = self.validate_state_memory_bytes(state_bytes, 0)?;
+        let intrabar_state = Self::fresh_intrabar_state(program, &settings)?;
+        let intrabar_state_bytes = Self::reported_state_bytes(intrabar_state.as_ref())?;
+        let combined_bytes = state_bytes
+            .checked_add(intrabar_state_bytes)
+            .ok_or(StudyRuntimeError::RangeOverflow)?;
+        let next_state_bytes = self.validate_state_memory_bytes(combined_bytes, 0)?;
         if self.studies.len() == self.config.maximum_studies.get() {
             return Err(StudyRuntimeError::StudyLimitExceeded {
                 maximum: self.config.maximum_studies.get(),
@@ -429,6 +538,8 @@ impl StudyRuntime {
                 program,
                 state,
                 state_bytes,
+                intrabar_state,
+                intrabar_state_bytes,
             },
         );
         self.state_bytes = next_state_bytes;
@@ -467,6 +578,7 @@ impl StudyRuntime {
 
     /// Removes every study owned by one market consumer.
     pub(crate) fn remove_consumer(&mut self, owner: ConsumerId) -> Vec<StudyInstanceId> {
+        self.chart_contexts.remove(&owner);
         let removed = self
             .studies
             .iter()
@@ -477,9 +589,12 @@ impl StudyRuntime {
         }
         for study_id in &removed {
             if let Some(node) = self.studies.remove(study_id) {
-                self.state_bytes = self.state_bytes.saturating_sub(node.state_bytes);
+                self.state_bytes = self
+                    .state_bytes
+                    .saturating_sub(node.state_bytes.saturating_add(node.intrabar_state_bytes));
             }
             self.remove_outputs_for_study(*study_id);
+            self.remove_study_artifacts(*study_id);
         }
         self.rebuild_dependency_indexes();
         removed
@@ -512,9 +627,12 @@ impl StudyRuntime {
 
         for id in &removed {
             if let Some(node) = self.studies.remove(id) {
-                self.state_bytes = self.state_bytes.saturating_sub(node.state_bytes);
+                self.state_bytes = self
+                    .state_bytes
+                    .saturating_sub(node.state_bytes.saturating_add(node.intrabar_state_bytes));
             }
             self.remove_outputs_for_study(*id);
+            self.remove_study_artifacts(*id);
         }
         self.rebuild_dependency_indexes();
         Ok(removed.into_iter().collect())
@@ -566,9 +684,30 @@ impl StudyRuntime {
             .filter(|(output, _)| affected.contains(&output.study_id))
             .map(|(output, series)| (*output, series.clone()))
             .collect();
+        let style_overlays = self
+            .style_overlays
+            .iter()
+            .filter(|(id, _)| affected.contains(id))
+            .map(|(&id, overlay)| (id, overlay.clone()))
+            .collect();
+        let scenes = self
+            .scenes
+            .iter()
+            .filter(|(id, _)| affected.contains(id))
+            .map(|(&id, scene)| (id, scene.clone()))
+            .collect();
+        let alert_ledgers = self
+            .alert_ledgers
+            .iter()
+            .filter(|(id, _)| affected.contains(id))
+            .map(|(&id, ledger)| (id, ledger.clone()))
+            .collect();
         Ok(StudySubtreeCheckpoint {
             nodes,
             outputs,
+            style_overlays,
+            scenes,
+            alert_ledgers,
             output_points: self.output_points,
             state_bytes: self.state_bytes,
         })
@@ -582,6 +721,14 @@ impl StudyRuntime {
         self.outputs
             .retain(|output, _| !affected.contains(&output.study_id));
         self.outputs.extend(checkpoint.outputs);
+        self.style_overlays.retain(|id, _| !affected.contains(id));
+        self.style_overlays.extend(checkpoint.style_overlays);
+        self.scenes.retain(|id, _| !affected.contains(id));
+        self.scenes.extend(checkpoint.scenes);
+        self.alert_ledgers.retain(|id, _| !affected.contains(id));
+        self.alert_ledgers.extend(checkpoint.alert_ledgers);
+        self.scene_deltas.retain(|id, _| !affected.contains(id));
+        self.pending_alerts.retain(|id, _| !affected.contains(id));
         self.output_points = checkpoint.output_points;
         self.state_bytes = checkpoint.state_bytes;
         self.rebuild_dependency_indexes();
@@ -777,17 +924,18 @@ impl StudyRuntime {
         F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
     {
         self.ensure_execution_available(study_id)?;
-        let (definition, settings, program, previous_state_bytes) = {
+        let (owner, definition, settings, program, previous_state_bytes) = {
             let node = self
                 .studies
                 .get(&study_id)
                 .ok_or(StudyRuntimeError::UnknownStudy(study_id))?;
             (
+                node.owner,
                 node.definition.clone(),
                 node.settings.clone(),
                 node.program
                     .ok_or(StudyRuntimeError::StudyNotExecutable(study_id))?,
-                node.state_bytes,
+                node.state_bytes.saturating_add(node.intrabar_state_bytes),
             )
         };
         let Some(inputs) = self.resolve_inputs(engine, &definition) else {
@@ -827,8 +975,97 @@ impl StudyRuntime {
             }
         };
         let covering_execution = dirty.start == 0 && dirty.end_exclusive == Some(timeline.len());
-        let mut candidate_state = if covering_execution {
-            Self::fresh_state(Some(program), &settings)?
+        let meta = self.build_execution_meta(study_id, &inputs, &timeline, covering_execution);
+        let chart_context = owner
+            .and_then(|id| self.chart_contexts.get(&id).copied())
+            .unwrap_or_default();
+        let (mut candidate_state, mut candidate_intrabar_state) =
+            self.prepare_candidate_states(study_id, program, &settings, covering_execution)?;
+        let calculated = self.calculate_outputs(
+            &NativeStudyCalculation {
+                study_id,
+                settings: &settings,
+                program,
+                output_count,
+                inputs: &inputs,
+                live_inputs: &live_inputs,
+                timeline: &timeline,
+                dirty,
+                meta,
+                chart_context,
+            },
+            &mut candidate_state,
+            &mut candidate_intrabar_state,
+        )?;
+        let candidate_state_bytes = Self::reported_state_bytes(candidate_state.as_ref())?;
+        let candidate_intrabar_bytes =
+            Self::reported_state_bytes(candidate_intrabar_state.as_ref())?;
+        let combined_candidate_bytes = candidate_state_bytes
+            .checked_add(candidate_intrabar_bytes)
+            .ok_or(StudyRuntimeError::RangeOverflow)?;
+        let next_state_bytes =
+            self.validate_state_memory_bytes(combined_candidate_bytes, previous_state_bytes)?;
+        if let Some(live) = self.studies.get_mut(&study_id) {
+            live.state = candidate_state;
+            live.state_bytes = candidate_state_bytes;
+            live.intrabar_state = candidate_intrabar_state;
+            live.intrabar_state_bytes = candidate_intrabar_bytes;
+        }
+        self.state_bytes = next_state_bytes;
+        self.commit_wave_artifacts(
+            study_id,
+            &timeline,
+            calculated,
+            generation,
+            total_points,
+            meta.is_confirmed_bar,
+        );
+        self.next_output_generation = next_generation;
+        Ok(true)
+    }
+
+    fn build_execution_meta(
+        &self,
+        study_id: StudyInstanceId,
+        inputs: &[ResolvedStudyInput],
+        timeline: &StudyOutputTimeline,
+        covering_execution: bool,
+    ) -> StudyExecutionMeta {
+        let previous_len = self
+            .outputs
+            .get(&StudyOutputId {
+                study_id,
+                output_index: 0,
+            })
+            .map_or(0, StudyOutputSeries::len);
+        let (is_confirmed_bar, bar_period) = match inputs.first() {
+            Some(ResolvedStudyInput::Market(market)) => {
+                (!market.forming(), Some(market.series().period))
+            }
+            _ => (true, None),
+        };
+        let evaluation_time_unix_nanos = timeline
+            .timestamp(timeline.len().saturating_sub(1))
+            .unwrap_or(0);
+        StudyExecutionMeta {
+            is_historical: covering_execution,
+            is_new_bar: timeline.len() > previous_len,
+            is_confirmed_bar,
+            evaluation_time_unix_nanos,
+            bar_count: timeline.len(),
+            bar_period,
+        }
+    }
+
+    fn prepare_candidate_states(
+        &self,
+        study_id: StudyInstanceId,
+        program: NativeStudyProgram,
+        settings: &StudySettings,
+        covering_execution: bool,
+    ) -> Result<(Option<NativeStudyState>, Option<NativeStudyState>), StudyRuntimeError> {
+        let candidate_state = if covering_execution {
+            Self::fresh_state(Some(program), settings)?
         } else {
             catch_unwind(AssertUnwindSafe(|| {
                 self.studies
@@ -840,40 +1077,68 @@ impl StudyRuntime {
                 detail: "native study state clone panicked".to_string(),
             })?
         };
-        let calculated = self.calculate_outputs(
-            &NativeStudyCalculation {
+        let candidate_intrabar_state = if covering_execution {
+            Self::fresh_intrabar_state(Some(program), settings)?
+        } else {
+            catch_unwind(AssertUnwindSafe(|| {
+                self.studies
+                    .get(&study_id)
+                    .and_then(|node| node.intrabar_state.clone())
+            }))
+            .map_err(|_| StudyRuntimeError::ExecutionRejected {
                 study_id,
-                settings: &settings,
-                program,
-                output_count,
-                inputs: &inputs,
-                live_inputs: &live_inputs,
-                timeline: &timeline,
-                dirty,
-            },
-            &mut candidate_state,
-        )?;
-        let candidate_state_bytes = Self::reported_state_bytes(candidate_state.as_ref())?;
-        let next_state_bytes =
-            self.validate_state_memory_bytes(candidate_state_bytes, previous_state_bytes)?;
-        if let Some(live) = self.studies.get_mut(&study_id) {
-            live.state = candidate_state;
-            live.state_bytes = candidate_state_bytes;
-        }
-        self.state_bytes = next_state_bytes;
+                detail: "native study intrabar state clone panicked".to_string(),
+            })?
+        };
+        Ok((candidate_state, candidate_intrabar_state))
+    }
+
+    fn commit_wave_artifacts(
+        &mut self,
+        study_id: StudyInstanceId,
+        timeline: &StudyOutputTimeline,
+        calculated: CalculatedStudyOutputs,
+        generation: u64,
+        total_points: usize,
+        is_confirmed_bar: bool,
+    ) {
         self.commit_outputs(
             study_id,
-            &timeline,
+            timeline,
             calculated.outputs,
             generation,
             total_points,
         );
+        self.style_overlays
+            .insert(study_id, calculated.style_overlay);
+        let deltas = self.scenes.get(&study_id).map_or_else(
+            || StudySceneState::default().diff(&calculated.scene),
+            |previous| previous.diff(&calculated.scene),
+        );
+        if !deltas.is_empty() {
+            self.scene_deltas
+                .entry(study_id)
+                .or_default()
+                .extend(deltas);
+        }
+        self.scenes.insert(study_id, calculated.scene);
+        if !calculated.alerts.is_empty() {
+            let committed_alerts = self
+                .alert_ledgers
+                .entry(study_id)
+                .or_default()
+                .commit_wave(calculated.alerts, is_confirmed_bar);
+            if !committed_alerts.is_empty() {
+                self.pending_alerts
+                    .entry(study_id)
+                    .or_default()
+                    .extend(committed_alerts);
+            }
+        }
         #[cfg(test)]
         {
             self.last_output_preparation_work_rows = calculated.preparation_work_rows;
         }
-        self.next_output_generation = next_generation;
-        Ok(true)
     }
 
     fn output_points_after_replacement(
@@ -960,6 +1225,24 @@ impl StudyRuntime {
         }
     }
 
+    fn fresh_intrabar_state(
+        program: Option<NativeStudyProgram>,
+        settings: &StudySettings,
+    ) -> Result<Option<NativeStudyState>, StudyRuntimeError> {
+        let Some(factory) = program.and_then(|program| program.intrabar_state_factory) else {
+            return Ok(None);
+        };
+        match catch_unwind(AssertUnwindSafe(|| factory(settings))) {
+            Ok(Ok(state)) => Ok(Some(state)),
+            Ok(Err(detail)) => Err(StudyRuntimeError::StateInitializationRejected {
+                detail: bounded_execution_detail(detail),
+            }),
+            Err(_) => Err(StudyRuntimeError::StateInitializationRejected {
+                detail: "native study intrabar state factory panicked".to_string(),
+            }),
+        }
+    }
+
     fn fresh_states_for_reinitialization(
         &self,
         study_id: StudyInstanceId,
@@ -970,7 +1253,7 @@ impl StudyRuntime {
         let replaced_bytes = affected
             .iter()
             .filter_map(|affected_id| self.studies.get(affected_id))
-            .map(|node| node.state_bytes)
+            .map(|node| node.state_bytes.saturating_add(node.intrabar_state_bytes))
             .try_fold(0usize, usize::checked_add)
             .ok_or(StudyRuntimeError::RangeOverflow)?;
         let mut total = self
@@ -979,16 +1262,26 @@ impl StudyRuntime {
             .ok_or(StudyRuntimeError::RangeOverflow)?;
         let mut states = BTreeMap::new();
         for affected_id in affected {
-            let state = if *affected_id == study_id {
-                Self::fresh_state(Some(root_program), root_settings)?
+            let (state, intrabar_state) = if *affected_id == study_id {
+                (
+                    Self::fresh_state(Some(root_program), root_settings)?,
+                    Self::fresh_intrabar_state(Some(root_program), root_settings)?,
+                )
             } else {
                 let node = self
                     .studies
                     .get(affected_id)
                     .ok_or(StudyRuntimeError::UnknownStudy(*affected_id))?;
-                Self::fresh_state(node.program, &node.settings)?
+                (
+                    Self::fresh_state(node.program, &node.settings)?,
+                    Self::fresh_intrabar_state(node.program, &node.settings)?,
+                )
             };
-            let requested = Self::reported_state_bytes(state.as_ref())?;
+            let state_bytes = Self::reported_state_bytes(state.as_ref())?;
+            let intrabar_bytes = Self::reported_state_bytes(intrabar_state.as_ref())?;
+            let requested = state_bytes
+                .checked_add(intrabar_bytes)
+                .ok_or(StudyRuntimeError::RangeOverflow)?;
             if requested > self.config.maximum_state_bytes_per_study.get() {
                 return Err(StudyRuntimeError::StateMemoryLimitExceeded {
                     maximum: self.config.maximum_state_bytes_per_study.get(),
@@ -998,7 +1291,10 @@ impl StudyRuntime {
             total = total
                 .checked_add(requested)
                 .ok_or(StudyRuntimeError::RangeOverflow)?;
-            states.insert(*affected_id, (state, requested));
+            states.insert(
+                *affected_id,
+                (state, state_bytes, intrabar_state, intrabar_bytes),
+            );
         }
         if total > self.config.maximum_total_state_bytes.get() {
             return Err(StudyRuntimeError::TotalStateMemoryLimitExceeded {
@@ -1016,6 +1312,7 @@ impl StudyRuntime {
         &self,
         calculation: &NativeStudyCalculation<'_>,
         state: &mut Option<NativeStudyState>,
+        intrabar_state: &mut Option<NativeStudyState>,
     ) -> Result<CalculatedStudyOutputs, StudyRuntimeError> {
         let prepared = (0..calculation.output_count)
             .map(|output_index| {
@@ -1035,10 +1332,26 @@ impl StudyRuntime {
             .iter()
             .map(|(_, work_rows)| *work_rows)
             .sum::<usize>();
-        let mut outputs = prepared
+        let outputs = prepared
             .into_iter()
             .map(|(output, _)| output)
             .collect::<Vec<_>>();
+        let mut style_overlay = self
+            .style_overlays
+            .get(&calculation.study_id)
+            .cloned()
+            .unwrap_or_default();
+        style_overlay.prepare_for_dirty(calculation.timeline.len(), calculation.dirty);
+        let covering = calculation.dirty.start == 0
+            && calculation.dirty.end_exclusive == Some(calculation.timeline.len());
+        let scene = if covering {
+            StudySceneState::default()
+        } else {
+            self.scenes
+                .get(&calculation.study_id)
+                .cloned()
+                .unwrap_or_default()
+        };
         let executor = self
             .executor
             .get_or_init(execution::Executor::start)
@@ -1048,15 +1361,25 @@ impl StudyRuntime {
                 detail: detail.clone(),
             })?;
         let result = executor
-            .calculate(calculation, outputs, state.take())
+            .calculate(
+                calculation,
+                outputs,
+                style_overlay,
+                scene,
+                state.take(),
+                intrabar_state.take(),
+            )
             .map_err(|detail| StudyRuntimeError::ExecutionRejected {
                 study_id: calculation.study_id,
                 detail,
             })?;
-        outputs = result.0;
-        *state = result.1;
+        *state = result.state;
+        *intrabar_state = result.intrabar_state;
         Ok(CalculatedStudyOutputs {
-            outputs,
+            outputs: result.outputs,
+            style_overlay: result.style_overlay,
+            scene: result.scene,
+            alerts: result.alerts,
             #[cfg(test)]
             preparation_work_rows,
         })
@@ -1072,6 +1395,7 @@ impl StudyRuntime {
     ) {
         self.remove_outputs_for_study(study_id);
         for (output_index, output) in outputs.into_iter().enumerate() {
+            let (values, point_colors) = output.into_parts();
             self.outputs.insert(
                 StudyOutputId {
                     study_id,
@@ -1079,7 +1403,8 @@ impl StudyRuntime {
                 },
                 StudyOutputSeries {
                     timeline: timeline.clone(),
-                    values: output.into_values(),
+                    values,
+                    point_colors: Arc::new(point_colors),
                     materialized_values: Arc::new(OnceLock::new()),
                     generation,
                 },
@@ -2050,6 +2375,14 @@ impl StudyRuntime {
             .sum::<usize>();
         self.outputs.retain(|output, _| output.study_id != study_id);
         self.output_points = self.output_points.saturating_sub(removed_points);
+    }
+
+    fn remove_study_artifacts(&mut self, study_id: StudyInstanceId) {
+        self.style_overlays.remove(&study_id);
+        self.scenes.remove(&study_id);
+        self.scene_deltas.remove(&study_id);
+        self.alert_ledgers.remove(&study_id);
+        self.pending_alerts.remove(&study_id);
     }
 }
 

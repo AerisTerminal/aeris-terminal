@@ -1794,10 +1794,7 @@ mod tests {
         NativeStudyRegistration {
             settings: StudySettings::defaults(&definition.settings).expect("valid defaults"),
             definition,
-            program: NativeStudyProgram {
-                calculate: calculate_test_study,
-                state_factory: None,
-            },
+            program: NativeStudyProgram::stateless(calculate_test_study),
         }
     }
 
@@ -1821,6 +1818,8 @@ mod tests {
             super::super::broker_venue::BrokerVenueRunnerRegistry::default(),
             MarketServiceProviders {
                 presentations: vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
+                open_interest_sources: BTreeMap::new(),
+                liquidation_sources: BTreeMap::new(),
             },
             RuntimeChannels {
                 releases: Arc::new(Mutex::new(Vec::new())),
@@ -1866,6 +1865,8 @@ mod tests {
             super::super::broker_venue::BrokerVenueRunnerRegistry::default(),
             MarketServiceProviders {
                 presentations: vec![],
+                open_interest_sources: BTreeMap::new(),
+                liquidation_sources: BTreeMap::new(),
             },
             RuntimeChannels {
                 releases: Arc::clone(&releases),

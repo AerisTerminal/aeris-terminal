@@ -1853,10 +1853,7 @@ mod tests {
         NativeStudyRegistration {
             settings: StudySettings::defaults(&definition.settings).expect("valid defaults"),
             definition,
-            program: NativeStudyProgram {
-                calculate: calculate_test_study,
-                state_factory: None,
-            },
+            program: NativeStudyProgram::stateless(calculate_test_study),
         }
     }
 
@@ -1871,10 +1868,7 @@ mod tests {
         NativeStudyRegistration {
             settings: StudySettings::defaults(&definition.settings).expect("valid defaults"),
             definition,
-            program: NativeStudyProgram {
-                calculate: calculate_test_study,
-                state_factory: None,
-            },
+            program: NativeStudyProgram::stateless(calculate_test_study),
         }
     }
 
@@ -4372,10 +4366,7 @@ mod tests {
                     settings: StudySettings::defaults(&definition.settings)
                         .expect("valid defaults"),
                     definition,
-                    program: NativeStudyProgram {
-                        calculate: calculate_test_study,
-                        state_factory: None,
-                    },
+                    program: NativeStudyProgram::stateless(calculate_test_study),
                 },
             )
             .expect("MTF study registers");

@@ -1,13 +1,23 @@
 use super::{
-    NativeStudyState, StudyDecimal, StudyDirtyRange, StudyLiveMarketData, StudyMarketInput,
-    StudyMarketSeries, StudyOutputId, StudySettingSpec, StudySettings,
+    MAXIMUM_STUDY_ALERTS_PER_WAVE, MAXIMUM_STUDY_IDENTIFIER_BYTES,
+    MAXIMUM_STUDY_SETTING_DECIMAL_SCALE, NativeStudyState, StudyAlertEvent, StudyChartContext,
+    StudyColor, StudyDecimal, StudyDirtyRange, StudyExecutionMeta, StudyLiveMarketData,
+    StudyMarketInput, StudyMarketSeries, StudyOutputId, StudySceneState, StudySettingSpec,
+    StudySettings,
 };
 use aeris_market_engine::SeriesView;
 use std::{
-    array, fmt,
+    array,
+    collections::BTreeMap,
+    fmt,
     num::NonZeroUsize,
     sync::{Arc, OnceLock},
 };
+
+/// Maximum semantic horizontal price/value levels emitted by one study.
+pub const MAXIMUM_STUDY_LEVELS: usize = 32;
+/// Maximum fill-between-series regions emitted by one study.
+pub const MAXIMUM_STUDY_FILLS: usize = 16;
 
 /// One static dependency declared before a study begins calculating.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +43,59 @@ pub enum StudyPlotKind {
     Line,
     Histogram,
     Area,
+    StepLine,
+    Columns,
+    Circles,
+    Cross,
+}
+
+/// Stroke style shared across semantic levels and drawing objects.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum StudyLineStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+/// Generic semantic horizontal price/value level declared by a study.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StudyLevelSpec {
+    pub value: StudyDecimal,
+    pub color: StudyColor,
+    pub style: StudyLineStyle,
+    pub title: Option<String>,
+}
+
+/// Generic shaded region between two scalar outputs of the same study.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StudyFillSpec {
+    pub first_output_index: usize,
+    pub second_output_index: usize,
+    pub color: StudyColor,
+}
+
+/// Transactional per-bar style overrides, semantic levels, and fills committed with one study wave.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StudyStyleOverlay {
+    pub bar_colors: BTreeMap<usize, StudyColor>,
+    pub background_colors: BTreeMap<usize, StudyColor>,
+    pub levels: Vec<StudyLevelSpec>,
+    pub fills: Vec<StudyFillSpec>,
+}
+
+impl StudyStyleOverlay {
+    pub(super) fn prepare_for_dirty(&mut self, len: usize, dirty: StudyDirtyRange) {
+        let end = dirty.end_exclusive.unwrap_or(len).min(len);
+        self.bar_colors
+            .retain(|&idx, _| idx < len && (idx < dirty.start || idx >= end));
+        self.background_colors
+            .retain(|&idx, _| idx < len && (idx < dirty.start || idx >= end));
+        if dirty.start == 0 && end == len {
+            self.levels.clear();
+            self.fills.clear();
+        }
+    }
 }
 
 /// Semantic pane placement. Outputs using the same dedicated group share one
@@ -66,6 +129,8 @@ pub enum StudyPointStyle {
     Uniform,
     /// Four-state histogram coloring based on sign and movement toward/away from zero.
     MomentumHistogram,
+    /// Generic bounded per-point color overrides written via `StudyOutputBuffer::set_point_color`.
+    PerPoint,
 }
 
 /// Declarative presentation metadata for one scalar study output.
@@ -346,6 +411,7 @@ impl StudyOutputValues {
 pub struct StudyOutputSeries {
     pub(super) timeline: StudyOutputTimeline,
     pub(super) values: StudyOutputValues,
+    pub(super) point_colors: Arc<BTreeMap<usize, StudyColor>>,
     pub(super) materialized_values: Arc<OnceLock<Arc<[Option<f64>]>>>,
     pub(super) generation: u64,
 }
@@ -412,6 +478,18 @@ impl StudyOutputSeries {
             .get_or_init(|| self.values.to_vec().into())
             .as_ref()
     }
+
+    /// Returns the optional per-point color override at `index`.
+    #[must_use]
+    pub fn point_color(&self, index: usize) -> Option<StudyColor> {
+        self.point_colors.get(&index).copied()
+    }
+
+    /// Returns all sparse per-point color overrides for this output series.
+    #[must_use]
+    pub fn point_colors(&self) -> &BTreeMap<usize, StudyColor> {
+        &self.point_colors
+    }
 }
 
 #[derive(Clone)]
@@ -430,6 +508,7 @@ pub enum StudyInputSeries<'a> {
 /// One bounded output buffer for the current native calculation.
 pub struct StudyOutputBuffer {
     values: StudyOutputBufferValues,
+    point_colors: BTreeMap<usize, StudyColor>,
 }
 
 enum StudyOutputBufferValues {
@@ -441,6 +520,7 @@ impl StudyOutputBuffer {
     fn new(len: usize) -> Self {
         Self {
             values: StudyOutputBufferValues::Dense(vec![None; len]),
+            point_colors: BTreeMap::new(),
         }
     }
 
@@ -457,6 +537,7 @@ impl StudyOutputBuffer {
                 values: StudyOutputBufferValues::Persistent(
                     previous.values.clone().resized(timeline.len()),
                 ),
+                point_colors: (*previous.point_colors).clone(),
             };
             let cleared = output.clear(dirty);
             return (output, cleared);
@@ -478,6 +559,9 @@ impl StudyOutputBuffer {
                 std::cmp::Ordering::Equal => {
                     if let StudyOutputBufferValues::Dense(values) = &mut output.values {
                         values[current_index] = previous.value(previous_index).flatten();
+                    }
+                    if let Some(color) = previous.point_color(previous_index) {
+                        output.point_colors.insert(current_index, color);
                     }
                     previous_index += 1;
                     current_index += 1;
@@ -531,6 +615,10 @@ impl StudyOutputBuffer {
                 }
             }
         }
+        if !self.point_colors.is_empty() {
+            self.point_colors
+                .retain(|&index, _| index < range.start || index >= end);
+        }
         end - range.start
     }
 
@@ -569,11 +657,35 @@ impl StudyOutputBuffer {
         }
     }
 
-    pub(super) fn into_values(self) -> StudyOutputValues {
-        match self.values {
+    /// Writes an optional per-point color override for row `index`.
+    ///
+    /// # Errors
+    /// Returns an error if `index` is outside the current output length.
+    pub fn set_point_color(
+        &mut self,
+        index: usize,
+        color: Option<StudyColor>,
+    ) -> Result<(), String> {
+        if index >= self.len() {
+            return Err("study point color row is outside the calculation range".to_string());
+        }
+        match color {
+            Some(color) => {
+                self.point_colors.insert(index, color);
+            }
+            None => {
+                self.point_colors.remove(&index);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn into_parts(self) -> (StudyOutputValues, BTreeMap<usize, StudyColor>) {
+        let values = match self.values {
             StudyOutputBufferValues::Dense(values) => StudyOutputValues::from_dense(&values),
             StudyOutputBufferValues::Persistent(values) => values,
-        }
+        };
+        (values, self.point_colors)
     }
 }
 
@@ -588,8 +700,14 @@ pub struct StudyExecutionContext<'a> {
     pub(super) live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
     pub(super) timeline: &'a StudyOutputTimeline,
     pub(super) dirty: StudyDirtyRange,
+    pub(super) meta: StudyExecutionMeta,
+    pub(super) chart_context: StudyChartContext,
     pub(super) outputs: &'a mut [StudyOutputBuffer],
+    pub(super) style_overlay: &'a mut StudyStyleOverlay,
+    pub(super) scene: &'a mut StudySceneState,
+    pub(super) alerts: &'a mut Vec<StudyAlertEvent>,
     pub(super) state: Option<&'a mut NativeStudyState>,
+    pub(super) intrabar_state: Option<&'a mut NativeStudyState>,
 }
 
 /// Immutable half of one native study calculation.
@@ -600,6 +718,8 @@ pub struct StudyExecutionInputs<'a> {
     live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
     timeline: &'a StudyOutputTimeline,
     dirty: StudyDirtyRange,
+    meta: StudyExecutionMeta,
+    chart_context: StudyChartContext,
 }
 
 impl<'a> StudyExecutionInputs<'a> {
@@ -607,6 +727,18 @@ impl<'a> StudyExecutionInputs<'a> {
     #[must_use]
     pub const fn settings(self) -> &'a StudySettings {
         self.settings
+    }
+
+    /// Returns deterministic runtime execution metadata (historical/realtime/new/confirmed/time).
+    #[must_use]
+    pub const fn meta(self) -> StudyExecutionMeta {
+        self.meta
+    }
+
+    /// Returns read-only visible chart viewport context when supplied by the host.
+    #[must_use]
+    pub const fn chart_context(self) -> StudyChartContext {
+        self.chart_context
     }
 
     /// Returns the primary output timeline inherited from dependency zero.
@@ -648,6 +780,18 @@ impl StudyExecutionContext<'_> {
         self.settings
     }
 
+    /// Returns deterministic runtime execution metadata (historical/realtime/new/confirmed/time).
+    #[must_use]
+    pub const fn meta(&self) -> StudyExecutionMeta {
+        self.meta
+    }
+
+    /// Returns read-only visible chart viewport context when supplied by the host.
+    #[must_use]
+    pub const fn chart_context(&self) -> StudyChartContext {
+        self.chart_context
+    }
+
     /// Returns the primary output timeline inherited from dependency zero.
     #[must_use]
     pub fn timestamps(&self) -> &[i64] {
@@ -681,6 +825,121 @@ impl StudyExecutionContext<'_> {
         self.outputs.get_mut(index)
     }
 
+    /// Sets or clears a per-bar candle/bar color override at row `index`.
+    ///
+    /// # Errors
+    /// Returns an error if `index` is outside the primary output timeline.
+    pub fn set_bar_color(&mut self, index: usize, color: Option<StudyColor>) -> Result<(), String> {
+        if index >= self.timeline.len() {
+            return Err("study bar color row is outside the calculation range".to_string());
+        }
+        match color {
+            Some(color) => {
+                self.style_overlay.bar_colors.insert(index, color);
+            }
+            None => {
+                self.style_overlay.bar_colors.remove(&index);
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets or clears a dynamic background tint at row `index`.
+    ///
+    /// # Errors
+    /// Returns an error if `index` is outside the primary output timeline.
+    pub fn set_background_color(
+        &mut self,
+        index: usize,
+        color: Option<StudyColor>,
+    ) -> Result<(), String> {
+        if index >= self.timeline.len() {
+            return Err("study background color row is outside the calculation range".to_string());
+        }
+        match color {
+            Some(color) => {
+                self.style_overlay.background_colors.insert(index, color);
+            }
+            None => {
+                self.style_overlay.background_colors.remove(&index);
+            }
+        }
+        Ok(())
+    }
+
+    /// Declares one bounded semantic horizontal price/value level.
+    ///
+    /// # Errors
+    /// Returns an error if level limits, decimal scale, or title length are exceeded.
+    pub fn add_level(&mut self, level: StudyLevelSpec) -> Result<(), String> {
+        if self.style_overlay.levels.len() >= MAXIMUM_STUDY_LEVELS {
+            return Err(format!("study level count exceeds {MAXIMUM_STUDY_LEVELS}"));
+        }
+        if level.value.scale > MAXIMUM_STUDY_SETTING_DECIMAL_SCALE {
+            return Err("study level decimal scale is out of range".to_string());
+        }
+        if level
+            .title
+            .as_ref()
+            .is_some_and(|title| title.len() > MAXIMUM_STUDY_IDENTIFIER_BYTES)
+        {
+            return Err("study level title exceeds metadata limit".to_string());
+        }
+        self.style_overlay.levels.push(level);
+        Ok(())
+    }
+
+    /// Declares one bounded shaded fill between two scalar outputs of this study.
+    ///
+    /// # Errors
+    /// Returns an error if fill limits or output indices are invalid.
+    pub fn add_fill(&mut self, fill: StudyFillSpec) -> Result<(), String> {
+        if self.style_overlay.fills.len() >= MAXIMUM_STUDY_FILLS {
+            return Err(format!("study fill count exceeds {MAXIMUM_STUDY_FILLS}"));
+        }
+        if fill.first_output_index >= self.outputs.len()
+            || fill.second_output_index >= self.outputs.len()
+            || fill.first_output_index == fill.second_output_index
+        {
+            return Err("study fill references invalid or identical output indices".to_string());
+        }
+        self.style_overlay.fills.push(fill);
+        Ok(())
+    }
+
+    /// Returns a read-only view of this study's transactional semantic drawing scene.
+    #[must_use]
+    pub const fn scene(&self) -> &StudySceneState {
+        self.scene
+    }
+
+    /// Returns mutable access to this study's transactional semantic drawing scene
+    /// (lines, boxes, polylines, line fills, labels, and dashboard tables).
+    ///
+    /// Mutations commit atomically with outputs and state, and are discarded on error or panic.
+    #[must_use]
+    pub const fn scene_mut(&mut self) -> &mut StudySceneState {
+        self.scene
+    }
+
+    /// Emits one typed, bounded alert event for this calculation wave.
+    ///
+    /// Alerts are committed atomically with outputs and delivered by the product host;
+    /// native calculation code never triggers notifications directly.
+    ///
+    /// # Errors
+    /// Returns an error if wave alert limits or alert payload validation fail.
+    pub fn emit_alert(&mut self, event: StudyAlertEvent) -> Result<(), String> {
+        if self.alerts.len() >= MAXIMUM_STUDY_ALERTS_PER_WAVE {
+            return Err(format!(
+                "study alert count exceeds {MAXIMUM_STUDY_ALERTS_PER_WAVE} per wave"
+            ));
+        }
+        event.validate()?;
+        self.alerts.push(event);
+        Ok(())
+    }
+
     /// Returns the runtime-owned mutable state value for this study when its
     /// native registration declared state of type `T`.
     ///
@@ -690,6 +949,13 @@ impl StudyExecutionContext<'_> {
     #[must_use]
     pub fn state_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.state.as_deref_mut()?.value_mut::<T>()
+    }
+
+    /// Returns the runtime-owned intrabar-persistent state value (Pine `varip` equivalent)
+    /// when this study registered an intrabar state factory of type `T`.
+    #[must_use]
+    pub fn intrabar_state_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.intrabar_state.as_deref_mut()?.value_mut::<T>()
     }
 
     /// Splits immutable inputs/settings from mutable output buffers so native
@@ -704,6 +970,8 @@ impl StudyExecutionContext<'_> {
                 live_inputs: self.live_inputs,
                 timeline: self.timeline,
                 dirty: self.dirty,
+                meta: self.meta,
+                chart_context: self.chart_context,
             },
             self.outputs,
         )
@@ -726,6 +994,8 @@ impl StudyExecutionContext<'_> {
                 live_inputs: self.live_inputs,
                 timeline: self.timeline,
                 dirty: self.dirty,
+                meta: self.meta,
+                chart_context: self.chart_context,
             },
             state,
             self.outputs,

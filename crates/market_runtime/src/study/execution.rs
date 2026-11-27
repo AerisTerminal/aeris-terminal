@@ -7,8 +7,9 @@ use std::collections::VecDeque;
 
 use super::{
     AssertUnwindSafe, NativeStudyCalculate, NativeStudyCalculation, NativeStudyState,
-    ResolvedStudyInput, StudyDepthView, StudyDirtyRange, StudyExecutionContext,
-    StudyLiveMarketData, StudyOutputBuffer, StudyOutputTimeline, StudyQuoteView, StudySettings,
+    ResolvedStudyInput, StudyAlertEvent, StudyChartContext, StudyDepthView, StudyDirtyRange,
+    StudyExecutionContext, StudyExecutionMeta, StudyLiveMarketData, StudyOutputBuffer,
+    StudyOutputTimeline, StudyQuoteView, StudySceneState, StudySettings, StudyStyleOverlay,
     StudyTradeWindow, bounded_execution_detail, catch_unwind,
 };
 use crate::RetainedMarketTrade;
@@ -26,7 +27,15 @@ use std::{
 const CALCULATION_DEADLINE: Duration = Duration::from_millis(50);
 pub(super) const BUSY_DETAIL: &str =
     "study worker is still finishing a calculation that missed its deadline";
-type Output = Result<(Vec<StudyOutputBuffer>, Option<NativeStudyState>), String>;
+pub(super) struct ExecutionOutput {
+    pub(super) outputs: Vec<StudyOutputBuffer>,
+    pub(super) style_overlay: StudyStyleOverlay,
+    pub(super) scene: StudySceneState,
+    pub(super) alerts: Vec<StudyAlertEvent>,
+    pub(super) state: Option<NativeStudyState>,
+    pub(super) intrabar_state: Option<NativeStudyState>,
+}
+type Output = Result<ExecutionOutput, String>;
 
 struct LiveInput {
     quote: Option<(TopOfBookQuote, u8, u8)>,
@@ -78,9 +87,14 @@ struct Job {
     live: Vec<Option<LiveInput>>,
     timeline: StudyOutputTimeline,
     dirty: StudyDirtyRange,
+    meta: StudyExecutionMeta,
+    chart_context: StudyChartContext,
     calculate: NativeStudyCalculate,
     outputs: Vec<StudyOutputBuffer>,
+    style_overlay: StudyStyleOverlay,
+    scene: StudySceneState,
     state: Option<NativeStudyState>,
+    intrabar_state: Option<NativeStudyState>,
     reply: mpsc::SyncSender<Output>,
 }
 
@@ -107,6 +121,7 @@ impl Executor {
                         .iter()
                         .map(|value| value.as_ref().map(LiveInput::view))
                         .collect::<Vec<_>>();
+                    let mut alerts = Vec::new();
                     let result = catch_unwind(AssertUnwindSafe(|| {
                         let mut context = StudyExecutionContext {
                             settings: &job.settings,
@@ -114,13 +129,26 @@ impl Executor {
                             live_inputs: &live,
                             timeline: &job.timeline,
                             dirty: job.dirty,
+                            meta: job.meta,
+                            chart_context: job.chart_context,
                             outputs: &mut job.outputs,
+                            style_overlay: &mut job.style_overlay,
+                            scene: &mut job.scene,
+                            alerts: &mut alerts,
                             state: job.state.as_mut(),
+                            intrabar_state: job.intrabar_state.as_mut(),
                         };
                         (job.calculate)(&mut context)
                     }));
                     let result = match result {
-                        Ok(Ok(())) => Ok((job.outputs, job.state)),
+                        Ok(Ok(())) => Ok(ExecutionOutput {
+                            outputs: job.outputs,
+                            style_overlay: job.style_overlay,
+                            scene: job.scene,
+                            alerts,
+                            state: job.state,
+                            intrabar_state: job.intrabar_state,
+                        }),
                         Ok(Err(detail)) => Err(bounded_execution_detail(detail)),
                         Err(_) => Err("native study panicked".into()),
                     };
@@ -159,7 +187,10 @@ impl Executor {
         &self,
         calculation: &NativeStudyCalculation<'_>,
         outputs: Vec<StudyOutputBuffer>,
+        style_overlay: StudyStyleOverlay,
+        scene: StudySceneState,
         state: Option<NativeStudyState>,
+        intrabar_state: Option<NativeStudyState>,
     ) -> Output {
         if self.is_busy() {
             return Err(BUSY_DETAIL.into());
@@ -180,9 +211,14 @@ impl Executor {
                 .collect(),
             timeline: calculation.timeline.clone(),
             dirty: calculation.dirty,
+            meta: calculation.meta,
+            chart_context: calculation.chart_context,
             calculate: calculation.program.calculate,
             outputs,
+            style_overlay,
+            scene,
             state,
+            intrabar_state,
             reply,
         };
         self.jobs

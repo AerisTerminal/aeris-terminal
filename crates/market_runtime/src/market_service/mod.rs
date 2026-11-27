@@ -294,15 +294,15 @@ impl OpenInterestCache {
         now: Instant,
         samples: Vec<aeris_provider_spi::OpenInterestSample>,
     ) {
-        if self.entries.len() >= OPEN_INTEREST_CACHE_CAPACITY && !self.entries.contains_key(&key) {
-            if let Some(oldest_key) = self
+        if self.entries.len() >= OPEN_INTEREST_CACHE_CAPACITY
+            && !self.entries.contains_key(&key)
+            && let Some(oldest_key) = self
                 .entries
                 .iter()
                 .min_by_key(|(_, (fetched_at, _))| *fetched_at)
                 .map(|(candidate, _)| candidate.clone())
-            {
-                self.entries.remove(&oldest_key);
-            }
+        {
+            self.entries.remove(&oldest_key);
         }
         self.entries.insert(key, (now, samples));
     }

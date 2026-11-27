@@ -10,16 +10,26 @@ pub use aeris_market_data::{
 pub use aeris_market_runtime::{
     MarketStream, StreamRequirements,
     study::{
-        MAXIMUM_STUDY_IDENTIFIER_BYTES, NativeStudyCalculate, NativeStudyProgram,
-        NativeStudyRegistration, NativeStudyState, NativeStudyStateFactory, StudyBarField,
+        MAXIMUM_STUDY_ALERT_MESSAGE_BYTES, MAXIMUM_STUDY_ALERTS_PER_WAVE, MAXIMUM_STUDY_FILLS,
+        MAXIMUM_STUDY_IDENTIFIER_BYTES, MAXIMUM_STUDY_LEVELS, MAXIMUM_STUDY_POLYLINE_POINTS,
+        MAXIMUM_STUDY_SCENE_OBJECTS, MAXIMUM_STUDY_SCENE_TABLES, MAXIMUM_STUDY_SCENE_TEXT_BYTES,
+        MAXIMUM_STUDY_TABLE_CELLS, NativeStudyCalculate, NativeStudyProgram,
+        NativeStudyRegistration, NativeStudyState, NativeStudyStateFactory, StudyAlertEvent,
+        StudyAlertFrequency, StudyBarField, StudyBoxObject, StudyChartContext, StudyColor,
         StudyDecimal, StudyDefinition, StudyDependency, StudyDepthView, StudyDirtyRange,
-        StudyExecutionContext, StudyExecutionInputs, StudyInputSeries, StudyInstanceId,
-        StudyInvalidationPolicy, StudyLiveMarketData, StudyMarketInput, StudyMarketSeries,
-        StudyOutputBuffer, StudyOutputId, StudyOutputSpec, StudyPaneTarget, StudyPlotKind,
-        StudyPointStyle, StudyQuoteView, StudyRuntimeError, StudyScaleTarget,
+        StudyExecutionContext, StudyExecutionInputs, StudyExecutionMeta, StudyFillSpec,
+        StudyInputSeries, StudyInstanceId, StudyInvalidationPolicy, StudyLabelObject,
+        StudyLabelStyle, StudyLevelSpec, StudyLineExtend, StudyLineFillObject, StudyLineObject,
+        StudyLineStyle, StudyLiveMarketData, StudyMarketInput, StudyMarketSeries,
+        StudyMtfConfirmation, StudyMtfGapPolicy, StudyOutputBuffer, StudyOutputId, StudyOutputSpec,
+        StudyPaneTarget, StudyPlotKind, StudyPoint, StudyPointStyle, StudyPolylineObject,
+        StudyQuoteView, StudyRequestContext, StudyRuntimeError, StudyScaleTarget, StudySceneDelta,
+        StudySceneObject, StudySceneObjectId, StudySceneState, StudySession,
         StudySettingChoiceOption, StudySettingCondition, StudySettingControl,
-        StudySettingPresentation, StudySettingSpec, StudySettingValue, StudySettings,
-        StudyThresholdRegion, StudyTradeSample, StudyTradeWindow,
+        StudySettingPresentation, StudySettingSpec, StudySettingValue, StudySettings, StudySource,
+        StudyStyleOverlay, StudySymbolRef, StudyTableCell, StudyTableObject, StudyTablePosition,
+        StudyTextAlign, StudyThresholdRegion, StudyTimeframe, StudyTradeSample, StudyTradeWindow,
+        align_higher_timeframe_bar, intrabar_range, resolve_market_input,
     },
 };
 use num_traits::ToPrimitive;
@@ -30,6 +40,29 @@ use std::{
     num::NonZeroUsize,
     panic::{AssertUnwindSafe, catch_unwind},
 };
+
+pub mod builders;
+
+/// Convenient one-line import for Aeris Study SDK authors.
+pub mod prelude {
+    pub use crate::builders::{StudyDefinitionBuilder, StudyOutputBuilder, StudySettingBuilder};
+    pub use crate::{
+        BarPeriod, BarSeriesKey, MarketStream, NativeStudyProgram, NativeStudyRegistration,
+        NativeStudyState, StreamRequirements, StudyAlertEvent, StudyAlertFrequency, StudyBarField,
+        StudyBoxObject, StudyChartContext, StudyColor, StudyDecimal, StudyDefinition,
+        StudyDependency, StudyDirtyRange, StudyExecutionContext, StudyExecutionInputs,
+        StudyExecutionMeta, StudyFillSpec, StudyInputSeries, StudyInvalidationPolicy,
+        StudyLabelObject, StudyLabelStyle, StudyLevelSpec, StudyLineExtend, StudyLineFillObject,
+        StudyLineObject, StudyLineStyle, StudyMarketInput, StudyMarketSeries, StudyMtfConfirmation,
+        StudyMtfGapPolicy, StudyOutputBuffer, StudyOutputSpec, StudyPaneTarget, StudyPlotKind,
+        StudyPoint, StudyPointStyle, StudyPolylineObject, StudyRequestContext, StudyScaleTarget,
+        StudySceneDelta, StudySceneObject, StudySceneObjectId, StudySceneState, StudySession,
+        StudySettingChoiceOption, StudySettingControl, StudySettingPresentation, StudySettingSpec,
+        StudySettingValue, StudySettings, StudySource, StudyStyleOverlay, StudySymbolRef,
+        StudyTableCell, StudyTableObject, StudyTablePosition, StudyTextAlign, StudyTimeframe,
+        align_higher_timeframe_bar, fixed_point_to_f64, intrabar_range, resolve_market_input,
+    };
+}
 
 /// Converts one fixed-point market value into the floating-point representation used by study
 /// formulas without requiring authors to depend on `Aeris`'s internal conversion crate.
