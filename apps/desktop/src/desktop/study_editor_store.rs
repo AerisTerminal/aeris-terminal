@@ -9,8 +9,8 @@
 //! This module owns source persistence and static sandbox-policy diagnostics only;
 //! it never calculates studies, opens provider sessions, or loads native libraries.
 
-use aeris_contracts::WorkspaceChartStudyState;
-use aeris_study_sdk::builders::{StudyDefinitionBuilder, StudyOutputBuilder};
+use aeris_contracts::{WorkspaceChartStudyState, workspace_study_setting_state};
+use aeris_study_sdk::builders::{StudyDefinitionBuilder, StudyOutputBuilder, StudySettingBuilder};
 use aeris_study_sdk::project::{
     MAXIMUM_STUDY_DIAGNOSTICS, MAXIMUM_STUDY_SOURCE_BYTES, MAXIMUM_USER_STUDY_PROJECTS,
     StudyDiagnostic, StudyDiagnosticSeverity, StudyProject, StudyProjectCapability,
@@ -23,13 +23,14 @@ use aeris_study_sdk::toolchain::{
 };
 use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
 use aeris_study_sdk::{
-    BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyColor, StudyFillSpec,
-    StudyInvalidationPolicy, StudyPaneTarget, StudyPlotKind, StudySettings,
+    BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyColor, StudyDecimal,
+    StudyFillSpec, StudyInvalidationPolicy, StudyLevelSpec, StudyLineStyle, StudyPaneTarget,
+    StudyPlotKind, StudySettingSpec, StudySettingValue, StudySettings,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -157,8 +158,31 @@ pub(crate) struct ParsedStudyOutputSpec {
 pub(crate) struct ParsedStudySpec {
     pub(crate) pane: StudyPaneTarget,
     pub(crate) line_width: u32,
+    pub(crate) inputs: Vec<StudySettingSpec>,
     pub(crate) outputs: Vec<ParsedStudyOutputSpec>,
     pub(crate) fills: Vec<StudyFillSpec>,
+    pub(crate) levels: Vec<StudyLevelSpec>,
+}
+
+fn parse_decimal_literal(raw: &str) -> Option<StudyDecimal> {
+    let trimmed = raw.trim();
+    if let Some((whole, frac)) = trimmed.split_once('.') {
+        let scale = u8::try_from(frac.len()).ok()?;
+        let digits = format!("{whole}{frac}");
+        let mantissa = digits.parse::<i64>().ok()?;
+        Some(StudyDecimal { mantissa, scale })
+    } else {
+        let mantissa = trimmed.parse::<i64>().ok()?;
+        Some(StudyDecimal { mantissa, scale: 0 })
+    }
+}
+
+fn parse_line_style(raw: &str) -> StudyLineStyle {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dashed" | "dash" => StudyLineStyle::Dashed,
+        "dotted" | "dot" => StudyLineStyle::Dotted,
+        _ => StudyLineStyle::Solid,
+    }
 }
 
 fn parse_plot_kind(raw: &str) -> StudyPlotKind {
@@ -203,10 +227,12 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
     let mut pane = StudyPaneTarget::Price;
     let mut default_plot = StudyPlotKind::Line;
     let mut line_width: u32 = 0;
+    let mut inputs = Vec::new();
     let mut outputs = Vec::new();
     let mut fills = Vec::new();
+    let mut levels = Vec::new();
 
-    for raw_line in source.lines().take(64) {
+    for raw_line in source.lines().take(80) {
         let trimmed = raw_line.trim();
         let Some(comment) = trimmed.strip_prefix("//") else {
             continue;
@@ -232,6 +258,36 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
         } else if let Some(value) = lower.strip_prefix("@width:") {
             if let Ok(w) = value.trim().parse::<u32>() {
                 line_width = w.clamp(1, 4);
+            }
+        } else if lower.starts_with("@input:") && inputs.len() < 16 {
+            // Format: // @input: <id> | <int|float|bool> | <default> | <label>
+            let body = content[7..].trim();
+            let parts: Vec<&str> = body.split('|').map(str::trim).collect();
+            if parts.len() >= 3 && !parts[0].is_empty() {
+                let id = parts[0];
+                let kind = parts[1].to_ascii_lowercase();
+                let default_raw = parts[2];
+                let label = parts
+                    .get(3)
+                    .filter(|s| !s.is_empty())
+                    .copied()
+                    .unwrap_or(id);
+                let spec = match kind.as_str() {
+                    "int" | "integer" => default_raw
+                        .parse::<i64>()
+                        .ok()
+                        .map(|val| StudySettingBuilder::integer(id, val).label(label).build()),
+                    "float" | "decimal" | "f64" => parse_decimal_literal(default_raw)
+                        .map(|dec| StudySettingBuilder::decimal(id, dec).label(label).build()),
+                    "bool" | "boolean" => default_raw
+                        .parse::<bool>()
+                        .ok()
+                        .map(|b| StudySettingBuilder::boolean(id, b).label(label).build()),
+                    _ => None,
+                };
+                if let Some(spec) = spec {
+                    inputs.push(spec);
+                }
             }
         } else if lower.starts_with("@output:") && outputs.len() < 16 {
             let body = content[8..].trim();
@@ -275,6 +331,34 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
                     });
                 }
             }
+        } else if lower.starts_with("@level:") && levels.len() < 16 {
+            // Format: // @level: <price> | <title> | <solid|dashed|dotted> | <#RRGGBBAA>
+            let body = content[7..].trim();
+            let parts: Vec<&str> = body.split('|').map(str::trim).collect();
+            if let Some(value) = parts.first().and_then(|s| parse_decimal_literal(s)) {
+                let title = parts
+                    .get(1)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (*s).to_string());
+                let style = parts
+                    .get(2)
+                    .map_or(StudyLineStyle::Dashed, |s| parse_line_style(s));
+                let color = parts
+                    .get(3)
+                    .and_then(|s| parse_hex_study_color(s))
+                    .unwrap_or(StudyColor {
+                        r: 148,
+                        g: 163,
+                        b: 184,
+                        a: 180,
+                    });
+                levels.push(StudyLevelSpec {
+                    value,
+                    color,
+                    style,
+                    title,
+                });
+            }
         }
     }
 
@@ -296,22 +380,29 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
     ParsedStudySpec {
         pane,
         line_width,
+        inputs,
         outputs,
         fills,
+        levels,
     }
 }
 
-/// Builds a `NativeStudyRegistration` for a compiled sandboxed WASM study using its parsed spec.
+/// Builds a `NativeStudyRegistration` for a compiled sandboxed WASM study using its parsed spec
+/// and optional typed setting overrides.
 #[must_use]
 pub(crate) fn build_wasm_study_registration(
     identifier: &str,
     series: &BarSeriesKey,
     spec: &ParsedStudySpec,
+    overrides: BTreeMap<String, StudySettingValue>,
     compiled: CompiledWasmStudy,
 ) -> NativeStudyRegistration {
     let mut builder = StudyDefinitionBuilder::new(identifier)
         .market(series.clone(), StreamRequirements::BARS)
         .invalidation(StudyInvalidationPolicy::FromFirstChanged);
+    for input in &spec.inputs {
+        builder = builder.setting(input.clone());
+    }
     for out in &spec.outputs {
         builder = builder.output(
             StudyOutputBuilder::new(&out.identifier, &out.title, out.plot)
@@ -319,12 +410,19 @@ pub(crate) fn build_wasm_study_registration(
                 .build(),
         );
     }
+    let definition = builder.build();
+    let settings = StudySettings::with_overrides(&definition.settings, overrides)
+        .or_else(|_| StudySettings::defaults(&definition.settings))
+        .unwrap_or_default();
+    let param_identifiers: Vec<String> = spec.inputs.iter().map(|s| s.identifier.clone()).collect();
     NativeStudyRegistration {
-        settings: StudySettings::default(),
-        definition: builder.build(),
+        settings,
+        definition,
         program: compiled.into_native_program_with_spec(
             spec.outputs.len(),
+            param_identifiers,
             spec.fills.clone(),
+            spec.levels.clone(),
             StudySandboxLimits::default(),
         ),
     }
@@ -606,10 +704,36 @@ impl StudyProjectStore {
             .map(|p| p.last_good_source.as_deref().unwrap_or(&p.source))
             .unwrap_or("");
         let spec = parse_study_source_spec(source_text, &display_name);
+        let mut overrides = BTreeMap::new();
+        for setting in &state.settings {
+            if let Some(val) = setting.value.as_ref() {
+                let parsed = match val {
+                    workspace_study_setting_state::Value::Integer(v) => {
+                        Some(StudySettingValue::Integer(*v))
+                    }
+                    workspace_study_setting_state::Value::Boolean(b) => {
+                        Some(StudySettingValue::Boolean(*b))
+                    }
+                    workspace_study_setting_state::Value::Decimal(d) => {
+                        u8::try_from(d.scale).ok().map(|scale| {
+                            StudySettingValue::Decimal(StudyDecimal {
+                                mantissa: d.mantissa,
+                                scale,
+                            })
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(v) = parsed {
+                    overrides.insert(setting.identifier.clone(), v);
+                }
+            }
+        }
         Ok(build_wasm_study_registration(
             &state.identifier,
             current_series,
             &spec,
+            overrides,
             compiled,
         ))
     }
@@ -837,6 +961,27 @@ pub(crate) struct CompiledStudyArtifact {
 const WASM_MULTI_HARNESS_SOURCE: &str = r#"#[forbid(unsafe_code)]
 mod user_study;
 
+static PARAMS: [std::sync::atomic::AtomicU64; 16] = [
+    const { std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()) }; 16
+];
+
+pub fn param(index: usize, default: f64) -> f64 {
+    if let Some(slot) = PARAMS.get(index) {
+        let v = f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed));
+        if v.is_finite() {
+            return v;
+        }
+    }
+    default
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_set_param(index: u32, value: f64) {
+    if let Some(slot) = PARAMS.get(index as usize) {
+        slot.store(value.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn aeris_study_abi_version() -> u32 {
     1
@@ -895,6 +1040,27 @@ fn source_uses_multi_output_entrypoint(source: &str) -> bool {
 
 const WASM_HARNESS_SOURCE: &str = r#"#[forbid(unsafe_code)]
 mod user_study;
+
+static PARAMS: [std::sync::atomic::AtomicU64; 16] = [
+    const { std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()) }; 16
+];
+
+pub fn param(index: usize, default: f64) -> f64 {
+    if let Some(slot) = PARAMS.get(index) {
+        let v = f64::from_bits(slot.load(std::sync::atomic::Ordering::Relaxed));
+        if v.is_finite() {
+            return v;
+        }
+    }
+    default
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_set_param(index: u32, value: f64) {
+    if let Some(slot) = PARAMS.get(index as usize) {
+        slot.store(value.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn aeris_study_abi_version() -> u32 {
@@ -1742,6 +1908,9 @@ pub fn calculate(
             r#"
 // @pane: price
 // @width: 2
+// @input: length | int | 3 | Median Length
+// @input: atr_length | int | 14 | ATR Length
+// @input: atr_mult | float | 2.0 | ATR Multiplier
 // @output: median | Median | line | {hash}ef4444
 // @output: upper | Upper Band | line | {hash}22c55e
 // @output: lower | Lower Band | line | {hash}d946ef
@@ -1750,6 +1919,7 @@ pub fn calculate(
 // @output: bear_fill | Bear Cloud | line | {hash}00000000
 // @fill: 4, 3 | {hash}22c55e33
 // @fill: 5, 3 | {hash}d946ef33
+// @level: 100.0 | Pivot | dashed | {hash}94a3b880
 pub fn calculate_multi(
     _open: &[f64],
     high: &[f64],
@@ -1758,9 +1928,9 @@ pub fn calculate_multi(
     _volume: &[f64],
     outs: &mut [&mut [f64]],
 ) {{
-    let length = 3usize;
-    let atr_len = 14usize;
-    let atr_mult = 2.0_f64;
+    let length = (super::param(0, 3.0).round() as usize).clamp(1, 200);
+    let atr_len = (super::param(1, 14.0).round() as usize).clamp(1, 200);
+    let atr_mult = super::param(2, 2.0).max(0.0);
     let n = close.len();
     if n == 0 || outs.len() < 6 {{
         return;
@@ -1827,23 +1997,45 @@ pub fn calculate_multi(
         let spec = parse_study_source_spec(&src, "Median");
         assert_eq!(spec.pane, StudyPaneTarget::Price);
         assert_eq!(spec.line_width, 2);
+        assert_eq!(spec.inputs.len(), 3);
+        assert_eq!(spec.inputs[0].identifier, "length");
+        assert_eq!(spec.inputs[1].identifier, "atr_length");
+        assert_eq!(spec.inputs[2].identifier, "atr_mult");
         assert_eq!(spec.outputs.len(), 6);
         assert_eq!(spec.fills.len(), 2);
+        assert_eq!(spec.levels.len(), 1);
 
         let artifact = compile_study_source_to_wasm(&src).expect("median compiles to wasm");
         let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::RangeBound, 120, 60);
-        let res = artifact
+        let res_default = artifact
             .compiled
-            .execute_columnar_outputs(
+            .execute_columnar_with_params(
                 &fixture.bars,
                 spec.outputs.len(),
+                &[3.0, 14.0, 2.0],
                 StudySandboxLimits::default(),
             )
-            .expect("multi-output median executes cleanly");
-        assert_eq!(res.outputs.len(), 6);
-        assert!(res.outputs[0][119].is_some());
-        assert!(res.outputs[1][119].is_some());
-        assert!(res.outputs[2][119].is_some());
-        assert!(res.outputs[3][119].is_some());
+            .expect("multi-output median executes cleanly with default params");
+        assert_eq!(res_default.outputs.len(), 6);
+        assert!(res_default.outputs[0][119].is_some());
+        assert!(res_default.outputs[1][119].is_some());
+        assert!(res_default.outputs[2][119].is_some());
+        assert!(res_default.outputs[3][119].is_some());
+
+        let res_wider = artifact
+            .compiled
+            .execute_columnar_with_params(
+                &fixture.bars,
+                spec.outputs.len(),
+                &[3.0, 14.0, 4.0],
+                StudySandboxLimits::default(),
+            )
+            .expect("multi-output median executes cleanly with overridden multiplier");
+        let upper_2x = res_default.outputs[1][119].unwrap();
+        let upper_4x = res_wider.outputs[1][119].unwrap();
+        assert!(
+            upper_4x > upper_2x,
+            "increasing atr_mult param from 2.0 to 4.0 must widen upper band ({upper_4x} vs {upper_2x})"
+        );
     }
 }

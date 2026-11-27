@@ -13,7 +13,8 @@ use crate::sandbox::{
     StudySandboxLimits,
 };
 use crate::{
-    NativeStudyProgram, StudyExecutionContext, StudyFillSpec, StudyInputSeries, fixed_point_to_f64,
+    NativeStudyProgram, StudyExecutionContext, StudyFillSpec, StudyInputSeries, StudyLevelSpec,
+    StudySettingValue, fixed_point_to_f64,
 };
 use std::error::Error;
 use std::fmt;
@@ -30,6 +31,9 @@ pub const WASM_EXPORT_CALCULATE: &str = "aeris_study_calculate";
 /// Optional guest export computing `output_count` contiguous output series over columnized
 /// OHLCV `f64` bars: `(bars_ptr: u32, bar_count: u32, out_ptr: u32, output_count: u32) -> i32`.
 pub const WASM_EXPORT_CALCULATE_MULTI: &str = "aeris_study_calculate_multi";
+/// Optional guest export setting one numeric input parameter `(index: u32, value: f64)` before
+/// calculation.
+pub const WASM_EXPORT_SET_PARAM: &str = "aeris_study_set_param";
 /// Required guest linear memory export name.
 pub const WASM_EXPORT_MEMORY: &str = "memory";
 
@@ -264,9 +268,6 @@ impl CompiledWasmStudy {
     /// Executes this sandboxed study over one columnized OHLCV bar batch in a fresh isolated
     /// `wasmi::Store` bounded by `limits`, returning `output_count` output series.
     ///
-    /// Uses `aeris_study_calculate_multi` when exported; otherwise falls back to
-    /// `aeris_study_calculate` for single-output modules.
-    ///
     /// # Errors
     /// Returns [`WasmSandboxError`] on inconsistent input, fuel exhaustion, memory ceiling
     /// violation, guest trap, guest error code, or non-finite infinite output.
@@ -274,6 +275,22 @@ impl CompiledWasmStudy {
         &self,
         bars: &StudySandboxColumnarBars,
         output_count: usize,
+        limits: StudySandboxLimits,
+    ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
+        self.execute_columnar_with_params(bars, output_count, &[], limits)
+    }
+
+    /// Executes this sandboxed study with optional numeric input parameters passed via
+    /// `aeris_study_set_param` before calculation.
+    ///
+    /// # Errors
+    /// Returns [`WasmSandboxError`] on inconsistent input, fuel exhaustion, memory ceiling
+    /// violation, guest trap, guest error code, or non-finite infinite output.
+    pub fn execute_columnar_with_params(
+        &self,
+        bars: &StudySandboxColumnarBars,
+        output_count: usize,
+        params: &[f64],
         limits: StudySandboxLimits,
     ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
         let count = output_count.clamp(1, 16);
@@ -313,6 +330,7 @@ impl CompiledWasmStudy {
         let single_fn = instance
             .get_typed_func::<(u32, u32, u32), i32>(&store, WASM_EXPORT_CALCULATE)
             .map_err(|_| WasmSandboxError::MissingExport(WASM_EXPORT_CALCULATE))?;
+        apply_wasm_params(instance, &mut store, params)?;
 
         let input_bytes = pack_columnar_ohlcv_f64(bars);
         let total_out_values =
@@ -399,16 +417,22 @@ impl CompiledWasmStudy {
     /// directly inside `StudyRuntime` with transactional rollback and generation fencing.
     #[must_use]
     pub fn into_native_program(self, limits: StudySandboxLimits) -> NativeStudyProgram {
-        self.into_native_program_with_spec(1, Vec::new(), limits)
+        self.into_native_program_with_spec(1, Vec::new(), Vec::new(), Vec::new(), limits)
     }
 
-    /// Wraps a multi-output sandboxed WebAssembly module (with optional fills) into a
-    /// [`NativeStudyProgram`] that runs inside `StudyRuntime`.
+    /// Wraps a multi-output sandboxed WebAssembly module (with optional typed setting names,
+    /// fills, and horizontal reference levels) into a [`NativeStudyProgram`] that runs inside
+    /// `StudyRuntime`.
+    ///
+    /// Writes only rows inside `context.dirty_range()` on incremental live ticks so live market
+    /// updates remain O(dirty) on the persistent output trees instead of rewriting all history.
     #[must_use]
     pub fn into_native_program_with_spec(
         self,
         output_count: usize,
+        param_identifiers: Vec<String>,
         fills: Vec<StudyFillSpec>,
+        levels: Vec<StudyLevelSpec>,
         limits: StudySandboxLimits,
     ) -> NativeStudyProgram {
         let compiled = self;
@@ -422,6 +446,29 @@ impl CompiledWasmStudy {
             if bar_count == 0 {
                 return Ok(());
             }
+            let dirty = context.dirty_range();
+            let dirty_start = dirty.start.min(bar_count);
+            let dirty_end = dirty.end_exclusive.unwrap_or(bar_count).min(bar_count);
+            let params: Vec<f64> = param_identifiers
+                .iter()
+                .map(|id| match context.settings().get(id) {
+                    Some(StudySettingValue::Integer(v)) => {
+                        fixed_point_to_f64(*v, 0).unwrap_or(f64::NAN)
+                    }
+                    Some(StudySettingValue::Decimal(d) | StudySettingValue::Price(d)) => {
+                        fixed_point_to_f64(d.mantissa, d.scale).unwrap_or(f64::NAN)
+                    }
+                    Some(StudySettingValue::Boolean(b)) => {
+                        if *b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    _ => f64::NAN,
+                })
+                .collect();
+
             // Clamp to the newest `limits.max_output_points` bars if the input window is larger.
             let start = bar_count.saturating_sub(limits.max_output_points);
             let slice_len = bar_count.saturating_sub(start);
@@ -449,23 +496,55 @@ impl CompiledWasmStudy {
             }
 
             let result = compiled
-                .execute_columnar_outputs(&columnar, count, limits)
+                .execute_columnar_with_params(&columnar, count, &params, limits)
                 .map_err(|err| err.to_string())?;
 
+            let write_from = dirty_start.max(start);
+            let write_to = dirty_end.min(bar_count);
             for (out_idx, series) in result.outputs.into_iter().enumerate() {
                 let Some(output) = context.output(out_idx) else {
                     break;
                 };
-                for (offset, value) in series.into_iter().enumerate() {
-                    output.set(start + offset, value)?;
+                for row in write_from..write_to {
+                    if let Some(&value) = series.get(row - start) {
+                        output.set(row, value)?;
+                    }
                 }
             }
-            for &fill in &fills {
-                context.add_fill(fill)?;
+            if dirty_start == 0 && dirty_end == bar_count {
+                for &fill in &fills {
+                    context.add_fill(fill)?;
+                }
+                for level in &levels {
+                    context.add_level(level.clone())?;
+                }
             }
             Ok(())
         }))
     }
+}
+
+fn apply_wasm_params(
+    instance: wasmi::Instance,
+    store: &mut Store<SandboxStoreState>,
+    params: &[f64],
+) -> Result<(), WasmSandboxError> {
+    if params.is_empty() {
+        return Ok(());
+    }
+    let Ok(set_param_fn) =
+        instance.get_typed_func::<(u32, f64), ()>(&*store, WASM_EXPORT_SET_PARAM)
+    else {
+        return Ok(());
+    };
+    for (idx, &val) in params.iter().take(16).enumerate() {
+        if let Ok(idx_u32) = u32::try_from(idx) {
+            set_param_fn
+                .call(&mut *store, (idx_u32, val))
+                .map_err(|err| classify_wasmi_error(&err, false))?;
+        }
+    }
+    Ok(())
 }
 
 fn checked_wasm_sizes(

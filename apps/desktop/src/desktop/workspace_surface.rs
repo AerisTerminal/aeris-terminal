@@ -6673,8 +6673,17 @@ impl WorkspaceSurface {
                     &identifier,
                     &series,
                     &spec,
+                    std::collections::BTreeMap::new(),
                     compiled,
                 );
+                let persisted_settings: Vec<WorkspaceStudySettingState> = spec
+                    .inputs
+                    .iter()
+                    .map(|input| WorkspaceStudySettingState {
+                        identifier: input.identifier.clone(),
+                        value: Some(persisted_study_setting_value(&input.default)),
+                    })
+                    .collect();
                 let output_identifiers: Vec<String> = spec
                     .outputs
                     .iter()
@@ -6693,9 +6702,26 @@ impl WorkspaceSurface {
                     .active()
                     .iter()
                     .find(|active| active.persisted.identifier == identifier)
-                    .map(|active| (active.study_id, active.persisted.output_identifiers.clone()));
-                if let Some((study_id, ref existing_outputs)) = existing
+                    .map(|active| {
+                        (
+                            active.study_id,
+                            active.persisted.output_identifiers.clone(),
+                            active
+                                .persisted
+                                .settings
+                                .iter()
+                                .map(|s| s.identifier.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+                let new_setting_identifiers: Vec<String> = spec
+                    .inputs
+                    .iter()
+                    .map(|input| input.identifier.clone())
+                    .collect();
+                if let Some((study_id, ref existing_outputs, ref existing_settings)) = existing
                     && *existing_outputs == output_identifiers
+                    && *existing_settings == new_setting_identifiers
                 {
                     self.apply_study_style(study_id, spec.line_width, &output_colors, cx);
                     match self
@@ -6711,7 +6737,7 @@ impl WorkspaceSurface {
                         }
                     }
                 } else {
-                    if let Some((old_study_id, _)) = existing {
+                    if let Some((old_study_id, _, _)) = existing {
                         let _ = self.market_worker.try_remove_study(old_study_id);
                     }
                     match self.studies.allocate_local_id() {
@@ -6723,7 +6749,7 @@ impl WorkspaceSurface {
                                 local_id,
                                 identifier: identifier.clone(),
                                 implementation_revision: revision,
-                                settings: Vec::new(),
+                                settings: persisted_settings,
                                 dependencies: vec![WorkspaceStudyDependencyState {
                                     kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
                                     streams: vec![WorkspaceStudyMarketStream::Bars as i32],
