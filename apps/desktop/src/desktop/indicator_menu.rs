@@ -218,6 +218,11 @@ pub(super) fn indicator_dialog_content(
             theme,
         ));
     }
+    const STUDY_EDITOR_FOOTER_HEIGHT: f32 = 40.0;
+    let body_extent = ChromeMenuExtent {
+        width: state.extent.width,
+        list_height: (state.extent.list_height - STUDY_EDITOR_FOOTER_HEIGHT).max(0.0),
+    };
     let editor_app = app.clone();
     let editor_terminal = state.templates.terminal.clone();
     chrome_menu_surface(&colors, state.extent)
@@ -226,17 +231,20 @@ pub(super) fn indicator_dialog_content(
             list,
             state.scroll,
             colors.text_secondary,
-            state.extent,
+            body_extent,
         ))
         .child(
             div()
+                .flex_none()
+                .h(px(STUDY_EDITOR_FOOTER_HEIGHT))
+                .flex()
+                .items_center()
                 .px_2()
-                .py_1p5()
                 .border_t_1()
                 .border_color(gpui_color(colors.border_subtle))
                 .child(
                     Button::new("open_study_editor", theme)
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Secondary)
                         .button_size(ButtonSize::Sm)
                         .w_full()
                         .label(tr!(aeris_localization::panels::STUDY_EDITOR))
