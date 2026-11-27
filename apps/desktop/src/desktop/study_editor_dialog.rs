@@ -1,7 +1,11 @@
 use super::native_ui::input::{TextArea, TextareaState};
+use super::study_editor_highlight::{
+    STUDY_API_QUICK_REF, STUDY_SNIPPETS, line_column_to_byte_range, rust_syntax_highlighter,
+};
 use super::study_editor_store::{
     StudyProjectStore, compile_study_source_to_wasm, export_project_bundle_json,
-    import_project_bundle_json, probe_study_dev_pack, run_offline_preview_check,
+    import_project_bundle_json, install_wasm_sandbox_target, probe_study_dev_pack,
+    run_offline_preview_check,
 };
 use super::*;
 use aeris_localization::{common, panels, tr};
@@ -18,6 +22,7 @@ pub(super) struct StudyEditorDialogState {
     pub(super) library: StudyProjectLibrary,
     pub(super) selected_id: Option<String>,
     pub(super) new_id_input: Entity<InputState>,
+    pub(super) search_input: Entity<InputState>,
     pub(super) source_input: Entity<TextareaState>,
     pub(super) diagnostics: Vec<StudyDiagnostic>,
     pub(super) status_message: Option<String>,
@@ -51,6 +56,8 @@ impl StudyEditorDialogState {
             .unwrap_or_default();
         let new_id_input =
             cx.new(|input_cx| InputState::new(window, input_cx).placeholder("user.my_study"));
+        let search_input =
+            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Find in code..."));
         let source_input = cx.new(|input_cx| {
             TextareaState::new(window, input_cx).placeholder("// Rust study source")
         });
@@ -71,6 +78,7 @@ impl StudyEditorDialogState {
             library,
             selected_id,
             new_id_input,
+            search_input,
             source_input,
             diagnostics: Vec::new(),
             status_message,
@@ -374,6 +382,90 @@ impl StudyEditorDialogState {
         self.status_message = Some(summary);
     }
 
+    pub(super) fn insert_snippet(
+        &mut self,
+        snippet: &'static str,
+        doc: &'static str,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceSurface>,
+    ) {
+        if self.selected_id.is_none() {
+            return;
+        }
+        self.source_input.update(cx, |input, input_cx| {
+            input.insert(snippet, window, input_cx);
+        });
+        self.status_message = Some(format!("Inserted snippet: {doc}"));
+    }
+
+    pub(super) fn find_next_in_source(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceSurface>,
+    ) {
+        let query = self.search_input.read(cx).value().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let source = self.source_input.read(cx).value().to_string();
+        let cursor = self.source_input.read(cx).cursor().min(source.len());
+        let found = source[cursor..]
+            .find(&query)
+            .map(|rel| cursor + rel)
+            .or_else(|| source.find(&query));
+        if let Some(start) = found {
+            let end = start + query.len();
+            self.source_input.update(cx, |input, input_cx| {
+                input.select_byte_range(start, end, window, input_cx);
+            });
+            self.status_message = Some(format!("Found `{query}`"));
+        } else {
+            self.status_message = Some(format!("`{query}` not found"));
+        }
+    }
+
+    pub(super) fn jump_to_diagnostic(
+        &mut self,
+        line: u32,
+        column: u32,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceSurface>,
+    ) {
+        let source = self.source_input.read(cx).value().to_string();
+        let (start, end) = line_column_to_byte_range(&source, line, column);
+        self.source_input.update(cx, |input, input_cx| {
+            input.select_byte_range(start, end, window, input_cx);
+        });
+    }
+
+    pub(super) fn install_dev_pack_target(&mut self) {
+        match install_wasm_sandbox_target() {
+            Ok(status) => {
+                self.dev_pack_status = status;
+                self.status_message =
+                    Some("Installed `wasm32-unknown-unknown` sandbox target".to_string());
+            }
+            Err(error) => {
+                self.status_message = Some(error);
+            }
+        }
+    }
+
+    pub(super) fn clean_dev_pack_cache(&mut self) {
+        self.dev_pack_status = probe_study_dev_pack();
+        let host_id = match &self.dev_pack_status {
+            StudyDevPackStatus::Ready { rustc_version, .. }
+            | StudyDevPackStatus::MissingSandboxTarget { rustc_version, .. } => {
+                rustc_version.as_str()
+            }
+            StudyDevPackStatus::Unavailable => "",
+        };
+        let removed = self.store.prune_stale_artifact_cache(host_id);
+        self.status_message = Some(format!(
+            "Dev Pack re-checked; pruned {removed} stale cache receipt(s)"
+        ));
+    }
+
     pub(super) fn import_bundle_from_clipboard(
         &mut self,
         window: &mut Window,
@@ -472,7 +564,11 @@ fn project_sidebar(
     list.into_any_element()
 }
 
-fn diagnostics_panel(dialog: &StudyEditorDialogState, theme: &AerisTheme) -> AnyElement {
+fn diagnostics_panel(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &StudyEditorDialogState,
+    theme: &AerisTheme,
+) -> AnyElement {
     let colors = theme.colors;
     let mut panel = div().flex().flex_col().gap_1();
     let toolchain_line = match &dialog.dev_pack_status {
@@ -490,12 +586,40 @@ fn diagnostics_panel(dialog: &StudyEditorDialogState, theme: &AerisTheme) -> Any
             "Dev Pack: Static sandbox validation mode (no local rustc detected)".to_string()
         }
     };
-    panel = panel.child(
+    let mut toolchain_row = div().flex().items_center().justify_between().gap_2().child(
         div()
             .text_xs()
             .text_color(gpui_color(colors.text_secondary))
             .child(toolchain_line),
     );
+    let mut dev_pack_actions = div().flex().items_center().gap_1();
+    if matches!(
+        dialog.dev_pack_status,
+        StudyDevPackStatus::MissingSandboxTarget { .. }
+    ) {
+        let install_app = app.clone();
+        dev_pack_actions = dev_pack_actions.child(
+            Button::new("study_editor_install_target", theme)
+                .variant(ButtonVariant::Secondary)
+                .button_size(ButtonSize::Sm)
+                .label("Install WASM target")
+                .on_click(move |_, _, cx| {
+                    install_app.update(cx, WorkspaceSurface::install_study_editor_dev_pack_target);
+                }),
+        );
+    }
+    let clean_app = app.clone();
+    dev_pack_actions = dev_pack_actions.child(
+        Button::new("study_editor_recheck_pack", theme)
+            .variant(ButtonVariant::Ghost)
+            .button_size(ButtonSize::Sm)
+            .label("Re-check")
+            .on_click(move |_, _, cx| {
+                clean_app.update(cx, WorkspaceSurface::clean_study_editor_cache);
+            }),
+    );
+    toolchain_row = toolchain_row.child(dev_pack_actions);
+    panel = panel.child(toolchain_row);
     if let Some(status) = &dialog.status_message {
         panel = panel.child(
             div()
@@ -504,17 +628,95 @@ fn diagnostics_panel(dialog: &StudyEditorDialogState, theme: &AerisTheme) -> Any
                 .child(status.clone()),
         );
     }
-    for diag in dialog.diagnostics.iter().take(8) {
+    for (idx, diag) in dialog.diagnostics.iter().take(8).enumerate() {
         let code = diag.code.as_deref().unwrap_or("STUDY");
-        let line = format!("{}:{} [{code}] {}", diag.line, diag.column, diag.message);
+        let label = format!("{}:{} [{code}] {}", diag.line, diag.column, diag.message);
         let text_color = match diag.severity {
             StudyDiagnosticSeverity::Error => gpui_color(colors.text_danger),
             StudyDiagnosticSeverity::Warning => gpui_color(colors.text_warning),
             StudyDiagnosticSeverity::Note => gpui_color(colors.text_secondary),
         };
-        panel = panel.child(div().text_xs().text_color(text_color).child(line));
+        let jump_app = app.clone();
+        let line = diag.line;
+        let column = diag.column;
+        panel = panel.child(
+            div()
+                .id(("study_editor_diag", idx))
+                .text_xs()
+                .text_color(text_color)
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    jump_app.update(cx, |surface, surface_cx| {
+                        surface.jump_to_study_editor_diagnostic(line, column, window, surface_cx);
+                    });
+                })
+                .child(label),
+        );
     }
     panel.into_any_element()
+}
+
+fn editor_toolbar(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &StudyEditorDialogState,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let mut snippets = div().flex().flex_wrap().items_center().gap_1();
+    for (idx, snippet) in STUDY_SNIPPETS.iter().enumerate() {
+        let insert_app = app.clone();
+        let body = snippet.body;
+        let doc = snippet.doc;
+        snippets = snippets.child(
+            Button::new(("study_editor_snip", idx), theme)
+                .variant(ButtonVariant::Ghost)
+                .button_size(ButtonSize::Sm)
+                .label(snippet.label)
+                .on_click(move |_, window, cx| {
+                    insert_app.update(cx, |surface, surface_cx| {
+                        surface.insert_study_editor_snippet(body, doc, window, surface_cx);
+                    });
+                }),
+        );
+    }
+    let find_app = app.clone();
+    let find_row = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .w(px(210.0))
+        .child(Input::new(&dialog.search_input).platform(theme).flex_1())
+        .child(
+            Button::new("study_editor_find_next", theme)
+                .variant(ButtonVariant::Secondary)
+                .button_size(ButtonSize::Sm)
+                .label("Find")
+                .on_click(move |_, window, cx| {
+                    find_app.update(cx, |surface, surface_cx| {
+                        surface.find_in_study_editor(window, surface_cx);
+                    });
+                }),
+        );
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(snippets)
+                .child(find_row),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(STUDY_API_QUICK_REF),
+        )
+        .into_any_element()
 }
 
 pub(super) fn study_editor_dialog_layer(
@@ -542,8 +744,12 @@ pub(super) fn study_editor_dialog_layer(
             .flex()
             .flex_col()
             .gap_2()
-            .child(TextArea::new(&dialog.source_input, px(300.0), theme))
-            .child(diagnostics_panel(dialog, theme))
+            .child(editor_toolbar(app, dialog, theme))
+            .child(
+                TextArea::new(&dialog.source_input, px(290.0), theme)
+                    .syntax_highlighter(rust_syntax_highlighter(theme)),
+            )
+            .child(diagnostics_panel(app, dialog, theme))
             .into_any_element()
     } else {
         div()
@@ -653,7 +859,7 @@ pub(super) fn study_editor_dialog_layer(
     .action(
         Button::new("study_editor_add_chart", theme)
             .variant(ButtonVariant::Secondary)
-            .label("Add to chart")
+            .label("Add / Reload on chart")
             .disabled(!has_selection)
             .on_click(move |_, _, cx| {
                 add_to_chart.update(cx, WorkspaceSurface::add_study_editor_project_to_chart);

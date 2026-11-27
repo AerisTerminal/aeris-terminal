@@ -3138,8 +3138,21 @@ impl WorkspaceSurface {
         ) {
             Ok(registration) => registration,
             Err(error) => {
-                state.blocked = true;
-                return Err(Box::new((state, error)));
+                // Non-built-in user studies restore automatically from their persisted `last_good.wasm`.
+                let wasm_restored = (!state.persisted.identifier.starts_with("builtin."))
+                    .then(|| aeris_platform_runtime::active_data_root().ok())
+                    .flatten()
+                    .and_then(|root| {
+                        super::study_editor_store::StudyProjectStore::new(root.path())
+                            .restore_wasm_study_registration(&state.persisted, &current_series)
+                            .ok()
+                    });
+                if let Some(registration) = wasm_restored {
+                    registration
+                } else {
+                    state.blocked = true;
+                    return Err(Box::new((state, error)));
+                }
             }
         };
         state.resolved_chart_series =
@@ -6628,59 +6641,38 @@ impl WorkspaceSurface {
         };
         let status = match self.current_runtime_series() {
             Err(error) => format!("Chart not ready: {error}"),
-            Ok(series) => match self.studies.allocate_local_id() {
-                None => "Study identity limit reached".to_string(),
-                Some(local_id) => {
-                    let definition =
-                        aeris_study_sdk::builders::StudyDefinitionBuilder::new(&identifier)
-                            .market(series.clone(), aeris_study_sdk::StreamRequirements::BARS)
-                            .output(
-                                aeris_study_sdk::builders::StudyOutputBuilder::line(
-                                    "value",
-                                    &display_name,
-                                )
-                                .build(),
+            Ok(series) => {
+                let definition =
+                    aeris_study_sdk::builders::StudyDefinitionBuilder::new(&identifier)
+                        .market(series.clone(), aeris_study_sdk::StreamRequirements::BARS)
+                        .output(
+                            aeris_study_sdk::builders::StudyOutputBuilder::line(
+                                "value",
+                                &display_name,
                             )
-                            .invalidation(
-                                aeris_study_sdk::StudyInvalidationPolicy::FromFirstChanged,
-                            )
-                            .build();
-                    let registration = NativeStudyRegistration {
-                        settings: aeris_study_sdk::StudySettings::default(),
-                        definition,
-                        program: compiled.into_native_program(
-                            aeris_study_sdk::sandbox::StudySandboxLimits::default(),
-                        ),
-                    };
-                    let persisted = WorkspaceChartStudyState {
-                        line_width: 0,
-                        output_colors: Vec::new(),
-                        local_id,
-                        identifier: identifier.clone(),
-                        implementation_revision: revision,
-                        settings: Vec::new(),
-                        dependencies: vec![WorkspaceStudyDependencyState {
-                            kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
-                            streams: vec![WorkspaceStudyMarketStream::Bars as i32],
-                            ..WorkspaceStudyDependencyState::default()
-                        }],
-                        visible: true,
-                        output_identifiers: vec!["value".to_string()],
-                    };
-                    match self.market_worker.try_register_study(registration) {
-                        Ok(sequence) => {
-                            self.studies.insert_pending(
-                                sequence,
-                                PendingRuntimeStudyState {
-                                    persisted,
-                                    resolved_chart_series: Some(series),
-                                    remove_on_registration: false,
-                                    persist_on_registration: false,
-                                    blocked: false,
-                                },
-                            );
-                            format!("Added sandboxed WASM study `{identifier}` to chart")
-                        }
+                            .build(),
+                        )
+                        .invalidation(aeris_study_sdk::StudyInvalidationPolicy::FromFirstChanged)
+                        .build();
+                let registration = NativeStudyRegistration {
+                    settings: aeris_study_sdk::StudySettings::default(),
+                    definition,
+                    program: compiled.into_native_program(
+                        aeris_study_sdk::sandbox::StudySandboxLimits::default(),
+                    ),
+                };
+                let existing_id = self
+                    .studies
+                    .active()
+                    .iter()
+                    .find(|active| active.persisted.identifier == identifier)
+                    .map(|active| active.study_id);
+                if let Some(study_id) = existing_id {
+                    match self
+                        .market_worker
+                        .try_reinitialize_study(study_id, registration)
+                    {
+                        Ok(_) => format!("Reloaded sandboxed WASM study `{identifier}` on chart"),
                         Err(TrySendError::Full(_)) => {
                             "Study request queue is busy; try again".to_string()
                         }
@@ -6688,8 +6680,51 @@ impl WorkspaceSurface {
                             "Study runtime is unavailable".to_string()
                         }
                     }
+                } else {
+                    match self.studies.allocate_local_id() {
+                        None => "Study identity limit reached".to_string(),
+                        Some(local_id) => {
+                            let persisted = WorkspaceChartStudyState {
+                                line_width: 0,
+                                output_colors: Vec::new(),
+                                local_id,
+                                identifier: identifier.clone(),
+                                implementation_revision: revision,
+                                settings: Vec::new(),
+                                dependencies: vec![WorkspaceStudyDependencyState {
+                                    kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+                                    streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+                                    ..WorkspaceStudyDependencyState::default()
+                                }],
+                                visible: true,
+                                output_identifiers: vec!["value".to_string()],
+                            };
+                            match self.market_worker.try_register_study(registration) {
+                                Ok(sequence) => {
+                                    self.studies.insert_pending(
+                                        sequence,
+                                        PendingRuntimeStudyState {
+                                            persisted,
+                                            resolved_chart_series: Some(series),
+                                            remove_on_registration: false,
+                                            persist_on_registration: true,
+                                            blocked: false,
+                                        },
+                                    );
+                                    self.persistence.mark_dirty();
+                                    format!("Added sandboxed WASM study `{identifier}` to chart")
+                                }
+                                Err(TrySendError::Full(_)) => {
+                                    "Study request queue is busy; try again".to_string()
+                                }
+                                Err(TrySendError::Disconnected(_)) => {
+                                    "Study runtime is unavailable".to_string()
+                                }
+                            }
+                        }
+                    }
                 }
-            },
+            }
         };
         if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
             self.indicator_settings_dialog.as_mut()
@@ -6697,6 +6732,63 @@ impl WorkspaceSurface {
             dialog.status_message = Some(status);
         }
         cx.notify();
+    }
+
+    pub(super) fn insert_study_editor_snippet(
+        &mut self,
+        snippet: &'static str,
+        doc: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.insert_snippet(snippet, doc, window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn find_in_study_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.find_next_in_source(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn jump_to_study_editor_diagnostic(
+        &mut self,
+        line: u32,
+        column: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.jump_to_diagnostic(line, column, window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn install_study_editor_dev_pack_target(&mut self, cx: &mut Context<Self>) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.install_dev_pack_target();
+            cx.notify();
+        }
+    }
+
+    pub(super) fn clean_study_editor_cache(&mut self, cx: &mut Context<Self>) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.clean_dev_pack_cache();
+            cx.notify();
+        }
     }
 
     pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {

@@ -279,6 +279,10 @@ type ValidateFn = Box<dyn Fn(&str, &mut App) -> bool + 'static>;
 type ContextMenuHandler =
     Rc<dyn Fn(NativeMenu, InputContextMenuCapabilities, Point<Pixels>, &mut Window, &mut App)>;
 
+/// Optional callback producing styled [`gpui::TextRun`]s for syntax highlighting.
+pub type SyntaxHighlighter =
+    std::sync::Arc<dyn Fn(&str, &gpui::TextRun) -> Vec<gpui::TextRun> + Send + Sync>;
+
 pub struct InputBaseState<M: InputModeKind> {
     pub(super) focus_handle: FocusHandle,
     pub(super) mode: LayoutMode,
@@ -343,6 +347,7 @@ pub struct InputBaseState<M: InputModeKind> {
     /// colours once and then never see them as unset again, which is the same
     /// freeze in a different place.
     projected_editor_style: InputEditorStyle,
+    pub(super) syntax_highlighter: Option<SyntaxHighlighter>,
 
     /// The mask pattern for formatting the input text
     pub(crate) mask_pattern: MaskPattern,
@@ -603,6 +608,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             mask_pattern_set: false,
             editor_style: InputEditorStyle::default(),
             projected_editor_style: InputEditorStyle::default(),
+            syntax_highlighter: None,
             context_menu_handler: None,
             pending_context_menu: None,
             enable_context_menu: true,
@@ -637,6 +643,35 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub fn set_editor_style(&mut self, style: InputEditorStyle) {
         self.editor_style = style.clone();
         self.projected_editor_style = style;
+    }
+
+    /// Sets or clears an optional syntax highlighter callback for styled text runs.
+    pub fn set_syntax_highlighter(&mut self, highlighter: Option<SyntaxHighlighter>) {
+        self.syntax_highlighter = highlighter;
+    }
+
+    /// Selects a UTF-8 byte range (clamped to valid char boundaries) and focuses the editor.
+    pub fn select_byte_range(
+        &mut self,
+        start: usize,
+        end: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let full = self.text.to_string();
+        let mut s = start.min(full.len());
+        while s > 0 && !full.is_char_boundary(s) {
+            s -= 1;
+        }
+        let mut e = end.clamp(s, full.len());
+        while e < full.len() && !full.is_char_boundary(e) {
+            e += 1;
+        }
+        self.selected_range = (s..e).into();
+        self.selection_reversed = false;
+        self.focus_handle.focus(window, cx);
+        self.pause_blink_cursor(cx);
+        cx.notify();
     }
 
     /// Set presentation padding for multi-line text and its scrollbar layout.

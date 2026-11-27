@@ -95,6 +95,7 @@ mod session_profile_dialog;
 mod side_panel_dock;
 mod sign_in_gate;
 mod study_editor_dialog;
+mod study_editor_highlight;
 mod study_editor_store;
 mod study_packages;
 mod study_settings_dialog;

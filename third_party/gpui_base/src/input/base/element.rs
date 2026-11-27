@@ -1104,13 +1104,27 @@ impl<M: InputModeKind> Element for TextElement<M> {
             state.masked,
         );
 
-        let runs = split_run_for_ime_underline(
-            run,
-            0..display_text.len(),
-            ime_marked_range,
-            marked_run.underline,
-        )
-        .into_vec();
+        let runs = if ime_marked_range.is_none()
+            && !state.masked
+            && display_text.len() > 0
+            && let Some(highlighter) = state.syntax_highlighter.as_ref()
+        {
+            let text_str = display_text.to_string();
+            let highlighted = highlighter(&text_str, &run);
+            if highlighted.iter().map(|r| r.len).sum::<usize>() == display_text.len() {
+                highlighted
+            } else {
+                vec![run]
+            }
+        } else {
+            split_run_for_ime_underline(
+                run,
+                0..display_text.len(),
+                ime_marked_range,
+                marked_run.underline,
+            )
+            .into_vec()
+        };
 
         // Create shaped lines for whitespace indicators before layout
         let whitespace_indicators =

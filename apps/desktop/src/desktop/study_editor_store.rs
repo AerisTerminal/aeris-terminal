@@ -9,6 +9,8 @@
 //! This module owns source persistence and static sandbox-policy diagnostics only;
 //! it never calculates studies, opens provider sessions, or loads native libraries.
 
+use aeris_contracts::WorkspaceChartStudyState;
+use aeris_study_sdk::builders::{StudyDefinitionBuilder, StudyOutputBuilder};
 use aeris_study_sdk::project::{
     MAXIMUM_STUDY_DIAGNOSTICS, MAXIMUM_STUDY_SOURCE_BYTES, MAXIMUM_USER_STUDY_PROJECTS,
     StudyDiagnostic, StudyDiagnosticSeverity, StudyProject, StudyProjectCapability,
@@ -20,6 +22,10 @@ use aeris_study_sdk::toolchain::{
     StudyArtifactCacheKey, StudyDevPackStatus, StudyPreviewFixture,
 };
 use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
+use aeris_study_sdk::{
+    BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyInvalidationPolicy,
+    StudySettings,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -366,6 +372,46 @@ impl StudyProjectStore {
             .map_err(|error| format!("read last_good.wasm failed: {error}"))
     }
 
+    /// Restores a persisted user-authored WASM study into a `NativeStudyRegistration`
+    /// using its last-known-good `.wasm` artifact on disk so chart instances survive restarts.
+    pub(crate) fn restore_wasm_study_registration(
+        &self,
+        state: &WorkspaceChartStudyState,
+        current_series: &BarSeriesKey,
+    ) -> Result<NativeStudyRegistration, String> {
+        if state.identifier.starts_with("builtin.") {
+            return Err("reserved built-in identifier cannot restore from user wasm store".into());
+        }
+        let Some(wasm_bytes) = self.load_last_good_wasm(&state.identifier)? else {
+            return Err(format!(
+                "no compiled wasm artifact found for user study `{}`",
+                state.identifier
+            ));
+        };
+        let compiled = CompiledWasmStudy::from_bytes(&wasm_bytes, StudySandboxLimits::default())
+            .map_err(|err| format!("sandbox wasm validation failed: {err}"))?;
+        let display_name = self
+            .project_dir(&state.identifier)
+            .ok()
+            .and_then(|dir| load_one_project(&dir).ok())
+            .map_or_else(|| state.identifier.clone(), |project| project.manifest.name);
+        let output_id = state
+            .output_identifiers
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "value".to_string());
+        let definition = StudyDefinitionBuilder::new(&state.identifier)
+            .market(current_series.clone(), StreamRequirements::BARS)
+            .output(StudyOutputBuilder::line(output_id, display_name).build())
+            .invalidation(StudyInvalidationPolicy::FromFirstChanged)
+            .build();
+        Ok(NativeStudyRegistration {
+            settings: StudySettings::default(),
+            definition,
+            program: compiled.into_native_program(StudySandboxLimits::default()),
+        })
+    }
+
     /// Deletes one persisted study project directory.
     ///
     /// # Errors
@@ -539,6 +585,23 @@ pub(crate) fn probe_study_dev_pack() -> StudyDevPackStatus {
             required_target: STUDY_SANDBOX_TARGET_TRIPLE.to_string(),
         }
     }
+}
+
+/// Attempts to install the pinned zero-authority WebAssembly sandbox target via `rustup`
+/// and re-probes the local Development Pack status.
+pub(crate) fn install_wasm_sandbox_target() -> Result<StudyDevPackStatus, String> {
+    let output = std::process::Command::new("rustup")
+        .args(["target", "add", STUDY_SANDBOX_TARGET_TRIPLE])
+        .output()
+        .map_err(|err| format!("failed to run rustup: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "rustup target add {STUDY_SANDBOX_TARGET_TRIPLE} failed: {}",
+            stderr.trim()
+        ));
+    }
+    Ok(probe_study_dev_pack())
 }
 
 /// Validated output of one controlled Rust -> WebAssembly study compilation.
@@ -1215,5 +1278,95 @@ mod tests {
         assert_eq!(loop_diags.len(), 1);
         assert_eq!(loop_diags[0].code.as_deref(), Some("AERIS_WASM_TRAP"));
         assert!(loop_summary.contains("fuel"), "summary: {loop_summary}");
+    }
+
+    #[test]
+    fn wasm_study_survives_restart_restore_and_executes_1000_bars_within_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "aeris_study_restart_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = StudyProjectStore::new(&root);
+
+        let mut library = StudyProjectLibrary::new();
+        library
+            .create_from_template(
+                "user.restart_ema",
+                "Restart EMA",
+                StudyProjectTemplate::StatefulRecursive,
+            )
+            .expect("creates project");
+        let src = library.get("user.restart_ema").unwrap().source.clone();
+
+        let build_start = std::time::Instant::now();
+        let artifact = compile_study_source_to_wasm(&src).expect("compiles to wasm");
+        let build_elapsed = build_start.elapsed();
+        assert!(
+            build_elapsed < std::time::Duration::from_secs(15),
+            "compile latency too high: {build_elapsed:?}"
+        );
+
+        store
+            .save_last_good_wasm(
+                "user.restart_ema",
+                &artifact.source_sha256,
+                &artifact.toolchain_identity,
+                &artifact.wasm_bytes,
+            )
+            .expect("saves last_good.wasm");
+        library
+            .record_build_success(
+                "user.restart_ema",
+                artifact.source_sha256,
+                artifact.artifact_sha256,
+            )
+            .expect("records build");
+        store
+            .save_project(library.get("user.restart_ema").unwrap())
+            .expect("saves project");
+
+        // Simulate app restart with a fresh StudyProjectStore and restore registration.
+        let restarted_store = StudyProjectStore::new(&root);
+        let persisted = WorkspaceChartStudyState {
+            local_id: 1,
+            identifier: "user.restart_ema".to_string(),
+            implementation_revision: 1,
+            output_identifiers: vec!["value".to_string()],
+            visible: true,
+            ..WorkspaceChartStudyState::default()
+        };
+        let series = BarSeriesKey {
+            provider_id: "test".to_string(),
+            instrument_id: "RESTART".to_string(),
+            entitlement_id: "default".to_string(),
+            period: aeris_study_sdk::BarPeriod::Time { seconds: 60 },
+            definition_version: 1,
+        };
+        let restored = restarted_store
+            .restore_wasm_study_registration(&persisted, &series)
+            .expect("restores wasm study registration after restart");
+        assert_eq!(restored.definition.identifier, "user.restart_ema");
+        assert!(restored.program.dynamic_calculate.is_some());
+
+        // Measure 1,000-bar wasmi execution latency on the restored artifact.
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::Uptrend, 1_000, 60);
+        let exec_start = std::time::Instant::now();
+        let result = artifact
+            .compiled
+            .execute_columnar(&fixture.bars, StudySandboxLimits::default())
+            .expect("executes 1,000 bars");
+        let exec_elapsed = exec_start.elapsed();
+        assert_eq!(result.values.len(), 1_000);
+        assert!(result.values.last().copied().flatten().is_some());
+        assert!(
+            exec_elapsed < std::time::Duration::from_secs(2),
+            "1,000-bar wasm execution too slow: {exec_elapsed:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

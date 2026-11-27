@@ -5,7 +5,7 @@ use gpui::{
 };
 use gpui_base::input::{Input as BaseInput, InputEditorStyle, Textarea as BaseTextarea};
 
-pub(crate) use gpui_base::input::{InputEvent, InputState, TextareaState};
+pub(crate) use gpui_base::input::{InputEvent, InputState, SyntaxHighlighter, TextareaState};
 
 use super::{
     platform_font_weight,
@@ -178,6 +178,7 @@ pub(crate) struct TextArea {
     state: Entity<TextareaState>,
     theme: AerisTheme,
     height: Pixels,
+    syntax_highlighter: Option<SyntaxHighlighter>,
 }
 
 impl TextArea {
@@ -186,7 +187,13 @@ impl TextArea {
             state: state.clone(),
             theme: *theme,
             height,
+            syntax_highlighter: None,
         }
+    }
+
+    pub(crate) fn syntax_highlighter(mut self, highlighter: SyntaxHighlighter) -> Self {
+        self.syntax_highlighter = Some(highlighter);
+        self
     }
 }
 
@@ -208,6 +215,7 @@ impl RenderOnce for TextArea {
                 selection: color.opacity(0.22),
                 caret: color,
             });
+            state.set_syntax_highlighter(self.syntax_highlighter);
         });
         div()
             .w_full()
