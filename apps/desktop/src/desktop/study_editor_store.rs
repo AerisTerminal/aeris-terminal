@@ -51,7 +51,7 @@ static BUILD_DIR_NONCE: AtomicU64 = AtomicU64::new(1);
 static DEV_PACK_CACHE: Mutex<Option<StudyDevPackStatus>> = Mutex::new(None);
 
 /// Creates a `Command` that never flashes a console window on Windows GUI builds.
-fn hidden_command(program: &str) -> std::process::Command {
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     #[cfg(windows)]
     {
@@ -60,6 +60,38 @@ fn hidden_command(program: &str) -> std::process::Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// Resolves a Rust toolchain binary (`rustc` or `rustup`) from `$CARGO_HOME/bin` or
+/// `~/.cargo/bin` first so an in-app Dev Pack install works immediately without restarting Aeris,
+/// falling back to standard `PATH` resolution.
+fn resolve_toolchain_binary(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    let file_name = format!("{name}.exe");
+    #[cfg(not(windows))]
+    let file_name = name.to_string();
+
+    if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
+        let candidate = PathBuf::from(cargo_home).join("bin").join(&file_name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").ok();
+    #[cfg(not(windows))]
+    let home = std::env::var("HOME").ok();
+
+    if let Some(home_dir) = home {
+        let candidate = PathBuf::from(home_dir)
+            .join(".cargo")
+            .join("bin")
+            .join(&file_name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(name)
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -893,7 +925,8 @@ pub(crate) fn probe_study_dev_pack_fresh() -> StudyDevPackStatus {
 }
 
 fn probe_study_dev_pack_uncached() -> StudyDevPackStatus {
-    let Ok(output) = hidden_command("rustc").arg("--version").output() else {
+    let rustc = resolve_toolchain_binary("rustc");
+    let Ok(output) = hidden_command(&rustc).arg("--version").output() else {
         return StudyDevPackStatus::Unavailable;
     };
     if !output.status.success() {
@@ -903,7 +936,7 @@ fn probe_study_dev_pack_uncached() -> StudyDevPackStatus {
     if rustc_version.is_empty() {
         return StudyDevPackStatus::Unavailable;
     }
-    let target_ok = hidden_command("rustc")
+    let target_ok = hidden_command(&rustc)
         .args([
             "--print",
             "target-libdir",
@@ -934,7 +967,8 @@ fn probe_study_dev_pack_uncached() -> StudyDevPackStatus {
 /// Attempts to install the pinned zero-authority WebAssembly sandbox target via `rustup`
 /// and re-probes the local Development Pack status.
 pub(crate) fn install_wasm_sandbox_target() -> Result<StudyDevPackStatus, String> {
-    let output = hidden_command("rustup")
+    let rustup = resolve_toolchain_binary("rustup");
+    let output = hidden_command(&rustup)
         .args(["target", "add", STUDY_SANDBOX_TARGET_TRIPLE])
         .output()
         .map_err(|err| format!("failed to run rustup: {err}"))?;
@@ -946,6 +980,117 @@ pub(crate) fn install_wasm_sandbox_target() -> Result<StudyDevPackStatus, String
         ));
     }
     Ok(probe_study_dev_pack_fresh())
+}
+
+/// Installs the minimal local Rust + `wasm32-unknown-unknown` Development Pack via the official
+/// `rustup` bootstrapper (`--profile minimal`, skipping docs/clippy/rustfmt for fastest setup and
+/// requiring no Visual Studio C++ Build Tools on Windows because WASM links via bundled `rust-lld`).
+pub(crate) fn install_rust_dev_pack() -> Result<StudyDevPackStatus, String> {
+    let rustup = resolve_toolchain_binary("rustup");
+    if hidden_command(&rustup)
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        let out = hidden_command(&rustup)
+            .args([
+                "toolchain",
+                "install",
+                "stable",
+                "--profile",
+                "minimal",
+                "--target",
+                STUDY_SANDBOX_TARGET_TRIPLE,
+            ])
+            .output()
+            .map_err(|err| format!("failed to run rustup: {err}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "rustup toolchain install failed: {}",
+                stderr.trim()
+            ));
+        }
+        let _ = hidden_command(&rustup).args(["default", "stable"]).output();
+        let status = probe_study_dev_pack_fresh();
+        return match status {
+            StudyDevPackStatus::Ready { .. } => Ok(status),
+            _ => install_wasm_sandbox_target(),
+        };
+    }
+
+    #[cfg(windows)]
+    {
+        let nonce = BUILD_DIR_NONCE.fetch_add(1, Ordering::Relaxed);
+        let init_exe = std::env::temp_dir().join(format!(
+            "aeris_rustup_init_{}_{nonce}.exe",
+            std::process::id()
+        ));
+        let dl = hidden_command("curl.exe")
+            .args([
+                "-fsSL",
+                "--retry",
+                "2",
+                "-o",
+                &init_exe.to_string_lossy(),
+                "https://win.rustup.rs/x86_64",
+            ])
+            .output()
+            .map_err(|err| format!("failed to download rustup-init.exe: {err}"))?;
+        if !dl.status.success() || !init_exe.is_file() {
+            let _ = fs::remove_file(&init_exe);
+            let stderr = String::from_utf8_lossy(&dl.stderr);
+            return Err(format!(
+                "failed to download official rustup installer: {}",
+                stderr.trim()
+            ));
+        }
+        let install = hidden_command(&init_exe)
+            .args([
+                "-y",
+                "--profile",
+                "minimal",
+                "--default-toolchain",
+                "stable",
+                "--target",
+                STUDY_SANDBOX_TARGET_TRIPLE,
+            ])
+            .output();
+        let _ = fs::remove_file(&init_exe);
+        let install = install.map_err(|err| format!("failed to launch rustup-init.exe: {err}"))?;
+        if !install.status.success() {
+            let stderr = String::from_utf8_lossy(&install.stderr);
+            return Err(format!(
+                "rustup minimal installation failed: {}",
+                stderr.trim()
+            ));
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let script = format!(
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --target {STUDY_SANDBOX_TARGET_TRIPLE}"
+        );
+        let install = hidden_command("sh")
+            .args(["-c", &script])
+            .output()
+            .map_err(|err| format!("failed to launch rustup bootstrapper: {err}"))?;
+        if !install.status.success() {
+            let stderr = String::from_utf8_lossy(&install.stderr);
+            return Err(format!(
+                "rustup minimal installation failed: {}",
+                stderr.trim()
+            ));
+        }
+    }
+
+    let status = probe_study_dev_pack_fresh();
+    if matches!(status, StudyDevPackStatus::Ready { .. }) {
+        Ok(status)
+    } else {
+        Err("Rust installer completed, but `rustc` with `wasm32-unknown-unknown` was not detected yet. Try Re-check Rust toolchain.".to_string())
+    }
 }
 
 /// Validated output of one controlled Rust -> WebAssembly study compilation.
@@ -1423,7 +1568,8 @@ pub(crate) fn compile_study_source_to_wasm(
         }]);
     }
 
-    let output = hidden_command("rustc")
+    let rustc = resolve_toolchain_binary("rustc");
+    let output = hidden_command(&rustc)
         .args([
             "--edition",
             "2024",

@@ -4,9 +4,9 @@ use super::study_editor_highlight::{
 };
 use super::study_editor_store::{
     CompiledStudyArtifact, StudyProjectStore, compile_study_source_to_wasm,
-    export_project_bundle_json, import_project_bundle_json, install_wasm_sandbox_target,
-    parse_study_source_spec, probe_study_dev_pack, probe_study_dev_pack_fresh,
-    run_offline_preview_check,
+    export_project_bundle_json, import_project_bundle_json, install_rust_dev_pack,
+    install_wasm_sandbox_target, parse_study_source_spec, probe_study_dev_pack,
+    probe_study_dev_pack_fresh, run_offline_preview_check,
 };
 use super::*;
 use aeris_localization::{panels, tr};
@@ -643,6 +643,38 @@ impl StudyEditorDialogState {
         self.source_input.update(cx, |input, input_cx| {
             input.select_byte_range(start, end, window, input_cx);
         });
+    }
+
+    pub(super) fn start_install_rust_dev_pack(&mut self, cx: &mut Context<WorkspaceSurface>) {
+        self.busy_label =
+            Some("Installing minimal Rust + WASM Dev Pack (~20s, runs locally)...".to_string());
+        self.status_message = None;
+        self.probe_task = Some(cx.spawn(async move |surface, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { install_rust_dev_pack() })
+                .await;
+            let _ = surface.update(cx, |surface, surface_cx| {
+                if let Some(dialog) = surface.study_editor.as_mut() {
+                    dialog.busy_label = None;
+                    dialog.probe_task = None;
+                    match result {
+                        Ok(status) => {
+                            dialog.dev_pack_status = Some(status);
+                            dialog.status_message = Some(
+                                "Rust + WASM Dev Pack installed and ready — no restart needed"
+                                    .to_string(),
+                            );
+                        }
+                        Err(error) => {
+                            dialog.status_message = Some(error);
+                            dialog.console_open = true;
+                        }
+                    }
+                    surface_cx.notify();
+                }
+            });
+        }));
     }
 
     pub(super) fn start_install_dev_pack_target(&mut self, cx: &mut Context<WorkspaceSurface>) {
@@ -1410,6 +1442,22 @@ fn more_popover(
 
     if matches!(
         editor.dev_pack_status,
+        Some(StudyDevPackStatus::Unavailable)
+    ) {
+        let install_app = app.clone();
+        menu = menu.child(popover_menu_row(
+            "se_more_install_rust",
+            "Install Rust Dev Pack (~20s)",
+            Some(HugeIcon::Download),
+            false,
+            is_busy,
+            theme,
+            move |_, cx| {
+                install_app.update(cx, WorkspaceSurface::install_study_editor_rust_dev_pack);
+            },
+        ));
+    } else if matches!(
+        editor.dev_pack_status,
         Some(StudyDevPackStatus::MissingSandboxTarget { .. })
     ) {
         let install_app = app.clone();
@@ -1438,6 +1486,68 @@ fn more_popover(
         },
     ))
     .into_any_element()
+}
+
+fn dev_pack_setup_banner(
+    app: &Entity<WorkspaceSurface>,
+    editor: &StudyEditorDialogState,
+    theme: &AerisTheme,
+) -> Option<AnyElement> {
+    let colors = theme.colors;
+    let is_busy = editor.busy_label.is_some();
+    let (message, action_label, is_full_install) = match &editor.dev_pack_status {
+        Some(StudyDevPackStatus::Unavailable) => (
+            "Install the minimal Rust + WASM Dev Pack (~20s, runs locally, no restart needed) to compile custom indicators.",
+            "Install Rust Dev Pack",
+            true,
+        ),
+        Some(StudyDevPackStatus::MissingSandboxTarget { .. }) => (
+            "Rust is installed. Add the `wasm32-unknown-unknown` sandbox target to compile indicators locally.",
+            "Install WASM target",
+            false,
+        ),
+        _ => return None,
+    };
+    let install_app = app.clone();
+    Some(
+        div()
+            .px_3()
+            .py_2()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .bg(gpui_color(colors.warning).opacity(0.12))
+            .border_b_1()
+            .border_color(gpui_color(colors.warning).opacity(0.32))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(gpui_color(colors.text_default))
+                    .child(message),
+            )
+            .child(
+                Button::new("study_editor_setup_dev_pack_btn", theme)
+                    .variant(ButtonVariant::Primary)
+                    .button_size(ButtonSize::Sm)
+                    .icon(header_icon(HugeIcon::Download))
+                    .label(action_label)
+                    .disabled(is_busy)
+                    .on_click(move |_, _, cx| {
+                        if is_full_install {
+                            install_app
+                                .update(cx, WorkspaceSurface::install_study_editor_rust_dev_pack);
+                        } else {
+                            install_app
+                                .update(cx, WorkspaceSurface::install_study_editor_dev_pack_target);
+                        }
+                    }),
+            )
+            .into_any_element(),
+    )
 }
 
 fn find_strip(
@@ -1799,9 +1909,11 @@ pub(super) fn study_editor_docked_panel(
         }
     };
 
+    let setup_banner = dev_pack_setup_banner(app, editor, theme);
     panel
         .child(editor_top_bar(app, editor, theme))
         .child(editor_action_bar(app, editor, theme))
+        .children(setup_banner)
         .when(editor.find_open, |el| {
             el.child(find_strip(app, editor, theme))
         })

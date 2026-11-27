@@ -6935,6 +6935,14 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn install_study_editor_rust_dev_pack(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
+            dialog.start_install_rust_dev_pack(cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn install_study_editor_dev_pack_target(&mut self, cx: &mut Context<Self>) {
         if let Some(dialog) = self.study_editor.as_mut() {
             dialog.popover = StudyEditorPopover::None;
