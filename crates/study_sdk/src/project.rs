@@ -490,6 +490,81 @@ impl StudyProjectLibrary {
     pub fn delete(&mut self, identifier: &str) -> bool {
         self.projects.remove(identifier).is_some()
     }
+
+    /// Duplicates an existing project under a new validated identifier and display name.
+    ///
+    /// # Errors
+    /// Returns [`StudyProjectLibraryError`] if the source project is missing, the target
+    /// identifier is invalid or already exists, or the library is at capacity.
+    pub fn duplicate(
+        &mut self,
+        source_id: &str,
+        new_id: &str,
+        new_name: &str,
+    ) -> Result<&StudyProject, StudyProjectLibraryError> {
+        if self.projects.contains_key(new_id) {
+            return Err(StudyProjectLibraryError::DuplicateIdentifier(
+                new_id.to_string(),
+            ));
+        }
+        if self.projects.len() >= MAXIMUM_USER_STUDY_PROJECTS {
+            return Err(StudyProjectLibraryError::LibraryFull {
+                maximum: MAXIMUM_USER_STUDY_PROJECTS,
+            });
+        }
+        let source_project = self
+            .projects
+            .get(source_id)
+            .ok_or_else(|| StudyProjectLibraryError::UnknownProject(source_id.to_string()))?
+            .clone();
+        let mut manifest = source_project.manifest;
+        manifest.identifier = new_id.to_string();
+        manifest.name = new_name.to_string();
+        manifest.implementation_revision = 1;
+        manifest.last_good_source_sha256 = None;
+        manifest.last_good_artifact_sha256 = None;
+        manifest.validate()?;
+        let project = StudyProject {
+            manifest,
+            source: source_project.source,
+            last_good_source: None,
+            diagnostics: Vec::new(),
+        };
+        Ok(self.projects.entry(new_id.to_string()).or_insert(project))
+    }
+
+    /// Atomically renames an existing project to a new validated identifier and display name,
+    /// preserving source, last-good snapshot, and diagnostics.
+    ///
+    /// # Errors
+    /// Returns [`StudyProjectLibraryError`] if the project is missing, the new identifier is
+    /// invalid, or another project already uses `new_id`.
+    pub fn rename(
+        &mut self,
+        old_id: &str,
+        new_id: &str,
+        new_name: &str,
+    ) -> Result<&StudyProject, StudyProjectLibraryError> {
+        if old_id != new_id && self.projects.contains_key(new_id) {
+            return Err(StudyProjectLibraryError::DuplicateIdentifier(
+                new_id.to_string(),
+            ));
+        }
+        let existing = self
+            .projects
+            .get(old_id)
+            .ok_or_else(|| StudyProjectLibraryError::UnknownProject(old_id.to_string()))?;
+        let mut candidate = existing.manifest.clone();
+        candidate.identifier = new_id.to_string();
+        candidate.name = new_name.to_string();
+        candidate.validate()?;
+        let mut project = self
+            .projects
+            .remove(old_id)
+            .ok_or_else(|| StudyProjectLibraryError::UnknownProject(old_id.to_string()))?;
+        project.manifest = candidate;
+        Ok(self.projects.entry(new_id.to_string()).or_insert(project))
+    }
 }
 
 #[cfg(test)]
@@ -566,5 +641,18 @@ mod tests {
             library.get("user.alpha").unwrap().diagnostics,
             Vec::<StudyDiagnostic>::new()
         );
+
+        library
+            .duplicate("user.alpha", "user.beta", "Beta")
+            .expect("duplicates cleanly");
+        assert_eq!(library.len(), 2);
+        assert_eq!(library.get("user.beta").unwrap().source, original_source);
+        assert!(library.get("user.beta").unwrap().last_good_source.is_none());
+
+        library
+            .rename("user.beta", "user.gamma", "Gamma")
+            .expect("renames cleanly");
+        assert!(library.get("user.beta").is_none());
+        assert_eq!(library.get("user.gamma").unwrap().manifest.name, "Gamma");
     }
 }

@@ -369,6 +369,144 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|error| format!("commit {} failed: {error}", path.display()))
 }
 
+const STUDY_PROJECT_BUNDLE_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct StudyProjectBundle {
+    bundle_version: u32,
+    manifest: StoredManifest,
+    source: String,
+    source_sha256: String,
+}
+
+/// Serializes one user-authored study project into a portable, integrity-checked JSON bundle.
+pub(crate) fn export_project_bundle_json(project: &StudyProject) -> Result<String, String> {
+    project
+        .manifest
+        .validate()
+        .map_err(|error| format!("invalid manifest: {error:?}"))?;
+    validate_study_source(&project.source).map_err(|error| format!("invalid source: {error:?}"))?;
+    let bundle = StudyProjectBundle {
+        bundle_version: STUDY_PROJECT_BUNDLE_VERSION,
+        manifest: StoredManifest::from(&project.manifest),
+        source_sha256: source_sha256_hex(&project.source),
+        source: project.source.clone(),
+    };
+    serde_json::to_string_pretty(&bundle)
+        .map_err(|error| format!("serialize study bundle failed: {error}"))
+}
+
+/// Validates and parses a portable JSON study bundle, rejecting tampered SHA-256 digests,
+/// unsupported bundle versions, invalid manifests, or oversized sources.
+pub(crate) fn import_project_bundle_json(
+    raw: &str,
+) -> Result<(StudyProjectManifest, String), String> {
+    if raw.len() > MAXIMUM_STUDY_SOURCE_BYTES.saturating_add(16 * 1024) {
+        return Err("study bundle exceeds maximum allowed size".to_string());
+    }
+    let bundle: StudyProjectBundle =
+        serde_json::from_str(raw).map_err(|error| format!("invalid study bundle JSON: {error}"))?;
+    if bundle.bundle_version != STUDY_PROJECT_BUNDLE_VERSION {
+        return Err(format!(
+            "unsupported study bundle version {}",
+            bundle.bundle_version
+        ));
+    }
+    let manifest = StudyProjectManifest::try_from(bundle.manifest)?;
+    validate_study_source(&bundle.source)
+        .map_err(|error| format!("invalid study source in bundle: {error:?}"))?;
+    let actual_sha = source_sha256_hex(&bundle.source);
+    if !bundle.source_sha256.eq_ignore_ascii_case(&actual_sha) {
+        return Err("study bundle SHA-256 integrity check failed".to_string());
+    }
+    Ok((manifest, bundle.source))
+}
+
+/// Result of one background study validation/build job.
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StudyBuildOutcome {
+    pub(crate) job_id: u64,
+    pub(crate) identifier: String,
+    pub(crate) source_sha256: String,
+    pub(crate) diagnostics: Vec<StudyDiagnostic>,
+    pub(crate) cancelled: bool,
+}
+
+/// Bounded, cancellable background validation/build coordinator for Phase L user studies.
+///
+/// Runs off the GPUI thread with at most one active job at a time; submitting a newer job
+/// cooperatively cancels any superseded in-flight job without spawning unbounded threads.
+#[cfg(test)]
+pub(crate) struct StudyBuildCoordinator {
+    next_job_id: u64,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    latest_outcome: std::sync::Arc<std::sync::Mutex<Option<StudyBuildOutcome>>>,
+}
+
+#[cfg(test)]
+impl StudyBuildCoordinator {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            next_job_id: 1,
+            cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            latest_outcome: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Cancels any active build job and starts one bounded background validation job.
+    pub(crate) fn submit(&mut self, identifier: String, source: String) -> u64 {
+        self.cancel_flag
+            .store(true, std::sync::atomic::Ordering::Release);
+        let job_id = self.next_job_id;
+        self.next_job_id = self.next_job_id.saturating_add(1);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.cancel_flag = std::sync::Arc::clone(&cancel);
+        let slot = std::sync::Arc::clone(&self.latest_outcome);
+        let _ = std::thread::Builder::new()
+            .name(format!("aeris-study-build-{job_id}"))
+            .spawn(move || {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                let diagnostics = validate_study_source_static(&source);
+                let source_sha256 = source_sha256_hex(&source);
+                let cancelled = cancel.load(std::sync::atomic::Ordering::Acquire);
+                let outcome = StudyBuildOutcome {
+                    job_id,
+                    identifier,
+                    source_sha256,
+                    diagnostics,
+                    cancelled,
+                };
+                if let Ok(mut guard) = slot.lock() {
+                    let should_replace = guard
+                        .as_ref()
+                        .is_none_or(|existing| outcome.job_id >= existing.job_id);
+                    if should_replace {
+                        *guard = Some(outcome);
+                    }
+                }
+            });
+        job_id
+    }
+
+    /// Cooperatively cancels the currently active job.
+    pub(crate) fn cancel_active(&self) {
+        self.cancel_flag
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Takes the newest completed build outcome, if any.
+    pub(crate) fn take_outcome(&self) -> Option<StudyBuildOutcome> {
+        self.latest_outcome
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +585,48 @@ mod tests {
 
         let (_, clean_src) = StudyProjectTemplate::StatelessOverlay.scaffold("user.clean", "Clean");
         assert!(validate_study_source_static(&clean_src).is_empty());
+    }
+
+    #[test]
+    fn study_project_bundle_round_trips_and_rejects_tampered_digest() {
+        let mut library = StudyProjectLibrary::new();
+        library
+            .create_from_template(
+                "user.portable",
+                "Portable",
+                StudyProjectTemplate::AlertStudy,
+            )
+            .expect("creates project");
+        let project = library.get("user.portable").unwrap();
+        let exported = export_project_bundle_json(project).expect("exports bundle");
+        let (manifest, source) = import_project_bundle_json(&exported).expect("imports bundle");
+        assert_eq!(manifest.identifier, "user.portable");
+        assert_eq!(source, project.source);
+
+        let tampered = exported
+            .replace("Portable", "Tampered")
+            .replace(&source_sha256_hex(&project.source), &"0".repeat(64));
+        assert!(import_project_bundle_json(&tampered).is_err());
+    }
+
+    #[test]
+    fn study_build_coordinator_runs_off_thread_and_produces_latest_outcome() {
+        let mut coordinator = StudyBuildCoordinator::new();
+        let (_, clean_src) = StudyProjectTemplate::StatelessOverlay.scaffold("user.bg", "BG");
+        let job_id = coordinator.submit("user.bg".to_string(), clean_src);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let outcome = loop {
+            if let Some(outcome) = coordinator.take_outcome() {
+                break outcome;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background build job timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(outcome.job_id, job_id);
+        assert!(outcome.diagnostics.is_empty());
+        assert!(!outcome.cancelled);
     }
 }

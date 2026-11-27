@@ -6570,6 +6570,41 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn duplicate_study_editor_project(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.duplicate_selected(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn export_study_editor_bundle(&mut self, cx: &mut Context<Self>) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.export_selected_bundle(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn import_study_editor_bundle(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+        {
+            dialog.import_bundle_from_clipboard(window, cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
         let Some((study_id, original)) = self
             .study_settings_dialog()

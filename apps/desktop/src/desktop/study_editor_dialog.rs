@@ -1,6 +1,7 @@
 use super::native_ui::input::{TextArea, TextareaState};
 use super::study_editor_store::{
-    StudyProjectStore, source_sha256_hex, validate_study_source_static,
+    StudyProjectStore, export_project_bundle_json, import_project_bundle_json, source_sha256_hex,
+    validate_study_source_static,
 };
 use super::*;
 use aeris_localization::{common, panels, tr};
@@ -224,6 +225,99 @@ impl StudyEditorDialogState {
             input.set_value(next_source, window, input_cx);
         });
     }
+
+    pub(super) fn duplicate_selected(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceSurface>,
+    ) {
+        let Some(source_id) = self.selected_id.clone() else {
+            return;
+        };
+        let new_id = format!("{source_id}_copy_{}", self.library.len() + 1);
+        let new_name = new_id
+            .rsplit('.')
+            .next()
+            .unwrap_or(&new_id)
+            .replace('_', " ");
+        match self.library.duplicate(&source_id, &new_id, &new_name) {
+            Ok(project) => {
+                let save_result = self.store.save_project(project);
+                let source = project.source.clone();
+                self.selected_id = Some(new_id.clone());
+                self.diagnostics.clear();
+                self.status_message = match save_result {
+                    Ok(()) => Some(format!("Duplicated to `{new_id}`")),
+                    Err(error) => Some(error),
+                };
+                self.source_input.update(cx, |input, input_cx| {
+                    input.set_value(source, window, input_cx);
+                });
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Duplicate failed: {error:?}"));
+            }
+        }
+    }
+
+    pub(super) fn export_selected_bundle(&mut self, cx: &mut Context<WorkspaceSurface>) {
+        let Some(identifier) = self.selected_id.as_deref() else {
+            return;
+        };
+        let Some(project) = self.library.get(identifier) else {
+            return;
+        };
+        match export_project_bundle_json(project) {
+            Ok(json) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(json));
+                self.status_message = Some(format!("Copied `{identifier}` bundle to clipboard"));
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Export failed: {error}"));
+            }
+        }
+    }
+
+    pub(super) fn import_bundle_from_clipboard(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<WorkspaceSurface>,
+    ) {
+        let Some(raw) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            self.status_message = Some("Clipboard does not contain a study bundle".to_string());
+            return;
+        };
+        match import_project_bundle_json(&raw) {
+            Ok((manifest, source)) => {
+                let id = manifest.identifier.clone();
+                let name = manifest.name.clone();
+                match self.library.create_from_template(
+                    &id,
+                    &name,
+                    StudyProjectTemplate::StatelessOverlay,
+                ) {
+                    Ok(_) => {
+                        let _ = self.library.update_source(&id, source.clone());
+                        if let Some(project) = self.library.get(&id) {
+                            let _ = self.store.save_project(project);
+                        }
+                        self.selected_id = Some(id.clone());
+                        self.diagnostics.clear();
+                        self.status_message = Some(format!("Imported `{id}` from clipboard"));
+                        self.source_input.update(cx, |input, input_cx| {
+                            input.set_value(source, window, input_cx);
+                        });
+                    }
+                    Err(error) => {
+                        self.status_message = Some(format!("Import failed: {error:?}"));
+                    }
+                }
+            }
+            Err(error) => {
+                self.status_message = Some(error);
+            }
+        }
+    }
 }
 
 fn project_sidebar(
@@ -314,6 +408,9 @@ pub(super) fn study_editor_dialog_layer(
     let colors = theme.colors;
     let dismiss = app.clone();
     let revert = app.clone();
+    let duplicate = app.clone();
+    let export_bundle = app.clone();
+    let import_bundle = app.clone();
     let delete = app.clone();
     let cancel = app.clone();
     let save = app.clone();
@@ -372,6 +469,36 @@ pub(super) fn study_editor_dialog_layer(
                     .on_click(move |_, window, cx| {
                         revert.update(cx, |surface, surface_cx| {
                             surface.revert_study_editor_project(window, surface_cx);
+                        });
+                    }),
+            )
+            .child(
+                Button::new("study_editor_duplicate", theme)
+                    .variant(ButtonVariant::Secondary)
+                    .label("Duplicate")
+                    .disabled(!has_selection)
+                    .on_click(move |_, window, cx| {
+                        duplicate.update(cx, |surface, surface_cx| {
+                            surface.duplicate_study_editor_project(window, surface_cx);
+                        });
+                    }),
+            )
+            .child(
+                Button::new("study_editor_export", theme)
+                    .variant(ButtonVariant::Secondary)
+                    .label("Copy bundle")
+                    .disabled(!has_selection)
+                    .on_click(move |_, _, cx| {
+                        export_bundle.update(cx, WorkspaceSurface::export_study_editor_bundle);
+                    }),
+            )
+            .child(
+                Button::new("study_editor_import", theme)
+                    .variant(ButtonVariant::Secondary)
+                    .label("Import bundle")
+                    .on_click(move |_, window, cx| {
+                        import_bundle.update(cx, |surface, surface_cx| {
+                            surface.import_study_editor_bundle(window, surface_cx);
                         });
                     }),
             )
