@@ -177,8 +177,11 @@ impl RenderOnce for Input {
 pub(crate) struct TextArea {
     state: Entity<TextareaState>,
     theme: AerisTheme,
-    height: Pixels,
+    height: Option<Pixels>,
     syntax_highlighter: Option<SyntaxHighlighter>,
+    code_editor: bool,
+    line_numbers: bool,
+    font_size: Option<Pixels>,
 }
 
 impl TextArea {
@@ -186,13 +189,40 @@ impl TextArea {
         Self {
             state: state.clone(),
             theme: *theme,
-            height,
+            height: Some(height),
             syntax_highlighter: None,
+            code_editor: false,
+            line_numbers: false,
+            font_size: None,
+        }
+    }
+
+    /// Full-bleed IDE code canvas filling its parent flex container with monospace font,
+    /// soft accent selection highlight, and optional synchronized line numbers.
+    pub(crate) fn code_editor(state: &Entity<TextareaState>, theme: &AerisTheme) -> Self {
+        Self {
+            state: state.clone(),
+            theme: *theme,
+            height: None,
+            syntax_highlighter: None,
+            code_editor: true,
+            line_numbers: true,
+            font_size: Some(px(13.0)),
         }
     }
 
     pub(crate) fn syntax_highlighter(mut self, highlighter: SyntaxHighlighter) -> Self {
         self.syntax_highlighter = Some(highlighter);
+        self
+    }
+
+    pub(crate) fn line_numbers(mut self, enabled: bool) -> Self {
+        self.line_numbers = enabled;
+        self
+    }
+
+    pub(crate) fn font_size(mut self, size: Pixels) -> Self {
+        self.font_size = Some(size);
         self
     }
 }
@@ -201,25 +231,53 @@ impl RenderOnce for TextArea {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let appearance = input_appearance(&self.theme);
         let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
-        let color = window.text_style().color;
+        let color = gpui_color(self.theme.colors.text_default);
+        let selection = if self.code_editor {
+            gpui_color(self.theme.colors.ring_primary).opacity(0.24)
+        } else {
+            color.opacity(0.22)
+        };
+        self.state.update(cx, |state, _| {
+            state.set_editor_style(InputEditorStyle {
+                foreground: color,
+                muted_foreground: gpui_color(self.theme.colors.text_secondary),
+                selection,
+                caret: color,
+            });
+            state.set_syntax_highlighter(self.syntax_highlighter);
+            state.set_line_numbers(self.line_numbers);
+        });
+
+        if self.code_editor {
+            let font_size = self.font_size.unwrap_or(px(13.0));
+            #[cfg(target_os = "macos")]
+            let mono_font = "Menlo";
+            #[cfg(not(target_os = "macos"))]
+            let mono_font = "Consolas";
+            return div()
+                .flex_1()
+                .w_full()
+                .min_h_0()
+                .h_full()
+                .flex()
+                .px_1()
+                .py_1p5()
+                .font_family(mono_font)
+                .text_size(font_size)
+                .line_height(px(f32::from(font_size) * 1.55))
+                .text_color(color)
+                .bg(gpui_color(self.theme.colors.surface))
+                .child(BaseTextarea::new(&self.state));
+        }
+
         let border = gpui_color(if focused {
             appearance.focus_ring
         } else {
             appearance.border
         });
         let hover_fill = gpui_color(appearance.hover_fill);
-        self.state.update(cx, |state, _| {
-            state.set_editor_style(InputEditorStyle {
-                foreground: color,
-                muted_foreground: gpui_color(self.theme.colors.text_secondary),
-                selection: color.opacity(0.22),
-                caret: color,
-            });
-            state.set_syntax_highlighter(self.syntax_highlighter);
-        });
-        div()
+        let mut root = div()
             .w_full()
-            .h(self.height)
             .flex()
             .px_2()
             .py_1p5()
@@ -229,8 +287,13 @@ impl RenderOnce for TextArea {
             .hover(move |style| style.bg(hover_fill))
             .border(platform_border_width(&self.theme))
             .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-            .border_color(border)
-            .child(BaseTextarea::new(&self.state))
+            .border_color(border);
+        if let Some(h) = self.height {
+            root = root.h(h);
+        } else {
+            root = root.flex_1().h_full().min_h_0();
+        }
+        root.child(BaseTextarea::new(&self.state))
     }
 }
 

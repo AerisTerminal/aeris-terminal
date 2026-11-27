@@ -199,6 +199,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         time_zone_input: init.time_zone_input,
         studies: init.studies,
         study_retry: StudyRetryTimer::default(),
+        study_editor: None,
         indicator_settings_dialog: None,
         chrome_focus: init.chrome_focus,
         provider: init.startup.provider,
@@ -3349,8 +3350,7 @@ impl WorkspaceSurface {
         if state.persist_on_registration {
             self.persistence.mark_dirty();
         }
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
+        if let Some(dialog) = self.study_editor.as_mut()
             && dialog.selected_id.as_deref() == Some(state.persisted.identifier.as_str())
         {
             dialog.status_message =
@@ -3381,11 +3381,11 @@ impl WorkspaceSurface {
             "Aeris study registration failed for {}: {message}",
             state.persisted.identifier
         );
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
+        if let Some(dialog) = self.study_editor.as_mut()
             && dialog.selected_id.as_deref() == Some(state.persisted.identifier.as_str())
         {
             dialog.status_message = Some(format!("Chart rejected study: {message}"));
+            dialog.console_open = true;
         }
         if state.persist_on_registration {
             self.persistence.mark_dirty();
@@ -6261,7 +6261,6 @@ impl WorkspaceSurface {
     pub(super) fn cancel_indicator_settings_dialog(&mut self, cx: &mut Context<Self>) {
         match &self.indicator_settings_dialog {
             Some(IndicatorSettingsDialog::Study(_)) => self.close_study_settings_dialog(cx),
-            Some(IndicatorSettingsDialog::StudyEditor(_)) => self.close_study_editor_dialog(cx),
             Some(IndicatorSettingsDialog::BigTrades(_)) => self.close_big_trades_dialog(cx),
             Some(IndicatorSettingsDialog::Volume(_)) => self.close_volume_dialog(cx),
             Some(IndicatorSettingsDialog::OrderFlow(_)) => self.close_order_flow_dialog(cx),
@@ -6283,7 +6282,7 @@ impl WorkspaceSurface {
     ) {
         self.close_drawing_settings_dialog(false, cx);
         let kind = match &dialog {
-            IndicatorSettingsDialog::Study(_) | IndicatorSettingsDialog::StudyEditor(_) => "study",
+            IndicatorSettingsDialog::Study(_) => "study",
             IndicatorSettingsDialog::Volume(_) => "volume_settings",
             IndicatorSettingsDialog::BigTrades(_) => "big_trades_settings",
             IndicatorSettingsDialog::OrderFlow(_) => "order_flow_settings",
@@ -6347,8 +6346,7 @@ impl WorkspaceSurface {
             Some(IndicatorSettingsDialog::Volume(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::OrderFlow(dialog)) => Some(&mut dialog.menu),
             Some(IndicatorSettingsDialog::SessionProfile(dialog)) => Some(&mut dialog.menu),
-            Some(IndicatorSettingsDialog::Drawing(_) | IndicatorSettingsDialog::StudyEditor(_))
-            | None => None,
+            Some(IndicatorSettingsDialog::Drawing(_)) | None => None,
         }
     }
 
@@ -6518,26 +6516,149 @@ impl WorkspaceSurface {
         }
     }
 
-    /// Cancel: closes the dialog and restores the study's style and settings it opened with.
     pub(super) fn open_study_editor_dialog(
         &mut self,
         data_root: std::path::PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let theme = self.theme;
-        self.indicator_settings_dialog = Some(IndicatorSettingsDialog::StudyEditor(
-            StudyEditorDialogState::open(data_root, &theme, window, cx),
-        ));
+        if self.study_editor.is_none() {
+            let theme = self.theme;
+            self.study_editor = Some(StudyEditorDialogState::open(data_root, &theme, window, cx));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_study_editor_panel(
+        &mut self,
+        data_root: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.study_editor.is_some() {
+            self.study_editor = None;
+        } else {
+            let theme = self.theme;
+            self.study_editor = Some(StudyEditorDialogState::open(data_root, &theme, window, cx));
+        }
         cx.notify();
     }
 
     pub(super) fn close_study_editor_dialog(&mut self, cx: &mut Context<Self>) {
-        if matches!(
-            self.indicator_settings_dialog,
-            Some(IndicatorSettingsDialog::StudyEditor(_))
-        ) {
-            self.indicator_settings_dialog = None;
+        if self.study_editor.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_study_editor_dock(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            editor.dock = match editor.dock {
+                StudyEditorDock::Right => StudyEditorDock::Bottom,
+                StudyEditorDock::Bottom => StudyEditorDock::Right,
+            };
+            editor.popover = StudyEditorPopover::None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_study_editor_expanded(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            match editor.dock {
+                StudyEditorDock::Right => {
+                    editor.width = if editor.width >= 760.0 { 560.0 } else { 820.0 };
+                }
+                StudyEditorDock::Bottom => {
+                    editor.height = if editor.height >= 480.0 { 340.0 } else { 540.0 };
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_study_editor_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            let clamped = width.clamp(380.0, 1100.0);
+            if (editor.width - clamped).abs() >= 1.0 {
+                editor.width = clamped;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(super) fn set_study_editor_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            let clamped = height.clamp(220.0, 640.0);
+            if (editor.height - clamped).abs() >= 1.0 {
+                editor.height = clamped;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(super) fn toggle_study_editor_popover(
+        &mut self,
+        target: StudyEditorPopover,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            editor.popover = if editor.popover == target {
+                StudyEditorPopover::None
+            } else {
+                target
+            };
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_study_editor_find(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            editor.find_open = !editor.find_open;
+            editor.popover = StudyEditorPopover::None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_study_editor_snippets(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            editor.snippets_open = !editor.snippets_open;
+            editor.popover = StudyEditorPopover::None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_study_editor_console(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            editor.console_open = !editor.console_open;
+            editor.popover = StudyEditorPopover::None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_study_editor_line_numbers(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            editor.line_numbers = !editor.line_numbers;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_study_editor_word_wrap(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            editor.word_wrap = !editor.word_wrap;
+            let wrap = editor.word_wrap;
+            editor.source_input.update(cx, |input, input_cx| {
+                input.set_soft_wrap(wrap, window, input_cx);
+            });
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_study_editor_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        if let Some(editor) = self.study_editor.as_mut() {
+            editor.font_size = size.clamp(11.0, 16.0);
             cx.notify();
         }
     }
@@ -6548,10 +6669,9 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
             dialog.select_project(identifier, window, cx);
+            dialog.popover = StudyEditorPopover::None;
             cx.notify();
         }
     }
@@ -6562,18 +6682,16 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
             dialog.create_from_template(template, window, cx);
+            dialog.popover = StudyEditorPopover::None;
             cx.notify();
         }
     }
 
     pub(super) fn validate_and_save_study_editor_project(&mut self, cx: &mut Context<Self>) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.start_build_and_save(cx);
             cx.notify();
         }
@@ -6584,9 +6702,8 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.revert_to_last_good(window, cx);
             cx.notify();
         }
@@ -6597,9 +6714,8 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.delete_selected(window, cx);
             cx.notify();
         }
@@ -6610,18 +6726,16 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.duplicate_selected(window, cx);
             cx.notify();
         }
     }
 
     pub(super) fn export_study_editor_bundle(&mut self, cx: &mut Context<Self>) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.export_selected_bundle(cx);
             cx.notify();
         }
@@ -6632,27 +6746,24 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.import_bundle_from_clipboard(window, cx);
             cx.notify();
         }
     }
 
     pub(super) fn run_study_editor_preview_test(&mut self, cx: &mut Context<Self>) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.start_preview_test(cx);
             cx.notify();
         }
     }
 
     pub(super) fn add_study_editor_project_to_chart(&mut self, cx: &mut Context<Self>) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.start_build_for_chart(cx);
             cx.notify();
         }
@@ -6785,9 +6896,7 @@ impl WorkspaceSurface {
                 }
             }
         };
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
             dialog.status_message = Some(status);
         }
         cx.notify();
@@ -6800,18 +6909,14 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
             dialog.insert_snippet(snippet, doc, window, cx);
             cx.notify();
         }
     }
 
     pub(super) fn find_in_study_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
             dialog.find_next_in_source(window, cx);
             cx.notify();
         }
@@ -6824,27 +6929,23 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
             dialog.jump_to_diagnostic(line, column, window, cx);
             cx.notify();
         }
     }
 
     pub(super) fn install_study_editor_dev_pack_target(&mut self, cx: &mut Context<Self>) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.start_install_dev_pack_target(cx);
             cx.notify();
         }
     }
 
     pub(super) fn clean_study_editor_cache(&mut self, cx: &mut Context<Self>) {
-        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-            self.indicator_settings_dialog.as_mut()
-        {
+        if let Some(dialog) = self.study_editor.as_mut() {
+            dialog.popover = StudyEditorPopover::None;
             dialog.start_clean_dev_pack_cache(cx);
             cx.notify();
         }

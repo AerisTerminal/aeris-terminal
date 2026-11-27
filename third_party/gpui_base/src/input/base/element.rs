@@ -897,6 +897,8 @@ pub(super) struct PrepaintState {
     cursor_scroll_offset: Point<Pixels>,
     selection_path: Option<Path<Pixels>>,
     bounds: Bounds<Pixels>,
+    gutter_width: Pixels,
+    cursor_line: usize,
 }
 
 impl PrepaintState {
@@ -1001,7 +1003,18 @@ impl<M: InputModeKind> Element for TextElement<M> {
             (&text, fg)
         };
 
+        let gutter_width = if multi_line && state.show_line_numbers {
+            px(46.)
+        } else {
+            px(0.)
+        };
+        let cursor_line = state
+            .text
+            .offset_to_point(state.cursor().min(state.text.len()))
+            .row;
         let mut bounds = bounds;
+        bounds.origin.x += gutter_width;
+        bounds.size.width = (bounds.size.width - gutter_width).max(px(1.));
         let wrap_width = if multi_line && state.soft_wrap {
             Some(bounds.size.width - RIGHT_MARGIN)
         } else {
@@ -1234,6 +1247,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
             cursor_bounds,
             cursor_scroll_offset,
             selection_path,
+            gutter_width,
+            cursor_line,
         }
     }
 
@@ -1279,6 +1294,72 @@ impl<M: InputModeKind> Element for TextElement<M> {
         } else {
             px(0.)
         };
+
+        if prepaint.gutter_width > px(0.) {
+            let gutter_sep_x = input_bounds.origin.x + prepaint.gutter_width - px(8.);
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(gutter_sep_x, input_bounds.origin.y),
+                    size(px(1.), input_bounds.size.height),
+                ),
+                editor_style.muted_foreground.opacity(0.14),
+            ));
+            let text_style = window.text_style();
+            let font_size = text_style.font_size.to_pixels(window.rem_size());
+            let gutter_font_size = font_size * 0.9;
+            let num_right_x = gutter_sep_x - px(8.);
+            let mut gutter_y = prepaint.last_layout.visible_top;
+            for (line, &buf_line) in prepaint
+                .last_layout
+                .lines
+                .iter()
+                .zip(prepaint.last_layout.visible_buffer_lines.iter())
+            {
+                let row_h = line.size(line_height).height;
+                let is_active = buf_line == prepaint.cursor_line;
+                if is_active && focused {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(gutter_sep_x + px(1.), origin.y + gutter_y),
+                            size(
+                                (input_bounds.right() - gutter_sep_x - px(1.)).max(px(0.)),
+                                row_h,
+                            ),
+                        ),
+                        editor_style.foreground.opacity(0.035),
+                    ));
+                }
+                let label: SharedString = (buf_line + 1).to_string().into();
+                let color = if is_active {
+                    editor_style.foreground.opacity(0.85)
+                } else {
+                    editor_style.muted_foreground.opacity(0.55)
+                };
+                let shaped = window.text_system().shape_line(
+                    label.clone(),
+                    gutter_font_size,
+                    &[TextRun {
+                        len: label.len(),
+                        font: text_style.font(),
+                        color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                );
+                let num_x = (num_right_x - shaped.width).max(input_bounds.origin.x + px(2.));
+                let _ = shaped.paint(
+                    point(num_x, origin.y + gutter_y),
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+                gutter_y += row_h;
+            }
+        }
 
         if window.is_window_active()
             && let Some(path) = prepaint.selection_path.take()

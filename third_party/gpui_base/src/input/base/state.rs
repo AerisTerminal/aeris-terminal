@@ -348,6 +348,7 @@ pub struct InputBaseState<M: InputModeKind> {
     /// freeze in a different place.
     projected_editor_style: InputEditorStyle,
     pub(super) syntax_highlighter: Option<SyntaxHighlighter>,
+    pub(super) show_line_numbers: bool,
 
     /// The mask pattern for formatting the input text
     pub(crate) mask_pattern: MaskPattern,
@@ -609,6 +610,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             editor_style: InputEditorStyle::default(),
             projected_editor_style: InputEditorStyle::default(),
             syntax_highlighter: None,
+            show_line_numbers: false,
             context_menu_handler: None,
             pending_context_menu: None,
             enable_context_menu: true,
@@ -648,6 +650,19 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Sets or clears an optional syntax highlighter callback for styled text runs.
     pub fn set_syntax_highlighter(&mut self, highlighter: Option<SyntaxHighlighter>) {
         self.syntax_highlighter = highlighter;
+    }
+
+    /// Enables or disables the synchronized left line-number gutter for multi-line code editors.
+    pub fn set_line_numbers(&mut self, enabled: bool) {
+        self.show_line_numbers = enabled;
+    }
+
+    /// Returns the 1-based `(line, column)` of the active caret in the text buffer.
+    #[must_use]
+    pub fn cursor_line_col(&self) -> (usize, usize) {
+        let offset = self.cursor().min(self.text.len());
+        let point = self.text.offset_to_point(offset);
+        (point.row + 1, point.column + 1)
     }
 
     /// Selects a UTF-8 byte range (clamped to valid char boundaries) and focuses the editor.

@@ -68,7 +68,7 @@ struct DialogMovable {
     on_move: DialogMoveHandler,
 }
 
-/// The four dialog widths.
+/// The three dialog widths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DialogSize {
     /// 420 px: confirmations and short forms.
@@ -77,8 +77,6 @@ pub(crate) enum DialogSize {
     Md,
     /// 560 px: search palettes.
     Lg,
-    /// 1040 px: code editors and multi-pane authoring workspaces.
-    Xl,
 }
 
 impl DialogSize {
@@ -87,7 +85,6 @@ impl DialogSize {
             Self::Sm => 420.0,
             Self::Md => 480.0,
             Self::Lg => 560.0,
-            Self::Xl => 1040.0,
         })
     }
 }

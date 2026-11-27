@@ -307,7 +307,10 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
     time::{Duration, Instant},
 };
-use study_editor_dialog::{StudyEditorDialogState, study_editor_dialog_layer};
+use study_editor_dialog::{
+    StudyEditorDialogState, StudyEditorDock, StudyEditorHeightDrag, StudyEditorPopover,
+    StudyEditorWidthDrag, study_editor_docked_panel,
+};
 use study_settings_dialog::study_settings_dialog_layer;
 use symbol_browser::{
     ExactSymbolMatch, InstrumentMenuAction, InstrumentMenuEntry, InstrumentMenuSelection,
@@ -984,6 +987,7 @@ struct WorkspaceSurface {
     time_zone_input: Entity<InputState>,
     studies: studies_controller::StudiesController,
     study_retry: workspace_surface::StudyRetryTimer,
+    study_editor: Option<StudyEditorDialogState>,
     indicator_settings_dialog: Option<IndicatorSettingsDialog>,
     chrome_focus: FocusHandle,
     provider: ProviderId,
@@ -1197,7 +1201,6 @@ enum LegendSettingsRequest {
 /// The one settings dialog a surface can have open.
 enum IndicatorSettingsDialog {
     Study(StudySettingsDialogState),
-    StudyEditor(StudyEditorDialogState),
     BigTrades(BigTradesDialogState),
     Volume(VolumeDialogState),
     OrderFlow(OrderFlowDialogState),

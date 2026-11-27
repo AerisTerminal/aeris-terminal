@@ -301,9 +301,6 @@ fn pane_settings_dialog(
         IndicatorSettingsDialog::Study(dialog) => {
             Some(study_settings_dialog_layer(entity, dialog, theme, cx))
         }
-        IndicatorSettingsDialog::StudyEditor(dialog) => {
-            Some(study_editor_dialog_layer(entity, dialog, theme))
-        }
         IndicatorSettingsDialog::BigTrades(dialog) => {
             Some(big_trades_dialog_layer(entity, dialog, theme))
         }
@@ -525,11 +522,37 @@ pub(super) fn workspace_market_area(
         super::terminal_chrome::PanelSidebarState::of(surface, unread_notifications),
         theme,
     );
+    let study_editor_bottom = surface
+        .study_editor
+        .as_ref()
+        .filter(|editor| editor.dock == StudyEditorDock::Bottom)
+        .map(|editor| study_editor_docked_panel(active_surface, editor, theme, cx));
+    let study_editor_right = surface
+        .study_editor
+        .as_ref()
+        .filter(|editor| editor.dock == StudyEditorDock::Right)
+        .map(|editor| {
+            div()
+                .relative()
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(study_editor_docked_panel(active_surface, editor, theme, cx))
+                .children(panel_corners(theme, PanelEdges::INNER))
+        });
     let below = [
         docked_replay_panel(active_surface, theme, cx),
         workspace_context_panel(surface, active_surface, theme),
+        study_editor_bottom,
     ];
     let center = workspace_center_column(grid, below, center_edges, active_surface, theme);
+    let editor_width_drag_app = active_surface.clone();
+    let side_panel_reserved = if side_panels.any() {
+        surface.chrome.side_panel_width() + PANEL_GAP
+    } else {
+        0.0
+    };
     div()
         .relative()
         .flex()
@@ -537,7 +560,17 @@ pub(super) fn workspace_market_area(
         .gap(px(PANEL_GAP))
         .overflow_hidden()
         .track_focus(&chrome_focus)
+        .on_drag_move::<StudyEditorWidthDrag>(move |event, _, cx| {
+            let right = f32::from(event.bounds.right());
+            let side_reserved =
+                super::terminal_chrome::PANEL_SIDEBAR_WIDTH + PANEL_GAP * 2.0 + side_panel_reserved;
+            let width = right - f32::from(event.event.position.x) - side_reserved;
+            editor_width_drag_app.update(cx, |surface, surface_cx| {
+                surface.set_study_editor_width(width, surface_cx);
+            });
+        })
         .child(center)
+        .children(study_editor_right)
         .children(side_panel)
         .child(panel_sidebar)
         .when_some(expanded_drawing_toolbar, |market, sidebar| {
@@ -572,7 +605,7 @@ pub(super) fn workspace_price_alert_dialog(
 /// the toolbar it meets the window's left edge.
 fn workspace_center_column(
     grid: impl IntoElement,
-    below: [Option<AnyElement>; 2],
+    below: [Option<AnyElement>; 3],
     edges: PanelEdges,
     active_surface: &Entity<WorkspaceSurface>,
     theme: &AerisTheme,
@@ -588,6 +621,7 @@ fn workspace_center_column(
             .children(panel_corners(theme, edges))
     });
     let context_drag_app = active_surface.clone();
+    let editor_height_drag_app = active_surface.clone();
     // The drawing toolbar overlays the left edge of the whole center column, so
     // the chart grid and the context panel beneath it share one inset.
     div()
@@ -610,6 +644,15 @@ fn workspace_center_column(
             let height = (bottom - f32::from(event.event.position.y)).min(available);
             context_drag_app.update(cx, |surface, surface_cx| {
                 surface.set_context_panel_height(height, surface_cx);
+            });
+        })
+        .on_drag_move::<StudyEditorHeightDrag>(move |event, _, cx| {
+            let bottom = f32::from(event.bounds.bottom());
+            let available =
+                f32::from(event.bounds.size.height) - CONTEXT_PANEL_MINIMUM_CHART_HEIGHT;
+            let height = (bottom - f32::from(event.event.position.y)).min(available);
+            editor_height_drag_app.update(cx, |surface, surface_cx| {
+                surface.set_study_editor_height(height, surface_cx);
             });
         })
 }

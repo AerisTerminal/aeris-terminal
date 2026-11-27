@@ -9,7 +9,7 @@ use super::study_editor_store::{
     run_offline_preview_check,
 };
 use super::*;
-use aeris_localization::{common, panels, tr};
+use aeris_localization::{panels, tr};
 use aeris_study_sdk::project::{
     StudyDiagnostic, StudyDiagnosticSeverity, StudyProjectLibrary, StudyProjectTemplate,
 };
@@ -17,6 +17,39 @@ use aeris_study_sdk::sandbox::StudySandboxLimits;
 use aeris_study_sdk::toolchain::{PreviewFixturePreset, StudyDevPackStatus};
 use aeris_study_sdk::wasm_runtime::CompiledWasmStudy;
 use std::path::PathBuf;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum StudyEditorDock {
+    #[default]
+    Right,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum StudyEditorPopover {
+    #[default]
+    None,
+    Scripts,
+    More,
+}
+
+#[derive(Clone)]
+pub(super) struct StudyEditorWidthDrag;
+
+impl Render for StudyEditorWidthDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct StudyEditorHeightDrag;
+
+impl Render for StudyEditorHeightDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
 
 pub(super) struct StudyEditorDialogState {
     pub(super) store: StudyProjectStore,
@@ -30,6 +63,16 @@ pub(super) struct StudyEditorDialogState {
     pub(super) status_message: Option<String>,
     pub(super) busy_label: Option<String>,
     pub(super) dev_pack_status: Option<StudyDevPackStatus>,
+    pub(super) dock: StudyEditorDock,
+    pub(super) width: f32,
+    pub(super) height: f32,
+    pub(super) popover: StudyEditorPopover,
+    pub(super) find_open: bool,
+    pub(super) snippets_open: bool,
+    pub(super) console_open: bool,
+    pub(super) line_numbers: bool,
+    pub(super) word_wrap: bool,
+    pub(super) font_size: f32,
     pub(super) active_job_id: u64,
     pub(super) active_task: Option<gpui::Task<()>>,
     pub(super) probe_task: Option<gpui::Task<()>>,
@@ -82,16 +125,17 @@ impl StudyEditorDialogState {
         let source_input = cx.new(|input_cx| {
             TextareaState::new(window, input_cx).placeholder("// Rust study source")
         });
-        if !initial_source.is_empty() {
-            source_input.update(cx, |input, input_cx| {
+        source_input.update(cx, |input, input_cx| {
+            input.set_soft_wrap(false, window, input_cx);
+            if !initial_source.is_empty() {
                 input.set_value(initial_source, window, input_cx);
-            });
-        }
+            }
+        });
         let highlighter = rust_syntax_highlighter(theme);
         let status_message = if !warnings.is_empty() {
             Some(warnings.join(" · "))
         } else {
-            Some("Ready — edit Rust code, run Preview test, or Add / Reload on chart".to_string())
+            Some("Ready".to_string())
         };
 
         // Probe rustc + wasm32-unknown-unknown asynchronously off the GPUI thread so
@@ -111,9 +155,7 @@ impl StudyEditorDialogState {
                 })
                 .await;
             let _ = surface.update(cx, |surface, surface_cx| {
-                if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-                    surface.indicator_settings_dialog.as_mut()
-                {
+                if let Some(dialog) = surface.study_editor.as_mut() {
                     dialog.dev_pack_status = Some(status);
                     dialog.probe_task = None;
                     surface_cx.notify();
@@ -133,6 +175,16 @@ impl StudyEditorDialogState {
             status_message,
             busy_label: None,
             dev_pack_status: None,
+            dock: StudyEditorDock::Right,
+            width: 560.0,
+            height: 340.0,
+            popover: StudyEditorPopover::None,
+            find_open: false,
+            snippets_open: false,
+            console_open: false,
+            line_numbers: true,
+            word_wrap: false,
+            font_size: 13.0,
             active_job_id: 0,
             active_task: None,
             probe_task: Some(probe_task),
@@ -227,15 +279,16 @@ impl StudyEditorDialogState {
                 .spawn(async move { compile_study_source_to_wasm(&source) })
                 .await;
             let _ = surface.update(cx, |surface, surface_cx| {
-                if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-                    surface.indicator_settings_dialog.as_mut()
-                {
+                if let Some(dialog) = surface.study_editor.as_mut() {
                     if dialog.active_job_id != job_id {
                         return;
                     }
                     dialog.busy_label = None;
                     dialog.active_task = None;
                     dialog.finish_build_and_save(&identifier, build_result);
+                    if !dialog.diagnostics.is_empty() {
+                        dialog.console_open = true;
+                    }
                     surface_cx.notify();
                 }
             });
@@ -310,14 +363,13 @@ impl StudyEditorDialogState {
                     })
                     .await;
             let _ = surface.update(cx, |surface, surface_cx| {
-                if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-                    surface.indicator_settings_dialog.as_mut()
-                {
+                if let Some(dialog) = surface.study_editor.as_mut() {
                     if dialog.active_job_id != job_id {
                         return;
                     }
                     dialog.busy_label = None;
                     dialog.active_task = None;
+                    dialog.console_open = !diagnostics.is_empty();
                     dialog.diagnostics = diagnostics;
                     dialog.status_message = Some(summary);
                     surface_cx.notify();
@@ -375,9 +427,7 @@ impl StudyEditorDialogState {
                 .await;
 
             let _ = surface.update(cx, |surface, surface_cx| {
-                let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-                    surface.indicator_settings_dialog.as_mut()
-                else {
+                let Some(dialog) = surface.study_editor.as_mut() else {
                     return;
                 };
                 if dialog.active_job_id != job_id {
@@ -411,6 +461,7 @@ impl StudyEditorDialogState {
                     Err(diagnostics) => {
                         let count = diagnostics.len();
                         dialog.diagnostics = diagnostics;
+                        dialog.console_open = true;
                         dialog.status_message = Some(format!(
                             "Build failed ({count} diagnostic(s)) and no last-good WASM exists"
                         ));
@@ -602,9 +653,7 @@ impl StudyEditorDialogState {
                 .spawn(async move { install_wasm_sandbox_target() })
                 .await;
             let _ = surface.update(cx, |surface, surface_cx| {
-                if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-                    surface.indicator_settings_dialog.as_mut()
-                {
+                if let Some(dialog) = surface.study_editor.as_mut() {
                     dialog.busy_label = None;
                     dialog.probe_task = None;
                     match result {
@@ -616,6 +665,7 @@ impl StudyEditorDialogState {
                         }
                         Err(error) => {
                             dialog.status_message = Some(error);
+                            dialog.console_open = true;
                         }
                     }
                     surface_cx.notify();
@@ -644,9 +694,7 @@ impl StudyEditorDialogState {
                 })
                 .await;
             let _ = surface.update(cx, |surface, surface_cx| {
-                if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
-                    surface.indicator_settings_dialog.as_mut()
-                {
+                if let Some(dialog) = surface.study_editor.as_mut() {
                     dialog.busy_label = None;
                     dialog.probe_task = None;
                     dialog.dev_pack_status = Some(status);
@@ -701,24 +749,297 @@ impl StudyEditorDialogState {
     }
 }
 
-fn project_sidebar(
+fn popover_menu_row(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    icon: Option<HugeIcon>,
+    destructive: bool,
+    disabled: bool,
+    theme: &AerisTheme,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let colors = theme.colors;
+    let fg = if disabled {
+        gpui_color(colors.text_muted)
+    } else if destructive {
+        gpui_color(colors.text_danger)
+    } else {
+        gpui_color(colors.text_default)
+    };
+    let hover_bg = gpui_color(colors.hover_bg);
+    div()
+        .id(id)
+        .w_full()
+        .h(px(30.0))
+        .px_2p5()
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(fg)
+        .when(!disabled, |row| {
+            row.cursor_pointer()
+                .hover(move |style| style.bg(hover_bg))
+                .on_click(move |_, window, cx| {
+                    on_click(window, cx);
+                    cx.stop_propagation();
+                })
+        })
+        .when_some(icon, |row, ic| {
+            row.child(header_icon(ic).with_size(px(14.0)))
+        })
+        .child(label.into())
+        .into_any_element()
+}
+
+fn editor_top_bar(
     app: &Entity<WorkspaceSurface>,
-    dialog: &StudyEditorDialogState,
+    editor: &StudyEditorDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let has_selection = dialog.selected_id.is_some();
-    let revert = app.clone();
-    let duplicate = app.clone();
-    let export_bundle = app.clone();
-    let import_bundle = app.clone();
-    let delete = app.clone();
+    let dock_app = app.clone();
+    let expand_app = app.clone();
+    let close_app = app.clone();
+    let console_app = app.clone();
+    let dot_color = if editor.busy_label.is_some() {
+        gpui_color(colors.ring_primary)
+    } else {
+        match &editor.dev_pack_status {
+            Some(StudyDevPackStatus::Ready { .. }) => gpui_color(colors.positive),
+            Some(StudyDevPackStatus::MissingSandboxTarget { .. }) => gpui_color(colors.warning),
+            Some(StudyDevPackStatus::Unavailable) => gpui_color(colors.text_danger),
+            None => gpui_color(colors.text_muted),
+        }
+    };
+    let dock_icon = match editor.dock {
+        StudyEditorDock::Right => HugeIcon::SplitStacked,
+        StudyEditorDock::Bottom => HugeIcon::SplitSideBySide,
+    };
+    let dock_tip = match editor.dock {
+        StudyEditorDock::Right => "Dock editor to bottom",
+        StudyEditorDock::Bottom => "Dock editor to right",
+    };
+    let expanded = match editor.dock {
+        StudyEditorDock::Right => editor.width >= 760.0,
+        StudyEditorDock::Bottom => editor.height >= 480.0,
+    };
+    let expand_icon = if expanded {
+        HugeIcon::WindowRestore
+    } else {
+        HugeIcon::WindowMaximize
+    };
 
-    let mut template_row = div().flex().flex_wrap().gap_1();
+    div()
+        .h(px(34.0))
+        .px_3()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_b_1()
+        .border_color(gpui_color(colors.border_subtle))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui_color(colors.text_default))
+                .child(header_icon(HugeIcon::Template).with_size(px(14.0)))
+                .child(tr!(panels::STUDY_EDITOR))
+                .child(
+                    div()
+                        .id("study_editor_dev_dot")
+                        .size(px(7.0))
+                        .rounded_full()
+                        .bg(dot_color)
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            console_app.update(cx, WorkspaceSurface::toggle_study_editor_console);
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    Button::new("study_editor_dock_toggle", theme)
+                        .variant(ButtonVariant::Ghost)
+                        .button_size(ButtonSize::Sm)
+                        .icon(header_icon(dock_icon))
+                        .aria_label(dock_tip)
+                        .tooltip(TooltipSpec::new(dock_tip, theme).show_delay(TOOLTIP_OPEN_DELAY))
+                        .on_click(move |_, _, cx| {
+                            dock_app.update(cx, WorkspaceSurface::toggle_study_editor_dock);
+                        }),
+                )
+                .child(
+                    Button::new("study_editor_expand_toggle", theme)
+                        .variant(ButtonVariant::Ghost)
+                        .button_size(ButtonSize::Sm)
+                        .icon(header_icon(expand_icon))
+                        .aria_label("Toggle editor size")
+                        .tooltip(
+                            TooltipSpec::new("Toggle editor size", theme)
+                                .show_delay(TOOLTIP_OPEN_DELAY),
+                        )
+                        .on_click(move |_, _, cx| {
+                            expand_app.update(cx, WorkspaceSurface::toggle_study_editor_expanded);
+                        }),
+                )
+                .child(
+                    Button::new("study_editor_close_btn", theme)
+                        .variant(ButtonVariant::Ghost)
+                        .button_size(ButtonSize::Sm)
+                        .icon(header_icon(HugeIcon::Close))
+                        .aria_label("Close")
+                        .tooltip(TooltipSpec::new("Close", theme).show_delay(TOOLTIP_OPEN_DELAY))
+                        .on_click(move |_, _, cx| {
+                            close_app.update(cx, WorkspaceSurface::close_study_editor_dialog);
+                        }),
+                ),
+        )
+        .into_any_element()
+}
+
+fn editor_action_bar(
+    app: &Entity<WorkspaceSurface>,
+    editor: &StudyEditorDialogState,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let has_selection = editor.selected_id.is_some();
+    let is_busy = editor.busy_label.is_some();
+    let script_title = editor
+        .selected_id
+        .clone()
+        .unwrap_or_else(|| "Select script".to_string());
+    let scripts_open = editor.popover == StudyEditorPopover::Scripts;
+    let more_open = editor.popover == StudyEditorPopover::More;
+
+    let toggle_scripts = app.clone();
+    let add_chart = app.clone();
+    let preview = app.clone();
+    let save = app.clone();
+    let toggle_more = app.clone();
+    let hover_bg = gpui_color(colors.hover_bg);
+
+    let script_pill = div()
+        .id("study_editor_script_menu_btn")
+        .h(px(30.0))
+        .max_w(px(230.0))
+        .px_2p5()
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .cursor_pointer()
+        .text_sm()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(gpui_color(colors.text_default))
+        .when(scripts_open, |el| el.bg(gpui_color(colors.active_bg)))
+        .hover(move |style| style.bg(hover_bg))
+        .on_click(move |_, _, cx| {
+            toggle_scripts.update(cx, |surface, surface_cx| {
+                surface.toggle_study_editor_popover(StudyEditorPopover::Scripts, surface_cx);
+            });
+            cx.stop_propagation();
+        })
+        .child(div().truncate().child(script_title))
+        .child(
+            header_icon(if scripts_open {
+                HugeIcon::ChevronUp
+            } else {
+                HugeIcon::ChevronDown
+            })
+            .with_size(px(13.0)),
+        );
+
+    div()
+        .h(px(44.0))
+        .px_3()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .border_b_1()
+        .border_color(gpui_color(colors.border_subtle))
+        .child(script_pill)
+        .child(
+            Button::new("study_editor_add_chart", theme)
+                .variant(ButtonVariant::Secondary)
+                .button_size(ButtonSize::Sm)
+                .icon(header_icon(HugeIcon::Play))
+                .label("Add to chart")
+                .disabled(!has_selection || is_busy)
+                .on_click(move |_, _, cx| {
+                    add_chart.update(cx, WorkspaceSurface::add_study_editor_project_to_chart);
+                }),
+        )
+        .child(
+            Button::new("study_editor_preview", theme)
+                .variant(ButtonVariant::Ghost)
+                .button_size(ButtonSize::Sm)
+                .label("Preview")
+                .disabled(!has_selection || is_busy)
+                .on_click(move |_, _, cx| {
+                    preview.update(cx, WorkspaceSurface::run_study_editor_preview_test);
+                }),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new("study_editor_save", theme)
+                .variant(ButtonVariant::Primary)
+                .button_size(ButtonSize::Sm)
+                .label("Save")
+                .disabled(!has_selection || is_busy)
+                .on_click(move |_, _, cx| {
+                    save.update(cx, WorkspaceSurface::validate_and_save_study_editor_project);
+                }),
+        )
+        .child(
+            Button::new("study_editor_more_btn", theme)
+                .variant(ButtonVariant::Ghost)
+                .button_size(ButtonSize::Sm)
+                .icon(header_icon(HugeIcon::More))
+                .aria_label("Editor options")
+                .selected(more_open)
+                .on_click(move |_, _, cx| {
+                    toggle_more.update(cx, |surface, surface_cx| {
+                        surface.toggle_study_editor_popover(StudyEditorPopover::More, surface_cx);
+                    });
+                    cx.stop_propagation();
+                }),
+        )
+        .into_any_element()
+}
+
+fn scripts_popover(
+    app: &Entity<WorkspaceSurface>,
+    editor: &StudyEditorDialogState,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let has_selection = editor.selected_id.is_some();
+    let is_busy = editor.busy_label.is_some();
+
+    let save_app = app.clone();
+    let dup_app = app.clone();
+    let rev_app = app.clone();
+    let copy_app = app.clone();
+    let import_app = app.clone();
+    let del_app = app.clone();
+
+    let mut templates = div().flex().flex_wrap().gap_1();
     for (idx, (template, label)) in TEMPLATES.iter().enumerate() {
         let create_app = app.clone();
         let template = *template;
-        template_row = template_row.child(
+        templates = templates.child(
             Button::new(("study_editor_tpl", idx), theme)
                 .variant(ButtonVariant::Secondary)
                 .button_size(ButtonSize::Sm)
@@ -731,166 +1052,508 @@ fn project_sidebar(
         );
     }
 
-    let mut project_list = div()
-        .id("study_editor_project_list")
-        .flex_1()
-        .min_h(px(140.0))
-        .max_h(px(260.0))
+    let mut scripts_list = div()
+        .id("study_editor_scripts_list")
+        .max_h(px(200.0))
         .overflow_y_scroll()
         .flex()
         .flex_col()
-        .gap_1();
-    for (idx, project) in dialog.library.iter().enumerate() {
+        .gap_0p5();
+    let hover_bg = gpui_color(colors.hover_bg);
+    for (idx, project) in editor.library.iter().enumerate() {
         let id = project.manifest.identifier.clone();
-        let selected = dialog.selected_id.as_deref() == Some(id.as_str());
+        let selected = editor.selected_id.as_deref() == Some(id.as_str());
         let select_app = app.clone();
         let click_id = id.clone();
-        project_list = project_list.child(
-            Button::new(("study_editor_proj", idx), theme)
-                .variant(if selected {
-                    ButtonVariant::Primary
-                } else {
-                    ButtonVariant::Ghost
-                })
-                .button_size(ButtonSize::Sm)
+        scripts_list = scripts_list.child(
+            div()
+                .id(("study_editor_script_item", idx))
                 .w_full()
-                .label(id)
+                .h(px(30.0))
+                .px_2p5()
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .cursor_pointer()
+                .text_xs()
+                .when(selected, |row| {
+                    row.bg(gpui_color(colors.primary_subtle))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(gpui_color(colors.text_default))
+                })
+                .when(!selected, |row| {
+                    row.text_color(gpui_color(colors.text_secondary))
+                        .hover(move |style| style.bg(hover_bg))
+                })
                 .on_click(move |_, window, cx| {
                     select_app.update(cx, |surface, surface_cx| {
                         surface.select_study_editor_project(click_id.clone(), window, surface_cx);
+                    });
+                    cx.stop_propagation();
+                })
+                .child(div().truncate().child(id))
+                .when(selected, |row| {
+                    row.child(header_icon(HugeIcon::CheckIcon).with_size(px(13.0)))
+                }),
+        );
+    }
+
+    div()
+        .id("study_editor_scripts_popover")
+        .absolute()
+        .top(px(76.0))
+        .left(px(12.0))
+        .w(px(292.0))
+        .max_h(px(460.0))
+        .overflow_y_scroll()
+        .p_2()
+        .rounded(px(10.0))
+        .bg(gpui_color(colors.surface))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(popover_menu_row(
+            "se_menu_save",
+            "Save & compile",
+            Some(HugeIcon::CheckIcon),
+            false,
+            !has_selection || is_busy,
+            theme,
+            move |_, cx| {
+                save_app.update(cx, WorkspaceSurface::validate_and_save_study_editor_project);
+            },
+        ))
+        .child(popover_menu_row(
+            "se_menu_dup",
+            "Make a copy...",
+            Some(HugeIcon::Copy),
+            false,
+            !has_selection,
+            theme,
+            move |window, cx| {
+                dup_app.update(cx, |surface, surface_cx| {
+                    surface.duplicate_study_editor_project(window, surface_cx);
+                });
+            },
+        ))
+        .child(popover_menu_row(
+            "se_menu_revert",
+            tr!(panels::STUDY_EDITOR_REVERT),
+            Some(HugeIcon::Refresh),
+            false,
+            !has_selection,
+            theme,
+            move |window, cx| {
+                rev_app.update(cx, |surface, surface_cx| {
+                    surface.revert_study_editor_project(window, surface_cx);
+                });
+            },
+        ))
+        .child(popover_menu_row(
+            "se_menu_copy_bundle",
+            "Copy bundle to clipboard",
+            Some(HugeIcon::Copy),
+            false,
+            !has_selection,
+            theme,
+            move |_, cx| {
+                copy_app.update(cx, WorkspaceSurface::export_study_editor_bundle);
+            },
+        ))
+        .child(popover_menu_row(
+            "se_menu_import",
+            "Import bundle from clipboard",
+            Some(HugeIcon::Download),
+            false,
+            false,
+            theme,
+            move |window, cx| {
+                import_app.update(cx, |surface, surface_cx| {
+                    surface.import_study_editor_bundle(window, surface_cx);
+                });
+            },
+        ))
+        .child(popover_menu_row(
+            "se_menu_delete",
+            tr!(panels::REMOVE),
+            Some(HugeIcon::Trash),
+            true,
+            !has_selection,
+            theme,
+            move |window, cx| {
+                del_app.update(cx, |surface, surface_cx| {
+                    surface.delete_study_editor_project(window, surface_cx);
+                });
+            },
+        ))
+        .child(
+            div()
+                .my_1()
+                .border_t_1()
+                .border_color(gpui_color(colors.border_subtle)),
+        )
+        .child(
+            div()
+                .px_1()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui_color(colors.text_muted))
+                .child("CREATE NEW"),
+        )
+        .child(
+            div()
+                .h(px(28.0))
+                .px_1()
+                .child(Input::new(&editor.new_id_input).platform(theme)),
+        )
+        .child(div().px_1().pt_0p5().child(templates))
+        .child(
+            div()
+                .my_1()
+                .border_t_1()
+                .border_color(gpui_color(colors.border_subtle)),
+        )
+        .child(
+            div()
+                .px_1()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui_color(colors.text_muted))
+                .child("SCRIPTS"),
+        )
+        .child(scripts_list)
+        .into_any_element()
+}
+
+fn more_popover(
+    app: &Entity<WorkspaceSurface>,
+    editor: &StudyEditorDialogState,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let is_busy = editor.busy_label.is_some();
+    let find_app = app.clone();
+    let snip_app = app.clone();
+    let cons_app = app.clone();
+    let ln_app = app.clone();
+    let wrap_app = app.clone();
+    let recheck_app = app.clone();
+
+    let mut font_sizes = div().flex().items_center().gap_1().px_2().py_1();
+    for (px_label, size) in [(12usize, 12.0_f32), (13, 13.0), (14, 14.0)] {
+        let active = (editor.font_size - size).abs() < 0.5;
+        let f_app = app.clone();
+        font_sizes = font_sizes.child(
+            Button::new(("se_font_sz", px_label), theme)
+                .variant(if active {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Secondary
+                })
+                .button_size(ButtonSize::Sm)
+                .label(format!("{px_label}px"))
+                .on_click(move |_, _, cx| {
+                    f_app.update(cx, |surface, surface_cx| {
+                        surface.set_study_editor_font_size(size, surface_cx);
                     });
                 }),
         );
     }
 
-    let project_actions = div()
-        .flex()
-        .flex_wrap()
-        .gap_1()
-        .pt_2()
-        .border_t_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .child(
-            Button::new("study_editor_revert", theme)
-                .variant(ButtonVariant::Secondary)
-                .button_size(ButtonSize::Sm)
-                .label(tr!(panels::STUDY_EDITOR_REVERT))
-                .disabled(!has_selection)
-                .on_click(move |_, window, cx| {
-                    revert.update(cx, |surface, surface_cx| {
-                        surface.revert_study_editor_project(window, surface_cx);
-                    });
-                }),
-        )
-        .child(
-            Button::new("study_editor_duplicate", theme)
-                .variant(ButtonVariant::Secondary)
-                .button_size(ButtonSize::Sm)
-                .label("Duplicate")
-                .disabled(!has_selection)
-                .on_click(move |_, window, cx| {
-                    duplicate.update(cx, |surface, surface_cx| {
-                        surface.duplicate_study_editor_project(window, surface_cx);
-                    });
-                }),
-        )
-        .child(
-            Button::new("study_editor_export", theme)
-                .variant(ButtonVariant::Secondary)
-                .button_size(ButtonSize::Sm)
-                .label("Copy")
-                .disabled(!has_selection)
-                .on_click(move |_, _, cx| {
-                    export_bundle.update(cx, WorkspaceSurface::export_study_editor_bundle);
-                }),
-        )
-        .child(
-            Button::new("study_editor_import", theme)
-                .variant(ButtonVariant::Secondary)
-                .button_size(ButtonSize::Sm)
-                .label("Import")
-                .on_click(move |_, window, cx| {
-                    import_bundle.update(cx, |surface, surface_cx| {
-                        surface.import_study_editor_bundle(window, surface_cx);
-                    });
-                }),
-        )
-        .child(
-            Button::new("study_editor_delete", theme)
-                .variant(ButtonVariant::Destructive)
-                .button_size(ButtonSize::Sm)
-                .label(tr!(panels::REMOVE))
-                .disabled(!has_selection)
-                .on_click(move |_, window, cx| {
-                    delete.update(cx, |surface, surface_cx| {
-                        surface.delete_study_editor_project(window, surface_cx);
-                    });
-                }),
-        );
-
-    div()
+    let mut menu = div()
+        .id("study_editor_more_popover")
+        .absolute()
+        .top(px(76.0))
+        .right(px(12.0))
+        .w(px(252.0))
+        .max_h(px(420.0))
+        .overflow_y_scroll()
+        .p_2()
+        .rounded(px(10.0))
+        .bg(gpui_color(colors.surface))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .shadow_lg()
         .flex()
         .flex_col()
-        .gap_2()
-        .w(px(230.0))
-        .flex_shrink_0()
-        .pr_3()
-        .border_r_1()
-        .border_color(gpui_color(colors.border_secondary))
+        .gap_1()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
             div()
+                .px_2()
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(gpui_color(colors.text_secondary))
-                .child(tr!(panels::STUDY_EDITOR_NEW_PROJECT)),
+                .text_color(gpui_color(colors.text_muted))
+                .child("TOOLS"),
+        )
+        .child(popover_menu_row(
+            "se_more_find",
+            if editor.find_open {
+                "Hide Find bar"
+            } else {
+                "Find in code"
+            },
+            Some(HugeIcon::Search),
+            false,
+            false,
+            theme,
+            move |_, cx| {
+                find_app.update(cx, WorkspaceSurface::toggle_study_editor_find);
+            },
+        ))
+        .child(popover_menu_row(
+            "se_more_snippets",
+            if editor.snippets_open {
+                "Hide Snippets bar"
+            } else {
+                "Show Snippets & API"
+            },
+            Some(HugeIcon::Add),
+            false,
+            false,
+            theme,
+            move |_, cx| {
+                snip_app.update(cx, WorkspaceSurface::toggle_study_editor_snippets);
+            },
+        ))
+        .child(popover_menu_row(
+            "se_more_console",
+            if editor.console_open {
+                "Hide Diagnostics console"
+            } else {
+                "Show Diagnostics console"
+            },
+            Some(HugeIcon::Info),
+            false,
+            false,
+            theme,
+            move |_, cx| {
+                cons_app.update(cx, WorkspaceSurface::toggle_study_editor_console);
+            },
+        ))
+        .child(
+            div()
+                .my_1()
+                .border_t_1()
+                .border_color(gpui_color(colors.border_subtle)),
         )
         .child(
             div()
-                .h(px(30.0))
-                .child(Input::new(&dialog.new_id_input).platform(theme)),
-        )
-        .child(template_row)
-        .child(
-            div()
-                .pt_1()
+                .px_2()
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(gpui_color(colors.text_secondary))
-                .child("Projects"),
+                .text_color(gpui_color(colors.text_muted))
+                .child("EDITOR SETTINGS"),
         )
-        .child(project_list)
-        .child(project_actions)
-        .into_any_element()
+        .child(popover_menu_row(
+            "se_more_ln",
+            if editor.line_numbers {
+                "✓ Line numbers"
+            } else {
+                "   Line numbers"
+            },
+            None,
+            false,
+            false,
+            theme,
+            move |_, cx| {
+                ln_app.update(cx, WorkspaceSurface::toggle_study_editor_line_numbers);
+            },
+        ))
+        .child(popover_menu_row(
+            "se_more_wrap",
+            if editor.word_wrap {
+                "✓ Word wrap"
+            } else {
+                "   Word wrap"
+            },
+            None,
+            false,
+            false,
+            theme,
+            move |window, cx| {
+                wrap_app.update(cx, |surface, surface_cx| {
+                    surface.toggle_study_editor_word_wrap(window, surface_cx);
+                });
+            },
+        ))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_2()
+                .text_xs()
+                .text_color(gpui_color(colors.text_secondary))
+                .child("Font size")
+                .child(font_sizes),
+        )
+        .child(
+            div()
+                .my_1()
+                .border_t_1()
+                .border_color(gpui_color(colors.border_subtle)),
+        )
+        .child(
+            div()
+                .px_2()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui_color(colors.text_muted))
+                .child("DEV PACK"),
+        );
+
+    if matches!(
+        editor.dev_pack_status,
+        Some(StudyDevPackStatus::MissingSandboxTarget { .. })
+    ) {
+        let install_app = app.clone();
+        menu = menu.child(popover_menu_row(
+            "se_more_install_target",
+            "Install wasm32 target",
+            Some(HugeIcon::Download),
+            false,
+            is_busy,
+            theme,
+            move |_, cx| {
+                install_app.update(cx, WorkspaceSurface::install_study_editor_dev_pack_target);
+            },
+        ));
+    }
+
+    menu.child(popover_menu_row(
+        "se_more_recheck",
+        "Re-check Rust toolchain",
+        Some(HugeIcon::Refresh),
+        false,
+        is_busy,
+        theme,
+        move |_, cx| {
+            recheck_app.update(cx, WorkspaceSurface::clean_study_editor_cache);
+        },
+    ))
+    .into_any_element()
 }
 
-fn diagnostics_console(
+fn find_strip(
     app: &Entity<WorkspaceSurface>,
-    dialog: &StudyEditorDialogState,
+    editor: &StudyEditorDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let mut panel = div()
+    let find_app = app.clone();
+    let close_app = app.clone();
+    div()
+        .h(px(36.0))
+        .px_3()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .bg(gpui_color(colors.surface_secondary))
+        .border_b_1()
+        .border_color(gpui_color(colors.border_subtle))
+        .child(
+            div()
+                .flex_1()
+                .h(px(26.0))
+                .child(Input::new(&editor.search_input).platform(theme).flex_1()),
+        )
+        .child(
+            Button::new("study_editor_find_next", theme)
+                .variant(ButtonVariant::Secondary)
+                .button_size(ButtonSize::Sm)
+                .label("Next")
+                .on_click(move |_, window, cx| {
+                    find_app.update(cx, |surface, surface_cx| {
+                        surface.find_in_study_editor(window, surface_cx);
+                    });
+                }),
+        )
+        .child(
+            Button::new("study_editor_find_close", theme)
+                .variant(ButtonVariant::Ghost)
+                .button_size(ButtonSize::Sm)
+                .icon(header_icon(HugeIcon::Close))
+                .on_click(move |_, _, cx| {
+                    close_app.update(cx, WorkspaceSurface::toggle_study_editor_find);
+                }),
+        )
+        .into_any_element()
+}
+
+fn snippets_strip(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> AnyElement {
+    let colors = theme.colors;
+    let mut row = div().flex().flex_wrap().items_center().gap_1();
+    for (idx, snippet) in STUDY_SNIPPETS.iter().enumerate() {
+        let insert_app = app.clone();
+        let body = snippet.body;
+        let doc = snippet.doc;
+        row = row.child(
+            Button::new(("study_editor_snip", idx), theme)
+                .variant(ButtonVariant::Secondary)
+                .button_size(ButtonSize::Sm)
+                .label(snippet.label)
+                .on_click(move |_, window, cx| {
+                    insert_app.update(cx, |surface, surface_cx| {
+                        surface.insert_study_editor_snippet(body, doc, window, surface_cx);
+                    });
+                }),
+        );
+    }
+    div()
+        .px_3()
+        .py_1p5()
+        .flex_none()
         .flex()
         .flex_col()
         .gap_1()
-        .p_2()
-        .min_h(px(76.0))
-        .max_h(px(130.0))
-        .rounded(px(6.0))
         .bg(gpui_color(colors.surface_secondary))
-        .border_1()
-        .border_color(gpui_color(colors.border_secondary));
+        .border_b_1()
+        .border_color(gpui_color(colors.border_subtle))
+        .child(row)
+        .child(
+            div()
+                .text_xs()
+                .truncate()
+                .text_color(gpui_color(colors.text_muted))
+                .child(STUDY_API_QUICK_REF),
+        )
+        .into_any_element()
+}
 
-    if let Some(busy) = &dialog.busy_label {
-        panel = panel.child(
+fn diagnostics_drawer(
+    app: &Entity<WorkspaceSurface>,
+    editor: &StudyEditorDialogState,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let close_app = app.clone();
+    let mut list = div()
+        .id("study_editor_diag_list")
+        .max_h(px(120.0))
+        .overflow_y_scroll()
+        .px_3()
+        .py_1p5()
+        .flex()
+        .flex_col()
+        .gap_1();
+
+    if let Some(busy) = &editor.busy_label {
+        list = list.child(
             div()
                 .text_xs()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(gpui_color(colors.ring_primary))
                 .child(busy.clone()),
         );
-    } else if let Some(status) = &dialog.status_message {
-        panel = panel.child(
+    } else if let Some(status) = &editor.status_message {
+        list = list.child(
             div()
                 .text_xs()
                 .text_color(gpui_color(colors.text_secondary))
@@ -898,7 +1561,7 @@ fn diagnostics_console(
         );
     }
 
-    for (idx, diag) in dialog.diagnostics.iter().take(6).enumerate() {
+    for (idx, diag) in editor.diagnostics.iter().take(12).enumerate() {
         let code = diag.code.as_deref().unwrap_or("STUDY");
         let label = format!("{}:{} [{code}] {}", diag.line, diag.column, diag.message);
         let text_color = match diag.severity {
@@ -909,7 +1572,7 @@ fn diagnostics_console(
         let jump_app = app.clone();
         let line = diag.line;
         let column = diag.column;
-        panel = panel.child(
+        list = list.child(
             div()
                 .id(("study_editor_diag", idx))
                 .text_xs()
@@ -923,164 +1586,142 @@ fn diagnostics_console(
                 .child(label),
         );
     }
-    panel.into_any_element()
-}
 
-fn editor_toolbar(
-    app: &Entity<WorkspaceSurface>,
-    dialog: &StudyEditorDialogState,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let colors = theme.colors;
-    let mut snippets = div().flex().flex_wrap().items_center().gap_1();
-    for (idx, snippet) in STUDY_SNIPPETS.iter().enumerate() {
-        let insert_app = app.clone();
-        let body = snippet.body;
-        let doc = snippet.doc;
-        snippets = snippets.child(
-            Button::new(("study_editor_snip", idx), theme)
-                .variant(ButtonVariant::Secondary)
-                .button_size(ButtonSize::Sm)
-                .label(snippet.label)
-                .on_click(move |_, window, cx| {
-                    insert_app.update(cx, |surface, surface_cx| {
-                        surface.insert_study_editor_snippet(body, doc, window, surface_cx);
-                    });
-                }),
-        );
-    }
-    let find_app = app.clone();
-    let find_row = div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .w(px(220.0))
-        .h(px(28.0))
-        .child(Input::new(&dialog.search_input).platform(theme).flex_1())
-        .child(
-            Button::new("study_editor_find_next", theme)
-                .variant(ButtonVariant::Secondary)
-                .button_size(ButtonSize::Sm)
-                .label("Find")
-                .on_click(move |_, window, cx| {
-                    find_app.update(cx, |surface, surface_cx| {
-                        surface.find_in_study_editor(window, surface_cx);
-                    });
-                }),
-        );
     div()
+        .flex_none()
         .flex()
         .flex_col()
-        .gap_1()
+        .bg(gpui_color(colors.surface_secondary))
+        .border_t_1()
+        .border_color(gpui_color(colors.border_subtle))
         .child(
             div()
+                .h(px(26.0))
+                .px_3()
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap_2()
-                .child(snippets)
-                .child(find_row),
+                .border_b_1()
+                .border_color(gpui_color(colors.border_subtle))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(gpui_color(colors.text_secondary))
+                        .child(if editor.diagnostics.is_empty() {
+                            "Console".to_string()
+                        } else {
+                            format!("Console ({})", editor.diagnostics.len())
+                        }),
+                )
+                .child(
+                    Button::new("study_editor_console_close", theme)
+                        .variant(ButtonVariant::Ghost)
+                        .button_size(ButtonSize::Sm)
+                        .icon(header_icon(HugeIcon::Close))
+                        .on_click(move |_, _, cx| {
+                            close_app.update(cx, WorkspaceSurface::toggle_study_editor_console);
+                        }),
+                ),
+        )
+        .child(list)
+        .into_any_element()
+}
+
+fn editor_status_bar(
+    app: &Entity<WorkspaceSurface>,
+    editor: &StudyEditorDialogState,
+    theme: &AerisTheme,
+    cx: &App,
+) -> AnyElement {
+    let colors = theme.colors;
+    let (line, col) = editor.source_input.read(cx).cursor_line_col();
+    let toggle_console = app.clone();
+    let (status_text, status_color) = if let Some(busy) = &editor.busy_label {
+        (busy.clone(), gpui_color(colors.ring_primary))
+    } else if !editor.diagnostics.is_empty() {
+        (
+            format!("{} issue(s)", editor.diagnostics.len()),
+            gpui_color(colors.text_danger),
+        )
+    } else if let Some(msg) = &editor.status_message {
+        (msg.clone(), gpui_color(colors.text_secondary))
+    } else {
+        ("Ready".to_string(), gpui_color(colors.text_muted))
+    };
+
+    let toolchain = match &editor.dev_pack_status {
+        Some(StudyDevPackStatus::Ready { rustc_version, .. }) => rustc_version
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Some(StudyDevPackStatus::MissingSandboxTarget { .. }) => "Missing wasm32".to_string(),
+        Some(StudyDevPackStatus::Unavailable) => "No rustc".to_string(),
+        None => "Checking...".to_string(),
+    };
+
+    div()
+        .h(px(24.0))
+        .px_3()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .bg(gpui_color(colors.surface_secondary))
+        .border_t_1()
+        .border_color(gpui_color(colors.border_subtle))
+        .child(
+            div()
+                .id("study_editor_status_btn")
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(status_color)
+                .on_click(move |_, _, cx| {
+                    toggle_console.update(cx, WorkspaceSurface::toggle_study_editor_console);
+                })
+                .child(status_text),
         )
         .child(
             div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_3()
                 .text_xs()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(STUDY_API_QUICK_REF),
+                .text_color(gpui_color(colors.text_muted))
+                .child(format!("Ln {line}, Col {col}"))
+                .child(format!("Rust WASM · {toolchain}")),
         )
         .into_any_element()
 }
 
-fn dev_pack_footer(
+pub(super) fn study_editor_docked_panel(
     app: &Entity<WorkspaceSurface>,
-    dialog: &StudyEditorDialogState,
+    editor: &StudyEditorDialogState,
     theme: &AerisTheme,
+    cx: &App,
 ) -> AnyElement {
     let colors = theme.colors;
-    let is_busy = dialog.busy_label.is_some();
-    let toolchain_line = match &dialog.dev_pack_status {
-        None => "Dev Pack: Checking Rust toolchain...".to_string(),
-        Some(StudyDevPackStatus::Ready {
-            rustc_version,
-            target_triple,
-        }) => format!("Dev Pack: Ready ({rustc_version} · {target_triple})"),
-        Some(StudyDevPackStatus::MissingSandboxTarget {
-            rustc_version,
-            required_target,
-        }) => format!("Dev Pack: {rustc_version} (missing `{required_target}`)"),
-        Some(StudyDevPackStatus::Unavailable) => {
-            "Dev Pack: No local `rustc` detected (install Rust + wasm32-unknown-unknown)"
-                .to_string()
-        }
-    };
-    let mut row = div().flex().items_center().gap_2().child(
-        div()
-            .text_xs()
-            .truncate()
-            .text_color(gpui_color(colors.text_secondary))
-            .child(toolchain_line),
-    );
-    if matches!(
-        dialog.dev_pack_status,
-        Some(StudyDevPackStatus::MissingSandboxTarget { .. })
-    ) {
-        let install_app = app.clone();
-        row = row.child(
-            Button::new("study_editor_install_target", theme)
-                .variant(ButtonVariant::Secondary)
-                .button_size(ButtonSize::Sm)
-                .label("Install WASM target")
-                .disabled(is_busy)
-                .on_click(move |_, _, cx| {
-                    install_app.update(cx, WorkspaceSurface::install_study_editor_dev_pack_target);
-                }),
-        );
-    }
-    let clean_app = app.clone();
-    row = row.child(
-        Button::new("study_editor_recheck_pack", theme)
-            .variant(ButtonVariant::Ghost)
-            .button_size(ButtonSize::Sm)
-            .label("Re-check")
-            .disabled(is_busy)
-            .on_click(move |_, _, cx| {
-                clean_app.update(cx, WorkspaceSurface::clean_study_editor_cache);
-            }),
-    );
-    row.into_any_element()
-}
+    let has_selection = editor.selected_id.is_some();
+    let show_console = editor.console_open || !editor.diagnostics.is_empty();
+    let dismiss_popover = app.clone();
 
-pub(super) fn study_editor_dialog_layer(
-    app: &Entity<WorkspaceSurface>,
-    dialog: &StudyEditorDialogState,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let colors = theme.colors;
-    let dismiss = app.clone();
-    let preview = app.clone();
-    let add_to_chart = app.clone();
-    let cancel = app.clone();
-    let save = app.clone();
-    let has_selection = dialog.selected_id.is_some();
-    let is_busy = dialog.busy_label.is_some();
-
-    let editor_pane = if has_selection {
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(editor_toolbar(app, dialog, theme))
-            .child(
-                TextArea::new(&dialog.source_input, px(360.0), theme)
-                    .syntax_highlighter(dialog.highlighter.clone()),
-            )
-            .child(diagnostics_console(app, dialog, theme))
+    let code_canvas = if has_selection {
+        TextArea::code_editor(&editor.source_input, theme)
+            .syntax_highlighter(editor.highlighter.clone())
+            .line_numbers(editor.line_numbers)
+            .font_size(px(editor.font_size))
             .into_any_element()
     } else {
         div()
             .flex_1()
-            .min_w_0()
+            .w_full()
+            .min_h_0()
             .flex()
             .items_center()
             .justify_center()
@@ -1090,61 +1731,98 @@ pub(super) fn study_editor_dialog_layer(
             .into_any_element()
     };
 
-    Dialog::new(
-        "study_editor_dialog",
-        DialogSize::Xl,
-        theme,
-        move |_, cx| {
-            dismiss.update(cx, WorkspaceSurface::close_study_editor_dialog);
-        },
-    )
-    .title(tr!(panels::STUDY_EDITOR))
-    .subtitle(tr!(panels::STUDY_EDITOR_SUBTITLE))
-    .max_height(px(720.0))
-    .child(
-        div()
-            .flex()
-            .gap_3()
-            .w_full()
-            .min_h(px(520.0))
-            .child(project_sidebar(app, dialog, theme))
-            .child(editor_pane),
-    )
-    .footer_leading(dev_pack_footer(app, dialog, theme))
-    .action(
-        Button::new("study_editor_close", theme)
-            .variant(ButtonVariant::Secondary)
-            .label(tr!(common::CANCEL))
-            .on_click(move |_, _, cx| {
-                cancel.update(cx, WorkspaceSurface::close_study_editor_dialog);
-            }),
-    )
-    .action(
-        Button::new("study_editor_preview", theme)
-            .variant(ButtonVariant::Secondary)
-            .label("Preview test")
-            .disabled(!has_selection || is_busy)
-            .on_click(move |_, _, cx| {
-                preview.update(cx, WorkspaceSurface::run_study_editor_preview_test);
-            }),
-    )
-    .action(
-        Button::new("study_editor_add_chart", theme)
-            .variant(ButtonVariant::Secondary)
-            .label("Add / Reload on chart")
-            .disabled(!has_selection || is_busy)
-            .on_click(move |_, _, cx| {
-                add_to_chart.update(cx, WorkspaceSurface::add_study_editor_project_to_chart);
-            }),
-    )
-    .action(
-        Button::new("study_editor_save", theme)
-            .variant(ButtonVariant::Primary)
-            .label(tr!(panels::STUDY_EDITOR_VALIDATE_SAVE))
-            .disabled(!has_selection || is_busy)
-            .on_click(move |_, _, cx| {
-                save.update(cx, WorkspaceSurface::validate_and_save_study_editor_project);
-            }),
-    )
-    .into_any_element()
+    let popover_el = match editor.popover {
+        StudyEditorPopover::None => None,
+        StudyEditorPopover::Scripts => Some(scripts_popover(app, editor, theme)),
+        StudyEditorPopover::More => Some(more_popover(app, editor, theme)),
+    };
+
+    let mut panel = div()
+        .id("study_editor_docked_panel")
+        .relative()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .bg(gpui_color(colors.surface))
+        .when(editor.popover != StudyEditorPopover::None, |el| {
+            el.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                dismiss_popover.update(cx, |surface, surface_cx| {
+                    surface.toggle_study_editor_popover(StudyEditorPopover::None, surface_cx);
+                });
+            })
+        });
+
+    panel = match editor.dock {
+        StudyEditorDock::Right => {
+            let hover_resize = gpui_color(colors.ring_primary).opacity(0.45);
+            panel
+                .w(px(editor.width))
+                .h_full()
+                .border_l_1()
+                .border_color(gpui_color(colors.border))
+                .child(
+                    div()
+                        .id("study_editor_width_handle")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(px(4.0))
+                        .cursor(gpui::CursorStyle::ResizeLeftRight)
+                        .hover(move |style| style.bg(hover_resize))
+                        .on_drag(StudyEditorWidthDrag, |drag, _, _, cx| {
+                            cx.new(|_| drag.clone())
+                        }),
+                )
+        }
+        StudyEditorDock::Bottom => {
+            let hover_resize = gpui_color(colors.ring_primary).opacity(0.45);
+            panel
+                .w_full()
+                .h(px(editor.height))
+                .border_t_1()
+                .border_color(gpui_color(colors.border))
+                .child(
+                    div()
+                        .id("study_editor_height_handle")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(4.0))
+                        .cursor(gpui::CursorStyle::ResizeUpDown)
+                        .hover(move |style| style.bg(hover_resize))
+                        .on_drag(StudyEditorHeightDrag, |drag, _, _, cx| {
+                            cx.new(|_| drag.clone())
+                        }),
+                )
+        }
+    };
+
+    panel
+        .child(editor_top_bar(app, editor, theme))
+        .child(editor_action_bar(app, editor, theme))
+        .when(editor.find_open, |el| {
+            el.child(find_strip(app, editor, theme))
+        })
+        .when(editor.snippets_open, |el| {
+            el.child(snippets_strip(app, theme))
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(code_canvas),
+        )
+        .when(show_console, |el| {
+            el.child(diagnostics_drawer(app, editor, theme))
+        })
+        .child(editor_status_bar(app, editor, theme, cx))
+        .children(popover_el)
+        .into_any_element()
 }

@@ -704,13 +704,14 @@ pub(super) fn provider_attribution(
 }
 
 /// A `ButtonSize::Default` toggle (28 px) with 4 px of rail on each side.
-const PANEL_SIDEBAR_WIDTH: f32 = 36.0;
+pub(super) const PANEL_SIDEBAR_WIDTH: f32 = 36.0;
 
 /// What the panel sidebar shows for the active workspace surface.
 #[derive(Clone, Copy)]
 pub(super) struct PanelSidebarState {
     pub(super) side_panels: SidePanelVisibility,
     pub(super) context_visible: bool,
+    pub(super) study_editor_open: bool,
     /// Order book, order entry and Time & Sales need a selected market.
     pub(super) market_selected: bool,
     /// Announcements the notifications bell marks as unread.
@@ -722,6 +723,7 @@ impl PanelSidebarState {
         Self {
             side_panels: surface.chrome.side_panels(),
             context_visible: surface.context_panel.is_visible(),
+            study_editor_open: surface.study_editor.is_some(),
             market_selected: surface.has_market_selection(),
             unread_notifications,
         }
@@ -762,6 +764,36 @@ pub(super) fn panel_sidebar(
         theme,
         app.clone(),
     );
+    let editor_terminal = terminal.clone();
+    let editor_app = app.clone();
+    let study_editor_toggle = Button::new("study_editor_rail_toggle", theme)
+        .variant(ButtonVariant::Ghost)
+        .button_size(ButtonSize::Default)
+        .icon(header_icon(HugeIcon::Template))
+        .aria_label(tr!(panels::STUDY_EDITOR))
+        .tooltip(
+            TooltipSpec::new(tr!(panels::STUDY_EDITOR), theme)
+                .show_delay(TOOLTIP_OPEN_DELAY)
+                .placement(TooltipPlacement::Left),
+        )
+        .text_toggle()
+        .selected(state.study_editor_open)
+        .on_click(move |_, window, cx| {
+            let data_root = editor_terminal
+                .read(cx)
+                .saved
+                .writer()
+                .map(|writer| writer.data_root().to_path_buf())
+                .or_else(|| {
+                    aeris_platform_runtime::active_data_root()
+                        .ok()
+                        .map(|root| root.path().to_path_buf())
+                })
+                .unwrap_or_default();
+            editor_app.update(cx, |surface, surface_cx| {
+                surface.toggle_study_editor_panel(data_root, window, surface_cx);
+            });
+        });
     div()
         .flex_none()
         .h_full()
@@ -778,6 +810,7 @@ pub(super) fn panel_sidebar(
         .child(side_panel(SidePanel::OrderEntry))
         .child(side_panel(SidePanel::TimeSales))
         .child(context)
+        .child(study_editor_toggle)
         .child(div().flex_1())
         .child(notifications_bell(
             terminal,
