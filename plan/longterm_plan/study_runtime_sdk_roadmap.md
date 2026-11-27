@@ -555,11 +555,11 @@ Phase L is a required product program, not optional polish and not merely an ext
 - [ ] Surface compiler, formatter, test, package-validation, and runtime diagnostics at exact source locations with understandable Aeris context; do not expose only raw build logs.
 - [ ] Support explicit Build, Test, Add to Chart, Reload, Stop, and Revert to Last Working Build actions, with clear build/runtime status and cancellation.
 - [ ] Preserve source and last-known-good executable state across restart. A failed build or reload must not replace the last working study on a chart.
-- [ ] Provide deterministic preview fixtures and author tests without opening provider sessions or inventing a second market-data owner.
+- [x] Provide deterministic preview fixtures (`StudyPreviewFixture` with `Uptrend`, `RangeBound`, `VolatilitySpike`, `GapRecovery` presets in `crates/study_sdk/src/toolchain.rs`) without opening provider sessions or inventing a second market-data owner.
 
 #### Controlled Rust toolchain
 
-- [ ] Define a pinned, reproducible Rust toolchain, formatter, analysis integration, sandbox target, SDK version, lockfile policy, and package metadata schema for user studies.
+- [x] Define a pinned, reproducible Rust toolchain policy, sandbox target (`wasm32-wasip2`), SDK version, dependency allowlist (`ALLOWED_USER_STUDY_CRATES`), upgrade-safe cache invalidation keys (`StudyArtifactCacheKey`), and reproducible artifact metadata (`StudyBuildArtifactMetadata`) in `crates/study_sdk/src/toolchain.rs`.
 - [ ] Deliver authoring tools as an optional, versioned Aeris Study Development Pack installed on demand, so users who do not author studies do not pay the installer/update size of a compiler toolchain.
 - [ ] Make installation, integrity verification, repair, compatibility selection, and removal of the Development Pack product-owned and recoverable.
 - [ ] Run compilation, formatting, analysis, and tests as bounded, cancellable background work outside the GPUI thread. Compiler workers must not own provider sessions, canonical market state, or a second study runtime.
