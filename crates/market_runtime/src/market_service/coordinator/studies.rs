@@ -47,6 +47,30 @@ pub(super) fn study_live_market_data<'a>(
 }
 
 impl Coordinator<'_> {
+    pub(super) fn handle_study_command(&mut self, command: super::Command) {
+        match command {
+            super::Command::RegisterStudy(client_id, consumer_id, registration, reply) => {
+                let _ =
+                    reply.send(self.handle_register_study(client_id, consumer_id, registration));
+            }
+            super::Command::ReinitializeStudy(client_id, study_id, registration, reply) => {
+                let _ =
+                    reply.send(self.handle_reinitialize_study(client_id, study_id, registration));
+            }
+            super::Command::RemoveStudy(client_id, study_id, reply) => {
+                let _ = reply.send(self.handle_remove_study(client_id, study_id));
+            }
+            super::Command::SetStudyChartContext(client_id, consumer_id, context, reply) => {
+                let _ = reply.send(self.handle_set_study_chart_context(
+                    client_id,
+                    consumer_id,
+                    context,
+                ));
+            }
+            _ => {}
+        }
+    }
+
     pub(super) fn handle_register_study(
         &mut self,
         client_id: ClientId,
@@ -103,6 +127,28 @@ impl Coordinator<'_> {
         }
         self.reconcile_study_market_data()?;
         Ok(removed)
+    }
+
+    pub(super) fn handle_set_study_chart_context(
+        &mut self,
+        client_id: ClientId,
+        consumer_id: ConsumerId,
+        context: crate::study::StudyChartContext,
+    ) -> Result<Vec<super::super::StudyInstanceId>, String> {
+        authorize_consumer(&self.engine, client_id, consumer_id)?;
+        let notified = self.studies.set_chart_context(consumer_id, context);
+        let mut executed = Vec::new();
+        for study_id in notified {
+            if let Ok(batch) = self.execute_study_change(StudyChange::ReadySubtree(study_id)) {
+                executed.extend(batch.executed);
+            }
+        }
+        if !executed.is_empty() {
+            executed.sort_unstable();
+            executed.dedup();
+            self.publish_study_outputs(&executed);
+        }
+        Ok(executed)
     }
 
     pub(super) fn handle_reinitialize_study(

@@ -244,6 +244,109 @@ fn text_control(
     )
 }
 
+fn timeframe_control(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &StudySettingsDialogState,
+    control_id: usize,
+    spec: &StudySettingSpec,
+    allow_current_chart: bool,
+    enabled: bool,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let current = match dialog.draft_values.get(&spec.identifier) {
+        Some(StudySettingValue::Timeframe(tf)) => tf.to_label(),
+        _ => String::new(),
+    };
+    let menu = format!("study_timeframe_{control_id}");
+    let setting_identifier = spec.identifier.clone();
+    let (label, _) = setting_text(dialog, spec);
+    let mut options: Vec<(&str, &str)> = Vec::new();
+    if allow_current_chart {
+        options.push(("", "Chart"));
+    }
+    options.extend([
+        ("1m", "1m"),
+        ("3m", "3m"),
+        ("5m", "5m"),
+        ("15m", "15m"),
+        ("30m", "30m"),
+        ("1h", "1h"),
+        ("4h", "4h"),
+        ("1D", "1D"),
+        ("1W", "1W"),
+        ("1M", "1M"),
+    ]);
+    SettingDropdown {
+        menu: &menu,
+        label: &label,
+        open_menu: dialog.menu.as_deref(),
+        enabled,
+        choices: options
+            .into_iter()
+            .map(|(value, title)| DropdownChoice {
+                label: title.into(),
+                value: value.to_string(),
+                selected: current == value,
+            })
+            .collect(),
+    }
+    .render(
+        app,
+        move |surface, selected: String, cx| {
+            surface.select_study_setting_timeframe(&setting_identifier, &selected, cx);
+        },
+        theme,
+    )
+}
+
+fn source_control(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &StudySettingsDialogState,
+    control_id: usize,
+    spec: &StudySettingSpec,
+    enabled: bool,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let current = match dialog.draft_values.get(&spec.identifier) {
+        Some(StudySettingValue::Source(src)) => src.to_label(),
+        _ => "close".to_string(),
+    };
+    let menu = format!("study_source_{control_id}");
+    let setting_identifier = spec.identifier.clone();
+    let (label, _) = setting_text(dialog, spec);
+    let options = [
+        ("open", "Open"),
+        ("high", "High"),
+        ("low", "Low"),
+        ("close", "Close"),
+        ("hl2", "HL2"),
+        ("hlc3", "HLC3"),
+        ("ohlc4", "OHLC4"),
+        ("volume", "Volume"),
+    ];
+    SettingDropdown {
+        menu: &menu,
+        label: &label,
+        open_menu: dialog.menu.as_deref(),
+        enabled,
+        choices: options
+            .into_iter()
+            .map(|(value, title)| DropdownChoice {
+                label: title.into(),
+                value: value.to_string(),
+                selected: current == value,
+            })
+            .collect(),
+    }
+    .render(
+        app,
+        move |surface, selected: String, cx| {
+            surface.select_study_setting_source(&setting_identifier, &selected, cx);
+        },
+        theme,
+    )
+}
+
 fn setting_control(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
@@ -269,16 +372,28 @@ fn setting_control(
         StudySettingControl::Choice { options } => {
             choice_control(app, dialog, control_id, spec, options, enabled, theme)
         }
+        StudySettingControl::Timeframe {
+            allow_current_chart,
+        } => timeframe_control(
+            app,
+            dialog,
+            control_id,
+            spec,
+            *allow_current_chart,
+            enabled,
+            theme,
+        ),
+        StudySettingControl::Source { .. } => {
+            source_control(app, dialog, control_id, spec, enabled, theme)
+        }
         StudySettingControl::Integer { .. }
         | StudySettingControl::Decimal { .. }
         | StudySettingControl::Price { .. }
         | StudySettingControl::Text
         | StudySettingControl::Color
         | StudySettingControl::Symbol { .. }
-        | StudySettingControl::Timeframe { .. }
         | StudySettingControl::Session
-        | StudySettingControl::Timestamp
-        | StudySettingControl::Source { .. } => {
+        | StudySettingControl::Timestamp => {
             text_control(dialog.inputs.get(&spec.identifier), enabled, theme)
         }
     }

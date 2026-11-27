@@ -6,7 +6,7 @@
 //! execution of user-authored studies remains gated behind the versioned sandbox boundary.
 
 use crate::{MAXIMUM_STUDY_IDENTIFIER_BYTES, STUDY_SDK_COMPATIBILITY_EPOCH};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum user-authored study projects retained in one workspace library.
 pub const MAXIMUM_USER_STUDY_PROJECTS: usize = 64;
@@ -310,6 +310,188 @@ pub fn definition(series: BarSeriesKey) -> StudyDefinition {{
     }
 }
 
+/// One user-authored Rust study project held by the Study Editor library.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StudyProject {
+    pub manifest: StudyProjectManifest,
+    pub source: String,
+    /// Last-known-good source preserved across failed edits/builds so Revert always works.
+    pub last_good_source: Option<String>,
+    /// Bounded diagnostics from the latest build or validation attempt.
+    pub diagnostics: Vec<StudyDiagnostic>,
+}
+
+/// Errors returned by [`StudyProjectLibrary`] mutations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StudyProjectLibraryError {
+    LibraryFull { maximum: usize },
+    DuplicateIdentifier(String),
+    UnknownProject(String),
+    NoLastGoodBuild(String),
+    Validation(StudyProjectValidationError),
+}
+
+impl From<StudyProjectValidationError> for StudyProjectLibraryError {
+    fn from(error: StudyProjectValidationError) -> Self {
+        Self::Validation(error)
+    }
+}
+
+/// Bounded in-memory owner of user-authored Rust study projects for the Study Editor.
+///
+/// Capacity is capped at [`MAXIMUM_USER_STUDY_PROJECTS`]; creating past the cap is refused
+/// rather than silently evicting a user's study.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StudyProjectLibrary {
+    projects: BTreeMap<String, StudyProject>,
+}
+
+impl StudyProjectLibrary {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            projects: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.projects.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.projects.is_empty()
+    }
+
+    #[must_use]
+    pub fn get(&self, identifier: &str) -> Option<&StudyProject> {
+        self.projects.get(identifier)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &StudyProject> {
+        self.projects.values()
+    }
+
+    /// Creates a new project from a starter template without evicting existing projects.
+    ///
+    /// # Errors
+    /// Returns an error if the library is full, `identifier` already exists, or validation fails.
+    pub fn create_from_template(
+        &mut self,
+        identifier: &str,
+        name: &str,
+        template: StudyProjectTemplate,
+    ) -> Result<&StudyProject, StudyProjectLibraryError> {
+        if self.projects.len() >= MAXIMUM_USER_STUDY_PROJECTS {
+            return Err(StudyProjectLibraryError::LibraryFull {
+                maximum: MAXIMUM_USER_STUDY_PROJECTS,
+            });
+        }
+        if self.projects.contains_key(identifier) {
+            return Err(StudyProjectLibraryError::DuplicateIdentifier(
+                identifier.to_string(),
+            ));
+        }
+        let (manifest, source) = template.scaffold(identifier, name);
+        manifest.validate()?;
+        validate_study_source(&source)?;
+        let key = manifest.identifier.clone();
+        Ok(self.projects.entry(key).or_insert(StudyProject {
+            manifest,
+            source,
+            last_good_source: None,
+            diagnostics: Vec::new(),
+        }))
+    }
+
+    /// Replaces the editable source text while preserving `last_good_source`.
+    ///
+    /// # Errors
+    /// Returns an error if the project does not exist or the source exceeds bounds.
+    pub fn update_source(
+        &mut self,
+        identifier: &str,
+        source: String,
+    ) -> Result<(), StudyProjectLibraryError> {
+        validate_study_source(&source)?;
+        let project = self
+            .projects
+            .get_mut(identifier)
+            .ok_or_else(|| StudyProjectLibraryError::UnknownProject(identifier.to_string()))?;
+        project.source = source;
+        Ok(())
+    }
+
+    /// Records a successful build, advancing `last_good_source` and digest metadata.
+    ///
+    /// # Errors
+    /// Returns an error if the project does not exist or digests are malformed.
+    pub fn record_build_success(
+        &mut self,
+        identifier: &str,
+        source_sha256: String,
+        artifact_sha256: String,
+    ) -> Result<(), StudyProjectLibraryError> {
+        let project = self
+            .projects
+            .get_mut(identifier)
+            .ok_or_else(|| StudyProjectLibraryError::UnknownProject(identifier.to_string()))?;
+        let mut candidate = project.manifest.clone();
+        candidate.last_good_source_sha256 = Some(source_sha256);
+        candidate.last_good_artifact_sha256 = Some(artifact_sha256);
+        candidate.validate()?;
+        project.manifest = candidate;
+        project.last_good_source = Some(project.source.clone());
+        project.diagnostics.clear();
+        Ok(())
+    }
+
+    /// Records bounded diagnostics from a failed build without overwriting `last_good_source`.
+    ///
+    /// # Errors
+    /// Returns an error if the project does not exist.
+    pub fn record_build_failure(
+        &mut self,
+        identifier: &str,
+        mut diagnostics: Vec<StudyDiagnostic>,
+    ) -> Result<(), StudyProjectLibraryError> {
+        let project = self
+            .projects
+            .get_mut(identifier)
+            .ok_or_else(|| StudyProjectLibraryError::UnknownProject(identifier.to_string()))?;
+        diagnostics.truncate(MAXIMUM_STUDY_DIAGNOSTICS);
+        project.diagnostics = diagnostics;
+        Ok(())
+    }
+
+    /// Reverts the editable source back to the last successfully built source.
+    ///
+    /// # Errors
+    /// Returns an error if the project does not exist or has never built successfully.
+    pub fn revert_to_last_good(
+        &mut self,
+        identifier: &str,
+    ) -> Result<(), StudyProjectLibraryError> {
+        let project = self
+            .projects
+            .get_mut(identifier)
+            .ok_or_else(|| StudyProjectLibraryError::UnknownProject(identifier.to_string()))?;
+        let good = project
+            .last_good_source
+            .clone()
+            .ok_or_else(|| StudyProjectLibraryError::NoLastGoodBuild(identifier.to_string()))?;
+        project.source = good;
+        project.diagnostics.clear();
+        Ok(())
+    }
+
+    /// Removes one project from the library.
+    pub fn delete(&mut self, identifier: &str) -> bool {
+        self.projects.remove(identifier).is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +524,47 @@ mod tests {
         assert_eq!(
             bad_digest.validate(),
             Err(StudyProjectValidationError::InvalidDigest)
+        );
+    }
+
+    #[test]
+    fn library_enforces_capacity_and_reverts_failed_edits_to_last_good_build() {
+        let mut library = StudyProjectLibrary::new();
+        library
+            .create_from_template(
+                "user.alpha",
+                "Alpha",
+                StudyProjectTemplate::StatelessOverlay,
+            )
+            .expect("creates project");
+        let original_source = library.get("user.alpha").unwrap().source.clone();
+        let digest = "a".repeat(64);
+        library
+            .record_build_success("user.alpha", digest.clone(), digest)
+            .expect("records good build");
+        library
+            .update_source("user.alpha", "broken rust code".to_string())
+            .expect("updates editable source");
+        library
+            .record_build_failure(
+                "user.alpha",
+                vec![StudyDiagnostic {
+                    severity: StudyDiagnosticSeverity::Error,
+                    line: 1,
+                    column: 1,
+                    code: Some("E0425".to_string()),
+                    message: "expected item".to_string(),
+                }],
+            )
+            .expect("records failure");
+        assert_eq!(library.get("user.alpha").unwrap().diagnostics.len(), 1);
+        library
+            .revert_to_last_good("user.alpha")
+            .expect("reverts cleanly");
+        assert_eq!(library.get("user.alpha").unwrap().source, original_source);
+        assert_eq!(
+            library.get("user.alpha").unwrap().diagnostics,
+            Vec::<StudyDiagnostic>::new()
         );
     }
 }

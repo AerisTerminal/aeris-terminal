@@ -944,18 +944,10 @@ impl Coordinator<'_> {
                     &reply,
                 );
             }
-            Command::RegisterStudy(client_id, consumer_id, registration, reply) => {
-                let result = self.handle_register_study(client_id, consumer_id, registration);
-                let _ = reply.send(result);
-            }
-            Command::ReinitializeStudy(client_id, study_id, registration, reply) => {
-                let result = self.handle_reinitialize_study(client_id, study_id, registration);
-                let _ = reply.send(result);
-            }
-            Command::RemoveStudy(client_id, study_id, reply) => {
-                let result = self.handle_remove_study(client_id, study_id);
-                let _ = reply.send(result);
-            }
+            Command::RegisterStudy(..)
+            | Command::ReinitializeStudy(..)
+            | Command::RemoveStudy(..)
+            | Command::SetStudyChartContext(..) => self.handle_study_command(command),
             Command::SearchProviderInstruments(client_id, search, reply) => {
                 self.handle_provider_search(client_id, search, &reply);
             }

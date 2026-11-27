@@ -429,6 +429,12 @@ enum Command {
         Reply<Vec<StudyInstanceId>>,
     ),
     RemoveStudy(ClientId, StudyInstanceId, Reply<Vec<StudyInstanceId>>),
+    SetStudyChartContext(
+        ClientId,
+        ConsumerId,
+        crate::study::StudyChartContext,
+        Reply<Vec<StudyInstanceId>>,
+    ),
     SearchProviderInstruments(ClientId, SearchProviderInstruments, Reply<()>),
     SelectProviderInstrument(ClientId, SelectProviderInstrument, Reply<()>),
     ScreenProviderMarkets(ClientId, ScreenProviderMarkets, Reply<()>),

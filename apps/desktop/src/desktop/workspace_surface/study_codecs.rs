@@ -311,11 +311,12 @@ pub(super) fn study_setting_input_text(value: &StudySettingValue) -> Option<Stri
         StudySettingValue::Text(value) => Some(value.clone()),
         StudySettingValue::Color(color) => Some(color.to_hex()),
         StudySettingValue::Symbol(symbol) => Some(symbol.to_label()),
-        StudySettingValue::Timeframe(tf) => Some(tf.to_label()),
         StudySettingValue::Session(session) => Some(session.to_label()),
         StudySettingValue::Timestamp(nanos) => Some(nanos.to_string()),
-        StudySettingValue::Source(source) => Some(source.to_label()),
-        StudySettingValue::Boolean(_) | StudySettingValue::Choice(_) => None,
+        StudySettingValue::Boolean(_)
+        | StudySettingValue::Choice(_)
+        | StudySettingValue::Timeframe(_)
+        | StudySettingValue::Source(_) => None,
     }
 }
 
@@ -324,11 +325,12 @@ pub(super) fn study_setting_value_from_dialog(
     spec: &StudySettingSpec,
     cx: &App,
 ) -> Result<StudySettingValue, String> {
-    use aeris_market_runtime::study::{
-        StudyColor, StudySession, StudySource, StudySymbolRef, StudyTimeframe,
-    };
+    use aeris_market_runtime::study::{StudyColor, StudySession, StudySymbolRef};
     match &spec.presentation.control {
-        StudySettingControl::Boolean | StudySettingControl::Choice { .. } => dialog
+        StudySettingControl::Boolean
+        | StudySettingControl::Choice { .. }
+        | StudySettingControl::Timeframe { .. }
+        | StudySettingControl::Source { .. } => dialog
             .draft_values
             .get(&spec.identifier)
             .cloned()
@@ -430,23 +432,6 @@ pub(super) fn study_setting_value_from_dialog(
                     )
                 })
         }
-        StudySettingControl::Timeframe { .. } => {
-            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
-                tr!(
-                    workspace::SETTING_EDITOR_UNAVAILABLE,
-                    label = spec.presentation.label
-                )
-            })?;
-            StudyTimeframe::parse_label(input.read(cx).value().as_ref())
-                .map(StudySettingValue::Timeframe)
-                .ok_or_else(|| {
-                    tr!(
-                        workspace::SETTING_PARSE_ERROR,
-                        label = spec.presentation.label,
-                        error = "unsupported timeframe"
-                    )
-                })
-        }
         StudySettingControl::Session => {
             let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
                 tr!(
@@ -481,23 +466,6 @@ pub(super) fn study_setting_value_from_dialog(
                     tr!(
                         workspace::SETTING_WHOLE_NUMBER,
                         label = spec.presentation.label
-                    )
-                })
-        }
-        StudySettingControl::Source { .. } => {
-            let input = dialog.inputs.get(&spec.identifier).ok_or_else(|| {
-                tr!(
-                    workspace::SETTING_EDITOR_UNAVAILABLE,
-                    label = spec.presentation.label
-                )
-            })?;
-            StudySource::parse_label(input.read(cx).value().as_ref())
-                .map(StudySettingValue::Source)
-                .ok_or_else(|| {
-                    tr!(
-                        workspace::SETTING_PARSE_ERROR,
-                        label = spec.presentation.label,
-                        error = "expected open, high, low, close, hl2, hlc3, ohlc4, volume, or study:<id>:<output>"
                     )
                 })
         }

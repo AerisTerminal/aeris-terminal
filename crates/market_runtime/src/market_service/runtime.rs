@@ -1251,6 +1251,27 @@ impl MarketService {
         })
     }
 
+    /// Updates the read-only visible chart viewport context for one consumer and
+    /// re-executes only that consumer's studies that opted into chart context.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, ownership, or coordinator failure.
+    pub fn set_study_chart_context(
+        &self,
+        client_id: u64,
+        consumer_id: u64,
+        context: crate::study::StudyChartContext,
+    ) -> Result<Vec<StudyInstanceId>, String> {
+        self.request(|reply| {
+            Ok(Command::SetStudyChartContext(
+                ClientId(id(client_id)?),
+                ConsumerId(id(consumer_id)?),
+                context,
+                reply,
+            ))
+        })
+    }
+
     /// Schedules one bounded exact provider-instrument search for an owned consumer.
     ///
     /// # Errors

@@ -6420,6 +6420,39 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn select_study_setting_timeframe(
+        &mut self,
+        identifier: &str,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(timeframe) = aeris_market_runtime::study::StudyTimeframe::parse_label(label)
+            && let Some(dialog) = self.study_settings_dialog_mut()
+        {
+            dialog.draft_values.insert(
+                identifier.to_string(),
+                StudySettingValue::Timeframe(timeframe),
+            );
+            self.preview_study_settings_dialog(cx);
+        }
+    }
+
+    pub(super) fn select_study_setting_source(
+        &mut self,
+        identifier: &str,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(source) = aeris_market_runtime::study::StudySource::parse_label(label)
+            && let Some(dialog) = self.study_settings_dialog_mut()
+        {
+            dialog
+                .draft_values
+                .insert(identifier.to_string(), StudySettingValue::Source(source));
+            self.preview_study_settings_dialog(cx);
+        }
+    }
+
     pub(super) fn reset_study_settings_dialog(
         &mut self,
         window: &mut Window,
