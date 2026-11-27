@@ -13,14 +13,15 @@ use crate::sandbox::{
     StudySandboxLimits,
 };
 use crate::{
-    BarPeriod, MAXIMUM_STUDY_ALERT_MESSAGE_BYTES, MAXIMUM_STUDY_ALERTS_PER_WAVE,
+    AggressorSide, BarPeriod, MAXIMUM_STUDY_ALERT_MESSAGE_BYTES, MAXIMUM_STUDY_ALERTS_PER_WAVE,
     MAXIMUM_STUDY_IDENTIFIER_BYTES, MAXIMUM_STUDY_POLYLINE_POINTS, MAXIMUM_STUDY_SCENE_OBJECTS,
     MAXIMUM_STUDY_SCENE_TEXT_BYTES, MAXIMUM_STUDY_TABLE_CELLS, NativeStudyProgram,
     StudyAlertEvent, StudyAlertFrequency, StudyBoxObject, StudyColor, StudyExecutionContext,
     StudyFillSpec, StudyInputSeries, StudyLabelObject, StudyLabelStyle, StudyLevelSpec,
-    StudyLineExtend, StudyLineFillObject, StudyLineObject, StudyLineStyle, StudyPoint,
-    StudyPolylineObject, StudySceneObject, StudySceneState, StudySettingValue, StudySource,
-    StudyTableCell, StudyTableObject, StudyTablePosition, StudyTextAlign, fixed_point_to_f64,
+    StudyLineExtend, StudyLineFillObject, StudyLineObject, StudyLineStyle, StudyMtfConfirmation,
+    StudyMtfGapPolicy, StudyPoint, StudyPolylineObject, StudyRequestContext, StudySceneObject,
+    StudySceneState, StudySettingValue, StudySource, StudyTableCell, StudyTableObject,
+    StudyTablePosition, StudyTextAlign, align_higher_timeframe_bar, fixed_point_to_f64,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -52,6 +53,12 @@ pub const WASM_EXPORT_SET_TIMESTAMPS: &str = "aeris_study_set_timestamps";
 /// Optional guest export receiving instrument & execution metadata:
 /// `(timeframe_secs: u32, price_scale: u32, qty_scale: u32, flags: u32, symbol_ptr: u32, symbol_len: u32)`.
 pub const WASM_EXPORT_SET_META: &str = "aeris_study_set_meta";
+/// Optional guest export receiving one aligned secondary (MTF or multi-symbol) OHLCV series:
+/// `(slot: u32, ptr: u32, bar_count: u32)` where `ptr` points to 5 contiguous `f64` columns.
+pub const WASM_EXPORT_SET_SECONDARY: &str = "aeris_study_set_secondary";
+/// Optional guest export receiving per-bar order-flow columns (`buy_vol`, `sell_vol`, `delta`,
+/// `trade_count`, `poc`): `(ptr: u32, bar_count: u32)`.
+pub const WASM_EXPORT_SET_ORDER_FLOW: &str = "aeris_study_set_order_flow";
 /// Optional guest export returning the linear-memory pointer of the encoded scene command buffer.
 pub const WASM_EXPORT_SCENE_PTR: &str = "aeris_study_scene_ptr";
 /// Optional guest export returning the byte length of the encoded scene command buffer.
@@ -86,6 +93,8 @@ const OP_PLOT_SHAPE: u8 = 13;
 const MAX_WASM_PARAMS: usize = 32;
 /// Maximum UTF-8 bytes passed for a single string parameter.
 const MAX_WASM_STR_PARAM_BYTES: usize = 256;
+/// Maximum aligned secondary (MTF / multi-symbol) series passed to one WASM study.
+pub const MAX_WASM_SECONDARY_SERIES: usize = 4;
 
 const META_FLAG_REALTIME: u32 = 1 << 0;
 const META_FLAG_CONFIRMED_BAR: u32 = 1 << 1;
@@ -207,6 +216,33 @@ pub enum WasmStudyLogLevel {
 pub struct WasmStudyLogEntry {
     pub level: WasmStudyLogLevel,
     pub message: String,
+}
+
+/// Alignment policy for one secondary (MTF or multi-symbol) market dependency of a WASM study.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WasmSecondaryRequestSpec {
+    pub confirmation: StudyMtfConfirmation,
+    pub gaps: StudyMtfGapPolicy,
+}
+
+/// Primary-aligned secondary OHLCV columns (`f64::NAN` where unaligned/gapped) passed into WASM.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WasmAlignedSecondary {
+    pub open: Vec<f64>,
+    pub high: Vec<f64>,
+    pub low: Vec<f64>,
+    pub close: Vec<f64>,
+    pub volume: Vec<f64>,
+}
+
+/// Per-bar order-flow columns (`buy_vol`, `sell_vol`, `delta`, `trade_count`, `poc`) passed into WASM.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WasmOrderFlowColumns {
+    pub buy_vol: Vec<f64>,
+    pub sell_vol: Vec<f64>,
+    pub delta: Vec<f64>,
+    pub trade_count: Vec<f64>,
+    pub poc: Vec<f64>,
 }
 
 /// Read-only instrument and execution metadata passed into a sandboxed WASM study.
@@ -475,6 +511,38 @@ impl CompiledWasmStudy {
         meta: &WasmStudyMeta,
         limits: StudySandboxLimits,
     ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
+        self.execute_columnar_extended(
+            bars,
+            output_count,
+            params,
+            str_params,
+            &[],
+            None,
+            viewport,
+            meta,
+            limits,
+        )
+    }
+
+    /// Executes a sandboxed study with full typed parameters, aligned secondary (MTF / multi-symbol)
+    /// series, optional per-bar order-flow columns, viewport range, and instrument metadata.
+    ///
+    /// # Errors
+    /// Returns [`WasmSandboxError`] on inconsistent input, fuel exhaustion, memory ceiling
+    /// violation, guest trap, guest error code, or non-finite infinite output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_columnar_extended(
+        &self,
+        bars: &StudySandboxColumnarBars,
+        output_count: usize,
+        params: &[f64],
+        str_params: &[(usize, String)],
+        secondaries: &[WasmAlignedSecondary],
+        order_flow: Option<&WasmOrderFlowColumns>,
+        viewport: Option<(usize, usize)>,
+        meta: &WasmStudyMeta,
+        limits: StudySandboxLimits,
+    ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
         let started_at = Instant::now();
         let count = output_count.clamp(1, 32);
         if !bars.is_consistent() {
@@ -529,6 +597,10 @@ impl CompiledWasmStudy {
             &bars.timestamps_unix_nanos,
         )?;
         apply_wasm_meta(instance, &mut store, memory, alloc_fn, meta)?;
+        apply_wasm_secondaries(instance, &mut store, memory, alloc_fn, secondaries, bar_count)?;
+        if let Some(of) = order_flow {
+            apply_wasm_order_flow(instance, &mut store, memory, alloc_fn, of, bar_count)?;
+        }
 
         let input_bytes = pack_columnar_ohlcv_f64(bars);
         let total_out_values =
@@ -669,8 +741,35 @@ impl CompiledWasmStudy {
         limits: StudySandboxLimits,
         telemetry_sink: Option<WasmStudyTelemetrySink>,
     ) -> NativeStudyProgram {
+        self.into_native_program_full(
+            output_count,
+            param_identifiers,
+            Vec::new(),
+            false,
+            fills,
+            levels,
+            limits,
+            telemetry_sink,
+        )
+    }
+
+    /// Full WASM study program bridge supporting secondary MTF / multi-symbol market dependencies,
+    /// per-bar order-flow columns, typed parameters, fills, levels, and live telemetry.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn into_native_program_full(
+        self,
+        output_count: usize,
+        param_identifiers: Vec<String>,
+        secondary_specs: Vec<WasmSecondaryRequestSpec>,
+        include_order_flow: bool,
+        fills: Vec<StudyFillSpec>,
+        levels: Vec<StudyLevelSpec>,
+        limits: StudySandboxLimits,
+        telemetry_sink: Option<WasmStudyTelemetrySink>,
+    ) -> NativeStudyProgram {
         let compiled = self;
-        let count = output_count.clamp(1, 16);
+        let count = output_count.clamp(1, 32);
         NativeStudyProgram::dynamic(Arc::new(move |context: &mut StudyExecutionContext<'_>| {
             let Some(StudyInputSeries::Market(market)) = context.input(0) else {
                 return Err("sandboxed study requires primary market bar input".to_string());
@@ -795,12 +894,47 @@ impl CompiledWasmStudy {
                 is_new_bar: exec_meta.is_new_bar,
                 symbol,
             };
+            let secondaries: Vec<WasmAlignedSecondary> = secondary_specs
+                .iter()
+                .take(MAX_WASM_SECONDARY_SERIES)
+                .enumerate()
+                .map(|(slot_idx, req)| {
+                    if let Some(StudyInputSeries::Market(sec_market)) =
+                        context.input(slot_idx + 1)
+                    {
+                        align_secondary_market_to_primary(
+                            &columnar.timestamps_unix_nanos,
+                            sec_market,
+                            StudyRequestContext {
+                                confirmation: req.confirmation,
+                                gaps: req.gaps,
+                            },
+                        )
+                    } else {
+                        WasmAlignedSecondary {
+                            open: vec![f64::NAN; slice_len],
+                            high: vec![f64::NAN; slice_len],
+                            low: vec![f64::NAN; slice_len],
+                            close: vec![f64::NAN; slice_len],
+                            volume: vec![f64::NAN; slice_len],
+                        }
+                    }
+                })
+                .collect();
+            let order_flow = include_order_flow.then(|| {
+                aggregate_order_flow_columns(
+                    &columnar.timestamps_unix_nanos,
+                    context.live_market(0).and_then(|m| m.trades()),
+                )
+            });
             let result = compiled
-                .execute_columnar_with_typed_params(
+                .execute_columnar_extended(
                     &columnar,
                     count,
                     &params,
                     &str_params,
+                    &secondaries,
+                    order_flow.as_ref(),
                     viewport,
                     &wasm_meta,
                     limits,
@@ -1011,6 +1145,197 @@ fn apply_wasm_meta(
                 sym_len_u32,
             ),
         )
+        .map_err(|err| classify_wasmi_error(&err, false))
+}
+
+fn align_secondary_market_to_primary(
+    primary_timestamps: &[i64],
+    secondary: &crate::StudyMarketSeries,
+    request: StudyRequestContext,
+) -> WasmAlignedSecondary {
+    let n = primary_timestamps.len();
+    let mut open = vec![f64::NAN; n];
+    let mut high = vec![f64::NAN; n];
+    let mut low = vec![f64::NAN; n];
+    let mut close = vec![f64::NAN; n];
+    let mut volume = vec![f64::NAN; n];
+    let sec_bars = secondary.bars();
+    let p_scale = sec_bars.price_scale();
+    let q_scale = sec_bars.quantity_scale();
+    for (i, &ts) in primary_timestamps.iter().enumerate() {
+        let prev_ts = i.checked_sub(1).and_then(|p| primary_timestamps.get(p).copied());
+        if let Some(sec_idx) = align_higher_timeframe_bar(ts, prev_ts, secondary, request)
+            && let Some(bar) = sec_bars.get(sec_idx)
+        {
+            open[i] = fixed_point_to_f64(bar.open, p_scale).unwrap_or(f64::NAN);
+            high[i] = fixed_point_to_f64(bar.high, p_scale).unwrap_or(f64::NAN);
+            low[i] = fixed_point_to_f64(bar.low, p_scale).unwrap_or(f64::NAN);
+            close[i] = fixed_point_to_f64(bar.close, p_scale).unwrap_or(f64::NAN);
+            volume[i] = fixed_point_to_f64(bar.volume, q_scale).unwrap_or(f64::NAN);
+        }
+    }
+    WasmAlignedSecondary {
+        open,
+        high,
+        low,
+        close,
+        volume,
+    }
+}
+
+fn aggregate_order_flow_columns(
+    timestamps: &[i64],
+    trades: Option<crate::StudyTradeWindow<'_>>,
+) -> WasmOrderFlowColumns {
+    let n = timestamps.len();
+    let mut buy_vol = vec![0.0; n];
+    let mut sell_vol = vec![0.0; n];
+    let mut delta = vec![0.0; n];
+    let mut trade_count = vec![0.0; n];
+    let mut poc = vec![f64::NAN; n];
+    let Some(window) = trades else {
+        return WasmOrderFlowColumns {
+            buy_vol,
+            sell_vol,
+            delta,
+            trade_count,
+            poc,
+        };
+    };
+    let p_scale = window.price_scale();
+    let q_scale = window.quantity_scale();
+    let mut per_bar_bins: BTreeMap<usize, BTreeMap<i64, i64>> = BTreeMap::new();
+    for sample in window.iter() {
+        let idx = timestamps
+            .partition_point(|&t| t <= sample.observed_unix_nanos)
+            .checked_sub(1);
+        let Some(bar_idx) = idx else {
+            continue;
+        };
+        if bar_idx >= n {
+            continue;
+        }
+        let qty = fixed_point_to_f64(sample.quantity, q_scale).unwrap_or(0.0);
+        match sample.aggressor {
+            AggressorSide::Buy => buy_vol[bar_idx] += qty,
+            AggressorSide::Sell => sell_vol[bar_idx] += qty,
+            AggressorSide::Unknown => {}
+        }
+        trade_count[bar_idx] += 1.0;
+        let bins = per_bar_bins.entry(bar_idx).or_default();
+        if bins.len() < 256 || bins.contains_key(&sample.price) {
+            *bins.entry(sample.price).or_insert(0) += sample.quantity.max(0);
+        }
+    }
+    for i in 0..n {
+        delta[i] = buy_vol[i] - sell_vol[i];
+    }
+    for (bar_idx, bins) in per_bar_bins {
+        if let Some((&best_price, _)) = bins.iter().max_by_key(|(_, vol)| **vol) {
+            poc[bar_idx] = fixed_point_to_f64(best_price, p_scale).unwrap_or(f64::NAN);
+        }
+    }
+    WasmOrderFlowColumns {
+        buy_vol,
+        sell_vol,
+        delta,
+        trade_count,
+        poc,
+    }
+}
+
+fn pack_five_f64_columns(
+    c0: &[f64],
+    c1: &[f64],
+    c2: &[f64],
+    c3: &[f64],
+    c4: &[f64],
+    n: usize,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n * 5 * size_of::<f64>());
+    for col in [c0, c1, c2, c3, c4] {
+        for i in 0..n {
+            let v = col.get(i).copied().unwrap_or(f64::NAN);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    out
+}
+
+fn apply_wasm_secondaries(
+    instance: wasmi::Instance,
+    store: &mut Store<SandboxStoreState>,
+    memory: wasmi::Memory,
+    alloc_fn: wasmi::TypedFunc<u32, u32>,
+    secondaries: &[WasmAlignedSecondary],
+    bar_count: usize,
+) -> Result<(), WasmSandboxError> {
+    if secondaries.is_empty() || bar_count == 0 {
+        return Ok(());
+    }
+    let Ok(set_sec_fn) =
+        instance.get_typed_func::<(u32, u32, u32), ()>(&*store, WASM_EXPORT_SET_SECONDARY)
+    else {
+        return Ok(());
+    };
+    let count_u32 = u32::try_from(bar_count).unwrap_or(0);
+    for (slot, sec) in secondaries.iter().take(MAX_WASM_SECONDARY_SERIES).enumerate() {
+        let raw = pack_five_f64_columns(
+            &sec.open,
+            &sec.high,
+            &sec.low,
+            &sec.close,
+            &sec.volume,
+            bar_count,
+        );
+        let len_u32 = u32::try_from(raw.len()).map_err(|_| WasmSandboxError::AllocationFailed {
+            requested_bytes: raw.len(),
+        })?;
+        let ptr = alloc_guest(store, alloc_fn, len_u32, raw.len())?;
+        memory
+            .write(&mut *store, ptr as usize, &raw)
+            .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
+        set_sec_fn
+            .call(&mut *store, (slot as u32, ptr, count_u32))
+            .map_err(|err| classify_wasmi_error(&err, false))?;
+    }
+    Ok(())
+}
+
+fn apply_wasm_order_flow(
+    instance: wasmi::Instance,
+    store: &mut Store<SandboxStoreState>,
+    memory: wasmi::Memory,
+    alloc_fn: wasmi::TypedFunc<u32, u32>,
+    order_flow: &WasmOrderFlowColumns,
+    bar_count: usize,
+) -> Result<(), WasmSandboxError> {
+    if bar_count == 0 {
+        return Ok(());
+    }
+    let Ok(set_of_fn) =
+        instance.get_typed_func::<(u32, u32), ()>(&*store, WASM_EXPORT_SET_ORDER_FLOW)
+    else {
+        return Ok(());
+    };
+    let raw = pack_five_f64_columns(
+        &order_flow.buy_vol,
+        &order_flow.sell_vol,
+        &order_flow.delta,
+        &order_flow.trade_count,
+        &order_flow.poc,
+        bar_count,
+    );
+    let len_u32 = u32::try_from(raw.len()).map_err(|_| WasmSandboxError::AllocationFailed {
+        requested_bytes: raw.len(),
+    })?;
+    let count_u32 = u32::try_from(bar_count).unwrap_or(0);
+    let ptr = alloc_guest(store, alloc_fn, len_u32, raw.len())?;
+    memory
+        .write(&mut *store, ptr as usize, &raw)
+        .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
+    set_of_fn
+        .call(&mut *store, (ptr, count_u32))
         .map_err(|err| classify_wasmi_error(&err, false))
 }
 

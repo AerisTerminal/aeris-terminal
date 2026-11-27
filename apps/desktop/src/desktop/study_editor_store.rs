@@ -22,13 +22,15 @@ use aeris_study_sdk::toolchain::{
     StudyArtifactCacheKey, StudyDevPackStatus, StudyPreviewFixture,
 };
 use aeris_study_sdk::wasm_runtime::{
-    CompiledWasmStudy, WasmStudyTelemetry, WasmStudyTelemetrySink,
+    CompiledWasmStudy, MAX_WASM_SECONDARY_SERIES, WasmSecondaryRequestSpec, WasmStudyTelemetry,
+    WasmStudyTelemetrySink,
 };
 use aeris_study_sdk::{
     BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyColor, StudyDecimal,
-    StudyFillSpec, StudyInvalidationPolicy, StudyLevelSpec, StudyLineStyle, StudyPaneTarget,
-    StudyPlotKind, StudyPointStyle, StudySession, StudySettingChoiceOption, StudySettingSpec,
-    StudySettingValue, StudySettings, StudySource, StudyTimeframe,
+    StudyFillSpec, StudyInvalidationPolicy, StudyLevelSpec, StudyLineStyle, StudyMtfConfirmation,
+    StudyMtfGapPolicy, StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudySession,
+    StudySettingChoiceOption, StudySettingSpec, StudySettingValue, StudySettings, StudySource,
+    StudyTimeframe,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -188,6 +190,17 @@ pub(crate) struct ParsedStudyOutputSpec {
     pub(crate) color: Option<String>,
 }
 
+/// One parsed secondary market request (`@request_tf:` or `@request_symbol:`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ParsedSecondaryRequest {
+    pub(crate) alias: String,
+    /// Optional explicit symbol (`"instrument_id"` or `"provider_id/instrument_id"`). `None` = primary chart symbol.
+    pub(crate) symbol: Option<String>,
+    pub(crate) timeframe: StudyTimeframe,
+    pub(crate) confirmation: StudyMtfConfirmation,
+    pub(crate) gaps: StudyMtfGapPolicy,
+}
+
 /// Complete declarative presentation metadata parsed from a user study's header comments.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ParsedStudySpec {
@@ -197,6 +210,8 @@ pub(crate) struct ParsedStudySpec {
     pub(crate) outputs: Vec<ParsedStudyOutputSpec>,
     pub(crate) fills: Vec<StudyFillSpec>,
     pub(crate) levels: Vec<StudyLevelSpec>,
+    pub(crate) secondary_requests: Vec<ParsedSecondaryRequest>,
+    pub(crate) requires_order_flow: bool,
     pub(crate) uses_per_point_colors: bool,
 }
 
@@ -282,6 +297,8 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
     let mut outputs = Vec::new();
     let mut fills = Vec::new();
     let mut levels = Vec::new();
+    let mut secondary_requests = Vec::new();
+    let mut requires_order_flow = false;
 
     for raw_line in source.lines().take(80) {
         let trimmed = raw_line.trim();
@@ -480,6 +497,68 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
                     title,
                 });
             }
+        } else if lower.starts_with("@request_tf:")
+            && secondary_requests.len() < MAX_WASM_SECONDARY_SERIES
+        {
+            // Format: // @request_tf: <alias> | <timeframe> [| confirmed|forming] [| carry|gaps]
+            let body = content[12..].trim();
+            let parts: Vec<&str> = body.split('|').map(str::trim).collect();
+            if parts.len() >= 2
+                && !parts[0].is_empty()
+                && let Some(tf) = StudyTimeframe::parse_label(parts[1])
+            {
+                let confirmation = parts
+                    .get(2)
+                    .map(|s| s.to_ascii_lowercase())
+                    .map_or(StudyMtfConfirmation::ConfirmedOnly, |s| {
+                        if s == "forming" || s == "latest" {
+                            StudyMtfConfirmation::LatestIncludingForming
+                        } else {
+                            StudyMtfConfirmation::ConfirmedOnly
+                        }
+                    });
+                let gaps = parts
+                    .get(3)
+                    .map(|s| s.to_ascii_lowercase())
+                    .map_or(StudyMtfGapPolicy::CarryForward, |s| {
+                        if s == "gaps" || s == "gaps_on" {
+                            StudyMtfGapPolicy::Gaps
+                        } else {
+                            StudyMtfGapPolicy::CarryForward
+                        }
+                    });
+                secondary_requests.push(ParsedSecondaryRequest {
+                    alias: parts[0].to_string(),
+                    symbol: None,
+                    timeframe: tf,
+                    confirmation,
+                    gaps,
+                });
+            }
+        } else if lower.starts_with("@request_symbol:")
+            && secondary_requests.len() < MAX_WASM_SECONDARY_SERIES
+        {
+            // Format: // @request_symbol: <alias> | <symbol> [| <timeframe>]
+            let body = content[16..].trim();
+            let parts: Vec<&str> = body.split('|').map(str::trim).collect();
+            if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+                let tf = parts
+                    .get(2)
+                    .and_then(|s| StudyTimeframe::parse_label(s))
+                    .unwrap_or(StudyTimeframe::CurrentChart);
+                secondary_requests.push(ParsedSecondaryRequest {
+                    alias: parts[0].to_string(),
+                    symbol: Some(parts[1].to_string()),
+                    timeframe: tf,
+                    confirmation: StudyMtfConfirmation::ConfirmedOnly,
+                    gaps: StudyMtfGapPolicy::CarryForward,
+                });
+            }
+        } else if let Some(val) = lower.strip_prefix("@require:") {
+            let cap = val.trim();
+            if cap == "order_flow" || cap == "orderflow" || cap == "trades" {
+                requires_order_flow = true;
+            }
         }
     }
 
@@ -510,6 +589,8 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
         outputs,
         fills,
         levels,
+        secondary_requests,
+        requires_order_flow,
         uses_per_point_colors,
     }
 }
@@ -538,15 +619,42 @@ pub(crate) fn build_wasm_study_registration_with_telemetry(
     compiled: CompiledWasmStudy,
     telemetry_sink: Option<WasmStudyTelemetrySink>,
 ) -> NativeStudyRegistration {
+    let primary_streams = if spec.requires_order_flow {
+        StreamRequirements::BARS.with(aeris_study_sdk::MarketStream::Trades)
+    } else {
+        StreamRequirements::BARS
+    };
     let mut builder = StudyDefinitionBuilder::new(identifier)
-        .market(series.clone(), StreamRequirements::BARS)
+        .market(series.clone(), primary_streams)
         .invalidation(StudyInvalidationPolicy::FromFirstChanged);
+    let mut secondary_specs = Vec::new();
+    for req in spec
+        .secondary_requests
+        .iter()
+        .take(MAX_WASM_SECONDARY_SERIES)
+    {
+        let mut sec_series = series.clone();
+        sec_series.period = req.timeframe.resolve(series.period);
+        if let Some(sym) = &req.symbol {
+            if let Some((prov, inst)) = sym.split_once('/') {
+                sec_series.provider_id = prov.trim().to_string();
+                sec_series.instrument_id = inst.trim().to_string();
+            } else {
+                sec_series.instrument_id = sym.trim().to_string();
+            }
+        }
+        builder = builder.market(sec_series, StreamRequirements::BARS);
+        secondary_specs.push(WasmSecondaryRequestSpec {
+            confirmation: req.confirmation,
+            gaps: req.gaps,
+        });
+    }
     for input in &spec.inputs {
         builder = builder.setting(input.clone());
     }
     for out in &spec.outputs {
-        let mut out_builder = StudyOutputBuilder::new(&out.identifier, &out.title, out.plot)
-            .pane(spec.pane);
+        let mut out_builder =
+            StudyOutputBuilder::new(&out.identifier, &out.title, out.plot).pane(spec.pane);
         if spec.uses_per_point_colors {
             out_builder = out_builder.point_style(StudyPointStyle::PerPoint);
         }
@@ -560,9 +668,11 @@ pub(crate) fn build_wasm_study_registration_with_telemetry(
     NativeStudyRegistration {
         settings,
         definition,
-        program: compiled.into_native_program_with_spec_and_telemetry(
+        program: compiled.into_native_program_full(
             spec.outputs.len(),
             param_identifiers,
+            secondary_specs,
+            spec.requires_order_flow,
             spec.fills.clone(),
             spec.levels.clone(),
             StudySandboxLimits::default(),
@@ -1231,6 +1341,10 @@ static META_QTY_SCALE: AtomicU32 = AtomicU32::new(0);
 static META_FLAGS: AtomicU32 = AtomicU32::new(0);
 static META_SYMBOL: Mutex<String> = Mutex::new(String::new());
 static TIMESTAMPS: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+static SECONDARY_DATA: Mutex<[Vec<f64>; 4]> = Mutex::new([Vec::new(), Vec::new(), Vec::new(), Vec::new()]);
+static SECONDARY_LEN: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
+static ORDER_FLOW_DATA: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+static ORDER_FLOW_LEN: AtomicU32 = AtomicU32::new(0);
 static SCENE_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 const MAX_SCENE_BYTES: usize = 256 * 1024;
@@ -1495,6 +1609,107 @@ pub mod syminfo {
 
     pub fn is_new_bar() -> bool {
         (META_FLAGS.load(Ordering::Relaxed) & 4) != 0
+    }
+}
+
+fn read_secondary_col(slot: usize, col: usize, bar_index: usize) -> f64 {
+    if slot >= 4 {
+        return f64::NAN;
+    }
+    let n = SECONDARY_LEN[slot].load(Ordering::Relaxed) as usize;
+    if bar_index >= n {
+        return f64::NAN;
+    }
+    SECONDARY_DATA
+        .lock()
+        .ok()
+        .and_then(|s| s[slot].get(col * n + bar_index).copied())
+        .unwrap_or(f64::NAN)
+}
+
+#[allow(dead_code)]
+pub fn sec_open(slot: usize, bar_index: usize) -> f64 {
+    read_secondary_col(slot, 0, bar_index)
+}
+#[allow(dead_code)]
+pub fn sec_high(slot: usize, bar_index: usize) -> f64 {
+    read_secondary_col(slot, 1, bar_index)
+}
+#[allow(dead_code)]
+pub fn sec_low(slot: usize, bar_index: usize) -> f64 {
+    read_secondary_col(slot, 2, bar_index)
+}
+#[allow(dead_code)]
+pub fn sec_close(slot: usize, bar_index: usize) -> f64 {
+    read_secondary_col(slot, 3, bar_index)
+}
+#[allow(dead_code)]
+pub fn sec_volume(slot: usize, bar_index: usize) -> f64 {
+    read_secondary_col(slot, 4, bar_index)
+}
+
+/// Returns the full primary-aligned close slice of secondary series `slot` (`0..4`).
+#[allow(dead_code)]
+pub fn sec_close_series(slot: usize) -> Vec<f64> {
+    if slot >= 4 {
+        return Vec::new();
+    }
+    let n = SECONDARY_LEN[slot].load(Ordering::Relaxed) as usize;
+    if n == 0 {
+        return Vec::new();
+    }
+    SECONDARY_DATA
+        .lock()
+        .ok()
+        .and_then(|s| s[slot].get(3 * n..4 * n).map(<[f64]>::to_vec))
+        .unwrap_or_default()
+}
+
+/// Per-bar order-flow & microstructure accessors (`super::of::*`, requires `// @require: order_flow`).
+#[allow(dead_code)]
+pub mod of {
+    use super::*;
+
+    fn read_col(col: usize, bar_index: usize) -> f64 {
+        let n = ORDER_FLOW_LEN.load(Ordering::Relaxed) as usize;
+        if bar_index >= n {
+            return f64::NAN;
+        }
+        ORDER_FLOW_DATA
+            .lock()
+            .ok()
+            .and_then(|v| v.get(col * n + bar_index).copied())
+            .unwrap_or(f64::NAN)
+    }
+
+    pub fn buy_vol(bar_index: usize) -> f64 {
+        read_col(0, bar_index)
+    }
+    pub fn sell_vol(bar_index: usize) -> f64 {
+        read_col(1, bar_index)
+    }
+    pub fn delta(bar_index: usize) -> f64 {
+        read_col(2, bar_index)
+    }
+    pub fn trade_count(bar_index: usize) -> f64 {
+        read_col(3, bar_index)
+    }
+    pub fn poc(bar_index: usize) -> f64 {
+        read_col(4, bar_index)
+    }
+
+    /// Cumulative Volume Delta across bars `0..len`.
+    pub fn cvd(len: usize) -> Vec<f64> {
+        let mut out = Vec::with_capacity(len);
+        let mut acc = 0.0;
+        for i in 0..len {
+            let d = delta(i);
+            if d.is_finite() {
+                acc += d;
+            }
+            out.push(acc);
+        }
+        out
     }
 }
 
@@ -2546,6 +2761,39 @@ pub extern "C" fn aeris_study_set_meta(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_set_secondary(slot: u32, ptr: u32, bar_count: u32) {
+    let s = slot as usize;
+    let n = bar_count as usize;
+    if s >= 4 || ptr == 0 || n == 0 {
+        if s < 4 {
+            SECONDARY_LEN[s].store(0, Ordering::Relaxed);
+        }
+        return;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr as usize as *const f64, n * 5) };
+    if let Ok(mut sec) = SECONDARY_DATA.lock() {
+        sec[s].clear();
+        sec[s].extend_from_slice(slice);
+        SECONDARY_LEN[s].store(bar_count, Ordering::Relaxed);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_set_order_flow(ptr: u32, bar_count: u32) {
+    let n = bar_count as usize;
+    if ptr == 0 || n == 0 {
+        ORDER_FLOW_LEN.store(0, Ordering::Relaxed);
+        return;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr as usize as *const f64, n * 5) };
+    if let Ok(mut of) = ORDER_FLOW_DATA.lock() {
+        of.clear();
+        of.extend_from_slice(slice);
+        ORDER_FLOW_LEN.store(bar_count, Ordering::Relaxed);
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn aeris_study_scene_ptr() -> u32 {
     SCENE_BUF.lock().map_or(0, |buf| buf.as_ptr() as u32)
 }
@@ -3408,6 +3656,80 @@ pub fn calculate(
         assert!(summary.contains("1 series"), "summary: {summary}");
         let telemetry = telemetry.expect("telemetry present");
         assert_eq!(telemetry.scene_object_count, 4); // box + 2 lines + shape
+    }
+
+    #[test]
+    fn phase_3_mtf_multi_symbol_and_order_flow_compile_and_execute_in_wasm() {
+        let source = r#"
+// @pane: separate
+// @request_tf: htf | 15m | confirmed | carry
+// @request_symbol: bench | SPY | 1D
+// @require: order_flow
+// @output: rs | Relative Strength | line | #38bdf8
+// @output: cvd | CVD | line | #22c55e
+pub fn calculate_multi(
+    _open: &[f64],
+    _high: &[f64],
+    _low: &[f64],
+    close: &[f64],
+    _volume: &[f64],
+    outs: &mut [&mut [f64]],
+) {
+    let n = close.len();
+    for i in 0..n {
+        let htf_c = super::sec_close(0, i);
+        outs[0][i] = if htf_c.is_finite() && htf_c > 0.0 {
+            close[i] / htf_c
+        } else {
+            f64::NAN
+        };
+    }
+    let cvd = super::of::cvd(n);
+    outs[1].copy_from_slice(&cvd);
+}
+"#;
+        let spec = parse_study_source_spec(source, "Phase3");
+        assert_eq!(spec.secondary_requests.len(), 2);
+        assert_eq!(spec.secondary_requests[0].alias, "htf");
+        assert_eq!(spec.secondary_requests[1].symbol.as_deref(), Some("SPY"));
+        assert!(spec.requires_order_flow);
+
+        let artifact = compile_study_source_to_wasm(source).expect("Phase 3 study compiles");
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::Uptrend, 20, 60);
+        let n = fixture.bars.len();
+        let secondary = aeris_study_sdk::wasm_runtime::WasmAlignedSecondary {
+            open: vec![100.0; n],
+            high: vec![105.0; n],
+            low: vec![95.0; n],
+            close: vec![100.0; n],
+            volume: vec![1000.0; n],
+        };
+        let order_flow = aeris_study_sdk::wasm_runtime::WasmOrderFlowColumns {
+            buy_vol: vec![30.0; n],
+            sell_vol: vec![10.0; n],
+            delta: vec![20.0; n],
+            trade_count: vec![5.0; n],
+            poc: vec![101.0; n],
+        };
+        let result = artifact
+            .compiled
+            .execute_columnar_extended(
+                &fixture.bars,
+                2,
+                &[],
+                &[],
+                &[secondary],
+                Some(&order_flow),
+                None,
+                &aeris_study_sdk::wasm_runtime::WasmStudyMeta::default(),
+                StudySandboxLimits::default(),
+            )
+            .expect("Phase 3 extended execution succeeds");
+        assert_eq!(result.outputs.len(), 2);
+        assert!(result.outputs[0][0].is_some());
+        // CVD of constant delta=20.0 over 20 bars -> bar 19 = 400.0
+        let last_cvd = result.outputs[1][n - 1].expect("finite CVD");
+        assert!((last_cvd - 400.0).abs() < 1e-6, "got {last_cvd}");
     }
 
     #[test]
