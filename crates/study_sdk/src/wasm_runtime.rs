@@ -18,9 +18,9 @@ use crate::{
     MAXIMUM_STUDY_SCENE_TEXT_BYTES, MAXIMUM_STUDY_TABLE_CELLS, NativeStudyProgram,
     StudyAlertEvent, StudyAlertFrequency, StudyBoxObject, StudyColor, StudyExecutionContext,
     StudyFillSpec, StudyInputSeries, StudyLabelObject, StudyLabelStyle, StudyLevelSpec,
-    StudyLineExtend, StudyLineObject, StudyLineStyle, StudyPoint, StudyPolylineObject,
-    StudySceneObject, StudySceneState, StudySettingValue, StudyTableCell, StudyTableObject,
-    StudyTablePosition, StudyTextAlign, fixed_point_to_f64,
+    StudyLineExtend, StudyLineFillObject, StudyLineObject, StudyLineStyle, StudyPoint,
+    StudyPolylineObject, StudySceneObject, StudySceneState, StudySettingValue, StudySource,
+    StudyTableCell, StudyTableObject, StudyTablePosition, StudyTextAlign, fixed_point_to_f64,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -42,6 +42,8 @@ pub const WASM_EXPORT_CALCULATE_MULTI: &str = "aeris_study_calculate_multi";
 /// Optional guest export setting one numeric input parameter `(index: u32, value: f64)` before
 /// calculation.
 pub const WASM_EXPORT_SET_PARAM: &str = "aeris_study_set_param";
+/// Optional guest export setting one UTF-8 string input parameter `(index: u32, ptr: u32, len: u32)`.
+pub const WASM_EXPORT_SET_STR_PARAM: &str = "aeris_study_set_str_param";
 /// Optional guest export setting the chart's visible bar index range `(left: u32, right: u32)`.
 pub const WASM_EXPORT_SET_VIEWPORT: &str = "aeris_study_set_viewport";
 /// Optional guest export receiving the bar timestamps slice `(ptr: u32, count: u32)` where
@@ -75,6 +77,15 @@ const OP_BAR_COLOR: u8 = 6;
 const OP_BG_COLOR: u8 = 7;
 const OP_ALERT: u8 = 8;
 const OP_LOG: u8 = 9;
+const OP_BOX_EX: u8 = 10;
+const OP_LINE_FILL: u8 = 11;
+const OP_PLOT_COLOR: u8 = 12;
+const OP_PLOT_SHAPE: u8 = 13;
+
+/// Maximum numeric/string input parameters passed across the WASM boundary.
+const MAX_WASM_PARAMS: usize = 32;
+/// Maximum UTF-8 bytes passed for a single string parameter.
+const MAX_WASM_STR_PARAM_BYTES: usize = 256;
 
 const META_FLAG_REALTIME: u32 = 1 << 0;
 const META_FLAG_CONFIRMED_BAR: u32 = 1 << 1;
@@ -436,8 +447,36 @@ impl CompiledWasmStudy {
         meta: &WasmStudyMeta,
         limits: StudySandboxLimits,
     ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
+        self.execute_columnar_with_typed_params(
+            bars,
+            output_count,
+            params,
+            &[],
+            viewport,
+            meta,
+            limits,
+        )
+    }
+
+    /// Executes a single- or multi-output sandboxed study with numeric + UTF-8 string parameters,
+    /// visible chart viewport range, and full instrument/execution metadata.
+    ///
+    /// # Errors
+    /// Returns [`WasmSandboxError`] on inconsistent input, fuel exhaustion, memory ceiling
+    /// violation, guest trap, guest error code, or non-finite infinite output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_columnar_with_typed_params(
+        &self,
+        bars: &StudySandboxColumnarBars,
+        output_count: usize,
+        params: &[f64],
+        str_params: &[(usize, String)],
+        viewport: Option<(usize, usize)>,
+        meta: &WasmStudyMeta,
+        limits: StudySandboxLimits,
+    ) -> Result<WasmMultiExecutionResult, WasmSandboxError> {
         let started_at = Instant::now();
-        let count = output_count.clamp(1, 16);
+        let count = output_count.clamp(1, 32);
         if !bars.is_consistent() {
             return Err(WasmSandboxError::InconsistentInputBars);
         }
@@ -480,6 +519,7 @@ impl CompiledWasmStudy {
             .get_typed_func::<(u32, u32, u32), i32>(&store, WASM_EXPORT_CALCULATE)
             .map_err(|_| WasmSandboxError::MissingExport(WASM_EXPORT_CALCULATE))?;
         apply_wasm_params(instance, &mut store, params)?;
+        apply_wasm_str_params(instance, &mut store, memory, alloc_fn, str_params)?;
         apply_wasm_viewport(instance, &mut store, viewport, bar_count)?;
         apply_wasm_timestamps(
             instance,
@@ -550,7 +590,7 @@ impl CompiledWasmStudy {
         let (alerts, logs, scene_object_count) = if scene_bytes.is_empty() {
             (Vec::new(), Vec::new(), 0)
         } else {
-            let decoded = decode_wasm_scene_commands(&scene_bytes, &bars.timestamps_unix_nanos);
+            let decoded = decode_wasm_scene_commands(&scene_bytes, bars);
             (decoded.alerts, decoded.logs, decoded.objects.len())
         };
 
@@ -647,25 +687,66 @@ impl CompiledWasmStudy {
             let dirty = context.dirty_range();
             let dirty_start = dirty.start.min(bar_count);
             let dirty_end = dirty.end_exclusive.unwrap_or(bar_count).min(bar_count);
-            let params: Vec<f64> = param_identifiers
-                .iter()
-                .map(|id| match context.settings().get(id) {
+            let mut params = Vec::with_capacity(param_identifiers.len());
+            let mut str_params = Vec::new();
+            for (idx, id) in param_identifiers.iter().enumerate() {
+                match context.settings().get(id) {
                     Some(StudySettingValue::Integer(v)) => {
-                        fixed_point_to_f64(*v, 0).unwrap_or(f64::NAN)
+                        params.push(fixed_point_to_f64(*v, 0).unwrap_or(f64::NAN));
                     }
                     Some(StudySettingValue::Decimal(d) | StudySettingValue::Price(d)) => {
-                        fixed_point_to_f64(d.mantissa, d.scale).unwrap_or(f64::NAN)
+                        params.push(fixed_point_to_f64(d.mantissa, d.scale).unwrap_or(f64::NAN));
                     }
                     Some(StudySettingValue::Boolean(b)) => {
-                        if *b {
-                            1.0
-                        } else {
-                            0.0
-                        }
+                        params.push(if *b { 1.0 } else { 0.0 });
                     }
-                    _ => f64::NAN,
-                })
-                .collect();
+                    Some(StudySettingValue::Color(c)) => {
+                        params.push(f64::from(c.to_rgba_u32()));
+                    }
+                    Some(StudySettingValue::Source(src)) => {
+                        let code = match src {
+                            StudySource::Open => 0.0,
+                            StudySource::High => 1.0,
+                            StudySource::Low => 2.0,
+                            StudySource::Close => 3.0,
+                            StudySource::Hl2 => 4.0,
+                            StudySource::Hlc3 => 5.0,
+                            StudySource::Ohlc4 => 6.0,
+                            StudySource::Volume => 7.0,
+                            StudySource::StudyOutput { .. } => 3.0,
+                        };
+                        params.push(code);
+                    }
+                    Some(StudySettingValue::Choice(choice)) => {
+                        params.push(f64::NAN);
+                        str_params.push((idx, choice.clone()));
+                    }
+                    Some(StudySettingValue::Text(text)) => {
+                        params.push(f64::NAN);
+                        str_params.push((idx, text.clone()));
+                    }
+                    Some(StudySettingValue::Timeframe(tf)) => {
+                        let secs = match tf {
+                            crate::StudyTimeframe::CurrentChart => timeframe_seconds,
+                            crate::StudyTimeframe::Period(p) => bar_period_to_seconds(*p),
+                        };
+                        params.push(f64::from(secs));
+                        str_params.push((idx, tf.to_label()));
+                    }
+                    Some(StudySettingValue::Session(sess)) => {
+                        params.push(f64::from(sess.start_minute));
+                        str_params.push((idx, sess.to_label()));
+                    }
+                    Some(StudySettingValue::Symbol(sym)) => {
+                        params.push(f64::NAN);
+                        str_params.push((idx, sym.to_label()));
+                    }
+                    Some(StudySettingValue::Timestamp(ts)) => {
+                        params.push(*ts as f64);
+                    }
+                    None => params.push(f64::NAN),
+                }
+            }
 
             // Clamp to the newest `limits.max_output_points` bars if the input window is larger.
             let start = bar_count.saturating_sub(limits.max_output_points);
@@ -715,10 +796,11 @@ impl CompiledWasmStudy {
                 symbol,
             };
             let result = compiled
-                .execute_columnar_with_meta(
+                .execute_columnar_with_typed_params(
                     &columnar,
                     count,
                     &params,
+                    &str_params,
                     viewport,
                     &wasm_meta,
                     limits,
@@ -741,7 +823,7 @@ impl CompiledWasmStudy {
                 apply_decoded_wasm_scene(
                     context,
                     &result.scene_bytes,
-                    &columnar.timestamps_unix_nanos,
+                    &columnar,
                     start,
                     write_from,
                     write_to,
@@ -786,10 +868,50 @@ fn apply_wasm_params(
     else {
         return Ok(());
     };
-    for (idx, &val) in params.iter().take(16).enumerate() {
+    for (idx, &val) in params.iter().take(MAX_WASM_PARAMS).enumerate() {
         if let Ok(idx_u32) = u32::try_from(idx) {
             set_param_fn
                 .call(&mut *store, (idx_u32, val))
+                .map_err(|err| classify_wasmi_error(&err, false))?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_wasm_str_params(
+    instance: wasmi::Instance,
+    store: &mut Store<SandboxStoreState>,
+    memory: wasmi::Memory,
+    alloc_fn: wasmi::TypedFunc<u32, u32>,
+    str_params: &[(usize, String)],
+) -> Result<(), WasmSandboxError> {
+    if str_params.is_empty() {
+        return Ok(());
+    }
+    let Ok(set_str_fn) =
+        instance.get_typed_func::<(u32, u32, u32), ()>(&*store, WASM_EXPORT_SET_STR_PARAM)
+    else {
+        return Ok(());
+    };
+    for (idx, value) in str_params {
+        if *idx >= MAX_WASM_PARAMS {
+            continue;
+        }
+        let bytes = value.as_bytes();
+        let len = bytes.len().min(MAX_WASM_STR_PARAM_BYTES);
+        let (ptr, len_u32) = if len > 0 {
+            let l = u32::try_from(len).unwrap_or(0);
+            let p = alloc_guest(store, alloc_fn, l, len)?;
+            memory
+                .write(&mut *store, p as usize, &bytes[..len])
+                .map_err(|_| WasmSandboxError::MemoryAccessOutOfBounds)?;
+            (p, l)
+        } else {
+            (0, 0)
+        };
+        if let Ok(idx_u32) = u32::try_from(*idx) {
+            set_str_fn
+                .call(&mut *store, (idx_u32, ptr, len_u32))
                 .map_err(|err| classify_wasmi_error(&err, false))?;
         }
     }
@@ -1040,6 +1162,12 @@ const fn decode_label_style(code: u8) -> StudyLabelStyle {
         2 => StudyLabelStyle::LabelLeft,
         3 => StudyLabelStyle::LabelRight,
         4 => StudyLabelStyle::TextOnly,
+        5 => StudyLabelStyle::Circle,
+        6 => StudyLabelStyle::TriangleUp,
+        7 => StudyLabelStyle::TriangleDown,
+        8 => StudyLabelStyle::ArrowUp,
+        9 => StudyLabelStyle::ArrowDown,
+        10 => StudyLabelStyle::Cross,
         _ => StudyLabelStyle::LabelUp,
     }
 }
@@ -1107,10 +1235,123 @@ impl<'a> SceneCursor<'a> {
 
 struct DecodedWasmScene {
     objects: Vec<StudySceneObject>,
+    /// `(first_line_object_index, second_line_object_index, fill_color)` resolved after inserting lines.
+    line_fills: Vec<(usize, usize, StudyColor)>,
     bar_colors: Vec<(usize, StudyColor)>,
     bg_colors: Vec<(usize, StudyColor)>,
+    /// `(output_index, local_bar_index, color)` per-bar dynamic plot color overrides.
+    plot_colors: Vec<(usize, usize, StudyColor)>,
     alerts: Vec<StudyAlertEvent>,
     logs: Vec<WasmStudyLogEntry>,
+}
+
+fn decode_box_ex_cmd(
+    cursor: &mut SceneCursor<'_>,
+    timestamps: &[i64],
+    step_ns: i64,
+    objects: &mut Vec<StudySceneObject>,
+) -> bool {
+    let (
+        Some(x1),
+        Some(top),
+        Some(x2),
+        Some(bot),
+        Some(border),
+        Some(fill),
+        Some(bw),
+        Some(bstyle),
+        Some(text_rgba),
+        Some(text),
+    ) = (
+        cursor.f64(),
+        cursor.f64(),
+        cursor.f64(),
+        cursor.f64(),
+        cursor.u32(),
+        cursor.u32(),
+        cursor.u8(),
+        cursor.u8(),
+        cursor.u32(),
+        cursor.text(),
+    )
+    else {
+        return false;
+    };
+    if objects.len() < MAXIMUM_STUDY_SCENE_OBJECTS
+        && top.is_finite()
+        && bot.is_finite()
+        && let (Some(t1), Some(t2)) = (
+            bar_coord_to_unix_nanos(timestamps, step_ns, x1),
+            bar_coord_to_unix_nanos(timestamps, step_ns, x2),
+        )
+    {
+        let has_text = !text.is_empty();
+        objects.push(StudySceneObject::Box(StudyBoxObject {
+            top_left: StudyPoint::new(t1, top),
+            bottom_right: StudyPoint::new(t2, bot),
+            border_color: unpack_study_color(border),
+            border_width: bw,
+            border_style: decode_line_style(bstyle),
+            fill_color: ((fill & 0xFF) != 0).then(|| unpack_study_color(fill)),
+            text: has_text.then_some(text),
+            text_color: (has_text && (text_rgba & 0xFF) != 0)
+                .then(|| unpack_study_color(text_rgba)),
+        }));
+    }
+    true
+}
+
+fn decode_plot_shape_cmd(
+    cursor: &mut SceneCursor<'_>,
+    bars: &StudySandboxColumnarBars,
+    objects: &mut Vec<StudySceneObject>,
+) -> bool {
+    let (
+        Some(bar_idx),
+        Some(location),
+        Some(explicit_price),
+        Some(shape),
+        Some(color),
+        Some(text_color),
+        Some(text),
+    ) = (
+        cursor.u32(),
+        cursor.u8(),
+        cursor.f64(),
+        cursor.u8(),
+        cursor.u32(),
+        cursor.u32(),
+        cursor.text(),
+    )
+    else {
+        return false;
+    };
+    let idx = bar_idx as usize;
+    if objects.len() < MAXIMUM_STUDY_SCENE_OBJECTS
+        && let Some(&ts) = bars.timestamps_unix_nanos.get(idx)
+    {
+        let price = match location {
+            0 => bars
+                .high
+                .get(idx)
+                .and_then(|&h| fixed_point_to_f64(h, bars.price_scale)),
+            1 => bars
+                .low
+                .get(idx)
+                .and_then(|&l| fixed_point_to_f64(l, bars.price_scale)),
+            _ => explicit_price.is_finite().then_some(explicit_price),
+        };
+        if let Some(y) = price {
+            objects.push(StudySceneObject::Label(StudyLabelObject {
+                point: StudyPoint::new(ts, y),
+                text,
+                style: decode_label_style(shape),
+                color: unpack_study_color(color),
+                text_color: unpack_study_color(text_color),
+            }));
+        }
+    }
+    true
 }
 
 const fn decode_alert_frequency(code: u8) -> StudyAlertFrequency {
@@ -1391,22 +1632,48 @@ fn decode_table_cell_cmd(
     true
 }
 
-fn decode_wasm_scene_commands(bytes: &[u8], timestamps: &[i64]) -> DecodedWasmScene {
+fn decode_wasm_scene_commands(bytes: &[u8], bars: &StudySandboxColumnarBars) -> DecodedWasmScene {
+    let timestamps = &bars.timestamps_unix_nanos;
     let step_ns = estimate_bar_step_ns(timestamps);
     let mut cursor = SceneCursor { bytes, pos: 0 };
     let mut objects: Vec<StudySceneObject> = Vec::new();
+    let mut line_obj_indices: Vec<usize> = Vec::new();
+    let mut line_fills: Vec<(usize, usize, StudyColor)> = Vec::new();
     let mut tables: BTreeMap<(u8, u16, u16), StudyTableObject> = BTreeMap::new();
     let mut bar_colors: Vec<(usize, StudyColor)> = Vec::new();
     let mut bg_colors: Vec<(usize, StudyColor)> = Vec::new();
+    let mut plot_colors: Vec<(usize, usize, StudyColor)> = Vec::new();
     let mut alerts: Vec<StudyAlertEvent> = Vec::new();
     let mut logs: Vec<WasmStudyLogEntry> = Vec::new();
 
     while let Some(op) = cursor.u8() {
         let ok = match op {
             OP_BOX => decode_box_cmd(&mut cursor, timestamps, step_ns, &mut objects),
-            OP_LINE => decode_line_cmd(&mut cursor, timestamps, step_ns, &mut objects),
+            OP_BOX_EX => decode_box_ex_cmd(&mut cursor, timestamps, step_ns, &mut objects),
+            OP_LINE => {
+                let prev_len = objects.len();
+                let res = decode_line_cmd(&mut cursor, timestamps, step_ns, &mut objects);
+                if res && objects.len() > prev_len {
+                    line_obj_indices.push(prev_len);
+                }
+                res
+            }
+            OP_LINE_FILL => match (cursor.u32(), cursor.u32(), cursor.u32()) {
+                (Some(a), Some(b), Some(color)) => {
+                    if let (Some(&idx_a), Some(&idx_b)) = (
+                        line_obj_indices.get(a as usize),
+                        line_obj_indices.get(b as usize),
+                    ) && idx_a != idx_b
+                    {
+                        line_fills.push((idx_a, idx_b, unpack_study_color(color)));
+                    }
+                    true
+                }
+                _ => false,
+            },
             OP_POLYLINE => decode_polyline_cmd(&mut cursor, timestamps, step_ns, &mut objects),
             OP_LABEL => decode_label_cmd(&mut cursor, timestamps, step_ns, &mut objects),
+            OP_PLOT_SHAPE => decode_plot_shape_cmd(&mut cursor, bars, &mut objects),
             OP_TABLE_CELL => decode_table_cell_cmd(&mut cursor, &mut tables),
             OP_BAR_COLOR => match (cursor.u32(), cursor.u32()) {
                 (Some(idx), Some(color)) => {
@@ -1418,6 +1685,17 @@ fn decode_wasm_scene_commands(bytes: &[u8], timestamps: &[i64]) -> DecodedWasmSc
             OP_BG_COLOR => match (cursor.u32(), cursor.u32()) {
                 (Some(idx), Some(color)) => {
                     bg_colors.push((idx as usize, unpack_study_color(color)));
+                    true
+                }
+                _ => false,
+            },
+            OP_PLOT_COLOR => match (cursor.u8(), cursor.u32(), cursor.u32()) {
+                (Some(out_idx), Some(bar_idx), Some(color)) => {
+                    plot_colors.push((
+                        usize::from(out_idx),
+                        bar_idx as usize,
+                        unpack_study_color(color),
+                    ));
                     true
                 }
                 _ => false,
@@ -1438,8 +1716,10 @@ fn decode_wasm_scene_commands(bytes: &[u8], timestamps: &[i64]) -> DecodedWasmSc
     }
     DecodedWasmScene {
         objects,
+        line_fills,
         bar_colors,
         bg_colors,
+        plot_colors,
         alerts,
         logs,
     }
@@ -1448,21 +1728,45 @@ fn decode_wasm_scene_commands(bytes: &[u8], timestamps: &[i64]) -> DecodedWasmSc
 fn reconcile_wasm_scene(
     scene: &mut StudySceneState,
     objects: Vec<StudySceneObject>,
+    line_fills: &[(usize, usize, StudyColor)],
 ) -> Result<(), String> {
     let existing_ids: Vec<_> = scene.iter().map(|(id, _)| id).collect();
     let keep = existing_ids.len().min(objects.len());
+    let mut assigned_ids = Vec::with_capacity(objects.len() + line_fills.len());
     let mut iter = objects.into_iter();
     for &id in &existing_ids[..keep] {
-        if let Some(next_obj) = iter.next()
-            && scene.get(id) != Some(&next_obj)
-        {
-            scene.update(id, next_obj)?;
+        if let Some(next_obj) = iter.next() {
+            if scene.get(id) != Some(&next_obj) {
+                scene.update(id, next_obj)?;
+            }
+            assigned_ids.push(id);
         }
     }
     for extra in iter {
-        let _ = scene.insert(extra)?;
+        let id = scene.insert(extra)?;
+        assigned_ids.push(id);
     }
-    for &stale_id in &existing_ids[keep..] {
+    let mut next_slot = keep;
+    for &(idx_a, idx_b, color) in line_fills {
+        if let (Some(&first_line), Some(&second_line)) =
+            (assigned_ids.get(idx_a), assigned_ids.get(idx_b))
+        {
+            let fill_obj = StudySceneObject::LineFill(StudyLineFillObject {
+                first_line,
+                second_line,
+                color,
+            });
+            if let Some(&existing_id) = existing_ids.get(next_slot) {
+                if scene.get(existing_id) != Some(&fill_obj) {
+                    scene.update(existing_id, fill_obj)?;
+                }
+                next_slot += 1;
+            } else if scene.len() < MAXIMUM_STUDY_SCENE_OBJECTS {
+                let _ = scene.insert(fill_obj)?;
+            }
+        }
+    }
+    for &stale_id in &existing_ids[next_slot..] {
         let _ = scene.delete(stale_id);
     }
     Ok(())
@@ -1471,13 +1775,13 @@ fn reconcile_wasm_scene(
 fn apply_decoded_wasm_scene(
     context: &mut StudyExecutionContext<'_>,
     scene_bytes: &[u8],
-    timestamps: &[i64],
+    bars: &StudySandboxColumnarBars,
     slice_start: usize,
     write_from: usize,
     write_to: usize,
 ) -> Result<(), String> {
-    let decoded = decode_wasm_scene_commands(scene_bytes, timestamps);
-    reconcile_wasm_scene(context.scene_mut(), decoded.objects)?;
+    let decoded = decode_wasm_scene_commands(scene_bytes, bars);
+    reconcile_wasm_scene(context.scene_mut(), decoded.objects, &decoded.line_fills)?;
     for (local_idx, color) in decoded.bar_colors {
         let row = slice_start.saturating_add(local_idx);
         if row >= write_from && row < write_to {
@@ -1488,6 +1792,15 @@ fn apply_decoded_wasm_scene(
         let row = slice_start.saturating_add(local_idx);
         if row >= write_from && row < write_to {
             context.set_background_color(row, (color.a != 0).then_some(color))?;
+        }
+    }
+    for (out_idx, local_idx, color) in decoded.plot_colors {
+        let row = slice_start.saturating_add(local_idx);
+        if row >= write_from
+            && row < write_to
+            && let Some(output) = context.output(out_idx)
+        {
+            output.set_point_color(row, (color.a != 0).then_some(color))?;
         }
     }
     for alert in decoded.alerts {
@@ -1786,7 +2099,16 @@ mod tests {
 
     #[test]
     fn scene_decoder_parses_bounded_alerts_and_logs() {
-        let timestamps = [1_000_000_000_i64, 2_000_000_000, 3_000_000_000];
+        let bars = StudySandboxColumnarBars {
+            price_scale: 2,
+            quantity_scale: 0,
+            timestamps_unix_nanos: vec![1_000_000_000_i64, 2_000_000_000, 3_000_000_000],
+            open: vec![10000, 10100, 10200],
+            high: vec![10500, 10600, 10700],
+            low: vec![9900, 10000, 10100],
+            close: vec![10100, 10200, 10300],
+            volume: vec![10, 20, 30],
+        };
         let mut buf = Vec::new();
 
         // Emit 20 alerts (> MAXIMUM_STUDY_ALERTS_PER_WAVE = 16) to verify hard cap.
@@ -1810,7 +2132,7 @@ mod tests {
             buf.extend_from_slice(text.as_bytes());
         }
 
-        let decoded = decode_wasm_scene_commands(&buf, &timestamps);
+        let decoded = decode_wasm_scene_commands(&buf, &bars);
         assert_eq!(decoded.alerts.len(), MAXIMUM_STUDY_ALERTS_PER_WAVE);
         assert_eq!(decoded.alerts[0].condition_id, "cond_0");
         assert_eq!(decoded.alerts[0].bar_timestamp_unix_nanos, 1_000_000_000);
@@ -1826,5 +2148,88 @@ mod tests {
         assert_eq!(decoded.logs[0].message, "hello");
         assert_eq!(decoded.logs[1].level, WasmStudyLogLevel::Warn);
         assert_eq!(decoded.logs[2].level, WasmStudyLogLevel::Error);
+    }
+
+    #[test]
+    fn phase_2_scene_decoder_handles_box_text_line_fill_plot_color_and_shapes() {
+        let bars = StudySandboxColumnarBars {
+            price_scale: 2,
+            quantity_scale: 0,
+            timestamps_unix_nanos: vec![1_000_000_000_i64, 2_000_000_000, 3_000_000_000],
+            open: vec![10000, 10100, 10200],
+            high: vec![10500, 10600, 10700],
+            low: vec![9900, 10000, 10100],
+            close: vec![10100, 10200, 10300],
+            volume: vec![10, 20, 30],
+        };
+        let mut buf = Vec::new();
+        // OP_BOX_EX with text & dashed border
+        buf.push(OP_BOX_EX);
+        buf.extend_from_slice(&0.0_f64.to_le_bytes());
+        buf.extend_from_slice(&105.0_f64.to_le_bytes());
+        buf.extend_from_slice(&2.0_f64.to_le_bytes());
+        buf.extend_from_slice(&100.0_f64.to_le_bytes());
+        buf.extend_from_slice(&0x22c5_5eff_u32.to_le_bytes());
+        buf.extend_from_slice(&0x22c5_5e40_u32.to_le_bytes());
+        buf.push(1);
+        buf.push(1); // dashed
+        buf.extend_from_slice(&0xffff_ffff_u32.to_le_bytes());
+        buf.extend_from_slice(&3_u16.to_le_bytes());
+        buf.extend_from_slice(b"FVG");
+
+        // Two OP_LINEs + OP_LINE_FILL between them
+        for y in [105.0_f64, 100.0_f64] {
+            buf.push(OP_LINE);
+            buf.extend_from_slice(&0.0_f64.to_le_bytes());
+            buf.extend_from_slice(&y.to_le_bytes());
+            buf.extend_from_slice(&2.0_f64.to_le_bytes());
+            buf.extend_from_slice(&y.to_le_bytes());
+            buf.extend_from_slice(&0x38bd_f8ff_u32.to_le_bytes());
+            buf.push(1);
+            buf.push(0);
+            buf.push(0);
+        }
+        buf.push(OP_LINE_FILL);
+        buf.extend_from_slice(&0_u32.to_le_bytes());
+        buf.extend_from_slice(&1_u32.to_le_bytes());
+        buf.extend_from_slice(&0x38bd_f830_u32.to_le_bytes());
+
+        // OP_PLOT_COLOR on output 0 bar 2
+        buf.push(OP_PLOT_COLOR);
+        buf.push(0);
+        buf.extend_from_slice(&2_u32.to_le_bytes());
+        buf.extend_from_slice(&0xef44_44ff_u32.to_le_bytes());
+
+        // OP_PLOT_SHAPE AboveBar with TriangleDown (7)
+        buf.push(OP_PLOT_SHAPE);
+        buf.extend_from_slice(&1_u32.to_le_bytes());
+        buf.push(0); // AboveBar -> bar.high (106.0)
+        buf.extend_from_slice(&0.0_f64.to_le_bytes());
+        buf.push(7); // TriangleDown
+        buf.extend_from_slice(&0xef44_44ff_u32.to_le_bytes());
+        buf.extend_from_slice(&0xffff_ffff_u32.to_le_bytes());
+        buf.extend_from_slice(&4_u16.to_le_bytes());
+        buf.extend_from_slice(b"SELL");
+
+        let decoded = decode_wasm_scene_commands(&buf, &bars);
+        assert_eq!(decoded.objects.len(), 4); // box + 2 lines + shape
+        assert_eq!(decoded.line_fills.len(), 1);
+        assert_eq!(decoded.plot_colors.len(), 1);
+        assert_eq!(decoded.plot_colors[0].0, 0);
+        assert_eq!(decoded.plot_colors[0].1, 2);
+
+        if let StudySceneObject::Box(bx) = &decoded.objects[0] {
+            assert_eq!(bx.text.as_deref(), Some("FVG"));
+            assert_eq!(bx.border_style, StudyLineStyle::Dashed);
+        } else {
+            panic!("expected Box at index 0");
+        }
+        if let StudySceneObject::Label(lbl) = &decoded.objects[3] {
+            assert_eq!(lbl.style, StudyLabelStyle::TriangleDown);
+            assert!((lbl.point.price - 106.0).abs() < 1e-9);
+            assert_eq!(lbl.text, "SELL");
+        } else {
+            panic!("expected Label shape at index 3");
+        }
     }
 }

@@ -257,6 +257,31 @@ impl StudySettingBuilder {
     }
 
     #[must_use]
+    pub fn decimal_bounds(
+        mut self,
+        minimum: Option<StudyDecimal>,
+        maximum: Option<StudyDecimal>,
+        step: Option<StudyDecimal>,
+    ) -> Self {
+        if let StudySettingControl::Decimal {
+            minimum: min,
+            maximum: max,
+            step: st,
+        }
+        | StudySettingControl::Price {
+            minimum: min,
+            maximum: max,
+            step: st,
+        } = &mut self.spec.presentation.control
+        {
+            *min = minimum;
+            *max = maximum;
+            *st = step;
+        }
+        self
+    }
+
+    #[must_use]
     pub fn visible_when(
         mut self,
         setting_identifier: impl Into<String>,

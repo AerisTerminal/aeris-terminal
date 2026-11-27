@@ -27,7 +27,8 @@ use aeris_study_sdk::wasm_runtime::{
 use aeris_study_sdk::{
     BarSeriesKey, NativeStudyRegistration, StreamRequirements, StudyColor, StudyDecimal,
     StudyFillSpec, StudyInvalidationPolicy, StudyLevelSpec, StudyLineStyle, StudyPaneTarget,
-    StudyPlotKind, StudySettingSpec, StudySettingValue, StudySettings,
+    StudyPlotKind, StudyPointStyle, StudySession, StudySettingChoiceOption, StudySettingSpec,
+    StudySettingValue, StudySettings, StudySource, StudyTimeframe,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -196,6 +197,7 @@ pub(crate) struct ParsedStudySpec {
     pub(crate) outputs: Vec<ParsedStudyOutputSpec>,
     pub(crate) fills: Vec<StudyFillSpec>,
     pub(crate) levels: Vec<StudyLevelSpec>,
+    pub(crate) uses_per_point_colors: bool,
 }
 
 fn parse_decimal_literal(raw: &str) -> Option<StudyDecimal> {
@@ -222,11 +224,26 @@ fn parse_line_style(raw: &str) -> StudyLineStyle {
 fn parse_plot_kind(raw: &str) -> StudyPlotKind {
     match raw.trim().to_ascii_lowercase().as_str() {
         "histogram" | "hist" => StudyPlotKind::Histogram,
+        "area" => StudyPlotKind::Area,
         "columns" | "bars" => StudyPlotKind::Columns,
         "stepline" | "step" => StudyPlotKind::StepLine,
         "circles" | "dots" => StudyPlotKind::Circles,
         "cross" => StudyPlotKind::Cross,
         _ => StudyPlotKind::Line,
+    }
+}
+
+fn parse_study_source_literal(raw: &str) -> Option<StudySource> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "open" => Some(StudySource::Open),
+        "high" => Some(StudySource::High),
+        "low" => Some(StudySource::Low),
+        "close" => Some(StudySource::Close),
+        "hl2" => Some(StudySource::Hl2),
+        "hlc3" => Some(StudySource::Hlc3),
+        "ohlc4" => Some(StudySource::Ohlc4),
+        "volume" | "vol" => Some(StudySource::Volume),
+        _ => None,
     }
 }
 
@@ -293,34 +310,104 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
             if let Ok(w) = value.trim().parse::<u32>() {
                 line_width = w.clamp(1, 4);
             }
-        } else if lower.starts_with("@input:") && inputs.len() < 16 {
-            // Format: // @input: <id> | <int|float|bool> | <default> | <label>
+        } else if lower.starts_with("@input:") && inputs.len() < 32 {
+            // Format: // @input: <id> | <int|float|bool|color|choice|source|string|timeframe|session> | <default> | <label> [| key=val ...]
             let body = content[7..].trim();
             let parts: Vec<&str> = body.split('|').map(str::trim).collect();
             if parts.len() >= 3 && !parts[0].is_empty() {
                 let id = parts[0];
                 let kind = parts[1].to_ascii_lowercase();
                 let default_raw = parts[2];
-                let label = parts
-                    .get(3)
-                    .filter(|s| !s.is_empty())
-                    .copied()
-                    .unwrap_or(id);
-                let spec = match kind.as_str() {
-                    "int" | "integer" => default_raw
-                        .parse::<i64>()
-                        .ok()
-                        .map(|val| StudySettingBuilder::integer(id, val).label(label).build()),
-                    "float" | "decimal" | "f64" => parse_decimal_literal(default_raw)
-                        .map(|dec| StudySettingBuilder::decimal(id, dec).label(label).build()),
+                let mut label = id;
+                let mut min_raw: Option<&str> = None;
+                let mut max_raw: Option<&str> = None;
+                let mut step_raw: Option<&str> = None;
+                let mut options_raw: Option<&str> = None;
+                let mut group_raw: Option<&str> = None;
+                let mut tooltip_raw: Option<&str> = None;
+
+                for (idx, part) in parts.iter().enumerate().skip(3) {
+                    if let Some((k, v)) = part.split_once('=') {
+                        let key = k.trim().to_ascii_lowercase();
+                        let val = v.trim();
+                        match key.as_str() {
+                            "min" => min_raw = Some(val),
+                            "max" => max_raw = Some(val),
+                            "step" => step_raw = Some(val),
+                            "options" | "choices" => options_raw = Some(val),
+                            "group" => group_raw = Some(val),
+                            "tooltip" | "desc" | "description" => tooltip_raw = Some(val),
+                            _ => {}
+                        }
+                    } else if idx == 3 && !part.is_empty() {
+                        label = part;
+                    }
+                }
+
+                let mut builder = match kind.as_str() {
+                    "int" | "integer" => default_raw.parse::<i64>().ok().map(|val| {
+                        StudySettingBuilder::integer(id, val).integer_bounds(
+                            min_raw.and_then(|s| s.parse::<i64>().ok()),
+                            max_raw.and_then(|s| s.parse::<i64>().ok()),
+                            step_raw.and_then(|s| s.parse::<i64>().ok()),
+                        )
+                    }),
+                    "float" | "decimal" | "f64" => parse_decimal_literal(default_raw).map(|dec| {
+                        StudySettingBuilder::decimal(id, dec).decimal_bounds(
+                            min_raw.and_then(parse_decimal_literal),
+                            max_raw.and_then(parse_decimal_literal),
+                            step_raw.and_then(parse_decimal_literal),
+                        )
+                    }),
                     "bool" | "boolean" => default_raw
                         .parse::<bool>()
                         .ok()
-                        .map(|b| StudySettingBuilder::boolean(id, b).label(label).build()),
+                        .map(|b| StudySettingBuilder::boolean(id, b)),
+                    "color" => {
+                        parse_hex_study_color(default_raw).map(|c| StudySettingBuilder::color(id, c))
+                    }
+                    "choice" | "select" | "options" => {
+                        let opts: Vec<StudySettingChoiceOption> = options_raw
+                            .map(|raw| {
+                                raw.split(',')
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| StudySettingChoiceOption {
+                                        identifier: s.to_string(),
+                                        label: s.to_string(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| {
+                                vec![StudySettingChoiceOption {
+                                    identifier: default_raw.to_string(),
+                                    label: default_raw.to_string(),
+                                }]
+                            });
+                        if opts.is_empty() {
+                            None
+                        } else {
+                            Some(StudySettingBuilder::choice(id, default_raw, opts))
+                        }
+                    }
+                    "source" | "src" => parse_study_source_literal(default_raw)
+                        .map(|src| StudySettingBuilder::source(id, src, false)),
+                    "string" | "text" | "str" => Some(StudySettingBuilder::text(id, default_raw)),
+                    "timeframe" | "tf" => StudyTimeframe::parse_label(default_raw)
+                        .map(|tf| StudySettingBuilder::timeframe(id, tf, true)),
+                    "session" => StudySession::parse_label(default_raw)
+                        .map(|sess| StudySettingBuilder::session(id, sess)),
                     _ => None,
                 };
-                if let Some(spec) = spec {
-                    inputs.push(spec);
+                if let Some(mut b) = builder.take() {
+                    b = b.label(label);
+                    if let Some(group) = group_raw.filter(|g| !g.is_empty()) {
+                        b = b.group(group);
+                    }
+                    if let Some(tooltip) = tooltip_raw.filter(|t| !t.is_empty()) {
+                        b = b.description(tooltip);
+                    }
+                    inputs.push(b.build());
                 }
             }
         } else if lower.starts_with("@output:") && outputs.len() < 16 {
@@ -411,6 +498,11 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
             && f.first_output_index != f.second_output_index
     });
 
+    let uses_per_point_colors = source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or("");
+        code.contains("set_plot_color")
+    });
+
     ParsedStudySpec {
         pane,
         line_width,
@@ -418,6 +510,7 @@ pub(crate) fn parse_study_source_spec(source: &str, default_title: &str) -> Pars
         outputs,
         fills,
         levels,
+        uses_per_point_colors,
     }
 }
 
@@ -452,11 +545,12 @@ pub(crate) fn build_wasm_study_registration_with_telemetry(
         builder = builder.setting(input.clone());
     }
     for out in &spec.outputs {
-        builder = builder.output(
-            StudyOutputBuilder::new(&out.identifier, &out.title, out.plot)
-                .pane(spec.pane)
-                .build(),
-        );
+        let mut out_builder = StudyOutputBuilder::new(&out.identifier, &out.title, out.plot)
+            .pane(spec.pane);
+        if spec.uses_per_point_colors {
+            out_builder = out_builder.point_style(StudyPointStyle::PerPoint);
+        }
+        builder = builder.output(out_builder.build());
     }
     let definition = builder.build();
     let settings = StudySettings::with_overrides(&definition.settings, overrides)
@@ -1126,7 +1220,9 @@ mod user_study;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-static PARAMS: [AtomicU64; 16] = [const { AtomicU64::new(f64::NAN.to_bits()) }; 16];
+static PARAMS: [AtomicU64; 32] = [const { AtomicU64::new(f64::NAN.to_bits()) }; 32];
+static STR_PARAMS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static LINE_COUNTER: AtomicU32 = AtomicU32::new(0);
 static VIEWPORT_LEFT: AtomicU32 = AtomicU32::new(0);
 static VIEWPORT_RIGHT: AtomicU32 = AtomicU32::new(u32::MAX);
 static META_TIMEFRAME_SECS: AtomicU32 = AtomicU32::new(60);
@@ -1147,6 +1243,56 @@ const OP_BAR_COLOR: u8 = 6;
 const OP_BG_COLOR: u8 = 7;
 const OP_ALERT: u8 = 8;
 const OP_LOG: u8 = 9;
+const OP_BOX_EX: u8 = 10;
+const OP_LINE_FILL: u8 = 11;
+const OP_PLOT_COLOR: u8 = 12;
+const OP_PLOT_SHAPE: u8 = 13;
+
+#[allow(dead_code)]
+pub const LABEL_UP: u8 = 0;
+#[allow(dead_code)]
+pub const LABEL_DOWN: u8 = 1;
+#[allow(dead_code)]
+pub const LABEL_LEFT: u8 = 2;
+#[allow(dead_code)]
+pub const LABEL_RIGHT: u8 = 3;
+#[allow(dead_code)]
+pub const LABEL_TEXT_ONLY: u8 = 4;
+#[allow(dead_code)]
+pub const LABEL_CIRCLE: u8 = 5;
+#[allow(dead_code)]
+pub const LABEL_TRIANGLE_UP: u8 = 6;
+#[allow(dead_code)]
+pub const LABEL_TRIANGLE_DOWN: u8 = 7;
+#[allow(dead_code)]
+pub const LABEL_ARROW_UP: u8 = 8;
+#[allow(dead_code)]
+pub const LABEL_ARROW_DOWN: u8 = 9;
+#[allow(dead_code)]
+pub const LABEL_CROSS: u8 = 10;
+
+#[allow(dead_code)]
+pub const LOC_ABOVE_BAR: u8 = 0;
+#[allow(dead_code)]
+pub const LOC_BELOW_BAR: u8 = 1;
+#[allow(dead_code)]
+pub const LOC_ABSOLUTE: u8 = 2;
+
+#[allow(dead_code)]
+pub const LINE_SOLID: u8 = 0;
+#[allow(dead_code)]
+pub const LINE_DASHED: u8 = 1;
+#[allow(dead_code)]
+pub const LINE_DOTTED: u8 = 2;
+
+#[allow(dead_code)]
+pub const EXTEND_NONE: u8 = 0;
+#[allow(dead_code)]
+pub const EXTEND_RIGHT: u8 = 1;
+#[allow(dead_code)]
+pub const EXTEND_LEFT: u8 = 2;
+#[allow(dead_code)]
+pub const EXTEND_BOTH: u8 = 3;
 
 #[allow(dead_code)]
 pub const ALERT_ONCE_PER_BAR: u8 = 0;
@@ -1164,6 +1310,60 @@ pub fn param(index: usize, default: f64) -> f64 {
         }
     }
     default
+}
+
+#[allow(dead_code)]
+pub fn param_int(index: usize, default: i64) -> i64 {
+    let v = param(index, default as f64);
+    if v.is_finite() { v.round() as i64 } else { default }
+}
+
+#[allow(dead_code)]
+pub fn param_bool(index: usize, default: bool) -> bool {
+    let v = param(index, if default { 1.0 } else { 0.0 });
+    v != 0.0
+}
+
+#[allow(dead_code)]
+pub fn param_color(index: usize, default_rgba: u32) -> u32 {
+    let v = param(index, f64::from(default_rgba));
+    if v.is_finite() && v >= 0.0 {
+        v.round() as u32
+    } else {
+        default_rgba
+    }
+}
+
+#[allow(dead_code)]
+pub fn param_str(index: usize, default: &str) -> String {
+    STR_PARAMS
+        .lock()
+        .ok()
+        .and_then(|v| v.get(index).filter(|s| !s.is_empty()).cloned())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Resolves a `@input: ... | source | close | ...` parameter into a `Vec<f64>` series.
+#[allow(dead_code)]
+pub fn param_source(
+    index: usize,
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+) -> Vec<f64> {
+    let n = close.len();
+    match param_int(index, 3) {
+        0 => open.to_vec(),
+        1 => high.to_vec(),
+        2 => low.to_vec(),
+        4 => (0..n).map(|i| (high[i] + low[i]) * 0.5).collect(),
+        5 => (0..n).map(|i| (high[i] + low[i] + close[i]) / 3.0).collect(),
+        6 => (0..n).map(|i| (open[i] + high[i] + low[i] + close[i]) * 0.25).collect(),
+        7 => volume.to_vec(),
+        _ => close.to_vec(),
+    }
 }
 
 #[allow(dead_code)]
@@ -2006,11 +2206,13 @@ pub const fn rgba(hex_rgb: u32, alpha: u8) -> u32 {
 }
 
 fn clear_scene_buf() {
+    LINE_COUNTER.store(0, Ordering::Relaxed);
     if let Ok(mut buf) = SCENE_BUF.lock() {
         buf.clear();
     }
 }
 
+#[allow(dead_code)]
 pub fn draw_box(
     x1_bar: f64,
     top: f64,
@@ -2038,6 +2240,46 @@ pub fn draw_box(
     }
 }
 
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub fn draw_box_text(
+    x1_bar: f64,
+    top: f64,
+    x2_bar: f64,
+    bottom: f64,
+    border_rgba: u32,
+    fill_rgba: u32,
+    border_width: u8,
+    border_style: u8,
+    text_rgba: u32,
+    text: &str,
+) {
+    if !x1_bar.is_finite() || !x2_bar.is_finite() || !top.is_finite() || !bottom.is_finite() {
+        return;
+    }
+    let bytes = text.as_bytes();
+    let len = bytes.len().min(256);
+    if let Ok(mut buf) = SCENE_BUF.lock() {
+        if buf.len() + 49 + len > MAX_SCENE_BYTES {
+            return;
+        }
+        buf.push(OP_BOX_EX);
+        buf.extend_from_slice(&x1_bar.to_le_bytes());
+        buf.extend_from_slice(&top.to_le_bytes());
+        buf.extend_from_slice(&x2_bar.to_le_bytes());
+        buf.extend_from_slice(&bottom.to_le_bytes());
+        buf.extend_from_slice(&border_rgba.to_le_bytes());
+        buf.extend_from_slice(&fill_rgba.to_le_bytes());
+        buf.push(border_width);
+        buf.push(border_style);
+        buf.extend_from_slice(&text_rgba.to_le_bytes());
+        buf.extend_from_slice(&(len as u16).to_le_bytes());
+        buf.extend_from_slice(&bytes[..len]);
+    }
+}
+
+/// Draws a line/ray and returns its wave-local handle for use with `draw_line_fill`.
+#[allow(dead_code)]
 pub fn draw_line(
     x1_bar: f64,
     y1: f64,
@@ -2047,13 +2289,13 @@ pub fn draw_line(
     width: u8,
     style: u8,
     extend: u8,
-) {
+) -> u32 {
     if !x1_bar.is_finite() || !y1.is_finite() || !x2_bar.is_finite() || !y2.is_finite() {
-        return;
+        return u32::MAX;
     }
     if let Ok(mut buf) = SCENE_BUF.lock() {
         if buf.len() + 40 > MAX_SCENE_BYTES {
-            return;
+            return u32::MAX;
         }
         buf.push(OP_LINE);
         buf.extend_from_slice(&x1_bar.to_le_bytes());
@@ -2064,6 +2306,69 @@ pub fn draw_line(
         buf.push(width);
         buf.push(style);
         buf.push(extend);
+        return LINE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    }
+    u32::MAX
+}
+
+/// Shades the region between two lines returned by `draw_line` in the same wave.
+#[allow(dead_code)]
+pub fn draw_line_fill(first_line_handle: u32, second_line_handle: u32, color_rgba: u32) {
+    if first_line_handle == u32::MAX || second_line_handle == u32::MAX || first_line_handle == second_line_handle {
+        return;
+    }
+    if let Ok(mut buf) = SCENE_BUF.lock()
+        && buf.len() + 13 <= MAX_SCENE_BYTES
+    {
+        buf.push(OP_LINE_FILL);
+        buf.extend_from_slice(&first_line_handle.to_le_bytes());
+        buf.extend_from_slice(&second_line_handle.to_le_bytes());
+        buf.extend_from_slice(&color_rgba.to_le_bytes());
+    }
+}
+
+/// Overrides the color of one bar on output series `output_index` (`StudyPointStyle::PerPoint`).
+#[allow(dead_code)]
+pub fn set_plot_color(output_index: usize, bar_index: usize, color_rgba: u32) {
+    if let (Ok(out_u8), Ok(bar_u32)) = (u8::try_from(output_index), u32::try_from(bar_index))
+        && let Ok(mut buf) = SCENE_BUF.lock()
+        && buf.len() + 10 <= MAX_SCENE_BYTES
+    {
+        buf.push(OP_PLOT_COLOR);
+        buf.push(out_u8);
+        buf.extend_from_slice(&bar_u32.to_le_bytes());
+        buf.extend_from_slice(&color_rgba.to_le_bytes());
+    }
+}
+
+/// Plots a semantic marker/shape at `bar_index` (`LOC_ABOVE_BAR`, `LOC_BELOW_BAR`, or `LOC_ABSOLUTE`).
+#[allow(dead_code)]
+pub fn plot_shape(
+    bar_index: usize,
+    location: u8,
+    price: f64,
+    shape: u8,
+    color_rgba: u32,
+    text_rgba: u32,
+    text: &str,
+) {
+    let Ok(idx) = u32::try_from(bar_index) else {
+        return;
+    };
+    let bytes = text.as_bytes();
+    let len = bytes.len().min(256);
+    if let Ok(mut buf) = SCENE_BUF.lock()
+        && buf.len() + 25 + len <= MAX_SCENE_BYTES
+    {
+        buf.push(OP_PLOT_SHAPE);
+        buf.extend_from_slice(&idx.to_le_bytes());
+        buf.push(location);
+        buf.extend_from_slice(&price.to_le_bytes());
+        buf.push(shape);
+        buf.extend_from_slice(&color_rgba.to_le_bytes());
+        buf.extend_from_slice(&text_rgba.to_le_bytes());
+        buf.extend_from_slice(&(len as u16).to_le_bytes());
+        buf.extend_from_slice(&bytes[..len]);
     }
 }
 
@@ -2174,6 +2479,25 @@ pub fn set_bg_color(bar_index: usize, color_rgba: u32) {
 pub extern "C" fn aeris_study_set_param(index: u32, value: f64) {
     if let Some(slot) = PARAMS.get(index as usize) {
         slot.store(value.to_bits(), Ordering::Relaxed);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn aeris_study_set_str_param(index: u32, ptr: u32, len: u32) {
+    let idx = index as usize;
+    if idx >= 32 {
+        return;
+    }
+    if let Ok(mut table) = STR_PARAMS.lock() {
+        if table.len() <= idx {
+            table.resize_with(idx + 1, String::new);
+        }
+        table[idx].clear();
+        if ptr != 0 && len > 0 {
+            let clamped = (len as usize).min(256);
+            let bytes = unsafe { std::slice::from_raw_parts(ptr as usize as *const u8, clamped) };
+            table[idx].push_str(&String::from_utf8_lossy(bytes));
+        }
     }
 }
 
@@ -3014,6 +3338,76 @@ pub fn calculate_multi(
         assert!(telemetry.logs[0].message.contains("tf=60s"));
         assert!(!telemetry.logs[0].message.contains("ts=0 "));
         assert_eq!(telemetry.logs[1].message, "sample warning");
+    }
+
+    #[test]
+    fn phase_2_typed_inputs_per_point_colors_box_text_line_fill_and_plot_shape_work() {
+        let source = r#"
+// @pane: price
+// @input: len | int | 14 | Length | min=2 | max=200 | step=1 | group=Core | tooltip=MA period
+// @input: src | source | hlc3 | Price Source | group=Core
+// @input: mode | choice | EMA | Mode | options=SMA,EMA,RMA | group=Core
+// @input: bull_col | color | #22c55eff | Bull Color | group=Style
+// @input: tf | timeframe | 15m | Higher TF | group=MTF
+// @input: sess | session | 09:30-16:00 | Session | group=MTF
+// @output: ma | Dynamic MA | area | #22c55e
+pub fn calculate(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &mut [f64],
+) {
+    let len = super::param_int(0, 14).max(2) as usize;
+    let src = super::param_source(1, open, high, low, close, volume);
+    let mode = super::param_str(2, "EMA");
+    let bull = super::param_color(3, super::rgba(0x22c55e, 255));
+    let series = match mode.as_str() {
+        "SMA" => super::ta::sma(&src, len),
+        "RMA" => super::ta::rma(&src, len),
+        _ => super::ta::ema(&src, len),
+    };
+    out.copy_from_slice(&series);
+    for i in 1..out.len() {
+        let c = if out[i] >= out[i - 1] { bull } else { super::rgba(0xef4444, 255) };
+        super::set_plot_color(0, i, c);
+    }
+    let last = close.len().saturating_sub(1);
+    super::draw_box_text(
+        (last.saturating_sub(10)) as f64,
+        high[last],
+        last as f64,
+        low[last],
+        bull,
+        super::rgba(0x22c55e, 48),
+        1,
+        super::LINE_DASHED,
+        super::rgba(0xffffff, 255),
+        "ZONE",
+    );
+    let l1 = super::draw_line(0.0, high[last], last as f64, high[last], bull, 1, super::LINE_SOLID, super::EXTEND_NONE);
+    let l2 = super::draw_line(0.0, low[last], last as f64, low[last], bull, 1, super::LINE_SOLID, super::EXTEND_NONE);
+    super::draw_line_fill(l1, l2, super::rgba(0x22c55e, 32));
+    super::plot_shape(last, super::LOC_BELOW_BAR, 0.0, super::LABEL_TRIANGLE_UP, bull, super::rgba(0xffffff, 255), "BUY");
+}
+"#;
+        let spec = parse_study_source_spec(source, "Phase2");
+        assert_eq!(spec.inputs.len(), 6);
+        assert!(spec.uses_per_point_colors);
+        assert_eq!(spec.outputs[0].plot, StudyPlotKind::Area);
+        assert_eq!(spec.inputs[0].presentation.group.as_deref(), Some("Core"));
+        assert_eq!(
+            spec.inputs[0].presentation.description.as_deref(),
+            Some("MA period")
+        );
+
+        let (diags, summary, telemetry) =
+            run_offline_preview_check(source, PreviewFixturePreset::Uptrend);
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        assert!(summary.contains("1 series"), "summary: {summary}");
+        let telemetry = telemetry.expect("telemetry present");
+        assert_eq!(telemetry.scene_object_count, 4); // box + 2 lines + shape
     }
 
     #[test]
