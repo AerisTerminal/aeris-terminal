@@ -253,9 +253,24 @@ impl Coordinator<'_> {
                 .engine
                 .current_demand(owner)
                 .and_then(|demand| demand.generation);
+            let style_overlay = self.studies.resolved_style_overlay(study_id);
             let deltas = self.studies.take_scene_deltas(study_id);
             let alerts = self.studies.take_triggered_alerts(study_id);
             if let Some(events) = self.events.get_mut(&owner) {
+                if let Some(overlay) = style_overlay {
+                    events.publish_study_style_overlay(MarketRuntimeEvent::StudyStyleOverlay(
+                        crate::MarketStudyStyleOverlay {
+                            consumer_id: owner,
+                            generation,
+                            study_id,
+                            study_identifier: study_identifier.clone(),
+                            bar_colors: overlay.bar_colors,
+                            background_colors: overlay.background_colors,
+                            levels: overlay.levels,
+                            fills: overlay.fills,
+                        },
+                    ));
+                }
                 if !deltas.is_empty() {
                     events.publish_study_scene_delta(MarketRuntimeEvent::StudySceneDelta(
                         crate::MarketStudySceneDelta {

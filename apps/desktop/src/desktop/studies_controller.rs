@@ -45,6 +45,8 @@ pub(super) struct StudiesController {
     /// When automatic removals the command lane refused are retried, so a pane without further
     /// market messages still sends them.
     removal_retry: Option<Instant>,
+    /// Per-study sparse `(timestamp_unix_nanos, packed_0xRRGGBBAA)` candle color overrides.
+    bar_colors: std::collections::BTreeMap<StudyInstanceId, Vec<(i64, u32)>>,
     next_local_id: u64,
 }
 
@@ -62,6 +64,7 @@ impl Default for StudiesController {
             deferred: Vec::new(),
             registration_retry: None,
             removal_retry: None,
+            bar_colors: std::collections::BTreeMap::new(),
             next_local_id: 1,
         }
     }
@@ -543,10 +546,38 @@ impl StudiesController {
 
     pub(super) fn invalidate_study_outputs(&mut self, study_ids: &[StudyInstanceId]) {
         for study_id in study_ids {
+            self.bar_colors.remove(study_id);
             if !self.reinitializing.contains_key(study_id) {
                 self.suppressing_outputs.remove(study_id);
             }
         }
+    }
+
+    pub(super) fn set_bar_colors(
+        &mut self,
+        study_id: StudyInstanceId,
+        colors: Vec<(i64, u32)>,
+    ) -> bool {
+        if colors.is_empty() {
+            return self.bar_colors.remove(&study_id).is_some();
+        }
+        if self.bar_colors.get(&study_id) == Some(&colors) {
+            return false;
+        }
+        self.bar_colors.insert(study_id, colors);
+        true
+    }
+
+    pub(super) fn merged_bar_colors(&self) -> Vec<(i64, u32)> {
+        let mut merged = std::collections::BTreeMap::new();
+        for colors in self.bar_colors.values() {
+            for &(timestamp, color) in colors {
+                if color != 0 {
+                    merged.insert(timestamp, color);
+                }
+            }
+        }
+        merged.into_iter().collect()
     }
 
     pub(super) fn suppresses_output(&self, study_id: StudyInstanceId) -> bool {
@@ -593,6 +624,7 @@ impl StudiesController {
             .retain(|state| !removed_local_ids.contains(&state.persisted.local_id));
         changed |= self.deferred.len() != previous_deferred_len;
         for study_id in study_ids {
+            self.bar_colors.remove(study_id);
             self.reinitializing.remove(study_id);
             self.reinitialization_retries.remove(study_id);
             self.suppressing_outputs.remove(study_id);

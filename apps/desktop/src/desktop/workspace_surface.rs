@@ -2671,6 +2671,7 @@ impl WorkspaceSurface {
             aeris_market_runtime::MarketRuntimeEvent::StudyOutputSnapshot(_)
             | aeris_market_runtime::MarketRuntimeEvent::StudyOutputsInvalidated(_)
             | aeris_market_runtime::MarketRuntimeEvent::StudyRemoved(_)
+            | aeris_market_runtime::MarketRuntimeEvent::StudyStyleOverlay(_)
             | aeris_market_runtime::MarketRuntimeEvent::StudySceneDelta(_)
             | aeris_market_runtime::MarketRuntimeEvent::StudyAlertTriggered(_) => {
                 self.apply_runtime_study(event, cx);
@@ -2856,6 +2857,22 @@ impl WorkspaceSurface {
             }
             aeris_market_runtime::MarketRuntimeEvent::StudyRemoved(removed) => {
                 self.apply_study_removal_message(&removed, cx);
+            }
+            aeris_market_runtime::MarketRuntimeEvent::StudyStyleOverlay(overlay) => {
+                if !self.chart_pane_controller.accept_study_publication(
+                    overlay.generation.map(|generation| generation.0.get()),
+                ) || self.studies.suppresses_output(overlay.study_id)
+                {
+                    return;
+                }
+                let colors = overlay
+                    .bar_colors
+                    .iter()
+                    .map(|&(ts, color)| (ts, color.to_rgba_u32()))
+                    .collect::<Vec<_>>();
+                if self.studies.set_bar_colors(overlay.study_id, colors) {
+                    self.sync_study_bar_colors_to_chart(cx);
+                }
             }
             aeris_market_runtime::MarketRuntimeEvent::StudySceneDelta(delta) => {
                 if let Some(generation) = delta.generation
@@ -3488,12 +3505,27 @@ impl WorkspaceSurface {
             self.indicator_settings_dialog = None;
         }
         if let Some(chart) = &self.chart {
+            let merged_bar_colors = self.studies.merged_bar_colors();
             chart.update(cx, |chart, chart_cx| {
-                if chart.remove_study_outputs(&study_ids) {
+                let mut changed = chart.remove_study_outputs(&study_ids);
+                changed |= chart.set_study_bar_colors(&merged_bar_colors);
+                if changed {
                     chart_cx.notify();
                 }
             });
         }
+    }
+
+    fn sync_study_bar_colors_to_chart(&self, cx: &mut Context<Self>) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        let merged = self.studies.merged_bar_colors();
+        chart.update(cx, |chart, chart_cx| {
+            if chart.set_study_bar_colors(&merged) {
+                chart_cx.notify();
+            }
+        });
     }
 
     fn apply_study_invalidated(
@@ -3511,8 +3543,11 @@ impl WorkspaceSurface {
             .iter()
             .map(|study_id| study_id.get())
             .collect::<Vec<_>>();
+        let merged_bar_colors = self.studies.merged_bar_colors();
         chart.update(cx, |chart, chart_cx| {
-            if chart.remove_study_outputs(&study_ids) {
+            let mut changed = chart.remove_study_outputs(&study_ids);
+            changed |= chart.set_study_bar_colors(&merged_bar_colors);
+            if changed {
                 chart_cx.notify();
             }
         });

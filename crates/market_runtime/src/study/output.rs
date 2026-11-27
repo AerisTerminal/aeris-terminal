@@ -84,6 +84,15 @@ pub struct StudyStyleOverlay {
     pub fills: Vec<StudyFillSpec>,
 }
 
+/// Timestamp-resolved style overlay ready for host/chart publication.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ResolvedStudyStyleOverlay {
+    pub bar_colors: Vec<(i64, StudyColor)>,
+    pub background_colors: Vec<(i64, StudyColor)>,
+    pub levels: Vec<StudyLevelSpec>,
+    pub fills: Vec<StudyFillSpec>,
+}
+
 impl StudyStyleOverlay {
     pub(super) fn prepare_for_dirty(&mut self, len: usize, dirty: StudyDirtyRange) {
         let end = dirty.end_exclusive.unwrap_or(len).min(len);

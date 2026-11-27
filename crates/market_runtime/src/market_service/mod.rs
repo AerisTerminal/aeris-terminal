@@ -783,6 +783,8 @@ struct ConsumerEvents {
     /// Removal is infrequent and subtree-sized. Consecutive removals are merged
     /// into one bounded event before reaching presentation.
     study_removed: Option<MarketRuntimeEvent>,
+    /// Latest committed per-bar style overlay per study instance.
+    study_style_overlays: BTreeMap<StudyInstanceId, MarketRuntimeEvent>,
     /// Bounded compact scene deltas coalesced per study instance.
     study_scene_deltas: BTreeMap<StudyInstanceId, MarketRuntimeEvent>,
     /// Bounded FIFO of committed study alerts awaiting host delivery.

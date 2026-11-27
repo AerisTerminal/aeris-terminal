@@ -318,6 +318,7 @@ impl ConsumerEvents {
             || !self.series.is_empty()
             || self.study_invalidated.is_some()
             || !self.study_outputs.is_empty()
+            || !self.study_style_overlays.is_empty()
             || !self.study_scene_deltas.is_empty()
             || !self.study_alerts.is_empty()
             || self.study_removed.is_some()
@@ -344,6 +345,11 @@ impl ConsumerEvents {
                     .or_else(|| self.series.pop_front())
                     .or_else(|| self.study_invalidated.take())
                     .or_else(|| self.study_outputs.pop_first().map(|(_, event)| event))
+                    .or_else(|| {
+                        self.study_style_overlays
+                            .pop_first()
+                            .map(|(_, event)| event)
+                    })
                     .or_else(|| self.study_scene_deltas.pop_first().map(|(_, event)| event))
                     .or_else(|| self.study_alerts.pop_front())
                     .or_else(|| self.study_removed.take())
@@ -425,6 +431,14 @@ impl ConsumerEvents {
         self.study_outputs.insert(snapshot.output_id, event);
     }
 
+    /// Keeps only the newest committed style overlay for one study instance.
+    pub(super) fn publish_study_style_overlay(&mut self, event: MarketRuntimeEvent) {
+        let MarketRuntimeEvent::StudyStyleOverlay(overlay) = &event else {
+            return;
+        };
+        self.study_style_overlays.insert(overlay.study_id, event);
+    }
+
     /// Merges or replaces pending semantic scene deltas for one study instance, bounded to
     /// `MAXIMUM_STUDY_SCENE_OBJECTS * 2` entries per queued envelope.
     pub(super) fn publish_study_scene_delta(&mut self, event: MarketRuntimeEvent) {
@@ -479,6 +493,8 @@ impl ConsumerEvents {
             .collect::<std::collections::BTreeSet<_>>();
         self.study_outputs
             .retain(|output, _| !removed_set.contains(&output.study_id));
+        self.study_style_overlays
+            .retain(|study_id, _| !removed_set.contains(study_id));
         self.study_scene_deltas
             .retain(|study_id, _| !removed_set.contains(study_id));
 
@@ -517,6 +533,8 @@ impl ConsumerEvents {
             .collect::<std::collections::BTreeSet<_>>();
         self.study_outputs
             .retain(|output, _| !invalidated_set.contains(&output.study_id));
+        self.study_style_overlays
+            .retain(|study_id, _| !invalidated_set.contains(study_id));
         self.study_scene_deltas
             .retain(|study_id, _| !invalidated_set.contains(study_id));
         let mut study_ids = match self.study_invalidated.take() {

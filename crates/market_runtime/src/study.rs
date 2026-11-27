@@ -266,6 +266,54 @@ impl StudyRuntime {
         self.style_overlays.get(&study_id)
     }
 
+    /// Resolves a study's committed style overlay indices against its committed output timeline.
+    #[must_use]
+    pub fn resolved_style_overlay(
+        &self,
+        study_id: StudyInstanceId,
+    ) -> Option<output::ResolvedStudyStyleOverlay> {
+        let overlay = self.style_overlays.get(&study_id)?;
+        if overlay.bar_colors.is_empty()
+            && overlay.background_colors.is_empty()
+            && overlay.levels.is_empty()
+            && overlay.fills.is_empty()
+        {
+            return None;
+        }
+        let series = self.outputs.get(&StudyOutputId {
+            study_id,
+            output_index: 0,
+        });
+        let bar_colors = series.map_or_else(Vec::new, |series| {
+            overlay
+                .bar_colors
+                .iter()
+                .filter_map(|(&index, &color)| {
+                    series
+                        .timestamp_unix_nanos(index)
+                        .map(|timestamp| (timestamp, color))
+                })
+                .collect()
+        });
+        let background_colors = series.map_or_else(Vec::new, |series| {
+            overlay
+                .background_colors
+                .iter()
+                .filter_map(|(&index, &color)| {
+                    series
+                        .timestamp_unix_nanos(index)
+                        .map(|timestamp| (timestamp, color))
+                })
+                .collect()
+        });
+        Some(output::ResolvedStudyStyleOverlay {
+            bar_colors,
+            background_colors,
+            levels: overlay.levels.clone(),
+            fills: overlay.fills.clone(),
+        })
+    }
+
     /// Returns the last committed semantic drawing/table scene for one study.
     #[must_use]
     pub fn scene(&self, study_id: StudyInstanceId) -> Option<&StudySceneState> {

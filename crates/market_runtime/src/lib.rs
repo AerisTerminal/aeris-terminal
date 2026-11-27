@@ -361,6 +361,21 @@ pub struct MarketStudySceneDelta {
     pub deltas: Vec<study::StudySceneDelta>,
 }
 
+/// Latest committed per-bar style overlay, levels, and fills for one runtime-owned study.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketStudyStyleOverlay {
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: Option<aeris_market_engine::GenerationId>,
+    pub study_id: study::StudyInstanceId,
+    pub study_identifier: String,
+    /// Sparse `(timestamp_unix_nanos, color)` candle color overrides.
+    pub bar_colors: Vec<(i64, study::StudyColor)>,
+    /// Sparse `(timestamp_unix_nanos, color)` background tint overrides.
+    pub background_colors: Vec<(i64, study::StudyColor)>,
+    pub levels: Vec<study::StudyLevelSpec>,
+    pub fills: Vec<study::StudyFillSpec>,
+}
+
 /// One committed, deduplicated study alert emitted for product-owned notification delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketStudyAlertTriggered {
@@ -392,6 +407,7 @@ pub enum MarketRuntimeEvent {
     StudyOutputSnapshot(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),
+    StudyStyleOverlay(MarketStudyStyleOverlay),
     StudySceneDelta(MarketStudySceneDelta),
     StudyAlertTriggered(MarketStudyAlertTriggered),
     PriceAlertTriggered(MarketPriceAlertTrigger),
@@ -424,6 +440,7 @@ impl MarketRuntimeEvent {
             Self::StudyOutputSnapshot(event) => event.generation,
             Self::StudyOutputsInvalidated(event) => event.generation,
             Self::StudyRemoved(event) => event.generation,
+            Self::StudyStyleOverlay(event) => event.generation,
             Self::StudySceneDelta(event) => event.generation,
             Self::StudyAlertTriggered(event) => event.generation,
             Self::SelectionOutcome(_)
