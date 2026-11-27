@@ -3116,6 +3116,27 @@ impl WorkspaceSurface {
         dispatched
     }
 
+    fn resolve_runtime_study_registration(
+        &self,
+        persisted: &WorkspaceChartStudyState,
+        series: &BarSeriesKey,
+    ) -> Result<NativeStudyRegistration, String> {
+        match runtime_study_registration(persisted, series, self.studies.active()) {
+            Ok(registration) => Ok(registration),
+            Err(error) => {
+                if !persisted.identifier.starts_with("builtin.")
+                    && let Ok(root) = aeris_platform_runtime::active_data_root()
+                    && let Ok(registration) =
+                        super::study_editor_store::StudyProjectStore::new(root.path())
+                            .restore_wasm_study_registration(persisted, series)
+                {
+                    return Ok(registration);
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn dispatch_runtime_study(
         &mut self,
         mut state: PendingRuntimeStudyState,
@@ -3131,30 +3152,14 @@ impl WorkspaceSurface {
             Ok(series) => series,
             Err(error) => return Err(Box::new((state, error))),
         };
-        let registration = match runtime_study_registration(
-            &state.persisted,
-            &current_series,
-            self.studies.active(),
-        ) {
-            Ok(registration) => registration,
-            Err(error) => {
-                // Non-built-in user studies restore automatically from their persisted `last_good.wasm`.
-                let wasm_restored = (!state.persisted.identifier.starts_with("builtin."))
-                    .then(|| aeris_platform_runtime::active_data_root().ok())
-                    .flatten()
-                    .and_then(|root| {
-                        super::study_editor_store::StudyProjectStore::new(root.path())
-                            .restore_wasm_study_registration(&state.persisted, &current_series)
-                            .ok()
-                    });
-                if let Some(registration) = wasm_restored {
-                    registration
-                } else {
+        let registration =
+            match self.resolve_runtime_study_registration(&state.persisted, &current_series) {
+                Ok(registration) => registration,
+                Err(error) => {
                     state.blocked = true;
                     return Err(Box::new((state, error)));
                 }
-            }
-        };
+            };
         state.resolved_chart_series =
             runtime_study_uses_current_chart(&state.persisted).then_some(current_series);
         match self.market_worker.try_register_study(registration) {
@@ -3226,7 +3231,7 @@ impl WorkspaceSurface {
             .active_study(study_id)
             .map(|state| state.persisted.clone())
             .ok_or_else(|| "study is no longer active".to_string())?;
-        let registration = runtime_study_registration(&persisted, &series, self.studies.active())?;
+        let registration = self.resolve_runtime_study_registration(&persisted, &series)?;
         match self
             .market_worker
             .try_reinitialize_study(study_id, registration)
@@ -3344,6 +3349,13 @@ impl WorkspaceSurface {
         if state.persist_on_registration {
             self.persistence.mark_dirty();
         }
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+            && dialog.selected_id.as_deref() == Some(state.persisted.identifier.as_str())
+        {
+            dialog.status_message =
+                Some(format!("Live on chart: `{}`", state.persisted.identifier));
+        }
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
                 if chart.set_study_visible(study_id.get(), state.persisted.visible) {
@@ -3359,12 +3371,22 @@ impl WorkspaceSurface {
     fn apply_study_registration_failed(
         &mut self,
         request_sequence: u64,
-        _message: String,
+        message: String,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.studies.take_pending(request_sequence) else {
             return;
         };
+        diagnostic!(
+            "Aeris study registration failed for {}: {message}",
+            state.persisted.identifier
+        );
+        if let Some(IndicatorSettingsDialog::StudyEditor(dialog)) =
+            self.indicator_settings_dialog.as_mut()
+            && dialog.selected_id.as_deref() == Some(state.persisted.identifier.as_str())
+        {
+            dialog.status_message = Some(format!("Chart rejected study: {message}"));
+        }
         if state.persist_on_registration {
             self.persistence.mark_dirty();
         }

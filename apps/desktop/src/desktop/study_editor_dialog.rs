@@ -5,7 +5,8 @@ use super::study_editor_highlight::{
 use super::study_editor_store::{
     CompiledStudyArtifact, StudyProjectStore, compile_study_source_to_wasm,
     export_project_bundle_json, import_project_bundle_json, install_wasm_sandbox_target,
-    parse_study_source_presentation, probe_study_dev_pack, run_offline_preview_check,
+    parse_study_source_presentation, probe_study_dev_pack, probe_study_dev_pack_fresh,
+    run_offline_preview_check,
 };
 use super::*;
 use aeris_localization::{common, panels, tr};
@@ -636,7 +637,7 @@ impl StudyEditorDialogState {
             let (status, removed) = cx
                 .background_executor()
                 .spawn(async move {
-                    let status = probe_study_dev_pack();
+                    let status = probe_study_dev_pack_fresh();
                     let host_id = match &status {
                         StudyDevPackStatus::Ready { rustc_version, .. }
                         | StudyDevPackStatus::MissingSandboxTarget { rustc_version, .. } => {

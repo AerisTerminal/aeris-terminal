@@ -19,7 +19,7 @@ pub const STUDY_SANDBOX_ABI_VERSION: u32 = 1;
 /// Maximum admitted sandbox artifact payload size (4 MiB).
 pub const MAXIMUM_SANDBOX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
 /// Default per-invocation instruction fuel ceiling for sandboxed studies.
-pub const DEFAULT_SANDBOX_FUEL_LIMIT: u64 = 5_000_000;
+pub const DEFAULT_SANDBOX_FUEL_LIMIT: u64 = 50_000_000;
 /// Default per-invocation wall deadline in milliseconds (matches native worker deadline).
 pub const DEFAULT_SANDBOX_DEADLINE_MS: u64 = 50;
 /// Default linear memory ceiling per sandboxed study instance (16 MiB).

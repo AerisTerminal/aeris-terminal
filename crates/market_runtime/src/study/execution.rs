@@ -115,6 +115,7 @@ impl Executor {
         let worker_finished = Arc::clone(&finished);
         thread::Builder::new()
             .name("aeris-study-calculation".into())
+            .stack_size(4 * 1024 * 1024)
             .spawn(move || {
                 while let Ok(mut job) = receiver.recv() {
                     let live = job

@@ -32,7 +32,10 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 const PROJECTS_DIR_NAME: &str = "study_projects";
@@ -44,6 +47,19 @@ const LAST_GOOD_FILE_NAME: &str = "last_good.rs";
 const LAST_GOOD_WASM_FILE_NAME: &str = "last_good.wasm";
 
 static BUILD_DIR_NONCE: AtomicU64 = AtomicU64::new(1);
+static DEV_PACK_CACHE: Mutex<Option<StudyDevPackStatus>> = Mutex::new(None);
+
+/// Creates a `Command` that never flashes a console window on Windows GUI builds.
+fn hidden_command(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct StoredManifest {
@@ -143,7 +159,7 @@ pub(crate) fn parse_study_source_presentation(source: &str) -> (StudyPaneTarget,
         if let Some(value) = directive.strip_prefix("@pane:") {
             match value.trim() {
                 "separate" | "dedicated" | "subpane" | "oscillator" => {
-                    pane = StudyPaneTarget::Dedicated { group: 1 };
+                    pane = StudyPaneTarget::Dedicated { group: 0 };
                 }
                 "price" | "overlay" => {
                     pane = StudyPaneTarget::Price;
@@ -152,7 +168,7 @@ pub(crate) fn parse_study_source_presentation(source: &str) -> (StudyPaneTarget,
             }
         } else if let Some(value) = directive.strip_prefix("@overlay:") {
             if value.trim() == "false" {
-                pane = StudyPaneTarget::Dedicated { group: 1 };
+                pane = StudyPaneTarget::Dedicated { group: 0 };
             } else if value.trim() == "true" {
                 pane = StudyPaneTarget::Price;
             }
@@ -601,13 +617,31 @@ struct StoredCacheKey {
     lockfile_sha256: String,
 }
 
-/// Probes whether a local Rust compiler and `wasm32-wasip2` sandbox target are available.
+/// Probes whether a local Rust compiler and `wasm32-unknown-unknown` sandbox target are available.
+/// Caches the detected status in-process to avoid spawning repeated `rustc` checks.
 #[must_use]
 pub(crate) fn probe_study_dev_pack() -> StudyDevPackStatus {
-    let Ok(output) = std::process::Command::new("rustc")
-        .arg("--version")
-        .output()
-    else {
+    if let Ok(guard) = DEV_PACK_CACHE.lock()
+        && let Some(cached) = guard.as_ref()
+    {
+        return cached.clone();
+    }
+    probe_study_dev_pack_fresh()
+}
+
+/// Forces a fresh probe of the local Rust compiler and `wasm32-unknown-unknown` target,
+/// updating the in-process cache.
+#[must_use]
+pub(crate) fn probe_study_dev_pack_fresh() -> StudyDevPackStatus {
+    let status = probe_study_dev_pack_uncached();
+    if let Ok(mut guard) = DEV_PACK_CACHE.lock() {
+        *guard = Some(status.clone());
+    }
+    status
+}
+
+fn probe_study_dev_pack_uncached() -> StudyDevPackStatus {
+    let Ok(output) = hidden_command("rustc").arg("--version").output() else {
         return StudyDevPackStatus::Unavailable;
     };
     if !output.status.success() {
@@ -617,7 +651,7 @@ pub(crate) fn probe_study_dev_pack() -> StudyDevPackStatus {
     if rustc_version.is_empty() {
         return StudyDevPackStatus::Unavailable;
     }
-    let target_ok = std::process::Command::new("rustc")
+    let target_ok = hidden_command("rustc")
         .args([
             "--print",
             "target-libdir",
@@ -648,7 +682,7 @@ pub(crate) fn probe_study_dev_pack() -> StudyDevPackStatus {
 /// Attempts to install the pinned zero-authority WebAssembly sandbox target via `rustup`
 /// and re-probes the local Development Pack status.
 pub(crate) fn install_wasm_sandbox_target() -> Result<StudyDevPackStatus, String> {
-    let output = std::process::Command::new("rustup")
+    let output = hidden_command("rustup")
         .args(["target", "add", STUDY_SANDBOX_TARGET_TRIPLE])
         .output()
         .map_err(|err| format!("failed to run rustup: {err}"))?;
@@ -659,7 +693,7 @@ pub(crate) fn install_wasm_sandbox_target() -> Result<StudyDevPackStatus, String
             stderr.trim()
         ));
     }
-    Ok(probe_study_dev_pack())
+    Ok(probe_study_dev_pack_fresh())
 }
 
 /// Validated output of one controlled Rust -> WebAssembly study compilation.
@@ -682,8 +716,8 @@ pub extern "C" fn aeris_study_abi_version() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn aeris_study_alloc(byte_len: u32) -> u32 {
-    let len = byte_len as usize;
-    let mut buf = Vec::<u8>::with_capacity(len);
+    let words = (byte_len as usize).div_ceil(std::mem::size_of::<f64>()).max(1);
+    let mut buf = Vec::<f64>::with_capacity(words);
     let ptr = buf.as_mut_ptr();
     std::mem::forget(buf);
     ptr as u32
@@ -859,7 +893,7 @@ pub(crate) fn compile_study_source_to_wasm(
         }]);
     }
 
-    let output = std::process::Command::new("rustc")
+    let output = hidden_command("rustc")
         .args([
             "--edition",
             "2024",
@@ -868,6 +902,10 @@ pub(crate) fn compile_study_source_to_wasm(
             "--target",
             STUDY_SANDBOX_TARGET_TRIPLE,
             "-O",
+            "-C",
+            "panic=abort",
+            "-C",
+            "strip=symbols",
             "--error-format=json",
         ])
         .arg("-o")
@@ -1487,17 +1525,23 @@ pub fn calculate(
 }
 "#;
         let (pane, plot) = parse_study_source_presentation(src);
-        assert_eq!(pane, StudyPaneTarget::Dedicated { group: 1 });
+        assert_eq!(pane, StudyPaneTarget::Dedicated { group: 0 });
         assert_eq!(plot, StudyPlotKind::Histogram);
 
         let artifact = compile_study_source_to_wasm(src).expect("oscillator compiles to wasm");
-        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::RangeBound, 80, 60);
+        let fixture = StudyPreviewFixture::generate(PreviewFixturePreset::RangeBound, 1_500, 60);
+        let t0 = std::time::Instant::now();
         let res = artifact
             .compiled
             .execute_columnar(&fixture.bars, StudySandboxLimits::default())
-            .expect("oscillator executes cleanly in wasmi");
-        assert_eq!(res.values.len(), 80);
+            .expect("oscillator executes cleanly over 1,500 bars in wasmi");
+        let elapsed = t0.elapsed();
+        eprintln!(
+            "Squeeze Momentum 1,500 bars: fuel={}, elapsed={:?}",
+            res.fuel_consumed, elapsed
+        );
+        assert_eq!(res.values.len(), 1_500);
         assert!(res.values[0].is_none());
-        assert!(res.values[79].is_some());
+        assert!(res.values[1_499].is_some());
     }
 }
